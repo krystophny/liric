@@ -43,6 +43,8 @@ int test_parser_function_decl(void);
 int test_parser_add(void);
 int test_parser_typed_call_and_dot_label(void);
 int test_parser_named_type_operand(void);
+int test_parser_decl_with_modern_param_attrs(void);
+int test_parser_store_with_const_gep_operand(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
 int test_host_target_name(void);
@@ -90,6 +92,8 @@ int main(void) {
     RUN_TEST(test_parser_add);
     RUN_TEST(test_parser_typed_call_and_dot_label);
     RUN_TEST(test_parser_named_type_operand);
+    RUN_TEST(test_parser_decl_with_modern_param_attrs);
+    RUN_TEST(test_parser_store_with_const_gep_operand);
 
     fprintf(stderr, "\nCodegen tests:\n");
     RUN_TEST(test_codegen_ret_42);
