@@ -20,6 +20,7 @@
 #define DATA_PAGE_SIZE (256 * 1024)
 
 static void register_builtin_symbols(lr_jit_t *j);
+static const char *resolve_global_name(lr_module_t *m, uint32_t global_id);
 
 static uint64_t llvm_fabs_f32_bits(uint64_t x_bits) {
     uint32_t in_bits = (uint32_t)x_bits;
@@ -306,6 +307,7 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
                 global_size = sizeof(void *);
             if (r->offset + sizeof(uintptr_t) <= global_size)
                 memcpy(base + r->offset, &addr, sizeof(addr));
+
         }
     }
     return 0;

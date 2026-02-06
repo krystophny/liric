@@ -360,11 +360,19 @@ static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty
     return lr_op_null(result_ty);
 }
 
+static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type);
+
 static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *type) {
-    if (check(p, LR_TOK_LBRACE))
+    if (check(p, LR_TOK_LANGLE)) {
+        next(p);
         skip_balanced_braces(p);
-    else
+        if (check(p, LR_TOK_RANGLE))
+            next(p);
+    } else if (check(p, LR_TOK_LBRACE)) {
+        skip_balanced_braces(p);
+    } else {
         skip_balanced_brackets(p);
+    }
     return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
 }
 
