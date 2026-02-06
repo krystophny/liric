@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
+#include <math.h>
 
 #if defined(__APPLE__) && defined(__aarch64__) && defined(MAP_JIT)
 #include <pthread.h>
@@ -17,6 +18,86 @@
 
 #define CODE_PAGE_SIZE (1024 * 1024)
 #define DATA_PAGE_SIZE (256 * 1024)
+
+static void register_builtin_symbols(lr_jit_t *j);
+
+static uint64_t llvm_fabs_f32_bits(uint64_t x_bits) {
+    uint32_t in_bits = (uint32_t)x_bits;
+    float x = 0.0f;
+    float out = 0.0f;
+    uint32_t out_bits = 0;
+    memcpy(&x, &in_bits, sizeof(in_bits));
+    out = fabsf(x);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return (uint64_t)out_bits;
+}
+
+static uint64_t llvm_fabs_f64_bits(uint64_t x_bits) {
+    double x = 0.0;
+    double out = 0.0;
+    uint64_t out_bits = 0;
+    memcpy(&x, &x_bits, sizeof(x_bits));
+    out = fabs(x);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return out_bits;
+}
+
+static uint64_t llvm_sqrt_f32_bits(uint64_t x_bits) {
+    uint32_t in_bits = (uint32_t)x_bits;
+    float x = 0.0f;
+    float out = 0.0f;
+    uint32_t out_bits = 0;
+    memcpy(&x, &in_bits, sizeof(in_bits));
+    out = sqrtf(x);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return (uint64_t)out_bits;
+}
+
+static uint64_t llvm_exp_f32_bits(uint64_t x_bits) {
+    uint32_t in_bits = (uint32_t)x_bits;
+    float x = 0.0f;
+    float out = 0.0f;
+    uint32_t out_bits = 0;
+    memcpy(&x, &in_bits, sizeof(in_bits));
+    out = expf(x);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return (uint64_t)out_bits;
+}
+
+static uint64_t llvm_copysign_f32_bits(uint64_t x_bits, uint64_t y_bits) {
+    uint32_t in_x_bits = (uint32_t)x_bits;
+    uint32_t in_y_bits = (uint32_t)y_bits;
+    float x = 0.0f;
+    float y = 0.0f;
+    float out = 0.0f;
+    uint32_t out_bits = 0;
+    memcpy(&x, &in_x_bits, sizeof(in_x_bits));
+    memcpy(&y, &in_y_bits, sizeof(in_y_bits));
+    out = copysignf(x, y);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return (uint64_t)out_bits;
+}
+
+static void llvm_memset_p0i8_i32(void *dst, uint64_t val, int32_t len, uint64_t is_volatile) {
+    (void)is_volatile;
+    if (!dst || len <= 0)
+        return;
+    memset(dst, (int)(uint8_t)val, (size_t)len);
+}
+
+static void llvm_memcpy_p0i8_p0i8_i32(void *dst, const void *src, int32_t len, uint64_t is_volatile) {
+    (void)is_volatile;
+    if (!dst || !src || len <= 0)
+        return;
+    memcpy(dst, src, (size_t)len);
+}
+
+static void llvm_memcpy_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, uint64_t is_volatile) {
+    (void)is_volatile;
+    if (!dst || !src || len <= 0)
+        return;
+    memcpy(dst, src, (size_t)len);
+}
 
 static size_t align_up(size_t value, size_t align) {
     if (align == 0)
@@ -122,6 +203,8 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
         return NULL;
     }
 
+    register_builtin_symbols(j);
+
     return j;
 }
 
@@ -136,6 +219,17 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     e->addr = addr;
     e->next = j->symbols;
     j->symbols = e;
+}
+
+static void register_builtin_symbols(lr_jit_t *j) {
+    lr_jit_add_symbol(j, "llvm.fabs.f32", (void *)(uintptr_t)&llvm_fabs_f32_bits);
+    lr_jit_add_symbol(j, "llvm.fabs.f64", (void *)(uintptr_t)&llvm_fabs_f64_bits);
+    lr_jit_add_symbol(j, "llvm.sqrt.f32", (void *)(uintptr_t)&llvm_sqrt_f32_bits);
+    lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32_bits);
+    lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32_bits);
+    lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
 }
 
 int lr_jit_load_library(lr_jit_t *j, const char *path) {

@@ -550,3 +550,66 @@ int test_jit_varargs_printf_call(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_llvm_intrinsic_fabs_f32(void) {
+    const char *src =
+        "declare float @llvm.fabs.f32(float)\n"
+        "define i32 @call_fabs_bits() {\n"
+        "entry:\n"
+        "  %r = call float @llvm.fabs.f32(float -3.5)\n"
+        "  %bits = bitcast float %r to i32\n"
+        "  ret i32 %bits\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_fabs_bits");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 0x40600000, "fabs(-3.5f) bits");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_llvm_intrinsic_memcpy_memset(void) {
+    const char *src =
+        "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"
+        "declare void @llvm.memcpy.p0i8.p0i8.i32(ptr, ptr, i32, i1)\n"
+        "define i32 @copy_fill() {\n"
+        "entry:\n"
+        "  %dst = alloca i32, align 4\n"
+        "  %src = alloca i32, align 4\n"
+        "  call void @llvm.memset.p0i8.i32(ptr %src, i8 65, i32 4, i1 false)\n"
+        "  call void @llvm.memcpy.p0i8.p0i8.i32(ptr %dst, ptr %src, i32 4, i1 false)\n"
+        "  %v = load i8, ptr %dst\n"
+        "  %z = zext i8 %v to i32\n"
+        "  ret i32 %z\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "copy_fill");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 65, "memset/memcpy wrappers set byte to 'A'");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
