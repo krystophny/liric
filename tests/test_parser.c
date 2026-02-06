@@ -444,6 +444,81 @@ int test_parser_quoted_label_names(void) {
     return 0;
 }
 
+int test_parser_boolean_literals(void) {
+    const char *src =
+        "define i1 @test_true() {\n"
+        "entry:\n"
+        "  ret i1 true\n"
+        "}\n"
+        "define i1 @test_false() {\n"
+        "entry:\n"
+        "  ret i1 false\n"
+        "}\n"
+        "define void @test_store() {\n"
+        "entry:\n"
+        "  %ptr = alloca i1\n"
+        "  store i1 false, ptr %ptr, align 1\n"
+        "  ret void\n"
+        "}\n"
+        "define i32 @test_br() {\n"
+        "entry:\n"
+        "  br i1 true, label %a, label %b\n"
+        "a:\n"
+        "  ret i32 1\n"
+        "b:\n"
+        "  ret i32 0\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "test_true exists");
+    TEST_ASSERT(strcmp(f->name, "test_true") == 0, "first function is test_true");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *ret = b->first;
+    TEST_ASSERT(ret != NULL, "ret instruction exists");
+    TEST_ASSERT_EQ(ret->op, LR_OP_RET, "instruction is ret");
+    TEST_ASSERT_EQ(ret->operands[0].kind, LR_VAL_IMM_I64, "true is immediate");
+    TEST_ASSERT_EQ(ret->operands[0].imm_i64, 1, "true is 1");
+
+    f = f->next;
+    TEST_ASSERT(f != NULL, "test_false exists");
+    TEST_ASSERT(strcmp(f->name, "test_false") == 0, "second function is test_false");
+    b = f->first_block;
+    ret = b->first;
+    TEST_ASSERT_EQ(ret->operands[0].imm_i64, 0, "false is 0");
+
+    f = f->next;
+    TEST_ASSERT(f != NULL, "test_store exists");
+    TEST_ASSERT(strcmp(f->name, "test_store") == 0, "third function is test_store");
+    b = f->first_block;
+    lr_inst_t *alloca_inst = b->first;
+    TEST_ASSERT_EQ(alloca_inst->op, LR_OP_ALLOCA, "alloca parsed");
+    lr_inst_t *store = alloca_inst->next;
+    TEST_ASSERT(store != NULL, "store exists");
+    TEST_ASSERT_EQ(store->op, LR_OP_STORE, "store parsed");
+    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_IMM_I64, "false is immediate");
+    TEST_ASSERT_EQ(store->operands[0].imm_i64, 0, "false is 0");
+
+    f = f->next;
+    TEST_ASSERT(f != NULL, "test_br exists");
+    TEST_ASSERT(strcmp(f->name, "test_br") == 0, "fourth function is test_br");
+    b = f->first_block;
+    lr_inst_t *br = b->first;
+    TEST_ASSERT(br != NULL, "br exists");
+    TEST_ASSERT_EQ(br->op, LR_OP_CONDBR, "br parsed");
+    TEST_ASSERT_EQ(br->operands[0].kind, LR_VAL_IMM_I64, "true is immediate");
+    TEST_ASSERT_EQ(br->operands[0].imm_i64, 1, "true is 1");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+
 int test_parser_named_params_no_collision(void) {
     const char *src =
         "define void @increment(i32* %x) {\n"

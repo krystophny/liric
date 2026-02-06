@@ -716,6 +716,87 @@ int test_jit_global_string_constant(void) {
     return 0;
 }
 
+int test_jit_global_struct_ptr_relocation(void) {
+    /*
+     * Exercises the string_descriptor pattern from lfortran:
+     * a packed struct whose first field is a pointer (GEP) to another global,
+     * and whose second field is the string length.
+     * The function loads the pointer from the descriptor and reads the first byte.
+     */
+    const char *src =
+        "%sd = type <{ ptr, i64 }>\n"
+        "@str_data = private constant [5 x i8] c\"Hello\", align 1\n"
+        "@str_desc = private global %sd <{ ptr getelementptr inbounds "
+        "([5 x i8], [5 x i8]* @str_data, i32 0, i32 0), i64 5 }>, align 8\n"
+        "define i64 @read_desc() {\n"
+        "entry:\n"
+        "  %pp = getelementptr %sd, %sd* @str_desc, i32 0, i32 0\n"
+        "  %p = load ptr, ptr %pp, align 8\n"
+        "  %c = load i8, i8* %p, align 1\n"
+        "  %cv = zext i8 %c to i64\n"
+        "  %lp = getelementptr %sd, %sd* @str_desc, i32 0, i32 1\n"
+        "  %len = load i64, i64* %lp, align 8\n"
+        "  %r = add i64 %cv, %len\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "read_desc");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    /* 'H' (72) + length (5) = 77 */
+    TEST_ASSERT_EQ(fn(), 77, "string descriptor: 'H' + len = 72 + 5 = 77");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_global_struct_integer_init(void) {
+    /*
+     * Exercises parsing integer fields in a struct initializer.
+     * A packed struct with two i32 fields initialized to known values.
+     */
+    const char *src =
+        "%pair = type <{ i32, i32 }>\n"
+        "@vals = private global %pair <{ i32 10, i32 32 }>, align 4\n"
+        "define i32 @read_pair() {\n"
+        "entry:\n"
+        "  %p0 = getelementptr %pair, %pair* @vals, i32 0, i32 0\n"
+        "  %v0 = load i32, i32* %p0, align 4\n"
+        "  %p1 = getelementptr %pair, %pair* @vals, i32 0, i32 1\n"
+        "  %v1 = load i32, i32* %p1, align 4\n"
+        "  %r = add i32 %v0, %v1\n"
+        "  ret i32 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "read_pair");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "packed struct init: 10 + 32 = 42");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 static int64_t sum8(int64_t a, int64_t b, int64_t c, int64_t d,
                     int64_t e, int64_t f, int64_t g, int64_t h) {
     return a + b + c + d + e + f + g + h;

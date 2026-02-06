@@ -52,6 +52,7 @@ int test_parser_urem_instruction(void);
 int test_parser_canonical_phi_pairs(void);
 int test_parser_select_with_ptr_operands(void);
 int test_parser_quoted_label_names(void);
+int test_parser_boolean_literals(void);
 int test_parser_named_params_no_collision(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
@@ -81,6 +82,8 @@ int test_jit_llvm_intrinsic_memcpy_memset(void);
 int test_jit_gep_struct_field(void);
 int test_jit_gep_array_index(void);
 int test_jit_global_string_constant(void);
+int test_jit_global_struct_ptr_relocation(void);
+int test_jit_global_struct_integer_init(void);
 int test_jit_call_stack_args(void);
 int test_jit_call_many_stack_args(void);
 int test_e2e_ret_42(void);
@@ -125,6 +128,7 @@ int main(void) {
     RUN_TEST(test_parser_canonical_phi_pairs);
     RUN_TEST(test_parser_select_with_ptr_operands);
     RUN_TEST(test_parser_quoted_label_names);
+    RUN_TEST(test_parser_boolean_literals);
     RUN_TEST(test_parser_named_params_no_collision);
 
     fprintf(stderr, "\nCodegen tests:\n");
@@ -160,6 +164,8 @@ int main(void) {
     RUN_TEST(test_jit_gep_struct_field);
     RUN_TEST(test_jit_gep_array_index);
     RUN_TEST(test_jit_global_string_constant);
+    RUN_TEST(test_jit_global_struct_ptr_relocation);
+    RUN_TEST(test_jit_global_struct_integer_init);
     RUN_TEST(test_jit_call_stack_args);
     RUN_TEST(test_jit_call_many_stack_args);
 
