@@ -51,6 +51,7 @@ int test_parser_store_with_struct_constant(void);
 int test_parser_urem_instruction(void);
 int test_parser_canonical_phi_pairs(void);
 int test_parser_select_with_ptr_operands(void);
+int test_parser_quoted_label_names(void);
 int test_parser_boolean_literals(void);
 int test_parser_named_params_no_collision(void);
 int test_codegen_ret_42(void);
@@ -126,6 +127,7 @@ int main(void) {
     RUN_TEST(test_parser_urem_instruction);
     RUN_TEST(test_parser_canonical_phi_pairs);
     RUN_TEST(test_parser_select_with_ptr_operands);
+    RUN_TEST(test_parser_quoted_label_names);
     RUN_TEST(test_parser_boolean_literals);
     RUN_TEST(test_parser_named_params_no_collision);
 
