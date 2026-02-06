@@ -905,7 +905,7 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
 
     while (!check(p, LR_TOK_RBRACE) && !check(p, LR_TOK_EOF) && !p->had_error) {
         /* Check for label: name followed by colon */
-        if (check(p, LR_TOK_LOCAL_ID)) {
+        if (check(p, LR_TOK_LOCAL_ID) || check(p, LR_TOK_STRING_LIT)) {
             /* peek: is next token a colon? */
             lr_token_t saved_tok = p->cur;
             size_t saved_pos = p->lex.pos;

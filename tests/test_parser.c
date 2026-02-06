@@ -408,3 +408,38 @@ int test_parser_select_with_ptr_operands(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_quoted_label_names(void) {
+    const char *src =
+        "define i32 @main() {\n"
+        "\"entry block\":\n"
+        "  br label %\"exit block\"\n"
+        "\"exit block\":\n"
+        "  ret i32 42\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT(strcmp(f->name, "main") == 0, "function name is main");
+
+    lr_block_t *entry = f->first_block;
+    TEST_ASSERT(entry != NULL, "entry block exists");
+    TEST_ASSERT(strcmp(entry->name, "entry block") == 0, "entry block name is correct");
+
+    lr_block_t *exit = entry->next;
+    TEST_ASSERT(exit != NULL, "exit block exists");
+    TEST_ASSERT(strcmp(exit->name, "exit block") == 0, "exit block name is correct");
+
+    lr_inst_t *br = entry->first;
+    TEST_ASSERT(br != NULL, "br instruction exists");
+    TEST_ASSERT_EQ(br->op, LR_OP_BR, "br instruction parsed");
+    TEST_ASSERT_EQ(br->operands[0].kind, LR_VAL_BLOCK, "br target is block ref");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
