@@ -325,6 +325,7 @@ static const char *opcode_name(lr_opcode_t op) {
     case LR_OP_FSUB:         return "fsub";
     case LR_OP_FMUL:         return "fmul";
     case LR_OP_FDIV:         return "fdiv";
+    case LR_OP_FNEG:         return "fneg";
     case LR_OP_ICMP:         return "icmp";
     case LR_OP_FCMP:         return "fcmp";
     case LR_OP_ALLOCA:       return "alloca";
