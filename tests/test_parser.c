@@ -68,6 +68,39 @@ int test_parser_function_decl(void) {
     return 0;
 }
 
+int test_parser_typed_pointer_decl_params(void) {
+    const char *src =
+        "declare i32 @puts(i8*)\n"
+        "declare void @take_pp(i8**)\n"
+        "declare void @take_arr_ptr([4 x i8]*)\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *puts_fn = m->first_func;
+    TEST_ASSERT(puts_fn != NULL, "puts declaration exists");
+    TEST_ASSERT(strcmp(puts_fn->name, "puts") == 0, "first declaration is puts");
+    TEST_ASSERT_EQ(puts_fn->num_params, 1, "puts has one param");
+    TEST_ASSERT_EQ(puts_fn->param_types[0]->kind, LR_TYPE_PTR, "i8* parsed as ptr");
+
+    lr_func_t *pp_fn = puts_fn->next;
+    TEST_ASSERT(pp_fn != NULL, "take_pp declaration exists");
+    TEST_ASSERT(strcmp(pp_fn->name, "take_pp") == 0, "second declaration is take_pp");
+    TEST_ASSERT_EQ(pp_fn->num_params, 1, "take_pp has one param");
+    TEST_ASSERT_EQ(pp_fn->param_types[0]->kind, LR_TYPE_PTR, "i8** parsed as ptr");
+
+    lr_func_t *arr_fn = pp_fn->next;
+    TEST_ASSERT(arr_fn != NULL, "take_arr_ptr declaration exists");
+    TEST_ASSERT(strcmp(arr_fn->name, "take_arr_ptr") == 0, "third declaration is take_arr_ptr");
+    TEST_ASSERT_EQ(arr_fn->num_params, 1, "take_arr_ptr has one param");
+    TEST_ASSERT_EQ(arr_fn->param_types[0]->kind, LR_TYPE_PTR, "[4 x i8]* parsed as ptr");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_add(void) {
     const char *src =
         "define i32 @add(i32 %a, i32 %b) {\n"

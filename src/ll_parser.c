@@ -161,20 +161,22 @@ static void skip_balanced_brackets(lr_parser_t *p);
 
 static lr_type_t *parse_type(lr_parser_t *p) {
     lr_token_t t = p->cur;
+    lr_type_t *ty = NULL;
     switch (t.kind) {
-    case LR_TOK_VOID:   next(p); return p->module->type_void;
-    case LR_TOK_I1:     next(p); return p->module->type_i1;
-    case LR_TOK_I8:     next(p); return p->module->type_i8;
-    case LR_TOK_I16:    next(p); return p->module->type_i16;
-    case LR_TOK_I32:    next(p); return p->module->type_i32;
-    case LR_TOK_I64:    next(p); return p->module->type_i64;
-    case LR_TOK_FLOAT:  next(p); return p->module->type_float;
-    case LR_TOK_DOUBLE: next(p); return p->module->type_double;
-    case LR_TOK_PTR:    next(p); return p->module->type_ptr;
+    case LR_TOK_VOID:   next(p); ty = p->module->type_void; break;
+    case LR_TOK_I1:     next(p); ty = p->module->type_i1; break;
+    case LR_TOK_I8:     next(p); ty = p->module->type_i8; break;
+    case LR_TOK_I16:    next(p); ty = p->module->type_i16; break;
+    case LR_TOK_I32:    next(p); ty = p->module->type_i32; break;
+    case LR_TOK_I64:    next(p); ty = p->module->type_i64; break;
+    case LR_TOK_FLOAT:  next(p); ty = p->module->type_float; break;
+    case LR_TOK_DOUBLE: next(p); ty = p->module->type_double; break;
+    case LR_TOK_PTR:    next(p); ty = p->module->type_ptr; break;
     case LR_TOK_LOCAL_ID:
         /* Opaque/aliased named types are treated as pointer-sized for now. */
         next(p);
-        return p->module->type_ptr;
+        ty = p->module->type_ptr;
+        break;
     case LR_TOK_LBRACKET: {
         next(p);
         int64_t count = p->cur.int_val;
@@ -182,7 +184,8 @@ static lr_type_t *parse_type(lr_parser_t *p) {
         expect(p, LR_TOK_X);
         lr_type_t *elem = parse_type(p);
         expect(p, LR_TOK_RBRACKET);
-        return lr_type_array(p->arena, elem, count);
+        ty = lr_type_array(p->arena, elem, count);
+        break;
     }
     case LR_TOK_LBRACE: {
         next(p);
@@ -194,12 +197,20 @@ static lr_type_t *parse_type(lr_parser_t *p) {
                 fields[nf++] = parse_type(p);
         }
         expect(p, LR_TOK_RBRACE);
-        return lr_type_struct(p->arena, fields, nf, false, NULL);
+        ty = lr_type_struct(p->arena, fields, nf, false, NULL);
+        break;
     }
     default:
         error(p, "expected type, got '%s'", lr_tok_name(t.kind));
-        return p->module->type_void;
+        ty = p->module->type_void;
+        break;
     }
+
+    /* Accept legacy typed pointers (i8*, i8**, [N x T]*, %alias*). */
+    while (match(p, LR_TOK_STAR))
+        ty = p->module->type_ptr;
+
+    return ty;
 }
 
 static bool is_bare_identifier(const lr_token_t *tok) {

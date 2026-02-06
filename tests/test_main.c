@@ -40,6 +40,7 @@ int test_lexer_types(void);
 int test_lexer_identifiers(void);
 int test_parser_ret_i32(void);
 int test_parser_function_decl(void);
+int test_parser_typed_pointer_decl_params(void);
 int test_parser_add(void);
 int test_parser_typed_call_and_dot_label(void);
 int test_parser_named_type_operand(void);
@@ -103,6 +104,7 @@ int main(void) {
     fprintf(stderr, "\nParser tests:\n");
     RUN_TEST(test_parser_ret_i32);
     RUN_TEST(test_parser_function_decl);
+    RUN_TEST(test_parser_typed_pointer_decl_params);
     RUN_TEST(test_parser_add);
     RUN_TEST(test_parser_typed_call_and_dot_label);
     RUN_TEST(test_parser_named_type_operand);
