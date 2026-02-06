@@ -224,17 +224,28 @@ static lr_type_t *parse_type(lr_parser_t *p) {
     }
     case LR_TOK_LANGLE: {
         next(p);
-        expect(p, LR_TOK_LBRACE);
-        lr_type_t *fields[256];
-        uint32_t nf = 0;
-        if (!check(p, LR_TOK_RBRACE)) {
-            fields[nf++] = parse_type(p);
-            while (match(p, LR_TOK_COMMA))
+        if (check(p, LR_TOK_INT_LIT)) {
+            /* Vector type: <N x T> */
+            int64_t count = p->cur.int_val;
+            expect(p, LR_TOK_INT_LIT);
+            expect(p, LR_TOK_X);
+            lr_type_t *elem = parse_type(p);
+            expect(p, LR_TOK_RANGLE);
+            ty = lr_type_array(p->arena, elem, count);
+        } else {
+            /* Packed struct: <{ ... }> */
+            expect(p, LR_TOK_LBRACE);
+            lr_type_t *fields[256];
+            uint32_t nf = 0;
+            if (!check(p, LR_TOK_RBRACE)) {
                 fields[nf++] = parse_type(p);
+                while (match(p, LR_TOK_COMMA))
+                    fields[nf++] = parse_type(p);
+            }
+            expect(p, LR_TOK_RBRACE);
+            expect(p, LR_TOK_RANGLE);
+            ty = lr_type_struct(p->arena, fields, nf, true, NULL);
         }
-        expect(p, LR_TOK_RBRACE);
-        expect(p, LR_TOK_RANGLE);
-        ty = lr_type_struct(p->arena, fields, nf, true, NULL);
         break;
     }
     default:
