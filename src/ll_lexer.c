@@ -51,6 +51,7 @@ static const keyword_t keywords[] = {
     {"mul", LR_TOK_MUL},
     {"sdiv", LR_TOK_SDIV},
     {"srem", LR_TOK_SREM},
+    {"urem", LR_TOK_UREM},
     {"and", LR_TOK_AND},
     {"or", LR_TOK_OR},
     {"xor", LR_TOK_XOR},
@@ -383,6 +384,15 @@ const char *lr_tok_name(lr_tok_t kind) {
     case LR_TOK_RET:       return "ret";
     case LR_TOK_BR:        return "br";
     case LR_TOK_LABEL:     return "label";
+    case LR_TOK_ADD:       return "add";
+    case LR_TOK_SUB:       return "sub";
+    case LR_TOK_MUL:       return "mul";
+    case LR_TOK_SDIV:      return "sdiv";
+    case LR_TOK_SREM:      return "srem";
+    case LR_TOK_UREM:      return "urem";
+    case LR_TOK_CALL:      return "call";
+    case LR_TOK_GETELEMENTPTR: return "getelementptr";
+    case LR_TOK_ALIGN:     return "align";
     case LR_TOK_VOID:      return "void";
     case LR_TOK_I1:        return "i1";
     case LR_TOK_I8:        return "i8";

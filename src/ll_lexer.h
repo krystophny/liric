@@ -20,6 +20,7 @@ typedef enum lr_tok {
     LR_TOK_MUL,
     LR_TOK_SDIV,
     LR_TOK_SREM,
+    LR_TOK_UREM,
     LR_TOK_AND,
     LR_TOK_OR,
     LR_TOK_XOR,

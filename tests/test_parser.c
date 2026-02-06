@@ -218,3 +218,87 @@ int test_parser_store_with_const_gep_operand(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_call_arg_with_align_attr(void) {
+    const char *src =
+        "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)\n"
+        "define void @f(ptr %dst, ptr %src) {\n"
+        "entry:\n"
+        "  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %dst, ptr align 8 %src, "
+        "i64 12, i1 false)\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    while (f && strcmp(f->name, "f") != 0)
+        f = f->next;
+    TEST_ASSERT(f != NULL, "function f exists");
+    TEST_ASSERT(!f->is_decl, "f is definition");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *call = b->first;
+    TEST_ASSERT(call != NULL, "call exists");
+    TEST_ASSERT_EQ(call->op, LR_OP_CALL, "call parsed");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_store_with_struct_constant(void) {
+    const char *src =
+        "%t = type { i32, i32 }\n"
+        "define void @f(ptr %dst) {\n"
+        "entry:\n"
+        "  store %t { i32 1, i32 2 }, ptr %dst, align 4\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *store = b->first;
+    TEST_ASSERT(store != NULL, "store exists");
+    TEST_ASSERT_EQ(store->op, LR_OP_STORE, "store parsed");
+    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_UNDEF,
+                   "aggregate constant represented as undef placeholder");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_urem_instruction(void) {
+    const char *src =
+        "define i32 @f(i32 %a, i32 %b) {\n"
+        "entry:\n"
+        "  %r = urem i32 %a, %b\n"
+        "  ret i32 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *inst = b->first;
+    TEST_ASSERT(inst != NULL, "instruction exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_SREM, "urem parsed with integer rem opcode");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
