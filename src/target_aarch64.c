@@ -340,6 +340,18 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
     for (uint32_t i = 0; i < func->num_params && i < 8; i++) {
         emit_store_slot(mf, entry_mb, func->param_vregs[i], param_regs[i]);
     }
+    /* Load stack-passed parameters (args 9+) from caller's frame.
+       After stp x29,x30,[sp,#-16]!; mov x29,sp the caller's stack args
+       are at [FP + 16], [FP + 24], ... */
+    for (uint32_t i = 8; i < func->num_params; i++) {
+        int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
+        lr_minst_t *ld = minst_new(mf->arena, LR_MIR_MOV);
+        ld->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+        ld->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = caller_off } };
+        ld->size = 8;
+        mblock_append(entry_mb, ld);
+        emit_store_slot(mf, entry_mb, func->param_vregs[i], A64_X9);
+    }
 
     bi = 0;
     for (lr_block_t *b = func->first_block; b; b = b->next, bi++) {
@@ -782,13 +794,45 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
                     A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
                 };
                 uint32_t nargs = inst->num_operands - 1;
+                uint32_t nstack = nargs > 8 ? nargs - 8 : 0;
+                /* Round stack arg space to 16-byte alignment (AAPCS64) */
+                uint32_t stack_bytes = ((nstack * 8 + 15) & ~15u);
+
+                /* Reserve stack space for arguments beyond the first 8 */
+                if (stack_bytes > 0) {
+                    lr_minst_t *alloc = minst_new(mf->arena, LR_MIR_FRAME_ALLOC);
+                    alloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
+                    mblock_append(mb, alloc);
+                }
+
+                /* Store stack args to [SP + offset] */
+                for (uint32_t i = 0; i < nstack; i++) {
+                    uint32_t arg_idx = 8 + i;
+                    emit_load_operand(mf, mb, &inst->operands[arg_idx + 1], A64_X9);
+                    lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                    st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_SP, .disp = (int32_t)(i * 8) } };
+                    st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    st->size = 8;
+                    mblock_append(mb, st);
+                }
+
+                /* Place first 8 args in AAPCS64 registers */
                 for (uint32_t i = 0; i < nargs && i < 8; i++) {
                     emit_load_operand(mf, mb, &inst->operands[i + 1], call_regs[i]);
                 }
+
                 emit_load_operand(mf, mb, &inst->operands[0], A64_X16);
                 lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
                 call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
                 mblock_append(mb, call);
+
+                /* Reclaim stack space after call */
+                if (stack_bytes > 0) {
+                    lr_minst_t *dealloc = minst_new(mf->arena, LR_MIR_FRAME_FREE);
+                    dealloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
+                    mblock_append(mb, dealloc);
+                }
+
                 if (inst->type && inst->type->kind != LR_TYPE_VOID)
                     emit_store_slot(mf, mb, inst->dest, A64_X0);
                 break;

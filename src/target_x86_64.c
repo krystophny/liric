@@ -344,6 +344,18 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
     for (uint32_t i = 0; i < func->num_params && i < 6; i++) {
         emit_store_slot(mf, entry_mb, func->param_vregs[i], param_regs[i]);
     }
+    /* Load stack-passed parameters (args 7+) from caller's frame.
+       After push rbp; mov rbp,rsp the caller's stack args are at
+       [RBP + 16], [RBP + 24], ... (return address at +8, saved RBP at +0). */
+    for (uint32_t i = 6; i < func->num_params; i++) {
+        int32_t caller_off = 16 + (int32_t)(i - 6) * 8;
+        lr_minst_t *ld = minst_new(mf->arena, LR_MIR_MOV);
+        ld->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+        ld->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RBP, .disp = caller_off } };
+        ld->size = 8;
+        mblock_append(entry_mb, ld);
+        emit_store_slot(mf, entry_mb, func->param_vregs[i], X86_RAX);
+    }
 
     /* Lower each IR instruction */
     bi = 0;
@@ -784,17 +796,48 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
             }
             case LR_OP_CALL: {
                 /* operands[0] = callee, operands[1..] = args */
-                /* Place args in System V registers */
                 static const uint8_t call_regs[] = { X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9 };
                 uint32_t nargs = inst->num_operands - 1;
+                uint32_t nstack = nargs > 6 ? nargs - 6 : 0;
+                /* Round stack arg space to 16-byte alignment */
+                uint32_t stack_bytes = ((nstack * 8 + 15) & ~15u);
+
+                /* Reserve stack space for arguments beyond the first 6 */
+                if (stack_bytes > 0) {
+                    lr_minst_t *alloc = minst_new(mf->arena, LR_MIR_FRAME_ALLOC);
+                    alloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
+                    mblock_append(mb, alloc);
+                }
+
+                /* Store stack args in forward order to [RSP + offset] */
+                for (uint32_t i = 0; i < nstack; i++) {
+                    uint32_t arg_idx = 6 + i;
+                    emit_load_operand(mf, mb, &inst->operands[arg_idx + 1], X86_RAX);
+                    lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                    st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RSP, .disp = (int32_t)(i * 8) } };
+                    st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                    st->size = 8;
+                    mblock_append(mb, st);
+                }
+
+                /* Place first 6 args in System V registers */
                 for (uint32_t i = 0; i < nargs && i < 6; i++) {
                     emit_load_operand(mf, mb, &inst->operands[i + 1], call_regs[i]);
                 }
+
                 /* Load callee address into r10 */
                 emit_load_operand(mf, mb, &inst->operands[0], X86_R10);
                 lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
                 call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
                 mblock_append(mb, call);
+
+                /* Reclaim stack space after call */
+                if (stack_bytes > 0) {
+                    lr_minst_t *dealloc = minst_new(mf->arena, LR_MIR_FRAME_FREE);
+                    dealloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
+                    mblock_append(mb, dealloc);
+                }
+
                 /* result in rax */
                 if (inst->type && inst->type->kind != LR_TYPE_VOID)
                     emit_store_slot(mf, mb, inst->dest, X86_RAX);
@@ -1175,6 +1218,24 @@ static int x86_64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_
                 break;
             }
 
+            case LR_MIR_FRAME_ALLOC: {
+                /* sub rsp, imm32 */
+                emit_byte(buf, &pos, buflen, rex(true, false, false, false));
+                emit_byte(buf, &pos, buflen, 0x81);
+                emit_byte(buf, &pos, buflen, modrm(3, 5, X86_RSP));
+                emit_u32(buf, &pos, buflen, (uint32_t)(int32_t)mi->src.imm);
+                break;
+            }
+
+            case LR_MIR_FRAME_FREE: {
+                /* add rsp, imm32 */
+                emit_byte(buf, &pos, buflen, rex(true, false, false, false));
+                emit_byte(buf, &pos, buflen, 0x81);
+                emit_byte(buf, &pos, buflen, modrm(3, 0, X86_RSP));
+                emit_u32(buf, &pos, buflen, (uint32_t)(int32_t)mi->src.imm);
+                break;
+            }
+
             case LR_MIR_MOVSX: {
                 /* movsxd rax, eax: 48 63 C0 */
                 emit_byte(buf, &pos, buflen, rex(true, mi->dst.reg >= 8, false, mi->src.reg >= 8));
@@ -1247,6 +1308,8 @@ static int x86_64_print_inst(const lr_minst_t *mi, char *buf, size_t len) {
     case LR_MIR_JMP:  return snprintf(buf, len, "jmp .L%u", mi->dst.label);
     case LR_MIR_JCC:  return snprintf(buf, len, "j%u .L%u", mi->cc, mi->dst.label);
     case LR_MIR_LEA:  return snprintf(buf, len, "lea %s, [%s%+d]", reg_names_64[mi->dst.reg], reg_names_64[mi->src.mem.base], mi->src.mem.disp);
+    case LR_MIR_FRAME_ALLOC: return snprintf(buf, len, "sub rsp, %ld", (long)mi->src.imm);
+    case LR_MIR_FRAME_FREE:  return snprintf(buf, len, "add rsp, %ld", (long)mi->src.imm);
     default: return snprintf(buf, len, "<?>");
     }
 }
