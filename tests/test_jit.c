@@ -796,3 +796,83 @@ int test_jit_global_struct_integer_init(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+static int64_t sum8(int64_t a, int64_t b, int64_t c, int64_t d,
+                    int64_t e, int64_t f, int64_t g, int64_t h) {
+    return a + b + c + d + e + f + g + h;
+}
+
+int test_jit_call_stack_args(void) {
+    const char *src =
+        "declare i64 @sum8(i64, i64, i64, i64, i64, i64, i64, i64)\n"
+        "define i64 @call_sum8() {\n"
+        "entry:\n"
+        "  %r = call i64 @sum8(i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8)\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int64_t (*sum8_fn)(int64_t, int64_t, int64_t, int64_t,
+                       int64_t, int64_t, int64_t, int64_t) = sum8;
+    void *sum8_addr = NULL;
+    memcpy(&sum8_addr, &sum8_fn, sizeof(sum8_addr));
+    lr_jit_add_symbol(jit, "sum8", sum8_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_sum8");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 36, "sum8(1..8) = 36 via stack args");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+static int64_t sum10(int64_t a, int64_t b, int64_t c, int64_t d,
+                     int64_t e, int64_t f, int64_t g, int64_t h,
+                     int64_t i, int64_t j) {
+    return a + b + c + d + e + f + g + h + i + j;
+}
+
+int test_jit_call_many_stack_args(void) {
+    const char *src =
+        "declare i64 @sum10(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)\n"
+        "define i64 @call_sum10() {\n"
+        "entry:\n"
+        "  %r = call i64 @sum10(i64 1, i64 2, i64 3, i64 4, i64 5,"
+        " i64 6, i64 7, i64 8, i64 9, i64 10)\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int64_t (*sum10_fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                        int64_t, int64_t, int64_t, int64_t, int64_t) = sum10;
+    void *sum10_addr = NULL;
+    memcpy(&sum10_addr, &sum10_fn, sizeof(sum10_addr));
+    lr_jit_add_symbol(jit, "sum10", sum10_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_sum10");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 55, "sum10(1..10) = 55 via stack args");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}

@@ -51,6 +51,7 @@ int test_parser_store_with_struct_constant(void);
 int test_parser_urem_instruction(void);
 int test_parser_canonical_phi_pairs(void);
 int test_parser_select_with_ptr_operands(void);
+int test_parser_named_params_no_collision(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
 int test_host_target_name(void);
@@ -81,6 +82,8 @@ int test_jit_gep_array_index(void);
 int test_jit_global_string_constant(void);
 int test_jit_global_struct_ptr_relocation(void);
 int test_jit_global_struct_integer_init(void);
+int test_jit_call_stack_args(void);
+int test_jit_call_many_stack_args(void);
 int test_e2e_ret_42(void);
 int test_e2e_add_i32(void);
 int test_e2e_branch(void);
@@ -122,6 +125,7 @@ int main(void) {
     RUN_TEST(test_parser_urem_instruction);
     RUN_TEST(test_parser_canonical_phi_pairs);
     RUN_TEST(test_parser_select_with_ptr_operands);
+    RUN_TEST(test_parser_named_params_no_collision);
 
     fprintf(stderr, "\nCodegen tests:\n");
     RUN_TEST(test_codegen_ret_42);
@@ -158,6 +162,8 @@ int main(void) {
     RUN_TEST(test_jit_global_string_constant);
     RUN_TEST(test_jit_global_struct_ptr_relocation);
     RUN_TEST(test_jit_global_struct_integer_init);
+    RUN_TEST(test_jit_call_stack_args);
+    RUN_TEST(test_jit_call_many_stack_args);
 
     fprintf(stderr, "\nE2E tests:\n");
     RUN_TEST(test_e2e_ret_42);
