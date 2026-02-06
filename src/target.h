@@ -23,42 +23,49 @@ typedef struct lr_moperand {
     };
 } lr_moperand_t;
 
-/* Machine instruction */
-typedef enum lr_x86_op {
-    LR_X86_MOV,
-    LR_X86_MOV_IMM,
-    LR_X86_ADD,
-    LR_X86_SUB,
-    LR_X86_IMUL,
-    LR_X86_IDIV,
-    LR_X86_AND,
-    LR_X86_OR,
-    LR_X86_XOR,
-    LR_X86_SAL,
-    LR_X86_SAR,
-    LR_X86_SHR,
-    LR_X86_CMP,
-    LR_X86_TEST,
-    LR_X86_JMP,
-    LR_X86_JCC,
-    LR_X86_SETCC,
-    LR_X86_CMOVCC,
-    LR_X86_RET,
-    LR_X86_PUSH,
-    LR_X86_POP,
-    LR_X86_CALL,
-    LR_X86_LEA,
-    LR_X86_CDQ,
-    LR_X86_CQO,
-    LR_X86_MOVSX,
-    LR_X86_MOVZX,
-    LR_X86_NOP,
-    LR_X86_SUB_RSP,   /* sub rsp, imm (prologue) */
-    LR_X86_ADD_RSP,   /* add rsp, imm (epilogue) */
-} lr_x86_op_t;
+/* Target-neutral MIR opcodes shared by all backends */
+typedef enum lr_mir_op {
+    LR_MIR_MOV,
+    LR_MIR_MOV_IMM,
+    LR_MIR_ADD,
+    LR_MIR_SUB,
+    LR_MIR_IMUL,
+    LR_MIR_IDIV,
+    LR_MIR_AND,
+    LR_MIR_OR,
+    LR_MIR_XOR,
+    LR_MIR_SAL,
+    LR_MIR_SAR,
+    LR_MIR_SHR,
+    LR_MIR_CMP,
+    LR_MIR_TEST,
+    LR_MIR_JMP,
+    LR_MIR_JCC,
+    LR_MIR_SETCC,
+    LR_MIR_CMOVCC,
+    LR_MIR_RET,
+    LR_MIR_PUSH,
+    LR_MIR_POP,
+    LR_MIR_CALL,
+    LR_MIR_LEA,
+    LR_MIR_CDQ,
+    LR_MIR_CQO,
+    LR_MIR_MOVSX,
+    LR_MIR_MOVZX,
+    LR_MIR_NOP,
+    LR_MIR_FRAME_ALLOC,
+    LR_MIR_FRAME_FREE,
+} lr_mir_op_t;
+
+/* Target-neutral condition codes used by JCC/SETCC/CMOVCC */
+enum {
+    LR_CC_EQ = 0, LR_CC_NE, LR_CC_UGT, LR_CC_UGE, LR_CC_ULT, LR_CC_ULE,
+    LR_CC_SGT, LR_CC_SGE, LR_CC_SLT, LR_CC_SLE,
+    LR_CC_O, LR_CC_NO,
+};
 
 typedef struct lr_minst {
-    lr_x86_op_t op;
+    lr_mir_op_t op;
     lr_moperand_t dst;
     lr_moperand_t src;
     uint8_t size;      /* operand size: 1, 2, 4, or 8 bytes */
@@ -83,7 +90,7 @@ typedef struct lr_mfunc {
     uint32_t num_blocks;
     uint32_t stack_size;       /* total stack frame size */
     uint32_t num_stack_slots;
-    int32_t *stack_slots;      /* rbp offsets for each vreg stack slot */
+    int32_t *stack_slots;      /* frame pointer offsets for each vreg stack slot */
     lr_arena_t *arena;
     lr_func_t *ir_func;
 } lr_mfunc_t;
