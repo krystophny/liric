@@ -203,6 +203,8 @@ lr_token_t lr_lexer_next(lr_lexer_t *lex) {
     case '=': tok = make_token(lex, LR_TOK_EQUALS, start, 1); break;
     case '*': tok = make_token(lex, LR_TOK_STAR, start, 1); break;
     case ':': tok = make_token(lex, LR_TOK_COLON, start, 1); break;
+    case '<': tok = make_token(lex, LR_TOK_LANGLE, start, 1); break;
+    case '>': tok = make_token(lex, LR_TOK_RANGLE, start, 1); break;
     case '.':
         if (lex->pos + 1 < lex->src_len &&
             lex->src[lex->pos] == '.' && lex->src[lex->pos + 1] == '.') {
@@ -417,6 +419,8 @@ const char *lr_tok_name(lr_tok_t kind) {
     case LR_TOK_EQUALS:    return "=";
     case LR_TOK_STAR:      return "*";
     case LR_TOK_COLON:     return ":";
+    case LR_TOK_LANGLE:    return "<";
+    case LR_TOK_RANGLE:    return ">";
     case LR_TOK_DOTDOTDOT: return "...";
     default: return "?";
     }

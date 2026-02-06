@@ -189,7 +189,10 @@ int test_parser_named_type_operand(void) {
     lr_inst_t *alloca_inst = b->first;
     TEST_ASSERT(alloca_inst != NULL, "has alloca");
     TEST_ASSERT_EQ(alloca_inst->op, LR_OP_ALLOCA, "first op is alloca");
-    TEST_ASSERT_EQ(alloca_inst->type->kind, LR_TYPE_PTR, "named type parsed as opaque ptr");
+    TEST_ASSERT_EQ(alloca_inst->type->kind, LR_TYPE_STRUCT, "named type resolved to struct");
+    TEST_ASSERT_EQ(alloca_inst->type->struc.packed, true, "struct is packed");
+    TEST_ASSERT_EQ(alloca_inst->type->struc.num_fields, 2, "struct has 2 fields");
+    TEST_ASSERT_EQ(lr_type_size(alloca_inst->type), 16, "packed struct is 16 bytes");
 
     lr_arena_destroy(arena);
     return 0;

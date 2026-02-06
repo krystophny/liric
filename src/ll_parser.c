@@ -30,6 +30,10 @@ typedef struct lr_parser {
     struct { char *name; lr_func_t *func; } func_map[1024];
     uint32_t func_map_count;
 
+    /* named type alias mapping (e.g. %string_descriptor -> struct type) */
+    struct { char *name; lr_type_t *type; } type_map[256];
+    uint32_t type_map_count;
+
     lr_func_t *cur_func;
 } lr_parser_t;
 
@@ -153,6 +157,22 @@ static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
     }
 }
 
+static void register_type(lr_parser_t *p, const char *name, lr_type_t *ty) {
+    if (p->type_map_count < 256) {
+        p->type_map[p->type_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->type_map[p->type_map_count].type = ty;
+        p->type_map_count++;
+    }
+}
+
+static lr_type_t *resolve_type(lr_parser_t *p, const char *name) {
+    for (uint32_t i = 0; i < p->type_map_count; i++) {
+        if (strcmp(p->type_map[i].name, name) == 0)
+            return p->type_map[i].type;
+    }
+    return NULL;
+}
+
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
 static void skip_balanced_parens(lr_parser_t *p);
@@ -172,11 +192,13 @@ static lr_type_t *parse_type(lr_parser_t *p) {
     case LR_TOK_FLOAT:  next(p); ty = p->module->type_float; break;
     case LR_TOK_DOUBLE: next(p); ty = p->module->type_double; break;
     case LR_TOK_PTR:    next(p); ty = p->module->type_ptr; break;
-    case LR_TOK_LOCAL_ID:
-        /* Opaque/aliased named types are treated as pointer-sized for now. */
+    case LR_TOK_LOCAL_ID: {
+        char *tname = tok_name(p, &p->cur);
         next(p);
-        ty = p->module->type_ptr;
+        lr_type_t *resolved = resolve_type(p, tname);
+        ty = resolved ? resolved : p->module->type_ptr;
         break;
+    }
     case LR_TOK_LBRACKET: {
         next(p);
         int64_t count = p->cur.int_val;
@@ -198,6 +220,21 @@ static lr_type_t *parse_type(lr_parser_t *p) {
         }
         expect(p, LR_TOK_RBRACE);
         ty = lr_type_struct(p->arena, fields, nf, false, NULL);
+        break;
+    }
+    case LR_TOK_LANGLE: {
+        next(p);
+        expect(p, LR_TOK_LBRACE);
+        lr_type_t *fields[256];
+        uint32_t nf = 0;
+        if (!check(p, LR_TOK_RBRACE)) {
+            fields[nf++] = parse_type(p);
+            while (match(p, LR_TOK_COMMA))
+                fields[nf++] = parse_type(p);
+        }
+        expect(p, LR_TOK_RBRACE);
+        expect(p, LR_TOK_RANGLE);
+        ty = lr_type_struct(p->arena, fields, nf, true, NULL);
         break;
     }
     default:
@@ -985,9 +1022,8 @@ static void skip_line(lr_parser_t *p) {
         bool at_toplevel_col = (p->cur.col == 1);
         if (at_toplevel_col && (check(p, LR_TOK_DEFINE) || check(p, LR_TOK_DECLARE)))
             return;
-        if (at_toplevel_col && check(p, LR_TOK_GLOBAL_ID)) {
+        if (at_toplevel_col && (check(p, LR_TOK_GLOBAL_ID) || check(p, LR_TOK_LOCAL_ID)))
             return;
-        }
         next(p);
     }
 }
@@ -1010,8 +1046,17 @@ static void parse_global(lr_parser_t *p) {
     } else if (check(p, LR_TOK_CONSTANT)) {
         next(p);
         is_const = true;
+    } else if (check(p, LR_TOK_TYPE)) {
+        next(p);
+        if (check(p, LR_TOK_OPAQUE)) {
+            next(p);
+        } else {
+            lr_type_t *alias = parse_type(p);
+            register_type(p, name, alias);
+        }
+        skip_line(p);
+        return;
     } else {
-        /* might be a type alias: %name = type { ... } */
         skip_line(p);
         return;
     }
@@ -1022,7 +1067,49 @@ static void parse_global(lr_parser_t *p) {
     if (resolve_global(p, g->name) == UINT32_MAX)
         register_global(p, g->name, sym_id);
 
-    /* skip initializer for now */
+    if (check(p, LR_TOK_STRING_LIT)) {
+        const char *s = p->cur.start;
+        size_t slen = p->cur.len;
+        if (slen >= 3 && s[0] == 'c' && s[1] == '"') {
+            s += 2; slen -= 3;
+            uint8_t *buf = lr_arena_array(p->arena, uint8_t, slen + 1);
+            size_t out = 0;
+            for (size_t i = 0; i < slen; i++) {
+                if (s[i] == '\\' && i + 2 < slen) {
+                    int hi = 0, lo = 0;
+                    char c1 = s[i + 1], c2 = s[i + 2];
+                    hi = (c1 >= '0' && c1 <= '9') ? c1 - '0' :
+                         (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10 :
+                         (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10 : -1;
+                    lo = (c2 >= '0' && c2 <= '9') ? c2 - '0' :
+                         (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10 :
+                         (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10 : -1;
+                    if (hi >= 0 && lo >= 0) {
+                        buf[out++] = (uint8_t)(hi * 16 + lo);
+                        i += 2;
+                        continue;
+                    }
+                }
+                buf[out++] = (uint8_t)s[i];
+            }
+            g->init_data = buf;
+            g->init_size = out;
+        }
+        next(p);
+    } else if (check(p, LR_TOK_ZEROINITIALIZER)) {
+        next(p);
+    } else if (check(p, LR_TOK_INT_LIT)) {
+        int64_t val = p->cur.int_val;
+        size_t sz = lr_type_size(ty);
+        if (sz > 0 && sz <= 8) {
+            uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
+            memcpy(buf, &val, sz);
+            g->init_data = buf;
+            g->init_size = sz;
+        }
+        next(p);
+    }
+
     skip_line(p);
 }
 
@@ -1047,6 +1134,19 @@ lr_module_t *lr_parse_ll_text(const char *src, size_t len,
             parse_function_def(&p, true);
         } else if (check(&p, LR_TOK_GLOBAL_ID)) {
             parse_global(&p);
+        } else if (check(&p, LR_TOK_LOCAL_ID)) {
+            /* type alias: %name = type ... */
+            char *tname = tok_name(&p, &p.cur);
+            next(&p);
+            if (match(&p, LR_TOK_EQUALS) && match(&p, LR_TOK_TYPE)) {
+                if (check(&p, LR_TOK_OPAQUE)) {
+                    next(&p);
+                } else {
+                    lr_type_t *alias = parse_type(&p);
+                    register_type(&p, tname, alias);
+                }
+            }
+            skip_line(&p);
         } else {
             /* skip unknown top-level directives (source_filename, target, attributes, metadata) */
             skip_line(&p);

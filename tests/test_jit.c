@@ -613,3 +613,105 @@ int test_jit_llvm_intrinsic_memcpy_memset(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_gep_struct_field(void) {
+    const char *src =
+        "%my_struct = type <{ i32, i64 }>\n"
+        "define i64 @gep_struct() {\n"
+        "entry:\n"
+        "  %s = alloca %my_struct, align 8\n"
+        "  %p0 = getelementptr %my_struct, %my_struct* %s, i32 0, i32 0\n"
+        "  store i32 10, i32* %p0, align 4\n"
+        "  %p1 = getelementptr %my_struct, %my_struct* %s, i32 0, i32 1\n"
+        "  store i64 32, i64* %p1, align 8\n"
+        "  %v0 = load i32, i32* %p0, align 4\n"
+        "  %v1 = load i64, i64* %p1, align 8\n"
+        "  %ext = sext i32 %v0 to i64\n"
+        "  %sum = add i64 %ext, %v1\n"
+        "  ret i64 %sum\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "gep_struct");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "struct field GEP: 10 + 32 = 42");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_gep_array_index(void) {
+    const char *src =
+        "define i64 @gep_array() {\n"
+        "entry:\n"
+        "  %arr = alloca [3 x i64], align 8\n"
+        "  %p0 = getelementptr [3 x i64], [3 x i64]* %arr, i32 0, i32 0\n"
+        "  store i64 10, i64* %p0, align 8\n"
+        "  %p1 = getelementptr [3 x i64], [3 x i64]* %arr, i32 0, i32 1\n"
+        "  store i64 20, i64* %p1, align 8\n"
+        "  %p2 = getelementptr [3 x i64], [3 x i64]* %arr, i32 0, i32 2\n"
+        "  store i64 12, i64* %p2, align 8\n"
+        "  %v0 = load i64, i64* %p0, align 8\n"
+        "  %v2 = load i64, i64* %p2, align 8\n"
+        "  %sum = add i64 %v0, %v2\n"
+        "  ret i64 %sum\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "gep_array");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 22, "array GEP: arr[0] + arr[2] = 10 + 12 = 22");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_global_string_constant(void) {
+    const char *src =
+        "@hello = private unnamed_addr constant [5 x i8] c\"Hello\", align 1\n"
+        "define i32 @read_char() {\n"
+        "entry:\n"
+        "  %p = getelementptr [5 x i8], [5 x i8]* @hello, i32 0, i32 0\n"
+        "  %c = load i8, i8* %p, align 1\n"
+        "  %v = zext i8 %c to i32\n"
+        "  ret i32 %v\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "read_char");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 72, "global string constant: 'H' = 72");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
