@@ -667,13 +667,7 @@ static int x86_64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_
             case LR_X86_MOV_IMM: {
                 uint8_t dst = mi->dst.reg;
                 int64_t imm = mi->src.imm;
-                if (imm == 0) {
-                    /* xor eax, eax is shorter */
-                    if (dst >= 8)
-                        emit_byte(buf, &pos, buflen, rex(false, dst >= 8, false, dst >= 8));
-                    emit_byte(buf, &pos, buflen, 0x31);
-                    emit_byte(buf, &pos, buflen, modrm(3, dst, dst));
-                } else if (imm >= INT32_MIN && imm <= INT32_MAX) {
+                if (imm >= INT32_MIN && imm <= INT32_MAX) {
                     /* mov reg, imm32 (sign-extended) */
                     emit_byte(buf, &pos, buflen, rex(true, false, false, dst >= 8));
                     emit_byte(buf, &pos, buflen, 0xC7);
