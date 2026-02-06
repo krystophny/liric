@@ -261,7 +261,7 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
 }
 
 static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
-    /* Pass 1: allocate and initialize all globals */
+    /* First pass: allocate space and copy raw init_data for all globals */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->name || !g->name[0])
             continue;
@@ -290,31 +290,24 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
         lr_jit_add_symbol(j, g->name, dst);
     }
 
-    /* Pass 2: resolve pointer relocations */
+    /* Second pass: apply pointer relocations now that all globals are placed */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (!g->name || !g->name[0])
+        if (!g->relocs)
             continue;
-        if (!g->init_exprs)
+        uint8_t *base = lookup_symbol(j, g->name);
+        if (!base)
             continue;
+        for (lr_reloc_t *r = g->relocs; r; r = r->next) {
+            void *target = lookup_symbol(j, r->symbol_name);
+            if (!target)
+                continue;
+            uintptr_t addr = (uintptr_t)target;
+            size_t global_size = lr_type_size(g->type);
+            if (global_size == 0)
+                global_size = sizeof(void *);
+            if (r->offset + sizeof(uintptr_t) <= global_size)
+                memcpy(base + r->offset, &addr, sizeof(addr));
 
-        void *dst = lookup_symbol(j, g->name);
-        if (!dst)
-            continue;
-
-        size_t size = lr_type_size(g->type);
-        for (lr_global_init_elem_t *elem = g->init_exprs; elem; elem = elem->next) {
-            if (elem->value.kind == LR_VAL_GLOBAL) {
-                const char *ref_name = resolve_global_name(m, elem->value.global_id);
-                if (!ref_name || !ref_name[0])
-                    continue;
-                void *ref_addr = lookup_symbol(j, ref_name);
-                if (!ref_addr)
-                    return -1;
-
-                if (elem->offset + sizeof(void *) <= size) {
-                    memcpy((uint8_t *)dst + elem->offset, &ref_addr, sizeof(ref_addr));
-                }
-            }
         }
     }
     return 0;
