@@ -360,11 +360,114 @@ static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty
     return lr_op_null(result_ty);
 }
 
-static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *type) {
-    if (check(p, LR_TOK_LBRACE))
+static void parse_aggregate_initializer(lr_parser_t *p, lr_type_t *type,
+                                         uint8_t *buf, size_t buf_size,
+                                         lr_global_init_elem_t **exprs_head,
+                                         lr_global_init_elem_t **exprs_tail,
+                                         uint32_t base_offset);
+
+static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type);
+
+static void parse_struct_initializer(lr_parser_t *p, lr_type_t *type,
+                                     uint8_t *buf, size_t buf_size,
+                                     lr_global_init_elem_t **exprs_head,
+                                     lr_global_init_elem_t **exprs_tail,
+                                     uint32_t base_offset) {
+    if (type->kind != LR_TYPE_STRUCT)
+        return;
+
+    uint32_t offset = base_offset;
+    for (uint32_t i = 0; i < type->struc.num_fields; i++) {
+        lr_type_t *field_ty = type->struc.fields[i];
+        size_t field_size = lr_type_size(field_ty);
+        size_t field_align = lr_type_align(field_ty);
+
+        if (!type->struc.packed && field_align > 0) {
+            offset = (uint32_t)((offset + field_align - 1) & ~(field_align - 1));
+        }
+
+        if (field_ty->kind == LR_TYPE_PTR || field_ty->kind == LR_TYPE_I64 ||
+            field_ty->kind == LR_TYPE_I32 || field_ty->kind == LR_TYPE_I16 ||
+            field_ty->kind == LR_TYPE_I8 || field_ty->kind == LR_TYPE_I1 ||
+            field_ty->kind == LR_TYPE_FLOAT || field_ty->kind == LR_TYPE_DOUBLE) {
+
+            lr_type_t *val_ty = parse_type(p);
+            (void)val_ty;
+            lr_operand_t val_op = parse_operand(p, field_ty);
+
+            if (val_op.kind == LR_VAL_IMM_I64) {
+                if (offset + field_size <= buf_size) {
+                    memcpy(buf + offset, &val_op.imm_i64, field_size);
+                }
+            } else if (val_op.kind == LR_VAL_IMM_F64) {
+                if (offset + field_size <= buf_size) {
+                    if (field_ty->kind == LR_TYPE_FLOAT) {
+                        float f = (float)val_op.imm_f64;
+                        memcpy(buf + offset, &f, sizeof(f));
+                    } else {
+                        memcpy(buf + offset, &val_op.imm_f64, field_size);
+                    }
+                }
+            } else if (val_op.kind == LR_VAL_GLOBAL) {
+                lr_global_init_elem_t *elem = lr_arena_new(p->arena, lr_global_init_elem_t);
+                elem->value = val_op;
+                elem->offset = offset;
+                elem->next = NULL;
+                if (*exprs_tail) {
+                    (*exprs_tail)->next = elem;
+                } else {
+                    *exprs_head = elem;
+                }
+                *exprs_tail = elem;
+            } else {
+                memset(buf + offset, 0, field_size);
+            }
+        } else if (field_ty->kind == LR_TYPE_STRUCT || field_ty->kind == LR_TYPE_ARRAY) {
+            parse_aggregate_initializer(p, field_ty, buf, buf_size, exprs_head, exprs_tail, offset);
+        }
+
+        offset += field_size;
+
+        if (i + 1 < type->struc.num_fields)
+            match(p, LR_TOK_COMMA);
+    }
+}
+
+static void parse_aggregate_initializer(lr_parser_t *p, lr_type_t *type,
+                                        uint8_t *buf, size_t buf_size,
+                                        lr_global_init_elem_t **exprs_head,
+                                        lr_global_init_elem_t **exprs_tail,
+                                        uint32_t base_offset) {
+    bool is_packed = false;
+    if (check(p, LR_TOK_LANGLE)) {
+        next(p);
+        is_packed = true;
+    }
+
+    expect(p, LR_TOK_LBRACE);
+
+    if (type->kind == LR_TYPE_STRUCT) {
+        parse_struct_initializer(p, type, buf, buf_size, exprs_head, exprs_tail, base_offset);
+    } else {
         skip_balanced_braces(p);
-    else
+    }
+
+    expect(p, LR_TOK_RBRACE);
+    if (is_packed)
+        expect(p, LR_TOK_RANGLE);
+}
+
+static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *type) {
+    if (check(p, LR_TOK_LANGLE)) {
+        next(p);
+        skip_balanced_braces(p);
+        if (check(p, LR_TOK_RANGLE))
+            next(p);
+    } else if (check(p, LR_TOK_LBRACE)) {
+        skip_balanced_braces(p);
+    } else {
         skip_balanced_brackets(p);
+    }
     return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
 }
 
@@ -1208,6 +1311,20 @@ static void parse_global(lr_parser_t *p) {
             g->init_size = sz;
         }
         next(p);
+    } else if (check(p, LR_TOK_LANGLE) || check(p, LR_TOK_LBRACE)) {
+        size_t sz = lr_type_size(ty);
+        if (sz > 0 && sz <= 8192) {
+            uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
+            memset(buf, 0, sz);
+            lr_global_init_elem_t *exprs_head = NULL;
+            lr_global_init_elem_t *exprs_tail = NULL;
+            parse_aggregate_initializer(p, ty, buf, sz, &exprs_head, &exprs_tail, 0);
+            g->init_data = buf;
+            g->init_size = sz;
+            g->init_exprs = exprs_head;
+        } else {
+            skip_balanced_braces(p);
+        }
     }
 
     skip_line(p);
