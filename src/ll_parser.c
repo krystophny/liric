@@ -156,6 +156,8 @@ static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
 static void skip_balanced_parens(lr_parser_t *p);
+static void skip_balanced_braces(lr_parser_t *p);
+static void skip_balanced_brackets(lr_parser_t *p);
 
 static lr_type_t *parse_type(lr_parser_t *p) {
     lr_token_t t = p->cur;
@@ -226,6 +228,12 @@ static void skip_attrs(lr_parser_t *p) {
             next(p);
             continue;
         }
+        if (p->cur.kind == LR_TOK_ALIGN) {
+            next(p);
+            if (check(p, LR_TOK_INT_LIT))
+                next(p);
+            continue;
+        }
         if (is_bare_identifier(&p->cur)) {
             next(p);
             skip_attr_payload(p);
@@ -236,14 +244,19 @@ static void skip_attrs(lr_parser_t *p) {
 }
 
 static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty) {
+    bool wrapped = false;
     expect(p, LR_TOK_GETELEMENTPTR);
     skip_attrs(p);
+    if (match(p, LR_TOK_LPAREN))
+        wrapped = true;
     (void)parse_type(p);
     expect(p, LR_TOK_COMMA);
 
     lr_operand_t base = parse_typed_operand(p);
     while (match(p, LR_TOK_COMMA))
         (void)parse_typed_operand(p);
+    if (wrapped)
+        expect(p, LR_TOK_RPAREN);
 
     if (base.kind == LR_VAL_GLOBAL)
         return lr_op_global(base.global_id, result_ty);
@@ -252,6 +265,14 @@ static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty
     if (base.kind == LR_VAL_NULL)
         return lr_op_null(result_ty);
     return lr_op_null(result_ty);
+}
+
+static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *type) {
+    if (check(p, LR_TOK_LBRACE))
+        skip_balanced_braces(p);
+    else
+        skip_balanced_brackets(p);
+    return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
 }
 
 static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
@@ -285,6 +306,10 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         next(p);
         return lr_op_imm_i64(0, type);
     }
+    if (check(p, LR_TOK_STRING_LIT)) {
+        next(p);
+        return lr_op_null(type);
+    }
     if (check(p, LR_TOK_LOCAL_ID)) {
         char *name = tok_name(p, &p->cur);
         next(p);
@@ -303,6 +328,8 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
     }
     if (check(p, LR_TOK_GETELEMENTPTR))
         return parse_const_gep_operand(p, type);
+    if (check(p, LR_TOK_LBRACE) || check(p, LR_TOK_LBRACKET))
+        return parse_aggregate_constant_operand(p, type);
     error(p, "expected operand, got '%s'", lr_tok_name(p->cur.kind));
     return lr_op_imm_i64(0, type);
 }
@@ -331,6 +358,44 @@ static void skip_balanced_parens(lr_parser_t *p) {
     }
     if (depth != 0)
         error(p, "unterminated parenthesized type in call");
+}
+
+static void skip_balanced_braces(lr_parser_t *p) {
+    uint32_t depth = 0;
+    expect(p, LR_TOK_LBRACE);
+    depth = 1;
+    while (depth > 0 && !check(p, LR_TOK_EOF)) {
+        if (match(p, LR_TOK_LBRACE)) {
+            depth++;
+            continue;
+        }
+        if (match(p, LR_TOK_RBRACE)) {
+            depth--;
+            continue;
+        }
+        next(p);
+    }
+    if (depth != 0)
+        error(p, "unterminated aggregate constant");
+}
+
+static void skip_balanced_brackets(lr_parser_t *p) {
+    uint32_t depth = 0;
+    expect(p, LR_TOK_LBRACKET);
+    depth = 1;
+    while (depth > 0 && !check(p, LR_TOK_EOF)) {
+        if (match(p, LR_TOK_LBRACKET)) {
+            depth++;
+            continue;
+        }
+        if (match(p, LR_TOK_RBRACKET)) {
+            depth--;
+            continue;
+        }
+        next(p);
+    }
+    if (depth != 0)
+        error(p, "unterminated array constant");
 }
 
 static void skip_optional_callee_signature(lr_parser_t *p) {
@@ -364,7 +429,7 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
 
             switch (op_tok) {
             case LR_TOK_ADD: case LR_TOK_SUB: case LR_TOK_MUL:
-            case LR_TOK_SDIV: case LR_TOK_SREM:
+            case LR_TOK_SDIV: case LR_TOK_SREM: case LR_TOK_UREM:
             case LR_TOK_AND: case LR_TOK_OR: case LR_TOK_XOR:
             case LR_TOK_SHL: case LR_TOK_LSHR: case LR_TOK_ASHR:
             case LR_TOK_FADD: case LR_TOK_FSUB:
@@ -383,6 +448,7 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
                 case LR_TOK_MUL:  irop = LR_OP_MUL; break;
                 case LR_TOK_SDIV: irop = LR_OP_SDIV; break;
                 case LR_TOK_SREM: irop = LR_OP_SREM; break;
+                case LR_TOK_UREM: irop = LR_OP_SREM; break;
                 case LR_TOK_AND:  irop = LR_OP_AND; break;
                 case LR_TOK_OR:   irop = LR_OP_OR; break;
                 case LR_TOK_XOR:  irop = LR_OP_XOR; break;
