@@ -105,6 +105,9 @@ typedef enum lr_tok {
     LR_TOK_OGE,
     LR_TOK_OLT,
     LR_TOK_OLE,
+    LR_TOK_ORD,
+    LR_TOK_UEQ,
+    LR_TOK_UNE,
     LR_TOK_UNO,
 
     /* types */

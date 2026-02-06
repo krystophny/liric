@@ -80,8 +80,10 @@ typedef enum lr_icmp_pred {
 } lr_icmp_pred_t;
 
 typedef enum lr_fcmp_pred {
-    LR_FCMP_OEQ, LR_FCMP_ONE, LR_FCMP_OGT, LR_FCMP_OGE, LR_FCMP_OLT, LR_FCMP_OLE,
-    LR_FCMP_UNO,
+    LR_FCMP_FALSE,
+    LR_FCMP_OEQ, LR_FCMP_OGT, LR_FCMP_OGE, LR_FCMP_OLT, LR_FCMP_OLE, LR_FCMP_ONE, LR_FCMP_ORD,
+    LR_FCMP_UEQ, LR_FCMP_UGT, LR_FCMP_UGE, LR_FCMP_ULT, LR_FCMP_ULE, LR_FCMP_UNE, LR_FCMP_UNO,
+    LR_FCMP_TRUE,
 } lr_fcmp_pred_t;
 
 typedef enum lr_operand_kind {
