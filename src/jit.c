@@ -1,4 +1,5 @@
 #include "jit.h"
+#include "ir.h"
 #include "target.h"
 #include <stdlib.h>
 #include <string.h>
@@ -138,12 +139,41 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return addr;
 }
 
+/* Resolve LR_VAL_GLOBAL operands in CALL instructions to addresses */
+static void resolve_calls(lr_jit_t *j, lr_func_t *f, lr_module_t *m) {
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op != LR_OP_CALL) continue;
+            if (inst->num_operands == 0) continue;
+            lr_operand_t *callee = &inst->operands[0];
+            if (callee->kind != LR_VAL_GLOBAL) continue;
+
+            /* Find function name by walking the module's function list */
+            const char *name = NULL;
+            uint32_t idx = 0;
+            for (lr_func_t *fn = m->first_func; fn; fn = fn->next, idx++) {
+                if (idx == callee->global_id) { name = fn->name; break; }
+            }
+            if (!name) continue;
+
+            void *addr = lookup_symbol(j, name);
+            if (addr) {
+                callee->kind = LR_VAL_IMM_I64;
+                callee->imm_i64 = (int64_t)(intptr_t)addr;
+            }
+        }
+    }
+}
+
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
     if (make_writable(j) != 0) return -1;
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (f->is_decl) continue;
+
+        /* Pre-resolve call targets to addresses */
+        resolve_calls(j, f, m);
 
         lr_mfunc_t *mf = lr_arena_new(j->arena, lr_mfunc_t);
         mf->arena = j->arena;

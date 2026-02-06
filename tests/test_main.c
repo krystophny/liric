@@ -58,6 +58,19 @@ int test_e2e_ret_42(void);
 int test_e2e_add_i32(void);
 int test_e2e_branch(void);
 int test_e2e_loop(void);
+int test_wasm_leb128_u32(void);
+int test_wasm_leb128_i32(void);
+int test_wasm_leb128_i64(void);
+int test_wasm_decode_minimal(void);
+int test_wasm_decode_add(void);
+int test_wasm_decode_invalid_magic(void);
+int test_wasm_ir_ret_42(void);
+int test_wasm_ir_add_args(void);
+int test_wasm_jit_ret_42(void);
+int test_wasm_jit_add_args(void);
+int test_wasm_jit_branch(void);
+int test_wasm_jit_loop(void);
+int test_wasm_jit_call(void);
 
 int main(void) {
     fprintf(stderr, "liric test suite\n");
@@ -97,6 +110,27 @@ int main(void) {
     RUN_TEST(test_e2e_add_i32);
     RUN_TEST(test_e2e_branch);
     RUN_TEST(test_e2e_loop);
+
+    fprintf(stderr, "\nWASM LEB128 tests:\n");
+    RUN_TEST(test_wasm_leb128_u32);
+    RUN_TEST(test_wasm_leb128_i32);
+    RUN_TEST(test_wasm_leb128_i64);
+
+    fprintf(stderr, "\nWASM Decoder tests:\n");
+    RUN_TEST(test_wasm_decode_minimal);
+    RUN_TEST(test_wasm_decode_add);
+    RUN_TEST(test_wasm_decode_invalid_magic);
+
+    fprintf(stderr, "\nWASM IR tests:\n");
+    RUN_TEST(test_wasm_ir_ret_42);
+    RUN_TEST(test_wasm_ir_add_args);
+
+    fprintf(stderr, "\nWASM JIT tests:\n");
+    RUN_TEST(test_wasm_jit_ret_42);
+    RUN_TEST(test_wasm_jit_add_args);
+    RUN_TEST(test_wasm_jit_branch);
+    RUN_TEST(test_wasm_jit_loop);
+    RUN_TEST(test_wasm_jit_call);
 
     fprintf(stderr, "\n================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",
