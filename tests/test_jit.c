@@ -715,3 +715,43 @@ int test_jit_global_string_constant(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_call_many_args(void) {
+    const char *src =
+        "define i64 @sum10(i64 %a, i64 %b, i64 %c, i64 %d, i64 %e, i64 %f, i64 %g, i64 %h, i64 %i, i64 %j) {\n"
+        "entry:\n"
+        "  %s1 = add i64 %a, %b\n"
+        "  %s2 = add i64 %s1, %c\n"
+        "  %s3 = add i64 %s2, %d\n"
+        "  %s4 = add i64 %s3, %e\n"
+        "  %s5 = add i64 %s4, %f\n"
+        "  %s6 = add i64 %s5, %g\n"
+        "  %s7 = add i64 %s6, %h\n"
+        "  %s8 = add i64 %s7, %i\n"
+        "  %s9 = add i64 %s8, %j\n"
+        "  ret i64 %s9\n"
+        "}\n"
+        "define i64 @test() {\n"
+        "entry:\n"
+        "  %result = call i64 @sum10(i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7, i64 8, i64 9, i64 10)\n"
+        "  ret i64 %result\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef long long (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "test");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 55, "call with 10 args: sum(1..10) = 55");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
