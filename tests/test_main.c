@@ -53,6 +53,7 @@ int test_parser_canonical_phi_pairs(void);
 int test_parser_select_with_ptr_operands(void);
 int test_parser_bitcast_const_expr_operand(void);
 int test_parser_function_pointer_type(void);
+int test_parser_quoted_label_names(void);
 int test_parser_boolean_literals(void);
 int test_parser_named_params_no_collision(void);
 int test_codegen_ret_42(void);
@@ -130,6 +131,7 @@ int main(void) {
     RUN_TEST(test_parser_select_with_ptr_operands);
     RUN_TEST(test_parser_bitcast_const_expr_operand);
     RUN_TEST(test_parser_function_pointer_type);
+    RUN_TEST(test_parser_quoted_label_names);
     RUN_TEST(test_parser_boolean_literals);
     RUN_TEST(test_parser_named_params_no_collision);
 
