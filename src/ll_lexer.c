@@ -62,6 +62,7 @@ static const keyword_t keywords[] = {
     {"fsub", LR_TOK_FSUB},
     {"fmul", LR_TOK_FMUL},
     {"fdiv", LR_TOK_FDIV},
+    {"fneg", LR_TOK_FNEG},
     {"icmp", LR_TOK_ICMP},
     {"fcmp", LR_TOK_FCMP},
     {"alloca", LR_TOK_ALLOCA},

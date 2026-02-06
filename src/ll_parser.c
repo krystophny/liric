@@ -631,6 +631,15 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
                 break;
             }
 
+            case LR_TOK_FNEG: {
+                lr_operand_t src = parse_typed_operand(p);
+                lr_operand_t ops[1] = {src};
+                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_FNEG,
+                    src.type, dest, ops, 1);
+                lr_block_append(block, inst);
+                break;
+            }
+
             case LR_TOK_SELECT: {
                 lr_operand_t cond = parse_typed_operand(p);
                 expect(p, LR_TOK_COMMA);

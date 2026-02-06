@@ -31,6 +31,7 @@ typedef enum lr_tok {
     LR_TOK_FSUB,
     LR_TOK_FMUL,
     LR_TOK_FDIV,
+    LR_TOK_FNEG,
     LR_TOK_ICMP,
     LR_TOK_FCMP,
     LR_TOK_ALLOCA,
