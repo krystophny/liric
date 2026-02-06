@@ -267,17 +267,36 @@ def parse_function_defs(ir_text: str) -> List[Tuple[str, str, str]]:
     return defs
 
 
-def choose_entrypoint(ir_text: str) -> Optional[Tuple[str, str]]:
+def choose_entrypoint(ir_text: str, run_requested: bool) -> Optional[Tuple[str, str]]:
     defs = parse_function_defs(ir_text)
     if not defs:
         return None
 
     by_name = {name: (ret, args) for name, ret, args in defs}
-    for candidate in PREFERRED_ENTRIES:
-        if candidate in by_name:
-            ret, args = by_name[candidate]
+
+    if run_requested:
+        for candidate in PREFERRED_ENTRIES:
+            if candidate in by_name:
+                ret, args = by_name[candidate]
+                sig = signature_kind(ret, args)
+                return candidate, sig
+    else:
+        for candidate in PREFERRED_ENTRIES:
+            if candidate in by_name:
+                ret, args = by_name[candidate]
+                sig = signature_kind(ret, args)
+                if sig in SUPPORTED_SIGS:
+                    return candidate, sig
+        for name, ret, args in defs:
             sig = signature_kind(ret, args)
-            return candidate, sig
+            if sig in SUPPORTED_SIGS:
+                return name, sig
+
+        for candidate in PREFERRED_ENTRIES:
+            if candidate in by_name:
+                ret, args = by_name[candidate]
+                sig = signature_kind(ret, args)
+                return candidate, sig
 
     first = defs[0]
     return first[0], signature_kind(first[1], first[2])
@@ -451,7 +470,7 @@ def process_case(
         return row
 
     row["parse_ok"] = True
-    ep = choose_entrypoint(ir_text)
+    ep = choose_entrypoint(ir_text, bool(row["run_requested"]))
     if ep is None:
         row["stage"] = "entrypoint"
         row["classification"] = classify.UNSUPPORTED_ABI
@@ -462,6 +481,13 @@ def process_case(
     entry_name, entry_sig = ep
     row["entrypoint"] = entry_name
     row["entry_sig"] = entry_sig
+
+    if entry_sig not in SUPPORTED_SIGS:
+        row["stage"] = "entrypoint"
+        row["classification"] = classify.UNSUPPORTED_ABI
+        row["reason"] = f"unsupported entry signature for JIT execution: {entry_sig}"
+        persist_case_result(case_dir, row)
+        return row
 
     row["jit_attempted"] = True
     jit_cmd = [str(cfg.liric_cli)]
