@@ -54,7 +54,7 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 | **Target interface** | `src/target.h` | Backend vtable: `isel_func`, `encode_func`, `print_inst` |
 | **Target registry** | `src/target_registry.c` | `lr_target_by_name()`, `lr_target_host()`, host detection |
 | **x86_64 backend** | `src/target_x86_64.c/.h` | ISel (IR -> machine insts) + x86_64 binary encoder |
-| **aarch64 backend** | `src/target_aarch64.c/.h` | Reuses x86_64 ISel, translates to arm64 binary |
+| **aarch64 backend** | `src/target_aarch64.c/.h` | ISel (IR -> machine insts) + aarch64 binary encoder |
 | **JIT engine** | `src/jit.c/.h` | mmap, W^X transitions, symbol table, module compilation |
 | **Public API** | `include/liric/liric.h` | 9 functions: parse (.ll and .wasm), module management, JIT lifecycle |
 | **API wrapper** | `src/liric.c` | Thin bridge between public API and internal modules |
@@ -72,8 +72,9 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 
 **Machine IR** (`target.h`) is the ISel output:
 - `lr_mfunc_t` contains linked list of `lr_mblock_t` with `lr_minst_t`
-- Currently uses `LR_X86_*` opcodes shared across backends (known debt - should be target-neutral)
-- Stack-based register allocation: every vreg gets a stack slot, computation flows through RAX/RCX
+- Target-neutral `LR_MIR_*` opcodes and `LR_CC_*` condition codes shared across backends
+- Each backend has its own ISel using native register numbers (x86: RAX/RCX, aarch64: X9/X10)
+- Stack-based register allocation: every vreg gets a stack slot
 - PHI nodes lowered as stores in predecessor blocks before terminators
 
 **Backend interface** (`lr_target_t`):
@@ -143,8 +144,6 @@ RUN_TEST(test_name);           // in main()
 
 ## Known Technical Debt
 
-- `LR_X86_*` machine opcodes used by all backends (should be target-neutral `LR_MIR_*`)
-- aarch64 ISel delegates to x86_64 ISel then translates -- works but bypasses proper arm64 ISel
 - Parser limits are hardcoded (4096 vregs, 1024 blocks, 1024 functions, 4096 globals)
 - No floating-point codegen (types parsed but FPU/XMM instructions not emitted)
 - No optimization passes on IR or MIR
