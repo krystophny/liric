@@ -302,3 +302,73 @@ int test_parser_urem_instruction(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_canonical_phi_pairs(void) {
+    const char *src =
+        "define i32 @f(i1 %cond) {\n"
+        "entry:\n"
+        "  br i1 %cond, label %if.true, label %if.false\n"
+        "if.true:\n"
+        "  br label %merge\n"
+        "if.false:\n"
+        "  br label %merge\n"
+        "merge:\n"
+        "  %x = phi i32 [42, %if.true], [7, %if.false]\n"
+        "  ret i32 %x\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    while (b && strcmp(b->name, "merge") != 0)
+        b = b->next;
+    TEST_ASSERT(b != NULL, "merge block exists");
+
+    lr_inst_t *phi = b->first;
+    TEST_ASSERT(phi != NULL, "phi exists");
+    TEST_ASSERT_EQ(phi->op, LR_OP_PHI, "phi parsed");
+    TEST_ASSERT_EQ(phi->num_operands, 4, "phi has 2 incoming pairs");
+    TEST_ASSERT_EQ(phi->operands[1].kind, LR_VAL_BLOCK, "incoming block operand 0");
+    TEST_ASSERT_EQ(phi->operands[3].kind, LR_VAL_BLOCK, "incoming block operand 1");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_select_with_ptr_operands(void) {
+    const char *src =
+        "@a = global i32 0\n"
+        "@b = global i32 0\n"
+        "define ptr @pick(i1 %cond) {\n"
+        "entry:\n"
+        "  %p = select i1 %cond, ptr @a, ptr @b\n"
+        "  ret ptr %p\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    while (f && strcmp(f->name, "pick") != 0)
+        f = f->next;
+    TEST_ASSERT(f != NULL, "pick function exists");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *sel = b->first;
+    TEST_ASSERT(sel != NULL, "select exists");
+    TEST_ASSERT_EQ(sel->op, LR_OP_SELECT, "select parsed");
+    TEST_ASSERT_EQ(sel->type->kind, LR_TYPE_PTR, "select result type is ptr");
+    TEST_ASSERT_EQ(sel->operands[1].kind, LR_VAL_GLOBAL, "true arm is global");
+    TEST_ASSERT_EQ(sel->operands[2].kind, LR_VAL_GLOBAL, "false arm is global");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
