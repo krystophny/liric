@@ -64,6 +64,8 @@ int test_jit_branch(void);
 int test_jit_loop(void);
 int test_jit_alloca_load_store(void);
 int test_jit_forward_typed_call(void);
+int test_jit_fadd_double_bits(void);
+int test_jit_fmul_float_bits(void);
 int test_e2e_ret_42(void);
 int test_e2e_add_i32(void);
 int test_e2e_branch(void);
@@ -124,6 +126,8 @@ int main(void) {
     RUN_TEST(test_jit_loop);
     RUN_TEST(test_jit_alloca_load_store);
     RUN_TEST(test_jit_forward_typed_call);
+    RUN_TEST(test_jit_fadd_double_bits);
+    RUN_TEST(test_jit_fmul_float_bits);
 
     fprintf(stderr, "\nE2E tests:\n");
     RUN_TEST(test_e2e_ret_42);

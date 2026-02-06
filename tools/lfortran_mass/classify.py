@@ -16,12 +16,12 @@ UNSUPPORTED_ABI = "unsupported_abi"
 INFRA_FAIL = "infra_fail"
 
 UNSUPPORTED_FEATURE_PATTERNS = [
-    r"\bfadd\b",
-    r"\bfsub\b",
-    r"\bfmul\b",
-    r"\bfdiv\b",
-    r"\bfloat\b",
-    r"\bdouble\b",
+    r"\bfcmp\b",
+    r"\bsitofp\b",
+    r"\bfptosi\b",
+    r"\bfpext\b",
+    r"\bfptrunc\b",
+    r"\bfneg\b",
     r"<\s*\d+\s*x\s*",
     r"\bx86_amx\b",
     r"\btarget-features\b",
@@ -54,7 +54,12 @@ def classify_parse_failure(stderr: str, ir_text: str) -> str:
     msg = stderr.lower()
     if detect_unsupported_feature(ir_text):
         return UNSUPPORTED_FEATURE
-    if "expected type" in msg or "unexpected token" in msg:
+    if (
+        "expected type" in msg
+        or "unexpected token" in msg
+        or "expected operand" in msg
+        or "unknown instruction" in msg
+    ):
         return UNSUPPORTED_FEATURE
     return LIRIC_PARSE_FAIL
 
