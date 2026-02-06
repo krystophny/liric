@@ -625,6 +625,27 @@ def ensure_exists(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} not found: {path}")
 
 
+def selection_row(
+    entry: Any,
+    decision: str,
+    reason: str,
+    case_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    row = {
+        "corpus": str(getattr(entry, "corpus", "unknown")),
+        "index": int(getattr(entry, "index", -1)),
+        "filename": str(getattr(entry, "filename_raw", "")),
+        "source_path": str(getattr(entry, "source_path", "")),
+        "decision": decision,
+        "reason": reason,
+    }
+    if hasattr(entry, "name"):
+        row["integration_name"] = str(getattr(entry, "name"))
+    if case_id is not None:
+        row["case_id"] = case_id
+    return row
+
+
 def main() -> int:
     args = parse_args()
 
@@ -670,6 +691,8 @@ def main() -> int:
         lfortran_version = "unknown"
 
     entries: List[Any] = []
+    selected_before_limit: List[Any] = []
+    selection_rows: List[Dict[str, Any]] = []
     skipped_non_llvm = 0
     skipped_expected_fail = 0
 
@@ -677,9 +700,15 @@ def main() -> int:
         for entry in lfortran_tests_toml.iter_entries(tests_toml, lfortran_root):
             if not lfortran_tests_toml.is_llvm_intended(entry):
                 skipped_non_llvm += 1
+                selection_rows.append(
+                    selection_row(entry, "skipped", "not_llvm_intended")
+                )
                 continue
             if (not args.include_expected_fail) and lfortran_tests_toml.is_expected_failure(entry):
                 skipped_expected_fail += 1
+                selection_rows.append(
+                    selection_row(entry, "skipped", "expected_failure")
+                )
                 continue
             entries.append(entry)
 
@@ -687,9 +716,15 @@ def main() -> int:
         for entry in integration_tests_cmake.iter_integration_entries(integration_cmake):
             if not integration_tests_cmake.is_llvm_intended(entry):
                 skipped_non_llvm += 1
+                selection_rows.append(
+                    selection_row(entry, "skipped", "not_llvm_intended")
+                )
                 continue
             if (not args.include_expected_fail) and integration_tests_cmake.is_expected_failure(entry):
                 skipped_expected_fail += 1
+                selection_rows.append(
+                    selection_row(entry, "skipped", "expected_failure")
+                )
                 continue
             entries.append(entry)
 
@@ -707,20 +742,30 @@ def main() -> int:
         )
         if key in seen_keys:
             deduped_count += 1
+            selection_rows.append(selection_row(entry, "skipped", "duplicate_case"))
             continue
         seen_keys.add(key)
         deduped_entries.append(entry)
 
-    entries = deduped_entries
+    selected_before_limit = deduped_entries
+    entries = selected_before_limit
     if args.limit > 0:
+        for entry in entries[args.limit:]:
+            selection_rows.append(selection_row(entry, "skipped", "limit"))
         entries = entries[: args.limit]
 
     manifest_rows = [
         entry.to_manifest_record(lfortran_version=lfortran_version) for entry in entries
     ]
+    for entry, manifest_row in zip(entries, manifest_rows):
+        selection_rows.append(
+            selection_row(entry, "selected", "included", case_id=manifest_row["case_id"])
+        )
 
     manifest_path = output_root / "manifest_tests_toml.jsonl"
+    selection_path = output_root / "selection_decisions.jsonl"
     lfortran_tests_toml.write_jsonl(manifest_path, manifest_rows)
+    report.write_jsonl(selection_path, selection_rows)
 
     cfg = RunnerConfig(
         lfortran_bin=lfortran_bin,
@@ -764,6 +809,7 @@ def main() -> int:
         manifest_total=len(manifest_rows),
         processed=processed_rows,
         baseline=baseline_rows,
+        selection_rows=selection_rows,
     )
     report.write_summary_md(summary_path, summary)
     report.write_failures_csv(failures_path, processed_rows)
@@ -772,6 +818,7 @@ def main() -> int:
         report.write_jsonl(baseline_path, processed_rows)
 
     print(f"manifest: {manifest_path}")
+    print(f"selection: {selection_path}")
     print(f"results: {results_path}")
     print(f"summary: {summary_path}")
     print(f"failures: {failures_path}")
