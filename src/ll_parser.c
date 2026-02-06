@@ -726,13 +726,22 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
             case LR_TOK_FCMP: {
                 lr_fcmp_pred_t pred;
                 switch (p->cur.kind) {
+                case LR_TOK_FALSE: pred = LR_FCMP_FALSE; break;
                 case LR_TOK_OEQ: pred = LR_FCMP_OEQ; break;
-                case LR_TOK_ONE: pred = LR_FCMP_ONE; break;
                 case LR_TOK_OGT: pred = LR_FCMP_OGT; break;
                 case LR_TOK_OGE: pred = LR_FCMP_OGE; break;
                 case LR_TOK_OLT: pred = LR_FCMP_OLT; break;
                 case LR_TOK_OLE: pred = LR_FCMP_OLE; break;
+                case LR_TOK_ONE: pred = LR_FCMP_ONE; break;
+                case LR_TOK_ORD: pred = LR_FCMP_ORD; break;
+                case LR_TOK_UEQ: pred = LR_FCMP_UEQ; break;
+                case LR_TOK_UGT: pred = LR_FCMP_UGT; break;
+                case LR_TOK_UGE: pred = LR_FCMP_UGE; break;
+                case LR_TOK_ULT: pred = LR_FCMP_ULT; break;
+                case LR_TOK_ULE: pred = LR_FCMP_ULE; break;
+                case LR_TOK_UNE: pred = LR_FCMP_UNE; break;
                 case LR_TOK_UNO: pred = LR_FCMP_UNO; break;
+                case LR_TOK_TRUE: pred = LR_FCMP_TRUE; break;
                 default:
                     error(p, "expected fcmp predicate");
                     pred = LR_FCMP_OEQ;

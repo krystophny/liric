@@ -136,6 +136,9 @@ static const keyword_t keywords[] = {
     {"oge", LR_TOK_OGE},
     {"olt", LR_TOK_OLT},
     {"ole", LR_TOK_OLE},
+    {"ord", LR_TOK_ORD},
+    {"ueq", LR_TOK_UEQ},
+    {"une", LR_TOK_UNE},
     {"uno", LR_TOK_UNO},
     {"x", LR_TOK_X},
     {NULL, LR_TOK_EOF}
