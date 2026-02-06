@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What Is Liric
 
-Liric (Lightweight IR Compiler) is a fast, minimal JIT compiler for an LLVM IR subset. Written in C11,
-zero external dependencies, ~3000 lines. Designed for low-latency JIT where full LLVM overhead is
-unacceptable.
+Liric (Lightweight IR Compiler) is a fast, minimal JIT compiler with two frontends: LLVM IR text (.ll)
+and WebAssembly binary (.wasm). Written in C11, zero external dependencies. Designed for low-latency
+JIT where full LLVM overhead is unacceptable.
 
 ## Build and Test
 
@@ -21,12 +21,21 @@ Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake
 ## Pipeline
 
 ```
-LLVM IR text (.ll)
-    |
-    v
-ll_lexer  -->  ll_parser  -->  lr_module_t (SSA IR)  -->  ISel  -->  encode  -->  mmap+exec
- (tokens)      (IR AST)        (target-independent)     (MIR)     (binary)     (JIT run)
+LLVM IR text (.ll)                    WASM binary (.wasm)
+    |                                      |
+    v                                      v
+ll_lexer --> ll_parser               wasm_decode --> wasm_to_ir
+ (tokens)    (IR AST)                 (sections)    (stack->SSA)
+    |                                      |
+    +-------------- lr_module_t -----------+
+                  (target-independent SSA IR)
+                         |
+                         v
+                   ISel --> encode --> mmap+exec
+                   (MIR)   (binary)   (JIT run)
 ```
+
+The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm`).
 
 ## Source Map
 
@@ -35,12 +44,13 @@ ll_lexer  -->  ll_parser  -->  lr_module_t (SSA IR)  -->  ISel  -->  encode  -->
 | **Arena allocator** | `src/arena.c/.h` | Chunk-based bump allocator, all IR objects use it |
 | **Core IR** | `src/ir.c/.h` | Types, instructions, blocks, functions, modules (target-independent SSA) |
 | **LLVM IR frontend** | `src/ll_lexer.c/.h`, `src/ll_parser.c/.h` | Tokenizer + recursive descent parser for .ll text |
+| **WASM frontend** | `src/wasm_decode.c/.h`, `src/wasm_to_ir.c/.h` | Binary decoder + stack-to-SSA converter for .wasm |
 | **Target interface** | `src/target.h` | Backend vtable: `isel_func`, `encode_func`, `print_inst` |
 | **Target registry** | `src/target_registry.c` | `lr_target_by_name()`, `lr_target_host()`, host detection |
 | **x86_64 backend** | `src/target_x86_64.c/.h` | ISel (IR -> machine insts) + x86_64 binary encoder |
 | **aarch64 backend** | `src/target_aarch64.c/.h` | Reuses x86_64 ISel, translates to arm64 binary |
 | **JIT engine** | `src/jit.c/.h` | mmap, W^X transitions, symbol table, module compilation |
-| **Public API** | `include/liric/liric.h` | 8 functions: parse, module management, JIT lifecycle |
+| **Public API** | `include/liric/liric.h` | 9 functions: parse (.ll and .wasm), module management, JIT lifecycle |
 | **API wrapper** | `src/liric.c` | Thin bridge between public API and internal modules |
 | **CLI** | `tools/liric_main.c` | `--jit`, `--dump-ir`, `--func` |
 | **Tests** | `tests/test_*.c` | Lexer, parser, codegen, target, JIT, end-to-end |
@@ -104,6 +114,10 @@ Tests are a single executable (`test_liric`) with categories:
 - **Target** (4): host detection, target selection, rejection of non-host
 - **JIT** (7): end-to-end compile+execute (arithmetic, branches, loops, memory, calls)
 - **E2E** (4): parse .ll files from `tests/ll/` and execute
+- **WASM LEB128** (3): LEB128 unsigned/signed integer decoding
+- **WASM Decoder** (3): binary format parsing, section decoding, error handling
+- **WASM IR** (2): WASM-to-IR conversion correctness
+- **WASM JIT** (5): end-to-end WASM parse+compile+execute (constants, arithmetic, branches, loops, calls)
 
 Test pattern:
 ```c
@@ -129,6 +143,7 @@ RUN_TEST(test_name);           // in main()
 - No floating-point codegen (types parsed but FPU/XMM instructions not emitted)
 - No optimization passes on IR or MIR
 - No object file emission (JIT only, no ahead-of-time compilation)
+- WASM frontend: MVP integer subset only (no FP, SIMD, tables, bulk memory, multi-memory)
 
 ## Coding Style
 
