@@ -411,7 +411,7 @@ static int aarch64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen,
 
         int64_t target_pos = (int64_t)block_offsets[fx->target];
         int64_t here = (int64_t)fx->insn_pos;
-        int64_t imm = (target_pos - (here + 4)) / 4;
+        int64_t imm = (target_pos - here) / 4;
 
         if (fx->kind == 0) {
             if (imm >= -(1LL << 25) && imm < (1LL << 25)) {
