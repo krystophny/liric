@@ -207,6 +207,11 @@ lr_token_t lr_lexer_next(lr_lexer_t *lex) {
             lex->src[lex->pos] == '.' && lex->src[lex->pos + 1] == '.') {
             advance(lex); advance(lex);
             tok = make_token(lex, LR_TOK_DOTDOTDOT, start, 3);
+        } else if (is_ident_char(peek(lex))) {
+            while (lex->pos < lex->src_len && is_ident_char(peek(lex)))
+                advance(lex);
+            size_t len = (size_t)(lex->src + lex->pos - start);
+            tok = make_token(lex, LR_TOK_LOCAL_ID, start, len);
         } else {
             tok = make_token(lex, LR_TOK_ERROR, start, 1);
         }

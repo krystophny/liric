@@ -86,7 +86,7 @@ int test_lexer_types(void) {
 }
 
 int test_lexer_identifiers(void) {
-    const char *src = "%x @global %\"quoted name\" @\"quoted.global\"";
+    const char *src = "%x @global %\"quoted name\" @\"quoted.global\" .entry ...";
     lr_lexer_t lex;
     lr_lexer_init(&lex, src, strlen(src));
 
@@ -102,6 +102,12 @@ int test_lexer_identifiers(void) {
 
     t = lr_lexer_next(&lex);
     TEST_ASSERT_EQ(t.kind, LR_TOK_GLOBAL_ID, "quoted global id");
+
+    t = lr_lexer_next(&lex);
+    TEST_ASSERT_EQ(t.kind, LR_TOK_LOCAL_ID, "dot-prefixed bare label");
+
+    t = lr_lexer_next(&lex);
+    TEST_ASSERT_EQ(t.kind, LR_TOK_DOTDOTDOT, "vararg token");
 
     return 0;
 }

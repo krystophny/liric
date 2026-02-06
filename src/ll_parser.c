@@ -22,8 +22,8 @@ typedef struct lr_parser {
     struct { char *name; uint32_t id; lr_block_t *block; } block_map[1024];
     uint32_t block_map_count;
 
-    /* global name -> id mapping */
-    struct { char *name; uint32_t id; lr_global_t *global; } global_map[4096];
+    /* global/function symbol name -> id mapping */
+    struct { char *name; uint32_t id; } global_map[4096];
     uint32_t global_map_count;
 
     /* function name -> func mapping */
@@ -137,11 +137,10 @@ static uint32_t resolve_global(lr_parser_t *p, const char *name) {
     return UINT32_MAX;
 }
 
-static void register_global(lr_parser_t *p, const char *name, lr_global_t *g) {
+static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
     if (p->global_map_count < 4096) {
         p->global_map[p->global_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->global_map[p->global_map_count].id = g->id;
-        p->global_map[p->global_map_count].global = g;
+        p->global_map[p->global_map_count].id = id;
         p->global_map_count++;
     }
 }
@@ -168,6 +167,10 @@ static lr_type_t *parse_type(lr_parser_t *p) {
     case LR_TOK_FLOAT:  next(p); return p->module->type_float;
     case LR_TOK_DOUBLE: next(p); return p->module->type_double;
     case LR_TOK_PTR:    next(p); return p->module->type_ptr;
+    case LR_TOK_LOCAL_ID:
+        /* Opaque/aliased named types are treated as pointer-sized for now. */
+        next(p);
+        return p->module->type_ptr;
     case LR_TOK_LBRACKET: {
         next(p);
         int64_t count = p->cur.int_val;
@@ -248,12 +251,12 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
     if (check(p, LR_TOK_GLOBAL_ID)) {
         char *name = tok_name(p, &p->cur);
         next(p);
-        /* check if it is a function reference */
         uint32_t gid = resolve_global(p, name);
-        if (gid != UINT32_MAX)
-            return lr_op_global(gid, type);
-        /* might be a function - return as global with max id for now */
-        return lr_op_global(UINT32_MAX, type);
+        if (gid == UINT32_MAX) {
+            gid = lr_module_intern_symbol(p->module, name);
+            register_global(p, name, gid);
+        }
+        return lr_op_global(gid, type);
     }
     error(p, "expected operand, got '%s'", lr_tok_name(p->cur.kind));
     return lr_op_imm_i64(0, type);
@@ -264,6 +267,38 @@ static lr_operand_t parse_typed_operand(lr_parser_t *p) {
     lr_type_t *t = parse_type(p);
     skip_attrs(p);
     return parse_operand(p, t);
+}
+
+static void skip_balanced_parens(lr_parser_t *p) {
+    uint32_t depth = 0;
+    expect(p, LR_TOK_LPAREN);
+    depth = 1;
+    while (depth > 0 && !check(p, LR_TOK_EOF)) {
+        if (match(p, LR_TOK_LPAREN)) {
+            depth++;
+            continue;
+        }
+        if (match(p, LR_TOK_RPAREN)) {
+            depth--;
+            continue;
+        }
+        next(p);
+    }
+    if (depth != 0)
+        error(p, "unterminated parenthesized type in call");
+}
+
+static void skip_optional_callee_signature(lr_parser_t *p) {
+    /*
+     * Accept typed callee signatures like:
+     *   call ptr (ptr, i64, ...) @foo(...)
+     *   call i32 (i32)* @fn(i32 1)
+     */
+    if (check(p, LR_TOK_LPAREN)) {
+        skip_balanced_parens(p);
+        while (match(p, LR_TOK_STAR)) {}
+        skip_attrs(p);
+    }
 }
 
 static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
@@ -383,8 +418,7 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
             case LR_TOK_CALL: {
                 lr_type_t *ret_ty = parse_type(p);
                 skip_attrs(p);
-                /* optional function type */
-                /* callee */
+                skip_optional_callee_signature(p);
                 lr_operand_t callee = parse_operand(p, p->module->type_ptr);
                 expect(p, LR_TOK_LPAREN);
                 lr_operand_t args[64];
@@ -657,6 +691,7 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
         next(p);
         lr_type_t *ret_ty = parse_type(p);
         skip_attrs(p);
+        skip_optional_callee_signature(p);
         lr_operand_t callee = parse_operand(p, p->module->type_ptr);
         expect(p, LR_TOK_LPAREN);
         lr_operand_t args[64];
@@ -763,6 +798,10 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
         return;
     }
     char *name = tok_name(p, &p->cur);
+    if (resolve_global(p, name) == UINT32_MAX) {
+        uint32_t sym_id = lr_module_intern_symbol(p->module, name);
+        register_global(p, name, sym_id);
+    }
     next(p);
 
     expect(p, LR_TOK_LPAREN);
@@ -821,11 +860,10 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
 static void skip_line(lr_parser_t *p) {
     /* Skip tokens until we hit something that looks like a new top-level construct */
     while (!check(p, LR_TOK_EOF)) {
-        if (check(p, LR_TOK_DEFINE) || check(p, LR_TOK_DECLARE))
+        bool at_toplevel_col = (p->cur.col == 1);
+        if (at_toplevel_col && (check(p, LR_TOK_DEFINE) || check(p, LR_TOK_DECLARE)))
             return;
-        /* Skip globals starting with @ */
-        if (check(p, LR_TOK_GLOBAL_ID)) {
-            /* might be a global def, but we handle that in the main loop */
+        if (at_toplevel_col && check(p, LR_TOK_GLOBAL_ID)) {
             return;
         }
         next(p);
@@ -858,7 +896,9 @@ static void parse_global(lr_parser_t *p) {
 
     lr_type_t *ty = parse_type(p);
     lr_global_t *g = lr_global_create(p->module, name, ty, is_const);
-    register_global(p, name, g);
+    uint32_t sym_id = lr_module_intern_symbol(p->module, g->name);
+    if (resolve_global(p, g->name) == UINT32_MAX)
+        register_global(p, g->name, sym_id);
 
     /* skip initializer for now */
     skip_line(p);

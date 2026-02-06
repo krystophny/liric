@@ -100,3 +100,64 @@ int test_parser_add(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_typed_call_and_dot_label(void) {
+    const char *src =
+        "declare i32 @g(i32)\n"
+        "define i32 @f() {\n"
+        ".entry:\n"
+        "  %0 = call i32 (i32) @g(i32 41)\n"
+        "  %1 = add i32 %0, 1\n"
+        "  ret i32 %1\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    while (f && strcmp(f->name, "f") != 0)
+        f = f->next;
+    TEST_ASSERT(f != NULL, "function f exists");
+    TEST_ASSERT(!f->is_decl, "f is definition");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "has entry block");
+
+    lr_inst_t *call = b->first;
+    TEST_ASSERT(call != NULL, "has call");
+    TEST_ASSERT_EQ(call->op, LR_OP_CALL, "first op is call");
+    TEST_ASSERT_EQ(call->operands[0].kind, LR_VAL_GLOBAL, "callee is global symbol");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_named_type_operand(void) {
+    const char *src =
+        "%string_descriptor = type <{ ptr, i64 }>\n"
+        "define i32 @f() {\n"
+        ".entry:\n"
+        "  %d = alloca %string_descriptor, align 8\n"
+        "  ret i32 0\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *alloca_inst = b->first;
+    TEST_ASSERT(alloca_inst != NULL, "has alloca");
+    TEST_ASSERT_EQ(alloca_inst->op, LR_OP_ALLOCA, "first op is alloca");
+    TEST_ASSERT_EQ(alloca_inst->type->kind, LR_TYPE_PTR, "named type parsed as opaque ptr");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
