@@ -243,9 +243,43 @@ static lr_type_t *parse_type(lr_parser_t *p) {
         break;
     }
 
-    /* Accept legacy typed pointers (i8*, i8**, [N x T]*, %alias*). */
-    while (match(p, LR_TOK_STAR))
-        ty = p->module->type_ptr;
+    /* Handle type suffixes: pointers and function types.
+     * Examples: i8*, i8**, i32 (i64)*, i8* (i32)* */
+    while (true) {
+        if (match(p, LR_TOK_STAR)) {
+            /* Typed pointer suffix or pointer to function */
+            ty = p->module->type_ptr;
+        } else if (check(p, LR_TOK_LPAREN)) {
+            /* Function type: RetType (ParamTypes...)
+             * Note: ty is the return type at this point */
+            next(p);
+            lr_type_t *ret = ty;
+            lr_type_t *params[256];
+            uint32_t nparams = 0;
+            bool vararg = false;
+
+            if (!check(p, LR_TOK_RPAREN)) {
+                if (check(p, LR_TOK_DOTDOTDOT)) {
+                    vararg = true;
+                    next(p);
+                } else {
+                    params[nparams++] = parse_type(p);
+                    while (match(p, LR_TOK_COMMA)) {
+                        if (check(p, LR_TOK_DOTDOTDOT)) {
+                            vararg = true;
+                            next(p);
+                            break;
+                        }
+                        params[nparams++] = parse_type(p);
+                    }
+                }
+            }
+            expect(p, LR_TOK_RPAREN);
+            ty = lr_type_func(p->arena, ret, params, nparams, vararg);
+        } else {
+            break;
+        }
+    }
 
     return ty;
 }
