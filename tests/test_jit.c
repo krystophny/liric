@@ -350,3 +350,78 @@ int test_jit_fmul_float_bits(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_phi_select_nested(void) {
+    const char *src =
+        "define i32 @score(i32 %x, i32 %y) {\n"
+        "entry:\n"
+        "  %cmpx = icmp sgt i32 %x, 0\n"
+        "  br i1 %cmpx, label %pos, label %neg\n"
+        "pos:\n"
+        "  %a = add i32 %x, %y\n"
+        "  br label %merge\n"
+        "neg:\n"
+        "  %a2 = sub i32 %y, %x\n"
+        "  br label %merge\n"
+        "merge:\n"
+        "  %p = phi i32 [%a, %pos], [%a2, %neg]\n"
+        "  %cmp2 = icmp sgt i32 %p, 10\n"
+        "  %s = select i1 %cmp2, i32 %p, i32 10\n"
+        "  ret i32 %s\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(int, int);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "score");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(4, 3), 10, "score(4,3) == 10");
+    TEST_ASSERT_EQ(fn(8, 5), 13, "score(8,5) == 13");
+    TEST_ASSERT_EQ(fn(-2, 5), 10, "score(-2,5) == 10");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_phi_select_loop_carried(void) {
+    const char *src =
+        "define i32 @clamp_sum(i32 %n) {\n"
+        "entry:\n"
+        "  br label %loop\n"
+        "loop:\n"
+        "  %i = phi i32 [0, %entry], [%i1, %loop]\n"
+        "  %acc = phi i32 [0, %entry], [%acc1, %loop]\n"
+        "  %i1 = add i32 %i, 1\n"
+        "  %raw = sub i32 %i1, 5\n"
+        "  %is_neg = icmp slt i32 %raw, 0\n"
+        "  %term = select i1 %is_neg, i32 0, i32 %raw\n"
+        "  %acc1 = add i32 %acc, %term\n"
+        "  %done = icmp eq i32 %i1, %n\n"
+        "  br i1 %done, label %exit, label %loop\n"
+        "exit:\n"
+        "  ret i32 %acc1\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(int);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "clamp_sum");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(4), 0, "clamp_sum(4) == 0");
+    TEST_ASSERT_EQ(fn(7), 3, "clamp_sum(7) == 3");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
