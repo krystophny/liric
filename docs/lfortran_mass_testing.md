@@ -6,6 +6,8 @@ source of unit test cases, plus integration metadata from
 `../lfortran/integration_tests/CMakeLists.txt`, generate LLVM IR with LFortran, and
 evaluate compatibility in liric parse/JIT/runtime lanes.
 
+Roadmap and scorecard are tracked in `docs/lfortran_mass_tracker.md`.
+
 ## Design Principles
 - Reuse LFortran test configuration directly from `tests.toml`.
 - Reuse LFortran integration test definitions directly from integration `RUN(...)`.
