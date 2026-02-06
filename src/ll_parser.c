@@ -243,9 +243,17 @@ static lr_type_t *parse_type(lr_parser_t *p) {
         break;
     }
 
-    /* Accept legacy typed pointers (i8*, i8**, [N x T]*, %alias*). */
-    while (match(p, LR_TOK_STAR))
-        ty = p->module->type_ptr;
+    /* Accept legacy function pointer types: void ()*, i32 (i32, i32)*, etc.
+       When a base type is followed by '(', it is a function signature suffix;
+       skip the balanced parens and consume trailing '*'s, collapsing to ptr. */
+    while (check(p, LR_TOK_LPAREN) || check(p, LR_TOK_STAR)) {
+        if (match(p, LR_TOK_STAR)) {
+            ty = p->module->type_ptr;
+        } else {
+            skip_balanced_parens(p);
+            ty = p->module->type_ptr;
+        }
+    }
 
     return ty;
 }
@@ -376,6 +384,20 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
     }
     if (check(p, LR_TOK_GETELEMENTPTR))
         return parse_const_gep_operand(p, type);
+    if (check(p, LR_TOK_BITCAST) || check(p, LR_TOK_INTTOPTR) ||
+        check(p, LR_TOK_PTRTOINT) || check(p, LR_TOK_SEXT) ||
+        check(p, LR_TOK_ZEXT) || check(p, LR_TOK_TRUNC) ||
+        check(p, LR_TOK_SITOFP) || check(p, LR_TOK_FPTOSI) ||
+        check(p, LR_TOK_FPEXT) || check(p, LR_TOK_FPTRUNC)) {
+        next(p);
+        expect(p, LR_TOK_LPAREN);
+        lr_operand_t src = parse_typed_operand(p);
+        expect(p, LR_TOK_TO);
+        (void)parse_type(p);
+        expect(p, LR_TOK_RPAREN);
+        src.type = type;
+        return src;
+    }
     if (check(p, LR_TOK_LBRACE) || check(p, LR_TOK_LBRACKET))
         return parse_aggregate_constant_operand(p, type);
     error(p, "expected operand, got '%s'", lr_tok_name(p->cur.kind));
