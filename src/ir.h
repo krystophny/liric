@@ -145,11 +145,18 @@ typedef struct lr_func {
     struct lr_func *next;
 } lr_func_t;
 
+typedef struct lr_reloc {
+    size_t offset;
+    char *symbol_name;
+    struct lr_reloc *next;
+} lr_reloc_t;
+
 typedef struct lr_global {
     char *name;
     lr_type_t *type;
     uint8_t *init_data;
     size_t init_size;
+    lr_reloc_t *relocs;
     bool is_const;
     bool is_external;
     uint32_t id;
