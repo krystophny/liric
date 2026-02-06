@@ -94,6 +94,34 @@ class RunMassHelperTests(unittest.TestCase):
                 got = run_mass.resolve_default_runtime_lib(root, lfortran_bin)
             self.assertEqual(got, runtime_lib.resolve())
 
+    def test_choose_entrypoint_non_run_prefers_callable_signature(self) -> None:
+        ir_text = (
+            "define i32 @main(i32 %argc, i8** %argv) {\n"
+            "entry:\n"
+            "  ret i32 0\n"
+            "}\n"
+            "define i32 @helper() {\n"
+            "entry:\n"
+            "  ret i32 7\n"
+            "}\n"
+        )
+        got = run_mass.choose_entrypoint(ir_text, run_requested=False)
+        self.assertEqual(got, ("helper", "i32"))
+
+    def test_choose_entrypoint_run_requested_keeps_main_preference(self) -> None:
+        ir_text = (
+            "define i32 @main(i32 %argc, i8** %argv) {\n"
+            "entry:\n"
+            "  ret i32 0\n"
+            "}\n"
+            "define i32 @helper() {\n"
+            "entry:\n"
+            "  ret i32 7\n"
+            "}\n"
+        )
+        got = run_mass.choose_entrypoint(ir_text, run_requested=True)
+        self.assertEqual(got, ("main", "unsupported"))
+
 
 if __name__ == "__main__":
     unittest.main()
