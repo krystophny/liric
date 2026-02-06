@@ -48,6 +48,10 @@ static char *read_file(const char *path, size_t *out_len) {
 
 static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig) {
     void *sym = lr_jit_get_function(jit, func_name);
+    char argv0[] = "liric";
+    char *host_argv[] = {argv0, NULL};
+    int host_argc = 1;
+
     if (!sym) {
         fprintf(stderr, "function '%s' not found\n", func_name);
         return 3;
@@ -72,6 +76,28 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig) {
             return 3;
         }
         fn();
+        return 0;
+    }
+
+    if (strcmp(sig, "i32_argc_argv") == 0) {
+        int32_t (*fn)(int, char **) = NULL;
+        lr_jit_fn_to_ptr(&fn, sym);
+        return fn ? (int)(fn(host_argc, host_argv) & 0xff) : 3;
+    }
+
+    if (strcmp(sig, "i64_argc_argv") == 0) {
+        int64_t (*fn)(int, char **) = NULL;
+        lr_jit_fn_to_ptr(&fn, sym);
+        return fn ? (int)(fn(host_argc, host_argv) & 0xff) : 3;
+    }
+
+    if (strcmp(sig, "void_argc_argv") == 0) {
+        void (*fn)(int, char **) = NULL;
+        lr_jit_fn_to_ptr(&fn, sym);
+        if (!fn) {
+            return 3;
+        }
+        fn(host_argc, host_argv);
         return 0;
     }
 

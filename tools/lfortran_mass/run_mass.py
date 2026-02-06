@@ -27,7 +27,7 @@ RE_ENTRY = re.compile(
     re.MULTILINE,
 )
 PREFERRED_ENTRIES = ["main", "_lfortran_main_program", "_QQmain"]
-SUPPORTED_SIGS = {"i32", "i64", "void"}
+SUPPORTED_SIGS = {"i32", "i64", "void", "i32_argc_argv", "i64_argc_argv", "void_argc_argv"}
 FORTRAN_CPP_SUFFIXES = {".F", ".F03", ".F08", ".F18", ".F90", ".F95"}
 FORTRAN_FIXED_SUFFIXES = {".f", ".for", ".ftn"}
 FORTRAN_FREE_SUFFIXES = {".f90", ".f95", ".f03", ".f08", ".f18"}
@@ -305,6 +305,11 @@ def choose_entrypoint(ir_text: str, run_requested: bool) -> Optional[Tuple[str, 
 def signature_kind(ret_type: str, args: str) -> str:
     clean_args = args.strip()
     if clean_args and clean_args != "void":
+        if re.match(
+            r"^\s*i(32|64)\b[^,]*,\s*(?:i8\*\*|ptr)(?:\s|$)",
+            clean_args,
+        ):
+            return f"{ret_type}_argc_argv" if ret_type in SUPPORTED_SIGS else "unsupported"
         return "unsupported"
     if ret_type in SUPPORTED_SIGS:
         return ret_type
@@ -490,10 +495,7 @@ def process_case(
         return row
 
     row["jit_attempted"] = True
-    jit_cmd = [str(cfg.liric_cli)]
-    for lib in cfg.runtime_libs:
-        jit_cmd.extend(["--load-lib", lib])
-    jit_cmd.extend(["--jit", "--func", entry_name, str(ll_path)])
+    jit_cmd = probe_run_command(cfg, ll_path, entry_name, entry_sig)
     jit_result = run_cmd(jit_cmd, cwd=case_dir, timeout_sec=cfg.timeout_jit)
     row["jit_cmd"] = jit_result.command
     row["jit_rc"] = jit_result.rc

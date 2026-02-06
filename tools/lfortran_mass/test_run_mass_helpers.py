@@ -106,7 +106,7 @@ class RunMassHelperTests(unittest.TestCase):
             "}\n"
         )
         got = run_mass.choose_entrypoint(ir_text, run_requested=False)
-        self.assertEqual(got, ("helper", "i32"))
+        self.assertEqual(got, ("main", "i32_argc_argv"))
 
     def test_choose_entrypoint_run_requested_keeps_main_preference(self) -> None:
         ir_text = (
@@ -120,7 +120,15 @@ class RunMassHelperTests(unittest.TestCase):
             "}\n"
         )
         got = run_mass.choose_entrypoint(ir_text, run_requested=True)
-        self.assertEqual(got, ("main", "unsupported"))
+        self.assertEqual(got, ("main", "i32_argc_argv"))
+
+    def test_signature_kind_accepts_main_i8pp(self) -> None:
+        got = run_mass.signature_kind("i32", "i32 %argc, i8** %argv")
+        self.assertEqual(got, "i32_argc_argv")
+
+    def test_signature_kind_accepts_main_ptr_opaque(self) -> None:
+        got = run_mass.signature_kind("i32", "i32 noundef %argc, ptr noundef %argv")
+        self.assertEqual(got, "i32_argc_argv")
 
 
 if __name__ == "__main__":
