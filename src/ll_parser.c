@@ -882,19 +882,24 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     p->vreg_map_count = 0;
     p->block_map_count = 0;
 
-    /* register parameter vregs with both numeric and named aliases */
+    /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%u", i);
-        if (p->vreg_map_count < 4096) {
-            p->vreg_map[p->vreg_map_count].name = lr_arena_strdup(p->arena, buf, strlen(buf));
-            p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
-            p->vreg_map_count++;
-        }
-        if (param_names && param_names[i] && p->vreg_map_count < 4096) {
-            p->vreg_map[p->vreg_map_count].name = param_names[i];
-            p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
-            p->vreg_map_count++;
+        if (param_names && param_names[i]) {
+            /* named parameter: register only the name, not numeric alias */
+            if (p->vreg_map_count < 4096) {
+                p->vreg_map[p->vreg_map_count].name = param_names[i];
+                p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
+                p->vreg_map_count++;
+            }
+        } else {
+            /* unnamed parameter: register numeric alias */
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%u", i);
+            if (p->vreg_map_count < 4096) {
+                p->vreg_map[p->vreg_map_count].name = lr_arena_strdup(p->arena, buf, strlen(buf));
+                p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
+                p->vreg_map_count++;
+            }
         }
     }
 
