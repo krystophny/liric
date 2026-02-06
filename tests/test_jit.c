@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -476,6 +477,74 @@ int test_jit_internal_global_address_relocation(void) {
     TEST_ASSERT(fn != NULL, "function lookup");
     uint64_t addr = fn();
     TEST_ASSERT(addr != 0, "internal global address is non-zero");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_external_call_abs(void) {
+    const char *src =
+        "declare i32 @abs(i32)\n"
+        "define i32 @call_abs() {\n"
+        "entry:\n"
+        "  %r = call i32 @abs(i32 -5)\n"
+        "  ret i32 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int (*abs_fn)(int) = abs;
+    void *abs_addr = NULL;
+    memcpy(&abs_addr, &abs_fn, sizeof(abs_addr));
+    lr_jit_add_symbol(jit, "abs", abs_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_abs");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 5, "external abs call returns 5");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_varargs_printf_call(void) {
+    const char *src =
+        "declare i32 @printf(ptr, ...)\n"
+        "define i32 @call_printf() {\n"
+        "entry:\n"
+        "  %r = call i32 (ptr, ...) @printf(ptr @fmt, i32 7)\n"
+        "  ret i32 %r\n"
+        "}\n";
+    static const char fmt[] = "v=%d\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int (*printf_fn)(const char *, ...) = printf;
+    void *printf_addr = NULL;
+    memcpy(&printf_addr, &printf_fn, sizeof(printf_addr));
+    lr_jit_add_symbol(jit, "printf", printf_addr);
+    lr_jit_add_symbol(jit, "fmt", (void *)fmt);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_printf");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT(fn() > 0, "printf-style varargs call returns positive count");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
