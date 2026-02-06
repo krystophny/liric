@@ -27,12 +27,19 @@ UNSUPPORTED_FEATURE_PATTERNS = [
     r"\btarget-features\b",
 ]
 
-UNSUPPORTED_ABI_PATTERNS = [
-    r"@_lfortran_",
-    r"@_lpython_",
-    r"@_lcompilers_",
-    r"@malloc",
-    r"@free",
+UNSUPPORTED_ABI_JIT_PATTERNS = [
+    r"\bunresolved symbol:\s*[^\s]+",
+    r"\bundefined symbol\b",
+    r"\bfunction\s+'[^']+'\s+not found\b",
+    r'\bfunction\s+"[^"]+"\s+not found\b',
+    r"\bfunction\s+[^\s]+\s+not found\b",
+    r"\bunsupported signature\b",
+    r"\bunsupported entry signature\b",
+]
+
+UNSUPPORTED_FEATURE_JIT_PATTERNS = [
+    r"\bunsupported\s+(instruction|opcode|operation|feature|type|intrinsic|wasm)\b",
+    r"\bnot implemented\b",
 ]
 
 
@@ -43,9 +50,9 @@ def detect_unsupported_feature(ir_text: str) -> bool:
     return False
 
 
-def detect_unsupported_abi(ir_text: str) -> bool:
-    for pattern in UNSUPPORTED_ABI_PATTERNS:
-        if re.search(pattern, ir_text):
+def detect_unsupported_abi_jit(stderr: str) -> bool:
+    for pattern in UNSUPPORTED_ABI_JIT_PATTERNS:
+        if re.search(pattern, stderr):
             return True
     return False
 
@@ -66,11 +73,12 @@ def classify_parse_failure(stderr: str, ir_text: str) -> str:
 
 def classify_jit_failure(stderr: str, ir_text: str) -> str:
     msg = stderr.lower()
-    if detect_unsupported_abi(ir_text):
+    if detect_unsupported_abi_jit(msg):
         return UNSUPPORTED_ABI
-    if "function" in msg and "not found" in msg:
-        return UNSUPPORTED_ABI
-    if "unsupported" in msg:
+    for pattern in UNSUPPORTED_FEATURE_JIT_PATTERNS:
+        if re.search(pattern, msg):
+            return UNSUPPORTED_FEATURE
+    if detect_unsupported_feature(ir_text):
         return UNSUPPORTED_FEATURE
     return LIRIC_JIT_FAIL
 
