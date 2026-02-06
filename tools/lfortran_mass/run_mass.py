@@ -632,6 +632,14 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Runtime library path to preload into liric JIT (repeatable)",
     )
+    parser.add_argument(
+        "--no-auto-runtime-lib",
+        action="store_true",
+        help=(
+            "Disable automatic preload of liblfortran_runtime from the local "
+            "LFortran build/install tree"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -649,6 +657,43 @@ def resolve_default_lfortran_bin(lfortran_root: Path) -> Path:
         if path.exists():
             return path.resolve()
     return candidates[0].resolve()
+
+
+def resolve_default_runtime_lib(lfortran_root: Path, lfortran_bin: Path) -> Optional[Path]:
+    env_runtime_dir = os.environ.get("LFORTRAN_RUNTIME_LIBRARY_DIR", "").strip()
+    candidate_dirs = []
+    if env_runtime_dir:
+        candidate_dirs.append(Path(env_runtime_dir))
+
+    candidate_dirs.extend(
+        [
+            (lfortran_bin.parent / ".." / "runtime"),
+            (lfortran_bin.parent / ".." / ".." / "runtime"),
+            (lfortran_root / "build" / "src" / "runtime"),
+            (lfortran_root / "build" / "runtime"),
+        ]
+    )
+
+    seen = set()
+    for dir_path in candidate_dirs:
+        resolved_dir = dir_path.resolve()
+        key = str(resolved_dir)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not resolved_dir.exists() or not resolved_dir.is_dir():
+            continue
+
+        for name in ["liblfortran_runtime.so", "liblfortran_runtime.dylib", "liblfortran_runtime.so.0"]:
+            lib = resolved_dir / name
+            if lib.exists():
+                return lib.resolve()
+
+        so_candidates = sorted(resolved_dir.glob("liblfortran_runtime.so.*"))
+        if so_candidates:
+            return so_candidates[0].resolve()
+
+    return None
 
 
 def selection_row(
@@ -705,6 +750,24 @@ def main() -> int:
     ensure_exists(lfortran_bin, "lfortran binary")
     ensure_exists(liric_cli, "liric_cli binary")
     ensure_exists(probe_runner, "liric_probe_runner binary")
+
+    runtime_libs: List[str] = []
+    explicit_runtime_libs = [str(Path(lib).resolve()) for lib in args.load_lib]
+    runtime_libs.extend(explicit_runtime_libs)
+
+    if not args.no_auto_runtime_lib:
+        auto_runtime_lib = resolve_default_runtime_lib(lfortran_root, lfortran_bin)
+        if auto_runtime_lib is not None:
+            auto_runtime_lib_str = str(auto_runtime_lib)
+            if auto_runtime_lib_str not in runtime_libs:
+                runtime_libs.append(auto_runtime_lib_str)
+        else:
+            auto_runtime_lib_str = "none"
+    else:
+        auto_runtime_lib_str = "disabled"
+
+    for lib in runtime_libs:
+        ensure_exists(Path(lib), "runtime library")
 
     output_root.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -803,7 +866,7 @@ def main() -> int:
         timeout_jit=args.timeout_jit,
         timeout_run=args.timeout_run,
         force=args.force,
-        runtime_libs=tuple(args.load_lib),
+        runtime_libs=tuple(runtime_libs),
     )
 
     work_items = list(zip(entries, manifest_rows))
@@ -851,6 +914,7 @@ def main() -> int:
     print(f"failures: {failures_path}")
     print(f"filtered_non_llvm: {skipped_non_llvm}")
     print(f"filtered_expected_fail: {skipped_expected_fail}")
+    print(f"auto_runtime_lib: {auto_runtime_lib_str}")
     print(f"deduped_cases: {deduped_count}")
 
     ok, message = report.gate_result(summary)
