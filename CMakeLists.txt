@@ -34,6 +34,10 @@ endif()
 target_link_libraries(liric_cli PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_cli PRIVATE src)
 
+add_executable(liric_probe_runner tools/liric_probe_runner.c)
+target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+target_include_directories(liric_probe_runner PRIVATE src)
+
 enable_testing()
 add_executable(test_liric
     tests/test_main.c
