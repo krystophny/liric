@@ -425,3 +425,59 @@ int test_jit_phi_select_loop_carried(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_internal_global_load_store(void) {
+    const char *src =
+        "@g = global i32 zeroinitializer\n"
+        "define i32 @setget() {\n"
+        "entry:\n"
+        "  store i32 42, ptr @g\n"
+        "  %v = load i32, ptr @g\n"
+        "  ret i32 %v\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "setget");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "internal global load/store");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_internal_global_address_relocation(void) {
+    const char *src =
+        "@buf = global [8 x i8] zeroinitializer\n"
+        "define i64 @addr() {\n"
+        "entry:\n"
+        "  %p = ptrtoint ptr @buf to i64\n"
+        "  ret i64 %p\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "addr");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    uint64_t addr = fn();
+    TEST_ASSERT(addr != 0, "internal global address is non-zero");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
