@@ -472,3 +472,48 @@ int test_parser_function_pointer_type(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_named_params_no_collision(void) {
+    const char *src =
+        "define void @increment(i32* %x) {\n"
+        "entry:\n"
+        "  %0 = load i32, i32* %x, align 4\n"
+        "  %1 = add i32 %0, 1\n"
+        "  store i32 %1, i32* %x, align 4\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT_EQ(f->num_params, 1, "1 param");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *load = b->first;
+    TEST_ASSERT(load != NULL, "load exists");
+    TEST_ASSERT_EQ(load->op, LR_OP_LOAD, "first instruction is load");
+    TEST_ASSERT_EQ(load->operands[0].kind, LR_VAL_VREG, "load from vreg");
+    TEST_ASSERT_EQ(load->operands[0].vreg, f->param_vregs[0], "load from param vreg");
+
+    lr_inst_t *add = load->next;
+    TEST_ASSERT(add != NULL, "add exists");
+    TEST_ASSERT_EQ(add->op, LR_OP_ADD, "second instruction is add");
+    TEST_ASSERT_EQ(add->operands[0].kind, LR_VAL_VREG, "add first operand is vreg");
+    TEST_ASSERT(add->operands[0].vreg != f->param_vregs[0], "add operand is load result, not param");
+
+    lr_inst_t *store = add->next;
+    TEST_ASSERT(store != NULL, "store exists");
+    TEST_ASSERT_EQ(store->op, LR_OP_STORE, "third instruction is store");
+    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_VREG, "store value is vreg");
+    TEST_ASSERT_EQ(store->operands[1].kind, LR_VAL_VREG, "store address is vreg");
+    TEST_ASSERT_EQ(store->operands[1].vreg, f->param_vregs[0], "store to param vreg");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
