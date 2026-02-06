@@ -12,6 +12,9 @@ evaluate compatibility in liric parse/JIT/runtime lanes.
 - Do not duplicate test lists or copy LFortran config files into this repository.
 - Feed liric raw `--show-llvm` output from LFortran without preprocessing.
 - Exclude expected-failure tests by default.
+- Compile extrafiles by language:
+  - Fortran extrafiles with LFortran (including `--cpp`/fixed-form handling)
+  - C/C++ extrafiles with host C/C++ compiler (`CC`/`CXX`)
 - Treat unsupported features/ABI as tracked non-fatal buckets.
 - Fail only on mismatches and new supported regressions.
 
