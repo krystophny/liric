@@ -46,3 +46,12 @@ int test_non_host_target_fails(void) {
     TEST_ASSERT(jit == NULL, "non-host target rejected");
     return 0;
 }
+
+int test_load_missing_runtime_library_fails(void) {
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_load_library(jit, "/definitely/not/a/real/library/path.so");
+    TEST_ASSERT(rc != 0, "missing library rejected");
+    lr_jit_destroy(jit);
+    return 0;
+}

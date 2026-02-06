@@ -11,6 +11,11 @@ typedef struct lr_sym_entry {
     struct lr_sym_entry *next;
 } lr_sym_entry_t;
 
+typedef struct lr_lib_entry {
+    void *handle;
+    struct lr_lib_entry *next;
+} lr_lib_entry_t;
+
 typedef struct lr_jit {
     const lr_target_t *target;
     bool map_jit_enabled;
@@ -21,6 +26,7 @@ typedef struct lr_jit {
     size_t data_size;
     size_t data_cap;
     lr_sym_entry_t *symbols;
+    lr_lib_entry_t *libs;
     lr_arena_t *arena;
 } lr_jit_t;
 
@@ -29,6 +35,7 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name);
 const char *lr_jit_host_target_name(void);
 const char *lr_jit_target_name(const lr_jit_t *j);
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr);
+int lr_jit_load_library(lr_jit_t *j, const char *path);
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);
 void lr_jit_destroy(lr_jit_t *j);

@@ -56,6 +56,7 @@ int test_host_target_name(void);
 int test_create_host_target(void);
 int test_create_unknown_target_fails(void);
 int test_non_host_target_fails(void);
+int test_load_missing_runtime_library_fails(void);
 int test_jit_ret_42(void);
 int test_jit_add_args(void);
 int test_jit_arithmetic(void);
@@ -120,6 +121,7 @@ int main(void) {
     RUN_TEST(test_create_host_target);
     RUN_TEST(test_create_unknown_target_fails);
     RUN_TEST(test_non_host_target_fails);
+    RUN_TEST(test_load_missing_runtime_library_fails);
 
     fprintf(stderr, "\nJIT tests:\n");
     RUN_TEST(test_jit_ret_42);

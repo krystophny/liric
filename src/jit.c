@@ -138,10 +138,28 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     j->symbols = e;
 }
 
+int lr_jit_load_library(lr_jit_t *j, const char *path) {
+    if (!j || !path || !path[0])
+        return -1;
+    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    if (!handle)
+        return -1;
+    lr_lib_entry_t *entry = lr_arena_new(j->arena, lr_lib_entry_t);
+    entry->handle = handle;
+    entry->next = j->libs;
+    j->libs = entry;
+    return 0;
+}
+
 static void *lookup_symbol(lr_jit_t *j, const char *name) {
     for (lr_sym_entry_t *e = j->symbols; e; e = e->next) {
         if (strcmp(e->name, name) == 0)
             return e->addr;
+    }
+    for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
+        void *addr = dlsym(l->handle, name);
+        if (addr)
+            return addr;
     }
     void *addr = dlsym(RTLD_DEFAULT, name);
     return addr;
@@ -201,7 +219,7 @@ static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
  *  -1  malformed IR/symbol table state
  */
 static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
-                                   void *self_addr) {
+                                   void *self_addr, const char **missing_symbol) {
     for (lr_block_t *b = f->first_block; b; b = b->next) {
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
             for (uint32_t i = 0; i < inst->num_operands; i++) {
@@ -216,8 +234,11 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                 void *addr = lookup_symbol(j, name);
                 if (!addr && strcmp(name, f->name) == 0)
                     addr = self_addr;
-                if (!addr)
+                if (!addr) {
+                    if (missing_symbol)
+                        *missing_symbol = name;
                     return 1;
+                }
 
                 op->kind = LR_VAL_IMM_I64;
                 op->imm_i64 = (int64_t)(intptr_t)addr;
@@ -255,6 +276,7 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     uint32_t remaining = nfuncs;
     while (remaining > 0) {
         bool progress = false;
+        const char *last_missing = NULL;
 
         for (uint32_t i = 0; i < nfuncs; i++) {
             if (compiled[i])
@@ -262,7 +284,7 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
 
             lr_func_t *f = funcs[i];
             void *self_addr = j->code_buf + j->code_size;
-            int resolve_rc = resolve_global_operands(j, m, f, self_addr);
+            int resolve_rc = resolve_global_operands(j, m, f, self_addr, &last_missing);
             if (resolve_rc == 1)
                 continue;
             if (resolve_rc != 0)
@@ -292,8 +314,11 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             progress = true;
         }
 
-        if (!progress)
+        if (!progress) {
+            if (last_missing)
+                fprintf(stderr, "unresolved symbol: %s\n", last_missing);
             return -1;
+        }
     }
 
     if (make_executable(j) != 0)
@@ -308,6 +333,10 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
 
 void lr_jit_destroy(lr_jit_t *j) {
     if (!j) return;
+    for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
+        if (l->handle)
+            dlclose(l->handle);
+    }
     if (j->code_buf && j->code_buf != MAP_FAILED)
         munmap(j->code_buf, j->code_cap);
     if (j->data_buf && j->data_buf != MAP_FAILED)
