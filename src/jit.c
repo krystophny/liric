@@ -1,4 +1,5 @@
 #include "jit.h"
+#include "ir.h"
 #include "target.h"
 #include <stdlib.h>
 #include <string.h>
@@ -139,6 +140,21 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return addr;
 }
 
+static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
+    const char *name = lr_module_symbol_name(m, global_id);
+    if (name && name[0])
+        return name;
+
+    /* Backward-compatible fallback for modules that encoded function index. */
+    uint32_t idx = 0;
+    for (lr_func_t *fn = m->first_func; fn; fn = fn->next, idx++) {
+        if (idx == global_id)
+            return fn->name;
+    }
+
+    return NULL;
+}
+
 /*
  * Resolve global/function symbol operands to concrete addresses.
  * Returns:
@@ -155,7 +171,7 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                 if (op->kind != LR_VAL_GLOBAL)
                     continue;
 
-                const char *name = lr_module_symbol_name(m, op->global_id);
+                const char *name = resolve_global_name(m, op->global_id);
                 if (!name || !name[0])
                     return -1;
 

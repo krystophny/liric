@@ -15,6 +15,8 @@ add_library(liric STATIC
     src/ir.c
     src/ll_lexer.c
     src/ll_parser.c
+    src/wasm_decode.c
+    src/wasm_to_ir.c
     src/target_registry.c
     src/target_x86_64.c
     src/target_aarch64.c
@@ -41,6 +43,7 @@ add_executable(test_liric
     tests/test_targets.c
     tests/test_jit.c
     tests/test_e2e.c
+    tests/test_wasm.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)

@@ -1,6 +1,8 @@
 #include "arena.h"
 #include "ir.h"
 #include "ll_parser.h"
+#include "wasm_decode.h"
+#include "wasm_to_ir.h"
 #include "jit.h"
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +26,19 @@ lr_module_t *lr_parse_ll(const char *src, size_t len, char *err, size_t errlen) 
     /* Stash arena pointer in the module for lr_module_free.
        We use the fact that arena is the first allocated thing and the module
        already has a pointer to it. */
+    return m;
+}
+
+lr_module_t *lr_parse_wasm(const uint8_t *data, size_t len, char *err, size_t errlen) {
+    lr_arena_t *arena = lr_arena_create(0);
+    if (!arena) return NULL;
+
+    lr_wasm_module_t *wmod = lr_wasm_decode(data, len, arena, err, errlen);
+    if (!wmod) { lr_arena_destroy(arena); return NULL; }
+
+    lr_module_t *m = lr_wasm_to_ir(wmod, arena, err, errlen);
+    if (!m) { lr_arena_destroy(arena); return NULL; }
+
     return m;
 }
 
