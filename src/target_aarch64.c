@@ -186,6 +186,22 @@ static uint64_t fp_div_f64_bits(uint64_t a_bits, uint64_t b_bits) {
     return a_bits;
 }
 
+static uint32_t fp_neg_f32_bits(uint32_t a_bits) {
+    float a, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    out = -a;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint64_t fp_neg_f64_bits(uint64_t a_bits) {
+    double a, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    out = -a;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
 static uint64_t fp_cmp_f32_bits(uint64_t a_bits, uint64_t b_bits, uint64_t pred) {
     uint32_t in_a = (uint32_t)a_bits, in_b = (uint32_t)b_bits;
     float a, b;
@@ -273,6 +289,7 @@ static int64_t fp_helper_addr(lr_opcode_t op, lr_type_t *type) {
         case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f32_bits;
         case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f32_bits;
         case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f32_bits;
+        case LR_OP_FNEG: return (int64_t)(uintptr_t)&fp_neg_f32_bits;
         default: return 0;
         }
     }
@@ -281,6 +298,7 @@ static int64_t fp_helper_addr(lr_opcode_t op, lr_type_t *type) {
     case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f64_bits;
     case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f64_bits;
     case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f64_bits;
+    case LR_OP_FNEG: return (int64_t)(uintptr_t)&fp_neg_f64_bits;
     default: return 0;
     }
 }
@@ -321,6 +339,18 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
     lr_mblock_t *entry_mb = mf->first_block;
     for (uint32_t i = 0; i < func->num_params && i < 8; i++) {
         emit_store_slot(mf, entry_mb, func->param_vregs[i], param_regs[i]);
+    }
+    /* Load stack-passed parameters (args 9+) from caller's frame.
+       After stp x29,x30,[sp,#-16]!; mov x29,sp the caller's stack args
+       are at [FP + 16], [FP + 24], ... */
+    for (uint32_t i = 8; i < func->num_params; i++) {
+        int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
+        lr_minst_t *ld = minst_new(mf->arena, LR_MIR_MOV);
+        ld->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+        ld->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = caller_off } };
+        ld->size = 8;
+        mblock_append(entry_mb, ld);
+        emit_store_slot(mf, entry_mb, func->param_vregs[i], A64_X9);
     }
 
     bi = 0;
@@ -384,6 +414,20 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
                 int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
                 emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
                 emit_load_operand(mf, mb, &inst->operands[1], A64_X1);
+                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
+                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
+                mov->size = 8;
+                mblock_append(mb, mov);
+                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
+                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
+                mblock_append(mb, call);
+                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                break;
+            }
+            case LR_OP_FNEG: {
+                int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
+                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
                 lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
                 mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
                 mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
@@ -522,18 +566,77 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
                 break;
             }
             case LR_OP_ALLOCA: {
-                size_t sz = lr_type_size(inst->type);
-                if (sz < 8) sz = 8;
-                mf->stack_size += (uint32_t)sz;
-                mf->stack_size = (mf->stack_size + 7) & ~7u;
-                int32_t off = -(int32_t)mf->stack_size;
+                size_t elem_sz = lr_type_size(inst->type);
+                if (elem_sz < 8) elem_sz = 8;
 
-                lr_minst_t *lea = minst_new(mf->arena, LR_MIR_LEA);
-                lea->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                lea->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
-                lea->size = 8;
-                mblock_append(mb, lea);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
+                /* Check if we can use static alloca (no operands or constant count = 1) */
+                bool use_static = (inst->num_operands == 0);
+                if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
+                    inst->operands[0].imm_i64 == 1) {
+                    use_static = true;
+                }
+
+                if (use_static) {
+                    /* Static alloca: just allocate a stack slot, store its address */
+                    mf->stack_size += (uint32_t)elem_sz;
+                    mf->stack_size = (mf->stack_size + 7) & ~7u;
+                    int32_t off = -(int32_t)mf->stack_size;
+
+                    lr_minst_t *lea = minst_new(mf->arena, LR_MIR_LEA);
+                    lea->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    lea->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
+                    lea->size = 8;
+                    mblock_append(mb, lea);
+                    emit_store_slot(mf, mb, inst->dest, A64_X9);
+                } else {
+                    /* Dynamic alloca: alloca <type>, <count_type> <count_operand> */
+                    /* Load count into X9 */
+                    emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
+
+                    /* Multiply count by element size: X9 = X9 * elem_sz */
+                    if (elem_sz != 1) {
+                        lr_minst_t *mov_size = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                        mov_size->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
+                        mov_size->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)elem_sz };
+                        mov_size->size = 8;
+                        mblock_append(mb, mov_size);
+
+                        lr_minst_t *mul = minst_new(mf->arena, LR_MIR_IMUL);
+                        mul->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                        mul->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
+                        mul->size = 8;
+                        mblock_append(mb, mul);
+                    }
+
+                    /* Align total size to 16 bytes: X9 = (X9 + 15) & ~15 */
+                    lr_minst_t *add_align = minst_new(mf->arena, LR_MIR_ADD);
+                    add_align->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    add_align->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = 15 };
+                    add_align->size = 8;
+                    mblock_append(mb, add_align);
+
+                    lr_minst_t *and_align = minst_new(mf->arena, LR_MIR_AND);
+                    and_align->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    and_align->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = ~15LL };
+                    and_align->size = 8;
+                    mblock_append(mb, and_align);
+
+                    /* Subtract from SP: SP = SP - X9 */
+                    lr_minst_t *sub = minst_new(mf->arena, LR_MIR_SUB);
+                    sub->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_SP };
+                    sub->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    sub->size = 8;
+                    mblock_append(mb, sub);
+
+                    /* Result pointer is now SP, move to X9 */
+                    lr_minst_t *mov_sp = minst_new(mf->arena, LR_MIR_MOV);
+                    mov_sp->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    mov_sp->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_SP };
+                    mov_sp->size = 8;
+                    mblock_append(mb, mov_sp);
+
+                    emit_store_slot(mf, mb, inst->dest, A64_X9);
+                }
                 break;
             }
             case LR_OP_LOAD: {
@@ -750,13 +853,45 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
                     A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
                 };
                 uint32_t nargs = inst->num_operands - 1;
+                uint32_t nstack = nargs > 8 ? nargs - 8 : 0;
+                /* Round stack arg space to 16-byte alignment (AAPCS64) */
+                uint32_t stack_bytes = ((nstack * 8 + 15) & ~15u);
+
+                /* Reserve stack space for arguments beyond the first 8 */
+                if (stack_bytes > 0) {
+                    lr_minst_t *alloc = minst_new(mf->arena, LR_MIR_FRAME_ALLOC);
+                    alloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
+                    mblock_append(mb, alloc);
+                }
+
+                /* Store stack args to [SP + offset] */
+                for (uint32_t i = 0; i < nstack; i++) {
+                    uint32_t arg_idx = 8 + i;
+                    emit_load_operand(mf, mb, &inst->operands[arg_idx + 1], A64_X9);
+                    lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                    st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_SP, .disp = (int32_t)(i * 8) } };
+                    st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                    st->size = 8;
+                    mblock_append(mb, st);
+                }
+
+                /* Place first 8 args in AAPCS64 registers */
                 for (uint32_t i = 0; i < nargs && i < 8; i++) {
                     emit_load_operand(mf, mb, &inst->operands[i + 1], call_regs[i]);
                 }
+
                 emit_load_operand(mf, mb, &inst->operands[0], A64_X16);
                 lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
                 call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
                 mblock_append(mb, call);
+
+                /* Reclaim stack space after call */
+                if (stack_bytes > 0) {
+                    lr_minst_t *dealloc = minst_new(mf->arena, LR_MIR_FRAME_FREE);
+                    dealloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
+                    mblock_append(mb, dealloc);
+                }
+
                 if (inst->type && inst->type->kind != LR_TYPE_VOID)
                     emit_store_slot(mf, mb, inst->dest, A64_X0);
                 break;

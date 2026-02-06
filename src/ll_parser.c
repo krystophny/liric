@@ -224,17 +224,28 @@ static lr_type_t *parse_type(lr_parser_t *p) {
     }
     case LR_TOK_LANGLE: {
         next(p);
-        expect(p, LR_TOK_LBRACE);
-        lr_type_t *fields[256];
-        uint32_t nf = 0;
-        if (!check(p, LR_TOK_RBRACE)) {
-            fields[nf++] = parse_type(p);
-            while (match(p, LR_TOK_COMMA))
+        if (check(p, LR_TOK_INT_LIT)) {
+            /* Vector type: <N x T> */
+            int64_t count = p->cur.int_val;
+            expect(p, LR_TOK_INT_LIT);
+            expect(p, LR_TOK_X);
+            lr_type_t *elem = parse_type(p);
+            expect(p, LR_TOK_RANGLE);
+            ty = lr_type_array(p->arena, elem, count);
+        } else {
+            /* Packed struct: <{ ... }> */
+            expect(p, LR_TOK_LBRACE);
+            lr_type_t *fields[256];
+            uint32_t nf = 0;
+            if (!check(p, LR_TOK_RBRACE)) {
                 fields[nf++] = parse_type(p);
+                while (match(p, LR_TOK_COMMA))
+                    fields[nf++] = parse_type(p);
+            }
+            expect(p, LR_TOK_RBRACE);
+            expect(p, LR_TOK_RANGLE);
+            ty = lr_type_struct(p->arena, fields, nf, true, NULL);
         }
-        expect(p, LR_TOK_RBRACE);
-        expect(p, LR_TOK_RANGLE);
-        ty = lr_type_struct(p->arena, fields, nf, true, NULL);
         break;
     }
     default:
@@ -243,9 +254,43 @@ static lr_type_t *parse_type(lr_parser_t *p) {
         break;
     }
 
-    /* Accept legacy typed pointers (i8*, i8**, [N x T]*, %alias*). */
-    while (match(p, LR_TOK_STAR))
-        ty = p->module->type_ptr;
+    /* Handle type suffixes: pointers and function types.
+     * Examples: i8*, i8**, i32 (i64)*, i8* (i32)* */
+    while (true) {
+        if (match(p, LR_TOK_STAR)) {
+            /* Typed pointer suffix or pointer to function */
+            ty = p->module->type_ptr;
+        } else if (check(p, LR_TOK_LPAREN)) {
+            /* Function type: RetType (ParamTypes...)
+             * Note: ty is the return type at this point */
+            next(p);
+            lr_type_t *ret = ty;
+            lr_type_t *params[256];
+            uint32_t nparams = 0;
+            bool vararg = false;
+
+            if (!check(p, LR_TOK_RPAREN)) {
+                if (check(p, LR_TOK_DOTDOTDOT)) {
+                    vararg = true;
+                    next(p);
+                } else {
+                    params[nparams++] = parse_type(p);
+                    while (match(p, LR_TOK_COMMA)) {
+                        if (check(p, LR_TOK_DOTDOTDOT)) {
+                            vararg = true;
+                            next(p);
+                            break;
+                        }
+                        params[nparams++] = parse_type(p);
+                    }
+                }
+            }
+            expect(p, LR_TOK_RPAREN);
+            ty = lr_type_func(p->arena, ret, params, nparams, vararg);
+        } else {
+            break;
+        }
+    }
 
     return ty;
 }
@@ -378,6 +423,17 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         return parse_const_gep_operand(p, type);
     if (check(p, LR_TOK_LBRACE) || check(p, LR_TOK_LBRACKET))
         return parse_aggregate_constant_operand(p, type);
+    if (check(p, LR_TOK_LANGLE)) {
+        /* packed struct literal: <{ ... }> */
+        next(p);  /* consume < */
+        if (!check(p, LR_TOK_LBRACE)) {
+            error(p, "expected '{' after '<' in packed struct literal");
+            return lr_op_imm_i64(0, type);
+        }
+        skip_balanced_braces(p);
+        expect(p, LR_TOK_RANGLE);
+        return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
+    }
     error(p, "expected operand, got '%s'", lr_tok_name(p->cur.kind));
     return lr_op_imm_i64(0, type);
 }
@@ -548,12 +604,33 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
 
             case LR_TOK_ALLOCA: {
                 lr_type_t *ty = parse_type(p);
-                /* skip optional ", align N" */
+                lr_operand_t count_op = {0};
+                bool has_count = false;
+                /* check for optional count: ", <inttype> <operand>" */
                 if (match(p, LR_TOK_COMMA)) {
-                    if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
+                    if (check(p, LR_TOK_ALIGN)) {
+                        /* just align, no count */
+                        next(p); next(p);
+                    } else {
+                        /* parse count operand */
+                        lr_type_t *count_ty = parse_type(p);
+                        count_op = parse_operand(p, count_ty);
+                        has_count = true;
+                        /* check for optional ", align N" after count */
+                        if (match(p, LR_TOK_COMMA)) {
+                            if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
+                        }
+                    }
                 }
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
-                    p->module->type_ptr, dest, NULL, 0);
+                lr_inst_t *inst;
+                if (has_count) {
+                    lr_operand_t ops[1] = {count_op};
+                    inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
+                        p->module->type_ptr, dest, ops, 1);
+                } else {
+                    inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
+                        p->module->type_ptr, dest, NULL, 0);
+                }
                 inst->type = ty;
                 lr_block_append(block, inst);
                 break;
@@ -627,6 +704,15 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
                 lr_operand_t ops[1] = {src};
                 lr_inst_t *inst = lr_inst_create(p->arena, irop,
                     dst_ty, dest, ops, 1);
+                lr_block_append(block, inst);
+                break;
+            }
+
+            case LR_TOK_FNEG: {
+                lr_operand_t src = parse_typed_operand(p);
+                lr_operand_t ops[1] = {src};
+                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_FNEG,
+                    src.type, dest, ops, 1);
                 lr_block_append(block, inst);
                 break;
             }
@@ -726,13 +812,22 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
             case LR_TOK_FCMP: {
                 lr_fcmp_pred_t pred;
                 switch (p->cur.kind) {
+                case LR_TOK_FALSE: pred = LR_FCMP_FALSE; break;
                 case LR_TOK_OEQ: pred = LR_FCMP_OEQ; break;
-                case LR_TOK_ONE: pred = LR_FCMP_ONE; break;
                 case LR_TOK_OGT: pred = LR_FCMP_OGT; break;
                 case LR_TOK_OGE: pred = LR_FCMP_OGE; break;
                 case LR_TOK_OLT: pred = LR_FCMP_OLT; break;
                 case LR_TOK_OLE: pred = LR_FCMP_OLE; break;
+                case LR_TOK_ONE: pred = LR_FCMP_ONE; break;
+                case LR_TOK_ORD: pred = LR_FCMP_ORD; break;
+                case LR_TOK_UEQ: pred = LR_FCMP_UEQ; break;
+                case LR_TOK_UGT: pred = LR_FCMP_UGT; break;
+                case LR_TOK_UGE: pred = LR_FCMP_UGE; break;
+                case LR_TOK_ULT: pred = LR_FCMP_ULT; break;
+                case LR_TOK_ULE: pred = LR_FCMP_ULE; break;
+                case LR_TOK_UNE: pred = LR_FCMP_UNE; break;
                 case LR_TOK_UNO: pred = LR_FCMP_UNO; break;
+                case LR_TOK_TRUE: pred = LR_FCMP_TRUE; break;
                 default:
                     error(p, "expected fcmp predicate");
                     pred = LR_FCMP_OEQ;
@@ -882,19 +977,24 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     p->vreg_map_count = 0;
     p->block_map_count = 0;
 
-    /* register parameter vregs with both numeric and named aliases */
+    /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
-        char buf[32];
-        snprintf(buf, sizeof(buf), "%u", i);
-        if (p->vreg_map_count < 4096) {
-            p->vreg_map[p->vreg_map_count].name = lr_arena_strdup(p->arena, buf, strlen(buf));
-            p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
-            p->vreg_map_count++;
-        }
-        if (param_names && param_names[i] && p->vreg_map_count < 4096) {
-            p->vreg_map[p->vreg_map_count].name = param_names[i];
-            p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
-            p->vreg_map_count++;
+        if (param_names && param_names[i]) {
+            /* named parameter: register only the name, not numeric alias */
+            if (p->vreg_map_count < 4096) {
+                p->vreg_map[p->vreg_map_count].name = param_names[i];
+                p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
+                p->vreg_map_count++;
+            }
+        } else {
+            /* unnamed parameter: register numeric alias */
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%u", i);
+            if (p->vreg_map_count < 4096) {
+                p->vreg_map[p->vreg_map_count].name = lr_arena_strdup(p->arena, buf, strlen(buf));
+                p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
+                p->vreg_map_count++;
+            }
         }
     }
 
