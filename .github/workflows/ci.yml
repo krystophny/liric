@@ -23,7 +23,7 @@ jobs:
         run: cmake -S . -B build -G Ninja
 
       - name: Build
-        run: cmake --build build -j32
+        run: cmake --build build -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Test
         run: ctest --test-dir build --output-on-failure

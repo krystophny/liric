@@ -593,8 +593,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=max(1, (os.cpu_count() or 2) - 1),
-        help="Parallel workers (default: NCPU-1)",
+        default=max(1, os.cpu_count() or 1),
+        help="Parallel workers (default: NCPU)",
     )
     parser.add_argument(
         "--skip-tests-toml",

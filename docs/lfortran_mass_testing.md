@@ -35,7 +35,7 @@ Defaults are:
 ## Build Prerequisites
 ```bash
 cmake -S . -B build -G Ninja
-cmake --build build -j32
+cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
@@ -50,7 +50,7 @@ python3 -m tools.lfortran_mass.run_mass
 
 Useful options:
 - `--limit N`: process first N tests only
-- `--workers N`: control parallelism
+- `--workers N`: control parallelism (use `--workers $(nproc)` for all cores)
 - `--force`: ignore case cache and rerun
 - `--baseline <path>`: compare against previous results
 - `--update-baseline`: write current run as baseline snapshot

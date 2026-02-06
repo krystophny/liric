@@ -18,6 +18,12 @@ ctest --test-dir build --output-on-failure
 
 Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake.
 
+For LFortran mass runs, prefer:
+
+```bash
+python3 -m tools.lfortran_mass.run_mass --workers $(nproc)
+```
+
 ## Pipeline
 
 ```
