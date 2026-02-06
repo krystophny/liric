@@ -83,12 +83,21 @@ int main(int argc, char **argv) {
     const char *func_name = "main";
     const char *sig = "i32";
     const char *input_file = NULL;
+    const char *load_libs[64];
+    int num_load_libs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) {
             func_name = argv[++i];
         } else if (strcmp(argv[i], "--sig") == 0 && i + 1 < argc) {
             sig = argv[++i];
+        } else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
+            if (num_load_libs < 64) {
+                load_libs[num_load_libs++] = argv[++i];
+            } else {
+                fprintf(stderr, "too many --load-lib options\n");
+                return 1;
+            }
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         } else {
@@ -123,6 +132,16 @@ int main(int argc, char **argv) {
         lr_module_free(m);
         free(src);
         return 1;
+    }
+
+    for (int i = 0; i < num_load_libs; i++) {
+        if (lr_jit_load_library(jit, load_libs[i]) != 0) {
+            fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
+            lr_jit_destroy(jit);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
     }
 
     int rc = lr_jit_add_module(jit, m);

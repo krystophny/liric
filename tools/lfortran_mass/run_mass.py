@@ -59,6 +59,7 @@ class RunnerConfig:
     timeout_jit: int
     timeout_run: int
     force: bool
+    runtime_libs: Tuple[str, ...]
 
 
 def split_options(options: str) -> List[str]:
@@ -305,7 +306,11 @@ def reference_run_command(
 
 
 def probe_run_command(cfg: RunnerConfig, ll_path: Path, func: str, sig: str) -> List[str]:
-    return [str(cfg.probe_runner), "--func", func, "--sig", sig, str(ll_path)]
+    cmd = [str(cfg.probe_runner)]
+    for lib in cfg.runtime_libs:
+        cmd.extend(["--load-lib", lib])
+    cmd.extend(["--func", func, "--sig", sig, str(ll_path)])
+    return cmd
 
 
 def init_result_row(
@@ -459,7 +464,10 @@ def process_case(
     row["entry_sig"] = entry_sig
 
     row["jit_attempted"] = True
-    jit_cmd = [str(cfg.liric_cli), "--jit", "--func", entry_name, str(ll_path)]
+    jit_cmd = [str(cfg.liric_cli)]
+    for lib in cfg.runtime_libs:
+        jit_cmd.extend(["--load-lib", lib])
+    jit_cmd.extend(["--jit", "--func", entry_name, str(ll_path)])
     jit_result = run_cmd(jit_cmd, cwd=case_dir, timeout_sec=cfg.timeout_jit)
     row["jit_cmd"] = jit_result.command
     row["jit_rc"] = jit_result.rc
@@ -616,6 +624,12 @@ def parse_args() -> argparse.Namespace:
         "--force",
         action="store_true",
         help="Ignore cache and recompute each case",
+    )
+    parser.add_argument(
+        "--load-lib",
+        action="append",
+        default=[],
+        help="Runtime library path to preload into liric JIT (repeatable)",
     )
     return parser.parse_args()
 
@@ -777,6 +791,7 @@ def main() -> int:
         timeout_jit=args.timeout_jit,
         timeout_run=args.timeout_run,
         force=args.force,
+        runtime_libs=tuple(args.load_lib),
     )
 
     work_items = list(zip(entries, manifest_rows))

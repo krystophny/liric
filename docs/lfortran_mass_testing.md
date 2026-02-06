@@ -55,6 +55,7 @@ Useful options:
 - `--skip-tests-toml`: run only integration corpus
 - `--skip-integration-cmake`: run only unit corpus
 - `--include-expected-fail`: include expected-failure/error-handling tests
+- `--load-lib <path>`: preload runtime libraries into liric JIT (repeatable)
 
 ## Outputs
 All artifacts are written under `/tmp/liric_lfortran_mass/`:
