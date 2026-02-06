@@ -12,6 +12,29 @@ from tools.lfortran_mass import run_mass
 
 
 class RunMassHelperTests(unittest.TestCase):
+    def test_probe_run_command_ignore_retcode_flag(self) -> None:
+        cfg = run_mass.RunnerConfig(
+            lfortran_bin=Path("/tmp/lfortran"),
+            liric_cli=Path("/tmp/liric_cli"),
+            probe_runner=Path("/tmp/liric_probe_runner"),
+            cache_dir=Path("/tmp/cache"),
+            timeout_emit=1,
+            timeout_parse=1,
+            timeout_jit=1,
+            timeout_run=1,
+            force=False,
+            runtime_libs=("/tmp/libA.so", "/tmp/libB.so"),
+        )
+        got = run_mass.probe_run_command(
+            cfg,
+            Path("/tmp/test.ll"),
+            "main",
+            "i32_argc_argv",
+            ignore_retcode=True,
+        )
+        self.assertIn("--ignore-retcode", got)
+        self.assertEqual(got[-1], "/tmp/test.ll")
+
     def test_extract_c_compile_options_include_define(self) -> None:
         opts = [
             "--cpp",

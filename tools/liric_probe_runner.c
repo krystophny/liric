@@ -46,7 +46,7 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig) {
+static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int ignore_retcode) {
     void *sym = lr_jit_get_function(jit, func_name);
     char argv0[] = "liric";
     char *host_argv[] = {argv0, NULL};
@@ -59,14 +59,24 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig) {
 
     if (strcmp(sig, "i32") == 0) {
         int32_t (*fn)(void) = NULL;
+        int32_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        return fn ? (int)(fn() & 0xff) : 3;
+        if (!fn) {
+            return 3;
+        }
+        ret = fn();
+        return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
 
     if (strcmp(sig, "i64") == 0) {
         int64_t (*fn)(void) = NULL;
+        int64_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        return fn ? (int)(fn() & 0xff) : 3;
+        if (!fn) {
+            return 3;
+        }
+        ret = fn();
+        return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
 
     if (strcmp(sig, "void") == 0) {
@@ -81,14 +91,24 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig) {
 
     if (strcmp(sig, "i32_argc_argv") == 0) {
         int32_t (*fn)(int, char **) = NULL;
+        int32_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        return fn ? (int)(fn(host_argc, host_argv) & 0xff) : 3;
+        if (!fn) {
+            return 3;
+        }
+        ret = fn(host_argc, host_argv);
+        return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
 
     if (strcmp(sig, "i64_argc_argv") == 0) {
         int64_t (*fn)(int, char **) = NULL;
+        int64_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        return fn ? (int)(fn(host_argc, host_argv) & 0xff) : 3;
+        if (!fn) {
+            return 3;
+        }
+        ret = fn(host_argc, host_argv);
+        return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
 
     if (strcmp(sig, "void_argc_argv") == 0) {
@@ -109,6 +129,7 @@ int main(int argc, char **argv) {
     const char *func_name = "main";
     const char *sig = "i32";
     const char *input_file = NULL;
+    int ignore_retcode = 0;
     const char *load_libs[64];
     int num_load_libs = 0;
 
@@ -117,6 +138,8 @@ int main(int argc, char **argv) {
             func_name = argv[++i];
         } else if (strcmp(argv[i], "--sig") == 0 && i + 1 < argc) {
             sig = argv[++i];
+        } else if (strcmp(argv[i], "--ignore-retcode") == 0) {
+            ignore_retcode = 1;
         } else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
             if (num_load_libs < 64) {
                 load_libs[num_load_libs++] = argv[++i];
@@ -179,7 +202,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int run_rc = run_symbol(jit, func_name, sig);
+    int run_rc = run_symbol(jit, func_name, sig, ignore_retcode);
 
     lr_jit_destroy(jit);
     lr_module_free(m);

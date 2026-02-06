@@ -329,10 +329,18 @@ def reference_run_command(
     return cmd
 
 
-def probe_run_command(cfg: RunnerConfig, ll_path: Path, func: str, sig: str) -> List[str]:
+def probe_run_command(
+    cfg: RunnerConfig,
+    ll_path: Path,
+    func: str,
+    sig: str,
+    ignore_retcode: bool = False,
+) -> List[str]:
     cmd = [str(cfg.probe_runner)]
     for lib in cfg.runtime_libs:
         cmd.extend(["--load-lib", lib])
+    if ignore_retcode:
+        cmd.append("--ignore-retcode")
     cmd.extend(["--func", func, "--sig", sig, str(ll_path)])
     return cmd
 
@@ -495,7 +503,13 @@ def process_case(
         return row
 
     row["jit_attempted"] = True
-    jit_cmd = probe_run_command(cfg, ll_path, entry_name, entry_sig)
+    jit_cmd = probe_run_command(
+        cfg,
+        ll_path,
+        entry_name,
+        entry_sig,
+        ignore_retcode=True,
+    )
     jit_result = run_cmd(jit_cmd, cwd=case_dir, timeout_sec=cfg.timeout_jit)
     row["jit_cmd"] = jit_result.command
     row["jit_rc"] = jit_result.rc
