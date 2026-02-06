@@ -154,6 +154,8 @@ static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
 }
 
 static lr_type_t *parse_type(lr_parser_t *p);
+static lr_operand_t parse_typed_operand(lr_parser_t *p);
+static void skip_balanced_parens(lr_parser_t *p);
 
 static lr_type_t *parse_type(lr_parser_t *p) {
     lr_token_t t = p->cur;
@@ -198,17 +200,58 @@ static lr_type_t *parse_type(lr_parser_t *p) {
     }
 }
 
+static bool is_bare_identifier(const lr_token_t *tok) {
+    if (tok->kind != LR_TOK_LOCAL_ID || tok->len == 0)
+        return false;
+    return tok->start[0] != '%' && tok->start[0] != '@';
+}
+
+static void skip_attr_payload(lr_parser_t *p) {
+    if (!check(p, LR_TOK_LPAREN))
+        return;
+    skip_balanced_parens(p);
+}
+
 /* Skip attribute annotations we don't care about */
 static void skip_attrs(lr_parser_t *p) {
-    while (p->cur.kind == LR_TOK_NSW || p->cur.kind == LR_TOK_NUW ||
-           p->cur.kind == LR_TOK_INBOUNDS || p->cur.kind == LR_TOK_NONNULL ||
-           p->cur.kind == LR_TOK_NOUNDEF || p->cur.kind == LR_TOK_SIGNEXT ||
-           p->cur.kind == LR_TOK_ZEROEXT || p->cur.kind == LR_TOK_NOCAPTURE ||
-           p->cur.kind == LR_TOK_READONLY || p->cur.kind == LR_TOK_WRITEONLY ||
-           p->cur.kind == LR_TOK_NNAN || p->cur.kind == LR_TOK_NINF ||
-           p->cur.kind == LR_TOK_NSZ || p->cur.kind == LR_TOK_DSOLOCAL ||
-           p->cur.kind == LR_TOK_ATTR_GROUP)
-        next(p);
+    while (true) {
+        if (p->cur.kind == LR_TOK_NSW || p->cur.kind == LR_TOK_NUW ||
+            p->cur.kind == LR_TOK_INBOUNDS || p->cur.kind == LR_TOK_NONNULL ||
+            p->cur.kind == LR_TOK_NOUNDEF || p->cur.kind == LR_TOK_SIGNEXT ||
+            p->cur.kind == LR_TOK_ZEROEXT || p->cur.kind == LR_TOK_NOCAPTURE ||
+            p->cur.kind == LR_TOK_READONLY || p->cur.kind == LR_TOK_WRITEONLY ||
+            p->cur.kind == LR_TOK_NNAN || p->cur.kind == LR_TOK_NINF ||
+            p->cur.kind == LR_TOK_NSZ || p->cur.kind == LR_TOK_DSOLOCAL ||
+            p->cur.kind == LR_TOK_ATTR_GROUP || p->cur.kind == LR_TOK_METADATA_ID) {
+            next(p);
+            continue;
+        }
+        if (is_bare_identifier(&p->cur)) {
+            next(p);
+            skip_attr_payload(p);
+            continue;
+        }
+        break;
+    }
+}
+
+static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty) {
+    expect(p, LR_TOK_GETELEMENTPTR);
+    skip_attrs(p);
+    (void)parse_type(p);
+    expect(p, LR_TOK_COMMA);
+
+    lr_operand_t base = parse_typed_operand(p);
+    while (match(p, LR_TOK_COMMA))
+        (void)parse_typed_operand(p);
+
+    if (base.kind == LR_VAL_GLOBAL)
+        return lr_op_global(base.global_id, result_ty);
+    if (base.kind == LR_VAL_VREG)
+        return lr_op_vreg(base.vreg, result_ty);
+    if (base.kind == LR_VAL_NULL)
+        return lr_op_null(result_ty);
+    return lr_op_null(result_ty);
 }
 
 static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
@@ -258,6 +301,8 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         }
         return lr_op_global(gid, type);
     }
+    if (check(p, LR_TOK_GETELEMENTPTR))
+        return parse_const_gep_operand(p, type);
     error(p, "expected operand, got '%s'", lr_tok_name(p->cur.kind));
     return lr_op_imm_i64(0, type);
 }

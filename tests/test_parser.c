@@ -161,3 +161,60 @@ int test_parser_named_type_operand(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_decl_with_modern_param_attrs(void) {
+    const char *src =
+        "declare void @llvm.memcpy.p0.p0.i32("
+        "ptr noalias writeonly captures(none), "
+        "ptr noalias readonly captures(none), "
+        "i32, i1 immarg) #0\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "declaration exists");
+    TEST_ASSERT(f->is_decl, "is declaration");
+    TEST_ASSERT_EQ(f->num_params, 4, "param count matches");
+    TEST_ASSERT_EQ(f->param_types[0]->kind, LR_TYPE_PTR, "param 0 is ptr");
+    TEST_ASSERT_EQ(f->param_types[1]->kind, LR_TYPE_PTR, "param 1 is ptr");
+    TEST_ASSERT_EQ(f->param_types[2]->kind, LR_TYPE_I32, "param 2 is i32");
+    TEST_ASSERT_EQ(f->param_types[3]->kind, LR_TYPE_I1, "param 3 is i1");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_store_with_const_gep_operand(void) {
+    const char *src =
+        "@arr = global [4 x i32] zeroinitializer\n"
+        "define void @f(ptr %dst) {\n"
+        "entry:\n"
+        "  store ptr getelementptr inbounds ([4 x i32], ptr @arr, i32 0, i32 1), "
+        "ptr %dst, align 8\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    while (f && strcmp(f->name, "f") != 0)
+        f = f->next;
+    TEST_ASSERT(f != NULL, "function f exists");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *store = b->first;
+    TEST_ASSERT(store != NULL, "store instruction exists");
+    TEST_ASSERT_EQ(store->op, LR_OP_STORE, "first op is store");
+    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_GLOBAL,
+                   "constant gep lowered to global operand");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
