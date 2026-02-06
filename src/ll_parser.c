@@ -1128,6 +1128,159 @@ static void skip_line(lr_parser_t *p) {
     }
 }
 
+static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
+    size_t off = 0;
+    for (uint32_t i = 0; i < field_idx && i < st->struc.num_fields; i++) {
+        size_t fsz = lr_type_size(st->struc.fields[i]);
+        if (!st->struc.packed) {
+            size_t fa = lr_type_align(st->struc.fields[i]);
+            if (fa > 0)
+                off = (off + fa - 1) & ~(fa - 1);
+        }
+        off += fsz;
+    }
+    if (field_idx < st->struc.num_fields && !st->struc.packed) {
+        size_t fa = lr_type_align(st->struc.fields[field_idx]);
+        if (fa > 0)
+            off = (off + fa - 1) & ~(fa - 1);
+    }
+    return off;
+}
+
+static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
+                                         uint8_t *buf, size_t buf_size,
+                                         const lr_type_t *ty, size_t base_offset);
+
+/*
+ * Parse a single scalar initializer value at field_off within buf.
+ * Handles: integers, floats, GEP, bare global refs, null, undef, nested aggregates.
+ * Records relocations for pointer-to-global values.
+ */
+static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
+                                    uint8_t *buf, size_t buf_size,
+                                    const lr_type_t *field_type, size_t field_off) {
+    size_t field_sz = lr_type_size(field_type);
+
+    if (check(p, LR_TOK_LANGLE) || check(p, LR_TOK_LBRACE) ||
+        check(p, LR_TOK_LBRACKET)) {
+        parse_aggregate_initializer(p, g, buf, buf_size, field_type, field_off);
+    } else if (check(p, LR_TOK_GETELEMENTPTR)) {
+        lr_operand_t gep = parse_const_gep_operand(p, p->module->type_ptr);
+        if (gep.kind == LR_VAL_GLOBAL) {
+            const char *ref = lr_module_symbol_name(p->module, gep.global_id);
+            if (ref) {
+                lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
+                r->offset = field_off;
+                r->symbol_name = lr_arena_strdup(p->arena, ref, strlen(ref));
+                r->next = g->relocs;
+                g->relocs = r;
+            }
+        }
+    } else if (check(p, LR_TOK_INT_LIT)) {
+        int64_t val = p->cur.int_val;
+        next(p);
+        if (field_off + field_sz <= buf_size)
+            memcpy(buf + field_off, &val, field_sz < 8 ? field_sz : 8);
+    } else if (check(p, LR_TOK_FLOAT_LIT)) {
+        double val = p->cur.float_val;
+        next(p);
+        if (field_type->kind == LR_TYPE_FLOAT) {
+            float fv = (float)val;
+            if (field_off + 4 <= buf_size)
+                memcpy(buf + field_off, &fv, 4);
+        } else {
+            if (field_off + 8 <= buf_size)
+                memcpy(buf + field_off, &val, 8);
+        }
+    } else if (check(p, LR_TOK_NULL)) {
+        next(p);
+    } else if (check(p, LR_TOK_ZEROINITIALIZER)) {
+        next(p);
+    } else if (check(p, LR_TOK_GLOBAL_ID)) {
+        char *ref_name = tok_name(p, &p->cur);
+        next(p);
+        uint32_t gid = resolve_global(p, ref_name);
+        if (gid == UINT32_MAX) {
+            gid = lr_module_intern_symbol(p->module, ref_name);
+            register_global(p, ref_name, gid);
+        }
+        lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
+        r->offset = field_off;
+        r->symbol_name = lr_arena_strdup(p->arena, ref_name, strlen(ref_name));
+        r->next = g->relocs;
+        g->relocs = r;
+    } else if (check(p, LR_TOK_UNDEF) || check(p, LR_TOK_STRING_LIT)) {
+        next(p);
+    } else {
+        next(p);
+    }
+}
+
+/*
+ * Parse an aggregate constant initializer and write field values into buf.
+ * Record relocations for pointer-to-global fields on the global g.
+ * base_offset is the byte offset of this aggregate within the top-level global.
+ */
+static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
+                                         uint8_t *buf, size_t buf_size,
+                                         const lr_type_t *ty, size_t base_offset) {
+    bool packed_struct = false;
+
+    if (check(p, LR_TOK_LANGLE)) {
+        next(p);
+        expect(p, LR_TOK_LBRACE);
+        packed_struct = true;
+    } else if (check(p, LR_TOK_LBRACE)) {
+        next(p);
+    } else if (check(p, LR_TOK_LBRACKET)) {
+        next(p);
+        if (ty->kind == LR_TYPE_ARRAY) {
+            size_t elem_sz = lr_type_size(ty->array.elem);
+            for (uint64_t i = 0; i < ty->array.count; i++) {
+                if (check(p, LR_TOK_RBRACKET))
+                    break;
+                (void)parse_type(p);
+                skip_attrs(p);
+                size_t elem_off = base_offset + i * elem_sz;
+                parse_init_field_value(p, g, buf, buf_size, ty->array.elem, elem_off);
+                if (!match(p, LR_TOK_COMMA))
+                    break;
+            }
+        }
+        expect(p, LR_TOK_RBRACKET);
+        return;
+    } else {
+        return;
+    }
+
+    if (ty->kind != LR_TYPE_STRUCT) {
+        uint32_t depth = 1;
+        while (depth > 0 && !check(p, LR_TOK_EOF)) {
+            if (match(p, LR_TOK_LBRACE)) { depth++; continue; }
+            if (match(p, LR_TOK_RBRACE)) { depth--; continue; }
+            next(p);
+        }
+        if (packed_struct)
+            match(p, LR_TOK_RANGLE);
+        return;
+    }
+
+    for (uint32_t fi = 0; fi < ty->struc.num_fields; fi++) {
+        if (check(p, LR_TOK_RBRACE))
+            break;
+        (void)parse_type(p);
+        skip_attrs(p);
+        size_t field_off = base_offset + struct_field_offset(ty, fi);
+        parse_init_field_value(p, g, buf, buf_size, ty->struc.fields[fi], field_off);
+        if (!match(p, LR_TOK_COMMA))
+            break;
+    }
+
+    expect(p, LR_TOK_RBRACE);
+    if (packed_struct)
+        expect(p, LR_TOK_RANGLE);
+}
+
 static void parse_global(lr_parser_t *p) {
     char *name = tok_name(p, &p->cur);
     next(p);
@@ -1208,6 +1361,83 @@ static void parse_global(lr_parser_t *p) {
             g->init_size = sz;
         }
         next(p);
+    } else if (check(p, LR_TOK_FLOAT_LIT)) {
+        double val = p->cur.float_val;
+        size_t sz = lr_type_size(ty);
+        if (sz > 0) {
+            uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
+            memset(buf, 0, sz);
+            if (ty->kind == LR_TYPE_FLOAT) {
+                float fv = (float)val;
+                memcpy(buf, &fv, 4);
+            } else {
+                memcpy(buf, &val, sz < 8 ? sz : 8);
+            }
+            g->init_data = buf;
+            g->init_size = sz;
+        }
+        next(p);
+    } else if (check(p, LR_TOK_LANGLE) || check(p, LR_TOK_LBRACE) ||
+               check(p, LR_TOK_LBRACKET)) {
+        size_t sz = lr_type_size(ty);
+        if (sz > 0) {
+            uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
+            memset(buf, 0, sz);
+            g->init_data = buf;
+            g->init_size = sz;
+            parse_aggregate_initializer(p, g, buf, sz, ty, 0);
+        } else {
+            if (check(p, LR_TOK_LBRACE))
+                skip_balanced_braces(p);
+            else if (check(p, LR_TOK_LBRACKET))
+                skip_balanced_brackets(p);
+            else {
+                next(p);
+                skip_balanced_braces(p);
+                match(p, LR_TOK_RANGLE);
+            }
+        }
+    } else if (check(p, LR_TOK_NULL)) {
+        next(p);
+    } else if (check(p, LR_TOK_GETELEMENTPTR)) {
+        lr_operand_t gep = parse_const_gep_operand(p, p->module->type_ptr);
+        size_t sz = lr_type_size(ty);
+        if (sz == 0)
+            sz = 8;
+        uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
+        memset(buf, 0, sz);
+        g->init_data = buf;
+        g->init_size = sz;
+        if (gep.kind == LR_VAL_GLOBAL) {
+            const char *ref = lr_module_symbol_name(p->module, gep.global_id);
+            if (ref) {
+                lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
+                r->offset = 0;
+                r->symbol_name = lr_arena_strdup(p->arena, ref, strlen(ref));
+                r->next = g->relocs;
+                g->relocs = r;
+            }
+        }
+    } else if (check(p, LR_TOK_GLOBAL_ID)) {
+        char *ref_name = tok_name(p, &p->cur);
+        next(p);
+        uint32_t gid = resolve_global(p, ref_name);
+        if (gid == UINT32_MAX) {
+            gid = lr_module_intern_symbol(p->module, ref_name);
+            register_global(p, ref_name, gid);
+        }
+        size_t sz = lr_type_size(ty);
+        if (sz == 0)
+            sz = 8;
+        uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
+        memset(buf, 0, sz);
+        g->init_data = buf;
+        g->init_size = sz;
+        lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
+        r->offset = 0;
+        r->symbol_name = lr_arena_strdup(p->arena, ref_name, strlen(ref_name));
+        r->next = g->relocs;
+        g->relocs = r;
     }
 
     skip_line(p);
