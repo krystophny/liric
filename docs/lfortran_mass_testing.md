@@ -28,7 +28,9 @@ Defaults are:
 - LFortran root: `../lfortran`
 - tests.toml: `../lfortran/tests/tests.toml`
 - integration CMake: `../lfortran/integration_tests/CMakeLists.txt`
-- LFortran binary: `../lfortran/build_clean_bison/src/bin/lfortran`
+- LFortran binary: auto-detected:
+  - `../lfortran/build/src/bin/lfortran` (preferred)
+  - `../lfortran/build_clean_bison/src/bin/lfortran` (fallback)
 
 ## Build Prerequisites
 ```bash

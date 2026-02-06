@@ -561,7 +561,8 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to lfortran binary "
-            "(default: <lfortran-root>/build_clean_bison/src/bin/lfortran)"
+            "(default auto-detect: <lfortran-root>/build/src/bin/lfortran, "
+            "fallback <lfortran-root>/build_clean_bison/src/bin/lfortran)"
         ),
     )
     parser.add_argument(
@@ -639,6 +640,17 @@ def ensure_exists(path: Path, label: str) -> None:
         raise FileNotFoundError(f"{label} not found: {path}")
 
 
+def resolve_default_lfortran_bin(lfortran_root: Path) -> Path:
+    candidates = [
+        lfortran_root / "build" / "src" / "bin" / "lfortran",
+        lfortran_root / "build_clean_bison" / "src" / "bin" / "lfortran",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path.resolve()
+    return candidates[0].resolve()
+
+
 def selection_row(
     entry: Any,
     decision: str,
@@ -677,7 +689,7 @@ def main() -> int:
     lfortran_bin = (
         Path(args.lfortran_bin).resolve()
         if args.lfortran_bin
-        else (lfortran_root / "build_clean_bison" / "src" / "bin" / "lfortran").resolve()
+        else resolve_default_lfortran_bin(lfortran_root)
     )
 
     liric_cli = Path(args.liric_cli).resolve()
