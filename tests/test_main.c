@@ -43,6 +43,10 @@ int test_parser_function_decl(void);
 int test_parser_add(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
+int test_host_target_name(void);
+int test_create_host_target(void);
+int test_create_unknown_target_fails(void);
+int test_non_host_target_fails(void);
 int test_jit_ret_42(void);
 int test_jit_add_args(void);
 int test_jit_arithmetic(void);
@@ -72,6 +76,12 @@ int main(void) {
     fprintf(stderr, "\nCodegen tests:\n");
     RUN_TEST(test_codegen_ret_42);
     RUN_TEST(test_codegen_add);
+
+    fprintf(stderr, "\nTarget tests:\n");
+    RUN_TEST(test_host_target_name);
+    RUN_TEST(test_create_host_target);
+    RUN_TEST(test_create_unknown_target_fails);
+    RUN_TEST(test_non_host_target_fails);
 
     fprintf(stderr, "\nJIT tests:\n");
     RUN_TEST(test_jit_ret_42);

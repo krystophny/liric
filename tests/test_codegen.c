@@ -29,7 +29,8 @@ int test_codegen_ret_42(void) {
     lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
     TEST_ASSERT(m != NULL, err);
 
-    const lr_target_t *target = lr_target_x86_64();
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target exists");
     lr_mfunc_t mf = {0};
     mf.arena = arena;
 
@@ -60,7 +61,8 @@ int test_codegen_add(void) {
     lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
     TEST_ASSERT(m != NULL, err);
 
-    const lr_target_t *target = lr_target_x86_64();
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target exists");
     lr_mfunc_t mf = {0};
     mf.arena = arena;
 

@@ -13,6 +13,7 @@ typedef struct lr_sym_entry {
 
 typedef struct lr_jit {
     const lr_target_t *target;
+    bool map_jit_enabled;
     uint8_t *code_buf;
     size_t code_size;
     size_t code_cap;
@@ -24,6 +25,9 @@ typedef struct lr_jit {
 } lr_jit_t;
 
 lr_jit_t *lr_jit_create(void);
+lr_jit_t *lr_jit_create_for_target(const char *target_name);
+const char *lr_jit_host_target_name(void);
+const char *lr_jit_target_name(const lr_jit_t *j);
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr);
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);

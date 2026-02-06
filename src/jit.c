@@ -1,34 +1,103 @@
 #include "jit.h"
+#include "target.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
 
+#if defined(__APPLE__) && defined(__aarch64__) && defined(MAP_JIT)
+#include <pthread.h>
+#define LR_CAN_USE_MAP_JIT 1
+#else
+#define LR_CAN_USE_MAP_JIT 0
+#endif
+
 #define CODE_PAGE_SIZE (1024 * 1024)
 #define DATA_PAGE_SIZE (256 * 1024)
 
-lr_jit_t *lr_jit_create(void) {
+static int make_writable(lr_jit_t *j) {
+    if (j->map_jit_enabled) {
+#if LR_CAN_USE_MAP_JIT
+        pthread_jit_write_protect_np(0);
+        return 0;
+#else
+        return -1;
+#endif
+    }
+    return mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_WRITE);
+}
+
+static int make_executable(lr_jit_t *j) {
+    __builtin___clear_cache((char *)j->code_buf, (char *)(j->code_buf + j->code_size));
+
+    if (j->map_jit_enabled) {
+#if LR_CAN_USE_MAP_JIT
+        pthread_jit_write_protect_np(1);
+        return 0;
+#else
+        return -1;
+#endif
+    }
+    return mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_EXEC);
+}
+
+const char *lr_jit_host_target_name(void) {
+    const lr_target_t *host = lr_target_host();
+    return host ? host->name : NULL;
+}
+
+const char *lr_jit_target_name(const lr_jit_t *j) {
+    return (j && j->target) ? j->target->name : NULL;
+}
+
+lr_jit_t *lr_jit_create_for_target(const char *target_name) {
+    const lr_target_t *target = lr_target_by_name(target_name);
+    if (!target || !lr_target_is_host_compatible(target))
+        return NULL;
+
     lr_jit_t *j = calloc(1, sizeof(lr_jit_t));
     if (!j) return NULL;
 
-    j->target = lr_target_x86_64();
+    j->target = target;
     j->arena = lr_arena_create(0);
-
-    j->code_cap = CODE_PAGE_SIZE;
-    j->code_buf = mmap(NULL, j->code_cap,
-                        PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (j->code_buf == MAP_FAILED) {
-        lr_arena_destroy(j->arena);
+    if (!j->arena) {
         free(j);
         return NULL;
     }
 
+    j->code_cap = CODE_PAGE_SIZE;
+    int code_prot = PROT_READ | PROT_WRITE;
+    int code_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+
+#if LR_CAN_USE_MAP_JIT
+    code_prot |= PROT_EXEC;
+    code_flags |= MAP_JIT;
+#endif
+
+    j->code_buf = mmap(NULL, j->code_cap, code_prot, code_flags, -1, 0);
+    if (j->code_buf == MAP_FAILED) {
+#if LR_CAN_USE_MAP_JIT
+        j->code_buf = mmap(NULL, j->code_cap, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        j->map_jit_enabled = false;
+        if (j->code_buf == MAP_FAILED)
+#endif
+        {
+            lr_arena_destroy(j->arena);
+            free(j);
+            return NULL;
+        }
+    } else {
+#if LR_CAN_USE_MAP_JIT
+        j->map_jit_enabled = true;
+        pthread_jit_write_protect_np(0);
+#endif
+    }
+
     j->data_cap = DATA_PAGE_SIZE;
-    j->data_buf = mmap(NULL, j->data_cap,
-                        PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    j->data_buf = mmap(NULL, j->data_cap, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (j->data_buf == MAP_FAILED) {
         munmap(j->code_buf, j->code_cap);
         lr_arena_destroy(j->arena);
@@ -36,7 +105,20 @@ lr_jit_t *lr_jit_create(void) {
         return NULL;
     }
 
+    if (make_executable(j) != 0) {
+        munmap(j->data_buf, j->data_cap);
+        munmap(j->code_buf, j->code_cap);
+        lr_arena_destroy(j->arena);
+        free(j);
+        return NULL;
+    }
+
     return j;
+}
+
+lr_jit_t *lr_jit_create(void) {
+    const char *host = lr_jit_host_target_name();
+    return host ? lr_jit_create_for_target(host) : NULL;
 }
 
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
@@ -57,6 +139,9 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
 }
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
+    if (!j || !j->target || !m) return -1;
+    if (make_writable(j) != 0) return -1;
+
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (f->is_decl) continue;
 
@@ -82,8 +167,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         lr_jit_add_symbol(j, f->name, func_start);
     }
 
-    /* Make code executable */
-    mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_EXEC);
+    if (make_executable(j) != 0)
+        return -1;
 
     return 0;
 }

@@ -2,6 +2,7 @@
 #define LIRIC_TARGET_H
 
 #include "ir.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Machine instruction operand */
@@ -97,5 +98,9 @@ typedef struct lr_target {
 } lr_target_t;
 
 const lr_target_t *lr_target_x86_64(void);
+const lr_target_t *lr_target_aarch64(void);
+const lr_target_t *lr_target_by_name(const char *name);
+const lr_target_t *lr_target_host(void);
+bool lr_target_is_host_compatible(const lr_target_t *t);
 
 #endif

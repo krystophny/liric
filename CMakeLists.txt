@@ -15,7 +15,9 @@ add_library(liric STATIC
     src/ir.c
     src/ll_lexer.c
     src/ll_parser.c
+    src/target_registry.c
     src/target_x86_64.c
+    src/target_aarch64.c
     src/jit.c
     src/liric.c
 )
@@ -23,7 +25,11 @@ target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
 
 add_executable(liric_cli tools/liric_main.c)
-target_link_libraries(liric_cli PRIVATE liric dl)
+set(LIRIC_PLATFORM_LIBS)
+if(UNIX AND NOT APPLE)
+    list(APPEND LIRIC_PLATFORM_LIBS dl)
+endif()
+target_link_libraries(liric_cli PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_cli PRIVATE src)
 
 enable_testing()
@@ -32,9 +38,10 @@ add_executable(test_liric
     tests/test_lexer.c
     tests/test_parser.c
     tests/test_codegen.c
+    tests/test_targets.c
     tests/test_jit.c
     tests/test_e2e.c
 )
-target_link_libraries(test_liric PRIVATE liric dl)
+target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
 add_test(NAME liric_tests COMMAND test_liric)
