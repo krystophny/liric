@@ -319,8 +319,22 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
     }
 
     lr_mblock_t *entry_mb = mf->first_block;
+    /* First 8 params come in registers */
     for (uint32_t i = 0; i < func->num_params && i < 8; i++) {
         emit_store_slot(mf, entry_mb, func->param_vregs[i], param_regs[i]);
+    }
+    /* Params 9+ are on the stack at [fp + 16], [fp + 24], ... */
+    /* aarch64 prologue: stp x29, x30, [sp, #-16]!; mov x29, sp */
+    /* So [fp + 0] = saved fp, [fp + 8] = saved lr, [fp + 16] = first stack param */
+    for (uint32_t i = 8; i < func->num_params; i++) {
+        uint32_t vreg = func->param_vregs[i];
+        int32_t stack_offset = 16 + (i - 8) * 8;  /* fp+16 = first stack param */
+        lr_minst_t *load = minst_new(mf->arena, LR_MIR_MOV);
+        load->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+        load->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = stack_offset } };
+        load->size = 8;
+        mblock_append(entry_mb, load);
+        emit_store_slot(mf, entry_mb, vreg, A64_X9);
     }
 
     bi = 0;
@@ -746,17 +760,61 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
                 break;
             }
             case LR_OP_CALL: {
+                /* AAPCS64: first 8 args in registers X0-X7, rest on stack */
                 static const uint8_t call_regs[] = {
                     A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
                 };
                 uint32_t nargs = inst->num_operands - 1;
+                uint32_t stack_args = (nargs > 8) ? (nargs - 8) : 0;
+
+                /* Push stack arguments in reverse order (right-to-left) */
+                /* AAPCS64 requires 16-byte stack alignment; each arg is 8 bytes */
+                if (stack_args > 0) {
+                    /* If odd number of stack args, push alignment padding first */
+                    if ((stack_args % 2) != 0) {
+                        lr_minst_t *imm = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                        imm->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X17 };
+                        imm->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = 0 };
+                        mblock_append(mb, imm);
+                        lr_minst_t *push = minst_new(mf->arena, LR_MIR_PUSH);
+                        push->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X17 };
+                        mblock_append(mb, push);
+                    }
+                    /* Push arguments in reverse order */
+                    for (int i = nargs - 1; i >= 8; i--) {
+                        emit_load_operand(mf, mb, &inst->operands[i + 1], A64_X9);
+                        lr_minst_t *push = minst_new(mf->arena, LR_MIR_PUSH);
+                        push->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                        mblock_append(mb, push);
+                    }
+                }
+
+                /* Place first 8 args in registers */
                 for (uint32_t i = 0; i < nargs && i < 8; i++) {
                     emit_load_operand(mf, mb, &inst->operands[i + 1], call_regs[i]);
                 }
+
+                /* Load callee address into X16 */
                 emit_load_operand(mf, mb, &inst->operands[0], A64_X16);
                 lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
                 call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
                 mblock_append(mb, call);
+
+                /* Clean up stack after call */
+                if (stack_args > 0) {
+                    uint32_t total_pushes = (stack_args % 2) ? (stack_args + 1) : stack_args;
+                    uint32_t stack_bytes = total_pushes * 8;
+                    lr_minst_t *imm = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                    imm->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X17 };
+                    imm->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = stack_bytes };
+                    mblock_append(mb, imm);
+                    lr_minst_t *add = minst_new(mf->arena, LR_MIR_ADD);
+                    add->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_SP };
+                    add->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X17 };
+                    mblock_append(mb, add);
+                }
+
+                /* Result in X0 */
                 if (inst->type && inst->type->kind != LR_TYPE_VOID)
                     emit_store_slot(mf, mb, inst->dest, A64_X0);
                 break;
@@ -1170,6 +1228,15 @@ static int aarch64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen,
                 emit_addr(buf, &pos, buflen, dst, mi->src.mem.base,
                           mi->src.mem.disp);
                 break;
+
+            case LR_MIR_PUSH: {
+                /* str xN, [sp, #-8]! (pre-indexed store, decrement sp by 8) */
+                uint8_t reg = mi->src.reg;
+                /* STR encoding: 1111 1000 00ii iiii iiii 11rr rrrr rrrr */
+                /* imm9 = -8 (0x1F8 in 9-bit two's complement) */
+                emit_u32(buf, &pos, buflen, 0xF81F8FE0u | ((uint32_t)reg << 0));
+                break;
+            }
 
             case LR_MIR_CALL:
                 emit_u32(buf, &pos, buflen, 0xD63F0000u | ((uint32_t)src << 5));
