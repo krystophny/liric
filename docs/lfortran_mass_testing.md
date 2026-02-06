@@ -58,6 +58,7 @@ Useful options:
 All artifacts are written under `/tmp/liric_lfortran_mass/`:
 - `manifest_tests_toml.jsonl`: canonical list from `tests.toml`
 - `manifest_tests_toml.jsonl` includes both selected corpora with a `corpus` field
+- `selection_decisions.jsonl`: per-case selection decision and skip reason
 - `results.jsonl`: per-case outcomes
 - `summary.md`: aggregate metrics
 - `failures.csv`: non-pass rows for triage
@@ -65,11 +66,13 @@ All artifacts are written under `/tmp/liric_lfortran_mass/`:
 
 ## Statistics in Summary
 `summary.md` reports:
-- Total tests in `tests.toml`
+- Total selected tests
 - LLVM emission attempted/succeeded
 - Liric parse attempted/passed
 - Liric JIT attempted/passed
 - Differential attempted/completed/exact-match counts
+- Selected/skipped counts per corpus
+- Skip reason histogram and skip reasons by corpus
 - Supported processed/passed counts
 - Unsupported histogram
 - Mismatch count

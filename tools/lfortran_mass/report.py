@@ -36,6 +36,7 @@ def summarize(
     manifest_total: int,
     processed: List[Dict[str, Any]],
     baseline: List[Dict[str, Any]],
+    selection_rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     counts = classify.counts(processed)
     mismatch_count = counts.get(classify.MISMATCH, 0)
@@ -43,6 +44,22 @@ def summarize(
     for row in processed:
         corpus = str(row.get("corpus", "unknown"))
         corpus_counts[corpus] = corpus_counts.get(corpus, 0) + 1
+
+    selected_by_corpus: Dict[str, int] = {}
+    skipped_by_corpus: Dict[str, int] = {}
+    skipped_reason_counts: Dict[str, int] = {}
+    skipped_by_corpus_reason: Dict[str, int] = {}
+    for row in selection_rows:
+        corpus = str(row.get("corpus", "unknown"))
+        decision = str(row.get("decision", "unknown"))
+        reason = str(row.get("reason", "unknown"))
+        if decision == "selected":
+            selected_by_corpus[corpus] = selected_by_corpus.get(corpus, 0) + 1
+            continue
+        skipped_by_corpus[corpus] = skipped_by_corpus.get(corpus, 0) + 1
+        skipped_reason_counts[reason] = skipped_reason_counts.get(reason, 0) + 1
+        key = f"{corpus}:{reason}"
+        skipped_by_corpus_reason[key] = skipped_by_corpus_reason.get(key, 0) + 1
 
     emit_attempted = sum(1 for row in processed if row.get("emit_attempted"))
     emit_ok = sum(1 for row in processed if row.get("emit_ok"))
@@ -96,6 +113,10 @@ def summarize(
         "differential_match": diff_match,
         "classification_counts": counts,
         "corpus_counts": corpus_counts,
+        "selected_by_corpus": selected_by_corpus,
+        "skipped_by_corpus": skipped_by_corpus,
+        "skipped_reason_counts": skipped_reason_counts,
+        "skipped_by_corpus_reason": skipped_by_corpus_reason,
         "unsupported_histogram": unsupported_histogram,
         "supported_total": supported_total,
         "supported_pass": supported_pass,
@@ -136,6 +157,31 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     corpus_counts: Dict[str, int] = summary.get("corpus_counts", {})
     for key in sorted(corpus_counts.keys()):
         lines.append(f"- {key}: {corpus_counts[key]}")
+
+    lines.append("")
+    lines.append("## Selection Summary")
+    lines.append("")
+    selected_by_corpus: Dict[str, int] = summary.get("selected_by_corpus", {})
+    skipped_by_corpus: Dict[str, int] = summary.get("skipped_by_corpus", {})
+    for key in sorted(set(selected_by_corpus.keys()) | set(skipped_by_corpus.keys())):
+        lines.append(
+            f"- {key}: selected={selected_by_corpus.get(key, 0)}, "
+            f"skipped={skipped_by_corpus.get(key, 0)}"
+        )
+
+    lines.append("")
+    lines.append("## Skip Reasons")
+    lines.append("")
+    skip_reasons: Dict[str, int] = summary.get("skipped_reason_counts", {})
+    for key in sorted(skip_reasons.keys()):
+        lines.append(f"- {key}: {skip_reasons[key]}")
+
+    lines.append("")
+    lines.append("## Skip Reasons By Corpus")
+    lines.append("")
+    skip_by_corpus_reason: Dict[str, int] = summary.get("skipped_by_corpus_reason", {})
+    for key in sorted(skip_by_corpus_reason.keys()):
+        lines.append(f"- {key}: {skip_by_corpus_reason[key]}")
 
     lines.append("")
     lines.append("## Classification Counts")
