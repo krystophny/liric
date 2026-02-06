@@ -4,6 +4,7 @@
 #include "../src/jit.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdint.h>
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -271,6 +272,79 @@ int test_jit_forward_typed_call(void) {
     fn_t fn; LR_JIT_GET_FN(fn, jit, "f");
     TEST_ASSERT(fn != NULL, "function lookup");
     TEST_ASSERT_EQ(fn(), 42, "forward typed call returns 42");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fadd_double_bits(void) {
+    const char *src =
+        "define double @fadd64(double %a, double %b) {\n"
+        "entry:\n"
+        "  %c = fadd double %a, %b\n"
+        "  ret double %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t, uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "fadd64");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double a = 1.25;
+    double b = 2.5;
+    uint64_t a_bits = 0;
+    uint64_t b_bits = 0;
+    memcpy(&a_bits, &a, sizeof(a));
+    memcpy(&b_bits, &b, sizeof(b));
+
+    uint64_t out_bits = fn(a_bits, b_bits);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out > 3.74 && out < 3.76, "fadd64 result is 3.75");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fmul_float_bits(void) {
+    const char *src =
+        "define float @fmul32(float %a, float %b) {\n"
+        "entry:\n"
+        "  %c = fmul float %a, %b\n"
+        "  ret float %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t, uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "fmul32");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    float a = 3.5f;
+    float b = 2.0f;
+    uint32_t a_bits32 = 0;
+    uint32_t b_bits32 = 0;
+    memcpy(&a_bits32, &a, sizeof(a));
+    memcpy(&b_bits32, &b, sizeof(b));
+
+    uint64_t out_bits = fn((uint64_t)a_bits32, (uint64_t)b_bits32);
+    uint32_t out_bits32 = (uint32_t)out_bits;
+    float out = 0.0f;
+    memcpy(&out, &out_bits32, sizeof(out));
+    TEST_ASSERT(out > 6.99f && out < 7.01f, "fmul32 result is 7.0");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);

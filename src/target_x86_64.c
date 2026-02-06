@@ -1,6 +1,7 @@
 #include "target_x86_64.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 
 /*
  * Phase 1: minimal ISel + encoding for "ret i32 <imm>"
@@ -17,6 +18,98 @@ static lr_minst_t *minst_new(lr_arena_t *a, lr_x86_op_t op) {
     mi->op = op;
     mi->size = 8;
     return mi;
+}
+
+static uint32_t fp_add_f32_bits(uint32_t a_bits, uint32_t b_bits) {
+    float a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a + b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint32_t fp_sub_f32_bits(uint32_t a_bits, uint32_t b_bits) {
+    float a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a - b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint32_t fp_mul_f32_bits(uint32_t a_bits, uint32_t b_bits) {
+    float a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a * b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint32_t fp_div_f32_bits(uint32_t a_bits, uint32_t b_bits) {
+    float a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a / b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint64_t fp_add_f64_bits(uint64_t a_bits, uint64_t b_bits) {
+    double a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a + b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint64_t fp_sub_f64_bits(uint64_t a_bits, uint64_t b_bits) {
+    double a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a - b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint64_t fp_mul_f64_bits(uint64_t a_bits, uint64_t b_bits) {
+    double a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a * b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint64_t fp_div_f64_bits(uint64_t a_bits, uint64_t b_bits) {
+    double a, b, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    memcpy(&b, &b_bits, sizeof(b));
+    out = a / b;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static int64_t fp_helper_addr(lr_opcode_t op, lr_type_t *type) {
+    bool is_f32 = type && type->kind == LR_TYPE_FLOAT;
+    if (is_f32) {
+        switch (op) {
+        case LR_OP_FADD: return (int64_t)(uintptr_t)&fp_add_f32_bits;
+        case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f32_bits;
+        case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f32_bits;
+        case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f32_bits;
+        default: return 0;
+        }
+    }
+    switch (op) {
+    case LR_OP_FADD: return (int64_t)(uintptr_t)&fp_add_f64_bits;
+    case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f64_bits;
+    case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f64_bits;
+    case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f64_bits;
+    default: return 0;
+    }
 }
 
 static void mblock_append(lr_mblock_t *mb, lr_minst_t *mi) {
@@ -91,6 +184,23 @@ static void emit_load_operand(lr_mfunc_t *mf, lr_mblock_t *mb,
         mblock_append(mb, mi);
     } else if (op->kind == LR_VAL_VREG) {
         emit_load_slot(mf, mb, op->vreg, reg);
+    } else if (op->kind == LR_VAL_IMM_F64) {
+        int64_t imm_bits = 0;
+        if (op->type && op->type->kind == LR_TYPE_FLOAT) {
+            float fv = (float)op->imm_f64;
+            uint32_t bits = 0;
+            memcpy(&bits, &fv, sizeof(bits));
+            imm_bits = (int64_t)(uint64_t)bits;
+        } else {
+            uint64_t bits = 0;
+            memcpy(&bits, &op->imm_f64, sizeof(bits));
+            imm_bits = (int64_t)bits;
+        }
+        lr_minst_t *mi = minst_new(mf->arena, LR_X86_MOV_IMM);
+        mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
+        mi->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = imm_bits };
+        mi->size = 8;
+        mblock_append(mb, mi);
     } else if (op->kind == LR_VAL_NULL) {
         lr_minst_t *mi = minst_new(mf->arena, LR_X86_MOV_IMM);
         mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
@@ -171,6 +281,22 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
                 mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RCX };
                 mi->size = (uint8_t)lr_type_size(inst->type);
                 mblock_append(mb, mi);
+                emit_store_slot(mf, mb, inst->dest, X86_RAX);
+                break;
+            }
+            case LR_OP_FADD: case LR_OP_FSUB:
+            case LR_OP_FMUL: case LR_OP_FDIV: {
+                int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
+                emit_load_operand(mf, mb, &inst->operands[0], X86_RDI);
+                emit_load_operand(mf, mb, &inst->operands[1], X86_RSI);
+                lr_minst_t *mov = minst_new(mf->arena, LR_X86_MOV_IMM);
+                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
+                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
+                mov->size = 8;
+                mblock_append(mb, mov);
+                lr_minst_t *call = minst_new(mf->arena, LR_X86_CALL);
+                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
+                mblock_append(mb, call);
                 emit_store_slot(mf, mb, inst->dest, X86_RAX);
                 break;
             }
