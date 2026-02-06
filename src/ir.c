@@ -172,6 +172,33 @@ lr_operand_t lr_op_null(lr_type_t *type) {
     return (lr_operand_t){ .kind = LR_VAL_NULL, .type = type };
 }
 
+uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name) {
+    for (uint32_t i = 0; i < m->num_symbols; i++) {
+        if (strcmp(m->symbol_names[i], name) == 0)
+            return i;
+    }
+
+    if (m->num_symbols == m->symbol_cap) {
+        uint32_t old_cap = m->symbol_cap;
+        uint32_t new_cap = old_cap == 0 ? 64 : old_cap * 2;
+        char **names = lr_arena_array(m->arena, char *, new_cap);
+        if (old_cap > 0)
+            memcpy(names, m->symbol_names, sizeof(char *) * old_cap);
+        m->symbol_names = names;
+        m->symbol_cap = new_cap;
+    }
+
+    uint32_t id = m->num_symbols++;
+    m->symbol_names[id] = lr_arena_strdup(m->arena, name, strlen(name));
+    return id;
+}
+
+const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id) {
+    if (!m || id >= m->num_symbols)
+        return NULL;
+    return m->symbol_names[id];
+}
+
 size_t lr_type_size(const lr_type_t *t) {
     switch (t->kind) {
     case LR_TYPE_VOID:   return 0;

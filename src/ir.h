@@ -163,6 +163,9 @@ typedef struct lr_module {
     lr_global_t *first_global;
     lr_global_t *last_global;
     uint32_t num_globals;
+    char **symbol_names;
+    uint32_t num_symbols;
+    uint32_t symbol_cap;
     lr_type_t *type_void;
     lr_type_t *type_i1;
     lr_type_t *type_i8;
@@ -198,6 +201,8 @@ lr_operand_t lr_op_imm_f64(double val, lr_type_t *type);
 lr_operand_t lr_op_block(uint32_t id);
 lr_operand_t lr_op_global(uint32_t id, lr_type_t *type);
 lr_operand_t lr_op_null(lr_type_t *type);
+uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
+const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
 
 size_t lr_type_size(const lr_type_t *t);
 size_t lr_type_align(const lr_type_t *t);

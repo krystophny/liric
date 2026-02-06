@@ -245,3 +245,34 @@ int test_jit_alloca_load_store(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_forward_typed_call(void) {
+    const char *src =
+        "define i32 @f() {\n"
+        ".entry:\n"
+        "  %0 = call i32 () @g()\n"
+        "  %1 = add i32 %0, 2\n"
+        "  ret i32 %1\n"
+        "}\n"
+        "define i32 @g() {\n"
+        ".entry:\n"
+        "  ret i32 40\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "f");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "forward typed call returns 42");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}

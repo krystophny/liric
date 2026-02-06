@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
 
@@ -139,62 +140,121 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return addr;
 }
 
-/* Resolve LR_VAL_GLOBAL operands in CALL instructions to addresses */
-static void resolve_calls(lr_jit_t *j, lr_func_t *f, lr_module_t *m) {
+static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
+    const char *name = lr_module_symbol_name(m, global_id);
+    if (name && name[0])
+        return name;
+
+    /* Backward-compatible fallback for modules that encoded function index. */
+    uint32_t idx = 0;
+    for (lr_func_t *fn = m->first_func; fn; fn = fn->next, idx++) {
+        if (idx == global_id)
+            return fn->name;
+    }
+
+    return NULL;
+}
+
+/*
+ * Resolve global/function symbol operands to concrete addresses.
+ * Returns:
+ *   0  success
+ *   1  unresolved symbol (retry later)
+ *  -1  malformed IR/symbol table state
+ */
+static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
+                                   void *self_addr) {
     for (lr_block_t *b = f->first_block; b; b = b->next) {
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (inst->op != LR_OP_CALL) continue;
-            if (inst->num_operands == 0) continue;
-            lr_operand_t *callee = &inst->operands[0];
-            if (callee->kind != LR_VAL_GLOBAL) continue;
+            for (uint32_t i = 0; i < inst->num_operands; i++) {
+                lr_operand_t *op = &inst->operands[i];
+                if (op->kind != LR_VAL_GLOBAL)
+                    continue;
 
-            /* Find function name by walking the module's function list */
-            const char *name = NULL;
-            uint32_t idx = 0;
-            for (lr_func_t *fn = m->first_func; fn; fn = fn->next, idx++) {
-                if (idx == callee->global_id) { name = fn->name; break; }
-            }
-            if (!name) continue;
+                const char *name = resolve_global_name(m, op->global_id);
+                if (!name || !name[0])
+                    return -1;
 
-            void *addr = lookup_symbol(j, name);
-            if (addr) {
-                callee->kind = LR_VAL_IMM_I64;
-                callee->imm_i64 = (int64_t)(intptr_t)addr;
+                void *addr = lookup_symbol(j, name);
+                if (!addr && strcmp(name, f->name) == 0)
+                    addr = self_addr;
+                if (!addr)
+                    return 1;
+
+                op->kind = LR_VAL_IMM_I64;
+                op->imm_i64 = (int64_t)(intptr_t)addr;
             }
         }
     }
+    return 0;
 }
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
     if (make_writable(j) != 0) return -1;
 
+    uint32_t nfuncs = 0;
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (f->is_decl) continue;
+        if (!f->is_decl)
+            nfuncs++;
+    }
 
-        /* Pre-resolve call targets to addresses */
-        resolve_calls(j, f, m);
-
-        lr_mfunc_t *mf = lr_arena_new(j->arena, lr_mfunc_t);
-        mf->arena = j->arena;
-
-        int rc = j->target->isel_func(f, mf, m);
-        if (rc != 0) return rc;
-
-        uint8_t tmp_buf[65536];
-        size_t code_len = 0;
-        rc = j->target->encode_func(mf, tmp_buf, sizeof(tmp_buf), &code_len);
-        if (rc != 0) return rc;
-
-        if (j->code_size + code_len > j->code_cap)
+    if (nfuncs == 0) {
+        if (make_executable(j) != 0)
             return -1;
+        return 0;
+    }
 
-        uint8_t *func_start = j->code_buf + j->code_size;
-        memcpy(func_start, tmp_buf, code_len);
-        j->code_size += code_len;
+    lr_func_t **funcs = lr_arena_array(j->arena, lr_func_t *, nfuncs);
+    bool *compiled = lr_arena_array(j->arena, bool, nfuncs);
+    uint32_t fi = 0;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->is_decl)
+            funcs[fi++] = f;
+    }
 
-        /* Register this function as a symbol */
-        lr_jit_add_symbol(j, f->name, func_start);
+    uint32_t remaining = nfuncs;
+    while (remaining > 0) {
+        bool progress = false;
+
+        for (uint32_t i = 0; i < nfuncs; i++) {
+            if (compiled[i])
+                continue;
+
+            lr_func_t *f = funcs[i];
+            void *self_addr = j->code_buf + j->code_size;
+            int resolve_rc = resolve_global_operands(j, m, f, self_addr);
+            if (resolve_rc == 1)
+                continue;
+            if (resolve_rc != 0)
+                return -1;
+
+            lr_mfunc_t *mf = lr_arena_new(j->arena, lr_mfunc_t);
+            mf->arena = j->arena;
+
+            int rc = j->target->isel_func(f, mf, m);
+            if (rc != 0) return rc;
+
+            uint8_t tmp_buf[65536];
+            size_t code_len = 0;
+            rc = j->target->encode_func(mf, tmp_buf, sizeof(tmp_buf), &code_len);
+            if (rc != 0) return rc;
+
+            if (j->code_size + code_len > j->code_cap)
+                return -1;
+
+            uint8_t *func_start = j->code_buf + j->code_size;
+            memcpy(func_start, tmp_buf, code_len);
+            j->code_size += code_len;
+
+            lr_jit_add_symbol(j, f->name, func_start);
+            compiled[i] = true;
+            remaining--;
+            progress = true;
+        }
+
+        if (!progress)
+            return -1;
     }
 
     if (make_executable(j) != 0)
