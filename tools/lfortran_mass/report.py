@@ -39,6 +39,10 @@ def summarize(
 ) -> Dict[str, Any]:
     counts = classify.counts(processed)
     mismatch_count = counts.get(classify.MISMATCH, 0)
+    corpus_counts: Dict[str, int] = {}
+    for row in processed:
+        corpus = str(row.get("corpus", "unknown"))
+        corpus_counts[corpus] = corpus_counts.get(corpus, 0) + 1
 
     emit_attempted = sum(1 for row in processed if row.get("emit_attempted"))
     emit_ok = sum(1 for row in processed if row.get("emit_ok"))
@@ -91,6 +95,7 @@ def summarize(
         "differential_ok": diff_ok,
         "differential_match": diff_match,
         "classification_counts": counts,
+        "corpus_counts": corpus_counts,
         "unsupported_histogram": unsupported_histogram,
         "supported_total": supported_total,
         "supported_pass": supported_pass,
@@ -107,7 +112,7 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     lines: List[str] = []
     lines.append("# LFortran Mass Testing Summary")
     lines.append("")
-    lines.append(f"- Total tests in tests.toml: {summary['manifest_total']}")
+    lines.append(f"- Total selected tests: {summary['manifest_total']}")
     lines.append(f"- Processed tests: {summary['processed_total']}")
     lines.append(f"- LLVM emission attempted: {summary['emit_attempted']}")
     lines.append(f"- LLVM emission succeeded: {summary['emit_ok']}")
@@ -125,6 +130,13 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
         f"- New supported regressions: {summary['new_supported_regressions']}"
     )
     lines.append(f"- Gate fail: {summary['gate_fail']}")
+    lines.append("")
+    lines.append("## Corpus Counts")
+    lines.append("")
+    corpus_counts: Dict[str, int] = summary.get("corpus_counts", {})
+    for key in sorted(corpus_counts.keys()):
+        lines.append(f"- {key}: {corpus_counts[key]}")
+
     lines.append("")
     lines.append("## Classification Counts")
     lines.append("")

@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 @dataclass
 class LFortranTestEntry:
+    corpus: str
     index: int
     filename_raw: str
     source_path: Path
@@ -26,14 +27,22 @@ class LFortranTestEntry:
     pass_with_llvm: bool
     pass_name: str
     fast: bool
+    obj: bool
+    bin: bool
 
     def to_manifest_record(self, lfortran_version: str) -> Dict[str, Any]:
         source_hash = file_sha256(self.source_path)
         case_id = stable_case_id(
-            str(self.source_path), source_hash, lfortran_version, self.recipe_kind()
+            source_path=str(self.source_path),
+            source_hash=source_hash,
+            lfortran_version=lfortran_version,
+            recipe_kind=self.recipe_kind(),
+            options=self.options,
+            source_tag=f"{self.corpus}:{self.filename_raw}",
         )
         return {
             "case_id": case_id,
+            "corpus": self.corpus,
             "index": self.index,
             "filename": self.filename_raw,
             "source_path": str(self.source_path),
@@ -47,6 +56,8 @@ class LFortranTestEntry:
             "pass_with_llvm": self.pass_with_llvm,
             "pass": self.pass_name,
             "fast": self.fast,
+            "obj": self.obj,
+            "bin": self.bin,
             "asr_implicit_interface_and_typing_with_llvm": (
                 self.asr_implicit_interface_and_typing_with_llvm
             ),
@@ -71,9 +82,16 @@ def file_sha256(path: Path) -> str:
 
 
 def stable_case_id(
-    source_path: str, source_hash: str, lfortran_version: str, recipe_kind: str
+    source_path: str,
+    source_hash: str,
+    lfortran_version: str,
+    recipe_kind: str,
+    options: str = "",
+    source_tag: str = "",
 ) -> str:
-    payload = "|".join([source_path, source_hash, lfortran_version, recipe_kind])
+    payload = "|".join(
+        [source_path, source_hash, lfortran_version, recipe_kind, options, source_tag]
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
@@ -183,6 +201,7 @@ def iter_entries(tests_toml: Path, lfortran_root: Path) -> Iterable[LFortranTest
         ]
 
         entry = LFortranTestEntry(
+            corpus="tests_toml",
             index=idx,
             filename_raw=filename,
             source_path=source_path,
@@ -198,8 +217,26 @@ def iter_entries(tests_toml: Path, lfortran_root: Path) -> Iterable[LFortranTest
             pass_with_llvm=bool(raw.get("pass_with_llvm", False)),
             pass_name=str(raw.get("pass", "")).strip(),
             fast=bool(raw.get("fast", False)),
+            obj=bool(raw.get("obj", False)),
+            bin=bool(raw.get("bin", False)),
         )
         yield entry
+
+
+def is_llvm_intended(entry: LFortranTestEntry) -> bool:
+    return bool(
+        entry.pass_with_llvm
+        or entry.asr_implicit_interface_and_typing_with_llvm
+        or entry.run
+        or entry.run_with_dbg
+        or entry.obj
+        or entry.bin
+    )
+
+
+def is_expected_failure(entry: LFortranTestEntry) -> bool:
+    p = entry.filename_raw
+    return p.startswith("errors/") or "/errors/" in p
 
 
 def entries_to_manifest(

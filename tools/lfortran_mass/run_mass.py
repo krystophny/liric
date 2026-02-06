@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import classify
+from . import integration_tests_cmake
 from . import lfortran_tests_toml
 from . import report
 
@@ -98,7 +99,7 @@ def run_cmd(cmd: List[str], cwd: Path, timeout_sec: int) -> CommandResult:
     )
 
 
-def choose_emit_recipe(entry: lfortran_tests_toml.LFortranTestEntry) -> str:
+def choose_emit_recipe(entry: Any) -> str:
     if entry.pass_with_llvm and entry.pass_name:
         return "pass_with_llvm"
     if entry.asr_implicit_interface_and_typing_with_llvm:
@@ -110,7 +111,7 @@ def choose_emit_recipe(entry: lfortran_tests_toml.LFortranTestEntry) -> str:
 
 def emit_command(
     lfortran_bin: Path,
-    entry: lfortran_tests_toml.LFortranTestEntry,
+    entry: Any,
     output_ll: Path,
 ) -> List[str]:
     recipe = choose_emit_recipe(entry)
@@ -135,7 +136,7 @@ def emit_command(
 
 def compile_extrafiles(
     cfg: RunnerConfig,
-    entry: lfortran_tests_toml.LFortranTestEntry,
+    entry: Any,
     case_dir: Path,
 ) -> Optional[CommandResult]:
     for extrafile in entry.extrafiles:
@@ -195,7 +196,7 @@ def signature_kind(ret_type: str, args: str) -> str:
 
 def reference_run_command(
     cfg: RunnerConfig,
-    entry: lfortran_tests_toml.LFortranTestEntry,
+    entry: Any,
 ) -> List[str]:
     cmd = [str(cfg.lfortran_bin)]
     if entry.run_with_dbg:
@@ -212,7 +213,7 @@ def probe_run_command(cfg: RunnerConfig, ll_path: Path, func: str, sig: str) -> 
 
 def init_result_row(
     manifest_row: Dict[str, Any],
-    entry: lfortran_tests_toml.LFortranTestEntry,
+    entry: Any,
 ) -> Dict[str, Any]:
     row = dict(manifest_row)
     row.update(
@@ -256,7 +257,7 @@ def load_cached_case_result(case_dir: Path) -> Optional[Dict[str, Any]]:
 
 
 def process_case(
-    entry: lfortran_tests_toml.LFortranTestEntry,
+    entry: Any,
     manifest_row: Dict[str, Any],
     cfg: RunnerConfig,
 ) -> Dict[str, Any]:
@@ -443,6 +444,14 @@ def parse_args() -> argparse.Namespace:
         help="Path to tests.toml (default: <lfortran-root>/tests/tests.toml)",
     )
     parser.add_argument(
+        "--integration-cmake",
+        default=None,
+        help=(
+            "Path to integration_tests/CMakeLists.txt "
+            "(default: <lfortran-root>/integration_tests/CMakeLists.txt)"
+        ),
+    )
+    parser.add_argument(
         "--lfortran-bin",
         default=None,
         help=(
@@ -482,6 +491,21 @@ def parse_args() -> argparse.Namespace:
         help="Parallel workers (default: NCPU-1)",
     )
     parser.add_argument(
+        "--skip-tests-toml",
+        action="store_true",
+        help="Do not include tests/tests.toml corpus",
+    )
+    parser.add_argument(
+        "--skip-integration-cmake",
+        action="store_true",
+        help="Do not include integration_tests/CMakeLists corpus",
+    )
+    parser.add_argument(
+        "--include-expected-fail",
+        action="store_true",
+        help="Include expected-failure tests (default is excluded)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -513,6 +537,11 @@ def main() -> int:
         if args.tests_toml
         else (lfortran_root / "tests" / "tests.toml").resolve()
     )
+    integration_cmake = (
+        Path(args.integration_cmake).resolve()
+        if args.integration_cmake
+        else (lfortran_root / "integration_tests" / "CMakeLists.txt").resolve()
+    )
     lfortran_bin = (
         Path(args.lfortran_bin).resolve()
         if args.lfortran_bin
@@ -525,7 +554,10 @@ def main() -> int:
     cache_dir = output_root / "cache"
 
     ensure_exists(lfortran_root, "lfortran root")
-    ensure_exists(tests_toml, "tests.toml")
+    if not args.skip_tests_toml:
+        ensure_exists(tests_toml, "tests.toml")
+    if not args.skip_integration_cmake:
+        ensure_exists(integration_cmake, "integration CMakeLists")
     ensure_exists(lfortran_bin, "lfortran binary")
     ensure_exists(liric_cli, "liric_cli binary")
     ensure_exists(probe_runner, "liric_probe_runner binary")
@@ -540,7 +572,49 @@ def main() -> int:
     if not lfortran_version:
         lfortran_version = "unknown"
 
-    entries = list(lfortran_tests_toml.iter_entries(tests_toml, lfortran_root))
+    entries: List[Any] = []
+    skipped_non_llvm = 0
+    skipped_expected_fail = 0
+
+    if not args.skip_tests_toml:
+        for entry in lfortran_tests_toml.iter_entries(tests_toml, lfortran_root):
+            if not lfortran_tests_toml.is_llvm_intended(entry):
+                skipped_non_llvm += 1
+                continue
+            if (not args.include_expected_fail) and lfortran_tests_toml.is_expected_failure(entry):
+                skipped_expected_fail += 1
+                continue
+            entries.append(entry)
+
+    if not args.skip_integration_cmake:
+        for entry in integration_tests_cmake.iter_integration_entries(integration_cmake):
+            if not integration_tests_cmake.is_llvm_intended(entry):
+                skipped_non_llvm += 1
+                continue
+            if (not args.include_expected_fail) and integration_tests_cmake.is_expected_failure(entry):
+                skipped_expected_fail += 1
+                continue
+            entries.append(entry)
+
+    deduped_entries: List[Any] = []
+    seen_keys = set()
+    deduped_count = 0
+    for entry in entries:
+        key = (
+            str(entry.source_path),
+            entry.options,
+            tuple(str(x) for x in entry.extrafiles),
+            choose_emit_recipe(entry),
+            bool(entry.run),
+            bool(entry.run_with_dbg),
+        )
+        if key in seen_keys:
+            deduped_count += 1
+            continue
+        seen_keys.add(key)
+        deduped_entries.append(entry)
+
+    entries = deduped_entries
     if args.limit > 0:
         entries = entries[: args.limit]
 
@@ -604,6 +678,9 @@ def main() -> int:
     print(f"results: {results_path}")
     print(f"summary: {summary_path}")
     print(f"failures: {failures_path}")
+    print(f"filtered_non_llvm: {skipped_non_llvm}")
+    print(f"filtered_expected_fail: {skipped_expected_fail}")
+    print(f"deduped_cases: {deduped_count}")
 
     ok, message = report.gate_result(summary)
     print(f"gate: {'pass' if ok else 'fail'} ({message})")

@@ -2,13 +2,16 @@
 
 ## Goal
 Use LFortran's declared test corpus from `../lfortran/tests/tests.toml` as the only
-source of test cases, generate LLVM IR with LFortran, and evaluate compatibility in
-liric parse/JIT/runtime lanes.
+source of unit test cases, plus integration metadata from
+`../lfortran/integration_tests/CMakeLists.txt`, generate LLVM IR with LFortran, and
+evaluate compatibility in liric parse/JIT/runtime lanes.
 
 ## Design Principles
 - Reuse LFortran test configuration directly from `tests.toml`.
+- Reuse LFortran integration test definitions directly from integration `RUN(...)`.
 - Do not duplicate test lists or copy LFortran config files into this repository.
 - Feed liric raw `--show-llvm` output from LFortran without preprocessing.
+- Exclude expected-failure tests by default.
 - Treat unsupported features/ABI as tracked non-fatal buckets.
 - Fail only on mismatches and new supported regressions.
 
@@ -19,6 +22,7 @@ liric parse/JIT/runtime lanes.
 Defaults are:
 - LFortran root: `../lfortran`
 - tests.toml: `../lfortran/tests/tests.toml`
+- integration CMake: `../lfortran/integration_tests/CMakeLists.txt`
 - LFortran binary: `../lfortran/build_clean_bison/src/bin/lfortran`
 
 ## Build Prerequisites
@@ -43,10 +47,14 @@ Useful options:
 - `--force`: ignore case cache and rerun
 - `--baseline <path>`: compare against previous results
 - `--update-baseline`: write current run as baseline snapshot
+- `--skip-tests-toml`: run only integration corpus
+- `--skip-integration-cmake`: run only unit corpus
+- `--include-expected-fail`: include expected-failure/error-handling tests
 
 ## Outputs
 All artifacts are written under `/tmp/liric_lfortran_mass/`:
 - `manifest_tests_toml.jsonl`: canonical list from `tests.toml`
+- `manifest_tests_toml.jsonl` includes both selected corpora with a `corpus` field
 - `results.jsonl`: per-case outcomes
 - `summary.md`: aggregate metrics
 - `failures.csv`: non-pass rows for triage
@@ -72,3 +80,12 @@ For tests with `run = true` or `run_with_dbg = true`:
 3. Compare normalized stdout/stderr and return code.
 
 If signature/ABI is unsupported by the runner, classify as `unsupported_abi`.
+
+## Selection Rules
+- `tests.toml` entries are included only if LLVM-intended:
+  `pass_with_llvm`, `asr_implicit_interface_and_typing_with_llvm`,
+  `run`, `run_with_dbg`, `obj`, or `bin`.
+- `tests.toml` expected-failure unit tests are excluded when path is under `errors/`.
+- `integration_tests/CMakeLists.txt` entries are included only if `RUN(...)` has
+  native `llvm` label.
+- `RUN(... FAIL ...)` integration tests are excluded by default.
