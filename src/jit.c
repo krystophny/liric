@@ -18,6 +18,13 @@
 #define CODE_PAGE_SIZE (1024 * 1024)
 #define DATA_PAGE_SIZE (256 * 1024)
 
+static size_t align_up(size_t value, size_t align) {
+    if (align == 0)
+        return value;
+    size_t mask = align - 1;
+    return (value + mask) & ~mask;
+}
+
 static int make_writable(lr_jit_t *j) {
     if (j->map_jit_enabled) {
 #if LR_CAN_USE_MAP_JIT
@@ -140,6 +147,37 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return addr;
 }
 
+static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->name || !g->name[0])
+            continue;
+        if (lookup_symbol(j, g->name))
+            continue;
+
+        size_t align = lr_type_align(g->type);
+        if (align == 0)
+            align = sizeof(void *);
+        size_t size = lr_type_size(g->type);
+        if (size == 0)
+            size = sizeof(void *);
+
+        size_t off = align_up(j->data_size, align);
+        if (off + size > j->data_cap)
+            return -1;
+
+        uint8_t *dst = j->data_buf + off;
+        memset(dst, 0, size);
+        if (g->init_data && g->init_size > 0) {
+            size_t copy_n = g->init_size < size ? g->init_size : size;
+            memcpy(dst, g->init_data, copy_n);
+        }
+
+        j->data_size = off + size;
+        lr_jit_add_symbol(j, g->name, dst);
+    }
+    return 0;
+}
+
 static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
     const char *name = lr_module_symbol_name(m, global_id);
     if (name && name[0])
@@ -192,6 +230,7 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
     if (make_writable(j) != 0) return -1;
+    if (materialize_module_globals(j, m) != 0) return -1;
 
     uint32_t nfuncs = 0;
     for (lr_func_t *f = m->first_func; f; f = f->next) {
