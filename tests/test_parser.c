@@ -409,6 +409,38 @@ int test_parser_select_with_ptr_operands(void) {
     return 0;
 }
 
+int test_parser_bitcast_const_expr_operand(void) {
+    const char *src =
+        "@arr = global [3 x i32] zeroinitializer\n"
+        "declare void @llvm.memcpy.p0i8.p0i8.i32(i8*, i8*, i32, i1)\n"
+        "define void @f(ptr %dst) {\n"
+        "entry:\n"
+        "  call void @llvm.memcpy.p0i8.p0i8.i32("
+        "i8* %dst, i8* bitcast ([3 x i32]* @arr to i8*), i32 12, i1 false)\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    while (f && strcmp(f->name, "f") != 0)
+        f = f->next;
+    TEST_ASSERT(f != NULL, "function f exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *call = b->first;
+    TEST_ASSERT(call != NULL, "call exists");
+    TEST_ASSERT_EQ(call->op, LR_OP_CALL, "call parsed");
+    TEST_ASSERT_EQ(call->operands[2].kind, LR_VAL_GLOBAL,
+                   "bitcast const expr lowered to global ref");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_quoted_label_names(void) {
     const char *src =
         "define i32 @main() {\n"
@@ -518,6 +550,37 @@ int test_parser_boolean_literals(void) {
     return 0;
 }
 
+int test_parser_function_pointer_type(void) {
+    const char *src =
+        "@f_ptr = global ptr null\n"
+        "define void @f() {\n"
+        "entry:\n"
+        "  %0 = load void ()*, void ()** @f_ptr\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    while (f && strcmp(f->name, "f") != 0)
+        f = f->next;
+    TEST_ASSERT(f != NULL, "function f exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *load = b->first;
+    TEST_ASSERT(load != NULL, "load exists");
+    TEST_ASSERT_EQ(load->op, LR_OP_LOAD, "load parsed");
+    TEST_ASSERT_EQ(load->type->kind, LR_TYPE_PTR,
+                   "void ()* collapsed to ptr");
+    TEST_ASSERT_EQ(load->operands[0].kind, LR_VAL_GLOBAL,
+                   "load source is global");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
 
 int test_parser_named_params_no_collision(void) {
     const char *src =

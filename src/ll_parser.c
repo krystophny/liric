@@ -421,6 +421,20 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
     }
     if (check(p, LR_TOK_GETELEMENTPTR))
         return parse_const_gep_operand(p, type);
+    if (check(p, LR_TOK_BITCAST) || check(p, LR_TOK_INTTOPTR) ||
+        check(p, LR_TOK_PTRTOINT) || check(p, LR_TOK_SEXT) ||
+        check(p, LR_TOK_ZEXT) || check(p, LR_TOK_TRUNC) ||
+        check(p, LR_TOK_SITOFP) || check(p, LR_TOK_FPTOSI) ||
+        check(p, LR_TOK_FPEXT) || check(p, LR_TOK_FPTRUNC)) {
+        next(p);
+        expect(p, LR_TOK_LPAREN);
+        lr_operand_t src = parse_typed_operand(p);
+        expect(p, LR_TOK_TO);
+        (void)parse_type(p);
+        expect(p, LR_TOK_RPAREN);
+        src.type = type;
+        return src;
+    }
     if (check(p, LR_TOK_LBRACE) || check(p, LR_TOK_LBRACKET))
         return parse_aggregate_constant_operand(p, type);
     if (check(p, LR_TOK_LANGLE)) {
