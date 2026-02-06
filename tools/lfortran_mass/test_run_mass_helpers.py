@@ -6,6 +6,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from tools.lfortran_mass import run_mass
 
@@ -60,6 +61,38 @@ class RunMassHelperTests(unittest.TestCase):
 
             got = run_mass.resolve_default_lfortran_bin(root)
             self.assertEqual(got, (clean_bin / "lfortran").resolve())
+
+    def test_resolve_default_runtime_lib_uses_bin_adjacent_runtime(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "build" / "src" / "bin"
+            runtime_dir = root / "build" / "src" / "runtime"
+            bin_dir.mkdir(parents=True)
+            runtime_dir.mkdir(parents=True)
+            lfortran_bin = bin_dir / "lfortran"
+            runtime_lib = runtime_dir / "liblfortran_runtime.so"
+            lfortran_bin.write_text("", encoding="utf-8")
+            runtime_lib.write_text("", encoding="utf-8")
+
+            with patch.dict("os.environ", {}, clear=False):
+                got = run_mass.resolve_default_runtime_lib(root, lfortran_bin)
+            self.assertEqual(got, runtime_lib.resolve())
+
+    def test_resolve_default_runtime_lib_prefers_env_dir(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "build" / "src" / "bin"
+            runtime_dir = root / "custom_rt"
+            bin_dir.mkdir(parents=True)
+            runtime_dir.mkdir(parents=True)
+            lfortran_bin = bin_dir / "lfortran"
+            runtime_lib = runtime_dir / "liblfortran_runtime.so"
+            lfortran_bin.write_text("", encoding="utf-8")
+            runtime_lib.write_text("", encoding="utf-8")
+
+            with patch.dict("os.environ", {"LFORTRAN_RUNTIME_LIBRARY_DIR": str(runtime_dir)}, clear=False):
+                got = run_mass.resolve_default_runtime_lib(root, lfortran_bin)
+            self.assertEqual(got, runtime_lib.resolve())
 
 
 if __name__ == "__main__":

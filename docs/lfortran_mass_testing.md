@@ -31,6 +31,9 @@ Defaults are:
 - LFortran binary: auto-detected:
   - `../lfortran/build/src/bin/lfortran` (preferred)
   - `../lfortran/build_clean_bison/src/bin/lfortran` (fallback)
+- Runtime library preload: auto-detected when available:
+  - `<detected-lfortran-bin>/../runtime/liblfortran_runtime.so`
+  - env override: `$LFORTRAN_RUNTIME_LIBRARY_DIR/liblfortran_runtime.so`
 
 ## Build Prerequisites
 ```bash
@@ -58,6 +61,7 @@ Useful options:
 - `--skip-integration-cmake`: run only unit corpus
 - `--include-expected-fail`: include expected-failure/error-handling tests
 - `--load-lib <path>`: preload runtime libraries into liric JIT (repeatable)
+- `--no-auto-runtime-lib`: disable automatic preload of `liblfortran_runtime`
 
 ## Outputs
 All artifacts are written under `/tmp/liric_lfortran_mass/`:
