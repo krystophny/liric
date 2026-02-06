@@ -137,6 +137,8 @@ typedef enum lr_tok {
     LR_TOK_STAR,
     LR_TOK_DOTDOTDOT,
     LR_TOK_COLON,
+    LR_TOK_LANGLE,
+    LR_TOK_RANGLE,
     LR_TOK_EXCLAIM,
     LR_TOK_X,           /* 'x' in array types like [4 x i32] */
     LR_TOK_HASH,        /* # for attribute groups */
