@@ -378,6 +378,17 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         return parse_const_gep_operand(p, type);
     if (check(p, LR_TOK_LBRACE) || check(p, LR_TOK_LBRACKET))
         return parse_aggregate_constant_operand(p, type);
+    if (check(p, LR_TOK_LANGLE)) {
+        /* packed struct literal: <{ ... }> */
+        next(p);  /* consume < */
+        if (!check(p, LR_TOK_LBRACE)) {
+            error(p, "expected '{' after '<' in packed struct literal");
+            return lr_op_imm_i64(0, type);
+        }
+        skip_balanced_braces(p);
+        expect(p, LR_TOK_RANGLE);
+        return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
+    }
     error(p, "expected operand, got '%s'", lr_tok_name(p->cur.kind));
     return lr_op_imm_i64(0, type);
 }
