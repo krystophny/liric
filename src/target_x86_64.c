@@ -92,6 +92,22 @@ static uint64_t fp_div_f64_bits(uint64_t a_bits, uint64_t b_bits) {
     return a_bits;
 }
 
+static uint32_t fp_neg_f32_bits(uint32_t a_bits) {
+    float a, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    out = -a;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
+static uint64_t fp_neg_f64_bits(uint64_t a_bits) {
+    double a, out;
+    memcpy(&a, &a_bits, sizeof(a));
+    out = -a;
+    memcpy(&a_bits, &out, sizeof(out));
+    return a_bits;
+}
+
 static uint64_t fp_cmp_f32_bits(uint64_t a_bits, uint64_t b_bits, uint64_t pred) {
     uint32_t in_a = (uint32_t)a_bits, in_b = (uint32_t)b_bits;
     float a, b;
@@ -179,6 +195,7 @@ static int64_t fp_helper_addr(lr_opcode_t op, lr_type_t *type) {
         case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f32_bits;
         case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f32_bits;
         case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f32_bits;
+        case LR_OP_FNEG: return (int64_t)(uintptr_t)&fp_neg_f32_bits;
         default: return 0;
         }
     }
@@ -187,6 +204,7 @@ static int64_t fp_helper_addr(lr_opcode_t op, lr_type_t *type) {
     case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f64_bits;
     case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f64_bits;
     case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f64_bits;
+    case LR_OP_FNEG: return (int64_t)(uintptr_t)&fp_neg_f64_bits;
     default: return 0;
     }
 }
@@ -384,6 +402,20 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
                 int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
                 emit_load_operand(mf, mb, &inst->operands[0], X86_RDI);
                 emit_load_operand(mf, mb, &inst->operands[1], X86_RSI);
+                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
+                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
+                mov->size = 8;
+                mblock_append(mb, mov);
+                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
+                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
+                mblock_append(mb, call);
+                emit_store_slot(mf, mb, inst->dest, X86_RAX);
+                break;
+            }
+            case LR_OP_FNEG: {
+                int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
+                emit_load_operand(mf, mb, &inst->operands[0], X86_RDI);
                 lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
                 mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
                 mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };

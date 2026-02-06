@@ -50,6 +50,7 @@ typedef enum lr_opcode {
     LR_OP_FSUB,
     LR_OP_FMUL,
     LR_OP_FDIV,
+    LR_OP_FNEG,
     LR_OP_ICMP,
     LR_OP_FCMP,
     LR_OP_ALLOCA,
