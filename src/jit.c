@@ -260,6 +260,7 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
 }
 
 static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
+    /* First pass: allocate space and copy raw init_data for all globals */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->name || !g->name[0])
             continue;
@@ -286,6 +287,26 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
 
         j->data_size = off + size;
         lr_jit_add_symbol(j, g->name, dst);
+    }
+
+    /* Second pass: apply pointer relocations now that all globals are placed */
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->relocs)
+            continue;
+        uint8_t *base = lookup_symbol(j, g->name);
+        if (!base)
+            continue;
+        for (lr_reloc_t *r = g->relocs; r; r = r->next) {
+            void *target = lookup_symbol(j, r->symbol_name);
+            if (!target)
+                continue;
+            uintptr_t addr = (uintptr_t)target;
+            size_t global_size = lr_type_size(g->type);
+            if (global_size == 0)
+                global_size = sizeof(void *);
+            if (r->offset + sizeof(uintptr_t) <= global_size)
+                memcpy(base + r->offset, &addr, sizeof(addr));
+        }
     }
     return 0;
 }
