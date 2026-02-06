@@ -548,12 +548,33 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
 
             case LR_TOK_ALLOCA: {
                 lr_type_t *ty = parse_type(p);
-                /* skip optional ", align N" */
+                lr_operand_t count_op = {0};
+                bool has_count = false;
+                /* check for optional count: ", <inttype> <operand>" */
                 if (match(p, LR_TOK_COMMA)) {
-                    if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
+                    if (check(p, LR_TOK_ALIGN)) {
+                        /* just align, no count */
+                        next(p); next(p);
+                    } else {
+                        /* parse count operand */
+                        lr_type_t *count_ty = parse_type(p);
+                        count_op = parse_operand(p, count_ty);
+                        has_count = true;
+                        /* check for optional ", align N" after count */
+                        if (match(p, LR_TOK_COMMA)) {
+                            if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
+                        }
+                    }
                 }
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
-                    p->module->type_ptr, dest, NULL, 0);
+                lr_inst_t *inst;
+                if (has_count) {
+                    lr_operand_t ops[1] = {count_op};
+                    inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
+                        p->module->type_ptr, dest, ops, 1);
+                } else {
+                    inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
+                        p->module->type_ptr, dest, NULL, 0);
+                }
                 inst->type = ty;
                 lr_block_append(block, inst);
                 break;
