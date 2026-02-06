@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -27,6 +28,15 @@ RE_ENTRY = re.compile(
 )
 PREFERRED_ENTRIES = ["main", "_lfortran_main_program", "_QQmain"]
 SUPPORTED_SIGS = {"i32", "i64", "void"}
+FORTRAN_CPP_SUFFIXES = {".F", ".F03", ".F08", ".F18", ".F90", ".F95"}
+FORTRAN_FIXED_SUFFIXES = {".f", ".for", ".ftn"}
+FORTRAN_FREE_SUFFIXES = {".f90", ".f95", ".f03", ".f08", ".f18"}
+FORTRAN_SUFFIXES = FORTRAN_FIXED_SUFFIXES | FORTRAN_FREE_SUFFIXES | {
+    x.lower() for x in FORTRAN_CPP_SUFFIXES
+} | FORTRAN_CPP_SUFFIXES
+C_SUFFIXES = {".c"}
+CXX_SUFFIXES = {".cc", ".cpp", ".cxx", ".c++"}
+HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
 
 
 @dataclass(frozen=True)
@@ -88,6 +98,10 @@ def run_cmd(cmd: List[str], cwd: Path, timeout_sec: int) -> CommandResult:
         timeout_err = exc.stderr if isinstance(exc.stderr, bytes) else (exc.stderr or b"")
         stdout = timeout_out.decode("utf-8", errors="replace")
         stderr = timeout_err.decode("utf-8", errors="replace") + "\ncommand timed out"
+    except OSError as exc:
+        rc = 127
+        stdout = ""
+        stderr = str(exc)
 
     duration = time.monotonic() - start
     return CommandResult(
@@ -139,15 +153,98 @@ def compile_extrafiles(
     entry: Any,
     case_dir: Path,
 ) -> Optional[CommandResult]:
-    for extrafile in entry.extrafiles:
-        cmd = [str(cfg.lfortran_bin)]
-        if extrafile.suffix.lower() == ".f":
-            cmd.append("--fixed-form")
-        cmd.extend(["-c", str(extrafile)])
+    option_tokens = split_options(entry.options)
+    for idx, extrafile in enumerate(entry.extrafiles):
+        cmd = extrafile_compile_command(cfg, extrafile, option_tokens, case_dir, idx)
+        if cmd is None:
+            continue
         result = run_cmd(cmd, cwd=case_dir, timeout_sec=cfg.timeout_emit)
         if result.rc != 0:
             return result
     return None
+
+
+def extrafile_compile_command(
+    cfg: RunnerConfig,
+    extrafile: Path,
+    option_tokens: List[str],
+    case_dir: Path,
+    index: int,
+) -> Optional[List[str]]:
+    suffix = extrafile.suffix
+    suffix_lower = suffix.lower()
+    obj = case_dir / f"extra_{index}_{extrafile.stem}.o"
+
+    if suffix_lower in HEADER_SUFFIXES:
+        return None
+
+    if suffix in FORTRAN_CPP_SUFFIXES or suffix_lower in FORTRAN_SUFFIXES:
+        cmd = [str(cfg.lfortran_bin)]
+        if suffix_lower in FORTRAN_FIXED_SUFFIXES:
+            cmd.append("--fixed-form")
+        if needs_fortran_cpp(extrafile, option_tokens) and "--cpp" not in option_tokens:
+            cmd.append("--cpp")
+        cmd.extend(option_tokens)
+        cmd.extend(["-c", str(extrafile), "-o", str(obj)])
+        return cmd
+
+    if suffix_lower in C_SUFFIXES:
+        compiler = resolve_compiler("CC", "cc")
+        if not compiler:
+            return [os.environ.get("CC", "cc")]
+        cmd = [compiler]
+        cmd.extend(extract_c_compile_options(option_tokens))
+        cmd.extend(["-c", str(extrafile), "-o", str(obj)])
+        return cmd
+
+    if suffix_lower in CXX_SUFFIXES:
+        compiler = resolve_compiler("CXX", "c++")
+        if not compiler:
+            return [os.environ.get("CXX", "c++")]
+        cmd = [compiler]
+        cmd.extend(extract_c_compile_options(option_tokens))
+        cmd.extend(["-c", str(extrafile), "-o", str(obj)])
+        return cmd
+
+    return None
+
+
+def resolve_compiler(env_var: str, fallback: str) -> Optional[str]:
+    candidate = os.environ.get(env_var, "").strip()
+    if candidate:
+        if shutil.which(candidate):
+            return candidate
+        return None
+    return shutil.which(fallback)
+
+
+def needs_fortran_cpp(path: Path, option_tokens: List[str]) -> bool:
+    if "--cpp" in option_tokens:
+        return True
+    if "-cpp" in option_tokens:
+        return True
+    return path.suffix in FORTRAN_CPP_SUFFIXES
+
+
+def extract_c_compile_options(option_tokens: List[str]) -> List[str]:
+    out: List[str] = []
+    pair_flags = {"-I", "-D", "-U", "-include", "-isystem", "-idirafter", "-iquote"}
+    i = 0
+    while i < len(option_tokens):
+        tok = option_tokens[i]
+        if tok in pair_flags:
+            if i + 1 < len(option_tokens):
+                out.extend([tok, option_tokens[i + 1]])
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("-I") or tok.startswith("-D") or tok.startswith("-U"):
+            out.append(tok)
+            i += 1
+            continue
+        i += 1
+    return out
 
 
 def parse_function_defs(ir_text: str) -> List[Tuple[str, str, str]]:
