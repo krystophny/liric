@@ -1,0 +1,48 @@
+#ifndef LIRIC_JIT_H
+#define LIRIC_JIT_H
+
+#include "ir.h"
+#include "target.h"
+#include <stddef.h>
+
+typedef struct lr_sym_entry {
+    char *name;
+    void *addr;
+    struct lr_sym_entry *next;
+} lr_sym_entry_t;
+
+typedef struct lr_jit {
+    const lr_target_t *target;
+    uint8_t *code_buf;
+    size_t code_size;
+    size_t code_cap;
+    uint8_t *data_buf;
+    size_t data_size;
+    size_t data_cap;
+    lr_sym_entry_t *symbols;
+    lr_arena_t *arena;
+} lr_jit_t;
+
+lr_jit_t *lr_jit_create(void);
+void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr);
+int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
+void *lr_jit_get_function(lr_jit_t *j, const char *name);
+void lr_jit_destroy(lr_jit_t *j);
+
+/*
+ * POSIX guarantees void* and function pointers have the same size/representation.
+ * Use memcpy to convert without triggering -Wpedantic warnings.
+ */
+#define LR_JIT_FN(type, jit, name) \
+    lr_jit_fn_cast_##type(lr_jit_get_function((jit), (name)))
+
+#include <string.h>
+static inline void lr_jit_fn_to_ptr(void *dst, void *src) {
+    memcpy(dst, &src, sizeof(src));
+}
+
+#define LR_JIT_GET_FN(fn_var, jit, name) \
+    do { void *_p = lr_jit_get_function((jit), (name)); \
+         lr_jit_fn_to_ptr(&(fn_var), _p); } while (0)
+
+#endif

@@ -1,0 +1,102 @@
+#include "../src/arena.h"
+#include "../src/ir.h"
+#include "../src/ll_parser.h"
+#include <stdio.h>
+#include <string.h>
+
+#define TEST_ASSERT(cond, msg) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "  FAIL: %s (line %d)\n", msg, __LINE__); \
+        return 1; \
+    } \
+} while (0)
+
+#define TEST_ASSERT_EQ(a, b, msg) do { \
+    long long _a = (long long)(a), _b = (long long)(b); \
+    if (_a != _b) { \
+        fprintf(stderr, "  FAIL: %s: got %lld, expected %lld (line %d)\n", \
+                msg, _a, _b, __LINE__); \
+        return 1; \
+    } \
+} while (0)
+
+int test_parser_ret_i32(void) {
+    const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT(strcmp(f->name, "f") == 0, "function name is 'f'");
+    TEST_ASSERT(f->ret_type->kind == LR_TYPE_I32, "return type is i32");
+    TEST_ASSERT_EQ(f->num_params, 0, "no params");
+    TEST_ASSERT(!f->is_decl, "not a declaration");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "has entry block");
+
+    lr_inst_t *inst = b->first;
+    TEST_ASSERT(inst != NULL, "has instruction");
+    TEST_ASSERT_EQ(inst->op, LR_OP_RET, "instruction is ret");
+    TEST_ASSERT_EQ(inst->num_operands, 1, "ret has 1 operand");
+    TEST_ASSERT_EQ(inst->operands[0].kind, LR_VAL_IMM_I64, "operand is immediate");
+    TEST_ASSERT_EQ(inst->operands[0].imm_i64, 42, "immediate value is 42");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_function_decl(void) {
+    const char *src = "declare i32 @puts(ptr)\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT(strcmp(f->name, "puts") == 0, "function name is 'puts'");
+    TEST_ASSERT(f->is_decl, "is a declaration");
+    TEST_ASSERT_EQ(f->num_params, 1, "1 param");
+    TEST_ASSERT_EQ(f->param_types[0]->kind, LR_TYPE_PTR, "param is ptr");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_add(void) {
+    const char *src =
+        "define i32 @add(i32 %a, i32 %b) {\n"
+        "entry:\n"
+        "  %c = add i32 %a, %b\n"
+        "  ret i32 %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT_EQ(f->num_params, 2, "2 params");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "has entry block");
+
+    lr_inst_t *add = b->first;
+    TEST_ASSERT(add != NULL, "has add instruction");
+    TEST_ASSERT_EQ(add->op, LR_OP_ADD, "instruction is add");
+    TEST_ASSERT_EQ(add->num_operands, 2, "add has 2 operands");
+
+    lr_inst_t *ret = add->next;
+    TEST_ASSERT(ret != NULL, "has ret instruction");
+    TEST_ASSERT_EQ(ret->op, LR_OP_RET, "second instruction is ret");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
