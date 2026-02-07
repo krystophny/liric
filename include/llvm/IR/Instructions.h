@@ -8,19 +8,15 @@
 namespace llvm {
 
 class AllocaInst : public UnaryInstruction {
-    lc_alloca_inst_t *alloca_impl_;
-    Type *alloc_type_;
-
 public:
-    AllocaInst() : alloca_impl_(nullptr), alloc_type_(nullptr) {}
-
-    void setAllocaImpl(lc_alloca_inst_t *ai) {
-        alloca_impl_ = ai;
-        if (ai) alloc_type_ = Type::wrap(ai->alloc_type);
+    static AllocaInst *wrap(lc_value_t *v) {
+        return reinterpret_cast<AllocaInst *>(v);
     }
 
-    lc_alloca_inst_t *getAllocaImpl() const { return alloca_impl_; }
-    Type *getAllocatedType() const { return alloc_type_; }
+    Type *getAllocatedType() const {
+        lr_type_t *at = lc_value_get_alloca_type(impl());
+        return at ? Type::wrap(at) : nullptr;
+    }
 
     void setAlignment(unsigned A) { (void)A; }
     void setAlignment(uint64_t A) { (void)A; }

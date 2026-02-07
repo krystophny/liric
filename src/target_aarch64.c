@@ -1,4 +1,5 @@
 #include "target_aarch64.h"
+#include "objfile.h"
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -39,6 +40,8 @@ typedef struct {
     struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } fixups[4096];
     uint32_t num_fixups;
     lr_arena_t *arena;
+    lr_objfile_ctx_t *obj_ctx;
+    lr_module_t *mod;
 } a64_compile_ctx_t;
 
 static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
@@ -421,6 +424,21 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
         emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, imm_bits, true);
     } else if (op->kind == LR_VAL_NULL) {
         emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, 0, true);
+    } else if (op->kind == LR_VAL_GLOBAL && ctx->obj_ctx) {
+        const char *sym_name = lr_module_symbol_name(ctx->mod,
+                                                      op->global_id);
+        uint32_t sym_idx = lr_obj_ensure_symbol(ctx->obj_ctx, sym_name,
+                                                 false, 0, 0);
+        size_t adrp_off = ctx->pos;
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                 0x90000000u | (uint32_t)reg);
+        lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)adrp_off, sym_idx,
+                          LR_RELOC_ARM64_PAGE21);
+        size_t add_off = ctx->pos;
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                 0x91000000u | ((uint32_t)reg << 5) | (uint32_t)reg);
+        lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)add_off, sym_idx,
+                          LR_RELOC_ARM64_PAGEOFF12);
     }
 }
 
@@ -591,8 +609,6 @@ static phi_copy_t **build_phi_copies(a64_compile_ctx_t *ctx, lr_func_t *func) {
 static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                                  uint8_t *buf, size_t buflen, size_t *out_len,
                                  lr_arena_t *arena) {
-    (void)mod;
-
     a64_compile_ctx_t ctx = {
         .buf = buf,
         .buflen = buflen,
@@ -602,6 +618,8 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
         .num_stack_slots = 0,
         .num_fixups = 0,
         .arena = arena,
+        .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
+        .mod = mod,
     };
 
     prescan_slots(&ctx, func);
@@ -1055,9 +1073,21 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 for (uint32_t i = 0; i < nargs && i < 8; i++)
                     emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
 
-                emit_load_operand(&ctx, &inst->operands[0], A64_X16);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         0xD63F0000u | ((uint32_t)A64_X16 << 5)); /* blr x16 */
+                if (ctx.obj_ctx &&
+                    inst->operands[0].kind == LR_VAL_GLOBAL) {
+                    const char *sym_name = lr_module_symbol_name(
+                        ctx.mod, inst->operands[0].global_id);
+                    uint32_t sym_idx = lr_obj_ensure_symbol(
+                        ctx.obj_ctx, sym_name, false, 0, 0);
+                    size_t bl_off = ctx.pos;
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x94000000u);
+                    lr_obj_add_reloc(ctx.obj_ctx, (uint32_t)bl_off,
+                                      sym_idx, LR_RELOC_ARM64_BRANCH26);
+                } else {
+                    emit_load_operand(&ctx, &inst->operands[0], A64_X16);
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             0xD63F0000u | ((uint32_t)A64_X16 << 5));
+                }
 
                 if (stack_bytes > 0)
                     emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, stack_bytes, false);
@@ -1075,6 +1105,10 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
         }
     }
+
+    /* Empty function body: emit implicit return */
+    if (!func->first_block)
+        emit_epilogue_a64(&ctx);
 
     /* Fix up branch targets */
     for (uint32_t i = 0; i < ctx.num_fixups; i++) {

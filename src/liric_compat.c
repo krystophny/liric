@@ -1,5 +1,6 @@
 #include "ir.h"
 #include "arena.h"
+#include "objfile.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -46,7 +47,7 @@ typedef struct lc_value {
     lc_value_kind_t kind;
     lr_type_t *type;
     union {
-        struct { uint32_t id; lr_func_t *func; void *phi_node; } vreg;
+        struct { uint32_t id; lr_func_t *func; void *phi_node; lr_type_t *alloc_type; } vreg;
         struct { int64_t val; unsigned width; } const_int;
         struct { double val; bool is_double; } const_fp;
         struct { uint32_t id; const char *name; lr_func_t *func; } global;
@@ -263,6 +264,21 @@ lr_module_t *lc_module_get_ir(lc_module_compat_t *mod) {
 
 void lc_module_dump(lc_module_compat_t *mod) {
     lr_module_dump(mod->mod, stderr);
+}
+
+void lc_module_print(lc_module_compat_t *mod, FILE *out) {
+    lr_module_dump(mod->mod, out ? out : stdout);
+}
+
+char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *f = open_memstream(&buf, &len);
+    if (!f) return NULL;
+    lr_module_dump(mod->mod, f);
+    fclose(f);
+    if (out_len) *out_len = len;
+    return buf;
 }
 
 /* ---- Value allocation ---- */
@@ -573,6 +589,18 @@ lr_func_t *lc_value_get_block_func(lc_value_t *val) {
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val) {
     if (!val || val->kind != LC_VAL_VREG) return NULL;
     return (lc_phi_node_t *)val->vreg.phi_node;
+}
+
+lr_type_t *lc_value_get_alloca_type(lc_value_t *val) {
+    if (!val || val->kind != LC_VAL_VREG) return NULL;
+    return val->vreg.alloc_type;
+}
+
+bool lc_block_has_terminator(lr_block_t *block) {
+    if (!block || !block->last) return false;
+    lr_opcode_t op = block->last->op;
+    return op == LR_OP_RET || op == LR_OP_RET_VOID || op == LR_OP_BR
+        || op == LR_OP_CONDBR || op == LR_OP_UNREACHABLE;
 }
 
 /* ---- Global variable ---- */
@@ -974,6 +1002,7 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
                                     lc_value_t *array_size,
                                     const char *name) {
     (void)name;
+    if (!mod || !b || !f || !type) return NULL;
     lr_module_t *m = mod->mod;
     uint32_t dest = lr_vreg_new(f);
 
@@ -992,7 +1021,9 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
     }
 
     lc_alloca_inst_t *ai = (lc_alloca_inst_t *)malloc(sizeof(*ai));
-    ai->result = wrap_vreg(mod, dest, m->type_ptr, f);
+    lc_value_t *result = wrap_vreg(mod, dest, m->type_ptr, f);
+    result->vreg.alloc_type = type;
+    ai->result = result;
     ai->alloc_type = type;
     return ai;
 }
@@ -1068,6 +1099,7 @@ lc_value_t *lc_create_struct_gep(lc_module_compat_t *mod, lr_block_t *b,
 
 void lc_create_ret(lc_module_compat_t *mod, lr_block_t *b,
                    lc_value_t *val) {
+    if (!mod || !b || !val) return;
     lr_module_t *m = mod->mod;
     lr_operand_desc_t vd = lc_value_to_desc(val);
     lr_operand_t ops[1] = { desc_to_op(vd) };
@@ -1077,6 +1109,7 @@ void lc_create_ret(lc_module_compat_t *mod, lr_block_t *b,
 }
 
 void lc_create_ret_void(lc_module_compat_t *mod, lr_block_t *b) {
+    if (!mod || !b) return;
     lr_module_t *m = mod->mod;
     lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_RET_VOID,
                                       m->type_void, 0, NULL, 0);
@@ -1085,6 +1118,7 @@ void lc_create_ret_void(lc_module_compat_t *mod, lr_block_t *b) {
 
 void lc_create_br(lc_module_compat_t *mod, lr_block_t *b,
                   lr_block_t *target) {
+    if (!mod || !b || !target) return;
     lr_module_t *m = mod->mod;
     lr_operand_t ops[1] = { lr_op_block(target->id) };
     lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_BR,
@@ -1095,6 +1129,7 @@ void lc_create_br(lc_module_compat_t *mod, lr_block_t *b,
 void lc_create_cond_br(lc_module_compat_t *mod, lr_block_t *b,
                        lc_value_t *cond, lr_block_t *true_bb,
                        lr_block_t *false_bb) {
+    if (!mod || !b || !cond || !true_bb || !false_bb) return;
     lr_module_t *m = mod->mod;
     lr_operand_desc_t cd = lc_value_to_desc(cond);
     lr_operand_t ops[3] = {
@@ -1108,6 +1143,7 @@ void lc_create_cond_br(lc_module_compat_t *mod, lr_block_t *b,
 }
 
 void lc_create_unreachable(lc_module_compat_t *mod, lr_block_t *b) {
+    if (!mod || !b) return;
     lr_module_t *m = mod->mod;
     lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_UNREACHABLE,
                                       m->type_void, 0, NULL, 0);
@@ -1490,5 +1526,21 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                                        m->type_ptr, lr_vreg_new(f),
                                        ops, nops);
     lr_block_append(b, inst2);
+}
+
+int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
+    if (!mod || !out) return -1;
+    const lr_target_t *target = lr_target_host();
+    if (!target) return -1;
+    return lr_emit_object(mod->mod, target, out);
+}
+
+int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
+    if (!mod || !filename) return -1;
+    FILE *f = fopen(filename, "wb");
+    if (!f) return -1;
+    int rc = lc_module_emit_object_to_file(mod, f);
+    fclose(f);
+    return rc;
 }
 

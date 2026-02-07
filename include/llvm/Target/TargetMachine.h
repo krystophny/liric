@@ -17,6 +17,14 @@ class raw_ostream;
 class raw_pwrite_stream;
 namespace legacy { class PassManager; }
 
+namespace detail {
+struct ObjEmitState {
+    raw_pwrite_stream *out = nullptr;
+    CodeGenFileType file_type{};
+};
+inline thread_local ObjEmitState obj_emit_state;
+} // namespace detail
+
 class TargetMachine {
 public:
     virtual ~TargetMachine() = default;
@@ -35,9 +43,11 @@ public:
 
     void setFastISel(bool) {}
 
-    bool addPassesToEmitFile(legacy::PassManager &, raw_pwrite_stream &,
+    bool addPassesToEmitFile(legacy::PassManager &, raw_pwrite_stream &Out,
                              raw_pwrite_stream *,
-                             CodeGenFileType, bool = true) {
+                             CodeGenFileType FT, bool = true) {
+        detail::obj_emit_state.out = &Out;
+        detail::obj_emit_state.file_type = FT;
         return false;
     }
 

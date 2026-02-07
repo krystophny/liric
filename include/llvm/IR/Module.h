@@ -12,6 +12,9 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/CodeGen.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/Target/TargetMachine.h"
 #include <string>
 #include <vector>
 #include <memory>
@@ -93,8 +96,17 @@ public:
     }
 
     void print(raw_ostream &OS, void * = nullptr) const {
-        (void)OS;
-        lc_module_dump(compat_);
+        FILE *f = OS.getFileOrNull();
+        if (f) {
+            lc_module_print(compat_, f);
+        } else {
+            size_t len = 0;
+            char *buf = lc_module_sprint(compat_, &len);
+            if (buf) {
+                OS.write(buf, len);
+                free(buf);
+            }
+        }
     }
 
     void dump() const { lc_module_dump(compat_); }
@@ -371,12 +383,33 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     (void)Context; (void)InsertBefore;
     Function *fn = Parent ? Parent : detail::current_function;
     if (!fn) return nullptr;
-    if (Parent) detail::current_function = Parent;
+    detail::current_function = fn;
     lc_module_compat_t *mod = fn->getCompatMod();
     lr_func_t *f = fn->getIRFunc();
     if (!mod || !f) return nullptr;
     lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
     return BasicBlock::wrap(bv);
+}
+
+inline bool legacy::PassManager::run(Module &M) {
+    if (!detail::obj_emit_state.out)
+        return false;
+    if (detail::obj_emit_state.file_type != CodeGenFileType::ObjectFile)
+        return false;
+
+    lc_module_compat_t *compat = M.getCompat();
+    if (!compat)
+        return false;
+
+    lc_module_finalize_phis(compat);
+
+    FILE *f = detail::obj_emit_state.out->getFileOrNull();
+    if (!f)
+        return false;
+
+    int rc = lc_module_emit_object_to_file(compat, f);
+    detail::obj_emit_state.out = nullptr;
+    return rc == 0;
 }
 
 } // namespace llvm

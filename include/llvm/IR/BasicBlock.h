@@ -31,12 +31,19 @@ public:
     Function *getParent() const { return detail::current_function; }
     Module *getModule() const { return nullptr; }
 
-    bool empty() const { return true; }
+    bool empty() const {
+        lr_block_t *b = impl_block();
+        return !b || !b->first;
+    }
 
     iterator end() { return nullptr; }
     iterator getFirstInsertionPt() { return nullptr; }
 
-    Instruction *getTerminator() const { return nullptr; }
+    Instruction *getTerminator() const {
+        lr_block_t *b = impl_block();
+        if (!b || !lc_block_has_terminator(b)) return nullptr;
+        return reinterpret_cast<Instruction *>(b);
+    }
 
     void eraseFromParent() {}
     void moveAfter(BasicBlock *) {}

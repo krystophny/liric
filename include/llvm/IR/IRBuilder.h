@@ -406,9 +406,10 @@ public:
         lc_alloca_inst_t *ai = lc_create_alloca(
             M(), B(), F(), Ty->impl(),
             ArraySize ? ArraySize->impl() : nullptr, Name.c_str());
-        auto *inst = new AllocaInst();
-        inst->setAllocaImpl(ai);
-        return inst;
+        if (!ai) return nullptr;
+        lc_value_t *result = ai->result;
+        free(ai);
+        return AllocaInst::wrap(result);
     }
 
     AllocaInst *CreateAlloca(Type *Ty, unsigned AddrSpace,

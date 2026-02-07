@@ -188,6 +188,7 @@ typedef struct lr_module {
     lr_type_t *type_float;
     lr_type_t *type_double;
     lr_type_t *type_ptr;
+    void *obj_ctx;
 } lr_module_t;
 
 lr_module_t *lr_module_create(lr_arena_t *arena);

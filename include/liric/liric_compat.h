@@ -84,6 +84,8 @@ void lc_module_destroy(lc_module_compat_t *mod);
 void lc_module_finalize_phis(lc_module_compat_t *mod);
 lr_module_t *lc_module_get_ir(lc_module_compat_t *mod);
 void lc_module_dump(lc_module_compat_t *mod);
+void lc_module_print(lc_module_compat_t *mod, FILE *out);
+char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len);
 
 /* ---- Value allocation ---- */
 lc_value_t *lc_value_alloc(lc_module_compat_t *mod);
@@ -143,6 +145,8 @@ lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
 lr_block_t *lc_value_get_block(lc_value_t *val);
 lr_func_t *lc_value_get_block_func(lc_value_t *val);
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val);
+lr_type_t *lc_value_get_alloca_type(lc_value_t *val);
+bool lc_block_has_terminator(lr_block_t *block);
 
 /* ---- Global variable ---- */
 lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
@@ -392,6 +396,10 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *val, lc_value_t *size);
 void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                        lc_value_t *dst, lc_value_t *src, lc_value_t *size);
+
+/* ---- Object file emission ---- */
+int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);
+int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out);
 
 #ifdef __cplusplus
 }

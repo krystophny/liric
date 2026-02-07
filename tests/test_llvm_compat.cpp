@@ -322,13 +322,12 @@ static int test_irbuilder_memory() {
 
     llvm::AllocaInst *alloca = builder.CreateAlloca(i64, nullptr, "x");
     TEST_ASSERT(alloca != nullptr, "alloca created");
-    TEST_ASSERT(alloca->getAllocaImpl() != nullptr, "alloca impl set");
+    TEST_ASSERT(alloca->getAllocatedType() != nullptr, "alloca type set");
 
-    llvm::Value *alloca_val = llvm::Value::wrap(alloca->getAllocaImpl()->result);
     llvm::Value *val = llvm::ConstantInt::get(i64, 42);
-    builder.CreateStore(val, alloca_val);
+    builder.CreateStore(val, alloca);
 
-    llvm::Value *loaded = builder.CreateLoad(i64, alloca_val, "loaded");
+    llvm::Value *loaded = builder.CreateLoad(i64, alloca, "loaded");
     TEST_ASSERT(loaded != nullptr, "load created");
 
     builder.CreateRet(loaded);

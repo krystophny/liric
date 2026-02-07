@@ -20,7 +20,9 @@ namespace legacy {
 class PassManager {
 public:
     void add(Pass *P) { (void)P; }
-    bool run(Module &M) { (void)M; return false; }
+
+    /* Defined out-of-line after Module.h is available */
+    bool run(Module &M);
 };
 
 class FunctionPassManager {

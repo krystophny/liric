@@ -66,6 +66,8 @@ public:
 
     virtual uint64_t tell() const { return 0; }
 
+    virtual FILE *getFileOrNull() const { return nullptr; }
+
     raw_ostream &indent(unsigned NumSpaces) {
         for (unsigned i = 0; i < NumSpaces; ++i) write(" ", 1);
         return *this;
@@ -97,7 +99,7 @@ public:
                    unsigned flags = 0)
         : owns_(true) {
         (void)flags;
-        f_ = fopen(std::string(filename).c_str(), "w");
+        f_ = fopen(std::string(filename).c_str(), "wb");
         if (!f_) {
             EC = std::make_error_code(std::errc::no_such_file_or_directory);
             f_ = stderr;
@@ -114,6 +116,8 @@ public:
         return *this;
     }
     void flush() override { fflush(f_); }
+    FILE *getFile() const { return f_; }
+    FILE *getFileOrNull() const override { return f_; }
 };
 
 class raw_string_ostream : public raw_pwrite_stream {

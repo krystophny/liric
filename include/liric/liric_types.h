@@ -136,6 +136,7 @@ struct lr_module {
     lr_type_t *type_float;
     lr_type_t *type_double;
     lr_type_t *type_ptr;
+    void *obj_ctx;
 };
 
 lr_func_t *lr_func_declare(lr_module_t *m, const char *name, lr_type_t *ret,
