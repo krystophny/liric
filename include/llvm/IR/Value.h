@@ -4,6 +4,7 @@
 #include <liric/liric_compat.h>
 #include "llvm/IR/Type.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Casting.h"
 
 namespace llvm {
 

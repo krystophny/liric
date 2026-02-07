@@ -8,6 +8,9 @@ Liric (Lightweight IR Compiler) is a fast, minimal JIT compiler with two fronten
 and WebAssembly binary (.wasm). Written in C11, zero external dependencies. Designed for low-latency
 JIT where full LLVM overhead is unacceptable.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture diagrams and data structures.
+See [STATUS.md](STATUS.md) for current feature completion and LFortran integration progress.
+
 ## Build and Test
 
 ```bash
@@ -99,7 +102,7 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 | **Public API** | `include/liric/liric.h` | 9 functions: parse (.ll and .wasm), module management, JIT lifecycle |
 | **Compat C API** | `include/liric/liric_compat.h`, `src/liric_compat.c` | LLVM-style builder using lc_value_t handles |
 | **Public types** | `include/liric/liric_types.h` | Complete type definitions for C++ compat headers |
-| **LLVM C++ compat** | `include/llvm/**/*.h` | Header-only C++17 wrappers (37 headers) mapping LLVM API to liric |
+| **LLVM C++ compat** | `include/llvm/**/*.h` | Header-only C++17 wrappers (84 headers) mapping LLVM 21 API to liric |
 | **API wrapper** | `src/liric.c` | Thin bridge between public API and internal modules |
 | **CLI** | `tools/liric_main.c` | `--jit`, `--dump-ir`, `--func` |
 | **Tests** | `tests/test_*.c`, `tests/test_llvm_compat.cpp` | Lexer, parser, codegen, target, JIT, e2e, LLVM compat |
@@ -190,10 +193,11 @@ RUN_TEST(test_name);           // in main()
 ## Known Technical Debt
 
 - Parser limits are hardcoded (4096 vregs, 1024 blocks, 1024 functions, 4096 globals)
-- No floating-point codegen (types parsed but FPU/XMM instructions not emitted)
-- No optimization passes on IR or MIR
+- No optimization passes on IR or MIR (issue #42)
 - No object file emission (JIT only, no ahead-of-time compilation)
 - WASM frontend: MVP integer subset only (no FP, SIMD, tables, bulk memory, multi-memory)
+- Stack-based register allocation only (no liveness analysis)
+- LFortran mass tests: 174/2415 passing (see STATUS.md for breakdown)
 
 ## Coding Style
 

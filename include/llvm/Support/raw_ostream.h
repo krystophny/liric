@@ -2,6 +2,7 @@
 #define LLVM_SUPPORT_RAW_OSTREAM_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/SmallVector.h"
 #include <cstdio>
 #include <string>
 #include <system_error>

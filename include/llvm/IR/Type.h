@@ -2,6 +2,7 @@
 #define LLVM_IR_TYPE_H
 
 #include <liric/liric_compat.h>
+#include "llvm/Config/llvm-config.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/ADT/StringRef.h"
 

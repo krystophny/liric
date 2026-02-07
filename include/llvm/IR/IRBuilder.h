@@ -14,6 +14,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/DIBuilder.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -63,6 +64,10 @@ public:
         block_ = BB->impl_block();
         lr_func_t *f = lc_value_get_block_func(BB->impl());
         if (f) func_ = f;
+    }
+
+    void SetInsertPoint(BasicBlock *BB, BasicBlock::iterator) {
+        SetInsertPoint(BB);
     }
 
     void SetInsertPoint(BasicBlock *BB, BasicBlock::use_iterator) {
@@ -688,6 +693,22 @@ public:
         return CreateMemCpy(Dst, DstAlign, Src, SrcAlign, sz, isVolatile);
     }
 
+    Value *CreateMemCpy(Value *Dst, MaybeAlign DstAlign,
+                        Value *Src, MaybeAlign SrcAlign,
+                        Value *Size, bool isVolatile = false) {
+        return CreateMemCpy(Dst, (unsigned)DstAlign.valueOrOne(),
+                           Src, (unsigned)SrcAlign.valueOrOne(),
+                           Size, isVolatile);
+    }
+
+    Value *CreateMemCpy(Value *Dst, MaybeAlign DstAlign,
+                        Value *Src, MaybeAlign SrcAlign,
+                        uint64_t Size, bool isVolatile = false) {
+        return CreateMemCpy(Dst, (unsigned)DstAlign.valueOrOne(),
+                           Src, (unsigned)SrcAlign.valueOrOne(),
+                           Size, isVolatile);
+    }
+
     Value *CreateMemMove(Value *Dst, unsigned DstAlign,
                          Value *Src, unsigned SrcAlign,
                          Value *Size, bool isVolatile = false) {
@@ -704,6 +725,14 @@ public:
         return CreateMemMove(Dst, DstAlign, Src, SrcAlign, sz, isVolatile);
     }
 
+    Value *CreateMemMove(Value *Dst, MaybeAlign DstAlign,
+                         Value *Src, MaybeAlign SrcAlign,
+                         Value *Size, bool isVolatile = false) {
+        return CreateMemMove(Dst, (unsigned)DstAlign.valueOrOne(),
+                            Src, (unsigned)SrcAlign.valueOrOne(),
+                            Size, isVolatile);
+    }
+
     Value *CreateMemSet(Value *Ptr, Value *Val, Value *Size,
                         unsigned Align, bool isVolatile = false) {
         (void)Align; (void)isVolatile;
@@ -716,6 +745,18 @@ public:
                         unsigned Align, bool isVolatile = false) {
         Value *sz = ConstantInt::get(Type::getInt64Ty(ctx_), Size);
         return CreateMemSet(Ptr, Val, sz, Align, isVolatile);
+    }
+
+    Value *CreateMemSet(Value *Ptr, Value *Val, Value *Size,
+                        MaybeAlign Align, bool isVolatile = false) {
+        return CreateMemSet(Ptr, Val, Size, (unsigned)Align.valueOrOne(),
+                           isVolatile);
+    }
+
+    Value *CreateMemSet(Value *Ptr, Value *Val, uint64_t Size,
+                        MaybeAlign Align, bool isVolatile = false) {
+        return CreateMemSet(Ptr, Val, Size, (unsigned)Align.valueOrOne(),
+                           isVolatile);
     }
 
     Value *CreatePointerCast(Value *V, Type *DestTy,
@@ -747,15 +788,15 @@ public:
             Constant::getNullValue(Arg->getType()), Name);
     }
 
-    Value *CreateGlobalStringPtr(StringRef Str, const Twine &Name = "",
-                                 unsigned AddressSpace = 0) {
+    Constant *CreateGlobalStringPtr(StringRef Str, const Twine &Name = "",
+                                    unsigned AddressSpace = 0) {
         (void)AddressSpace;
         size_t len = Str.size() + 1;
         lc_value_t *gv = lc_global_create(
             M(), Name.c_str(),
             lc_get_int_type(M(), 8),
             true, Str.data(), len);
-        return Value::wrap(gv);
+        return static_cast<Constant *>(Value::wrap(gv));
     }
 
     Value *CreateGlobalString(StringRef Str, const Twine &Name = "",

@@ -14,6 +14,7 @@ class ArrayRef {
 
 public:
     ArrayRef() : data_(nullptr), len_(0) {}
+    ArrayRef(const T &single) : data_(&single), len_(1) {}
     ArrayRef(const T *data, size_t len) : data_(data), len_(len) {}
     ArrayRef(const T *begin, const T *end) : data_(begin), len_(end - begin) {}
     ArrayRef(const std::vector<T> &v) : data_(v.data()), len_(v.size()) {}

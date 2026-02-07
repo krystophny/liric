@@ -311,6 +311,12 @@ public:
         (void)Ty; (void)IdxList;
         return C;
     }
+
+    static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
+                                              ArrayRef<Value *> IdxList) {
+        (void)Ty; (void)IdxList;
+        return C;
+    }
 };
 
 class BlockAddress : public Constant {

@@ -90,6 +90,20 @@ public:
     static StructType *get(LLVMContext &C, ArrayRef<Type *> Elements,
                            bool isPacked = false);
 
+    template <typename... Types>
+    static StructType *get(Type *First, Types *... Rest) {
+        Type *elems[] = {First, static_cast<Type *>(Rest)...};
+        LLVMContext &C = First->getContext();
+        return get(C, ArrayRef<Type *>(elems, 1 + sizeof...(Rest)));
+    }
+
+    static StructType *create(ArrayRef<Type *> Elements, StringRef Name = "",
+                              bool isPacked = false) {
+        if (Elements.empty()) return nullptr;
+        LLVMContext &C = Elements[0]->getContext();
+        return create(C, Elements, Name, isPacked);
+    }
+
     static StructType *wrap(lr_type_t *t) {
         return static_cast<StructType *>(Type::wrap(t));
     }
@@ -121,6 +135,10 @@ public:
 class PointerType : public Type {
 public:
     static PointerType *get(LLVMContext &C, unsigned AddressSpace = 0);
+    static PointerType *get(Type *ElementType, unsigned AddressSpace) {
+        (void)ElementType; (void)AddressSpace;
+        return getUnqual(ElementType);
+    }
     static PointerType *getUnqual(Type *ElementType);
     static PointerType *getUnqual(LLVMContext &C);
 
@@ -137,6 +155,12 @@ public:
 
 class VectorType : public Type {
 public:
+    static VectorType *get(Type *ElementTy, unsigned NumElts,
+                           bool Scalable = false) {
+        (void)ElementTy; (void)NumElts; (void)Scalable;
+        return nullptr;
+    }
+
     static VectorType *wrap(lr_type_t *t) {
         return static_cast<VectorType *>(Type::wrap(t));
     }

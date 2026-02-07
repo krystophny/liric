@@ -62,7 +62,12 @@ public:
         arg_iterator(lc_module_compat_t *m, lc_value_t *fv, unsigned i)
             : mod_(m), func_val_(fv), idx_(i) {}
 
-        Argument *operator*() const {
+        Argument &operator*() const {
+            lc_value_t *av = lc_func_get_arg(mod_, func_val_, idx_);
+            return *reinterpret_cast<Argument *>(av);
+        }
+
+        Argument *operator->() const {
             lc_value_t *av = lc_func_get_arg(mod_, func_val_, idx_);
             return reinterpret_cast<Argument *>(av);
         }

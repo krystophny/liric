@@ -4,6 +4,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/IR/Value.h"
+#include "llvm/IR/LLVMContext.h"
 #include <cstdint>
 
 namespace llvm {
@@ -27,10 +28,13 @@ public:
 
 class DIScope {
 public:
-    DIScope *getContext() { return nullptr; }
+    LLVMContext &getContext() {
+        static LLVMContext dummy;
+        return dummy;
+    }
 };
 
-class DIType : public DIScope {};
+class DIType : public DIScope, public Metadata {};
 class DIBasicType : public DIType {};
 class DIDerivedType : public DIType {};
 class DICompositeType : public DIType {};
