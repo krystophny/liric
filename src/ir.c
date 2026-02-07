@@ -1,6 +1,37 @@
 #include "ir.h"
 #include <string.h>
 
+static uint32_t symbol_hash(const char *name) {
+    uint32_t h = 2166136261u;
+    while (*name) {
+        h ^= (uint8_t)*name++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int symbol_index_rebuild(lr_module_t *m, uint32_t min_symbols) {
+    uint32_t cap = 128;
+    uint32_t i;
+
+    while (cap < (min_symbols << 1))
+        cap <<= 1;
+
+    m->symbol_index = lr_arena_array(m->arena, uint32_t, cap);
+    if (!m->symbol_index)
+        return -1;
+    m->symbol_index_cap = cap;
+
+    for (i = 0; i < m->num_symbols; i++) {
+        uint32_t slot = m->symbol_hashes[i] & (cap - 1u);
+        while (m->symbol_index[slot] != 0)
+            slot = (slot + 1u) & (cap - 1u);
+        m->symbol_index[slot] = i + 1u;
+    }
+
+    return 0;
+}
+
 lr_module_t *lr_module_create(lr_arena_t *arena) {
     lr_module_t *m = lr_arena_new(arena, lr_module_t);
     m->arena = arena;
@@ -173,23 +204,54 @@ lr_operand_t lr_op_null(lr_type_t *type) {
 }
 
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name) {
-    for (uint32_t i = 0; i < m->num_symbols; i++) {
-        if (strcmp(m->symbol_names[i], name) == 0)
+    uint32_t hash = symbol_hash(name);
+    uint32_t slot;
+
+    if (m->symbol_index_cap == 0) {
+        if (symbol_index_rebuild(m, 1) != 0)
+            return UINT32_MAX;
+    }
+
+    slot = hash & (m->symbol_index_cap - 1u);
+    for (;;) {
+        uint32_t stored = m->symbol_index[slot];
+        if (stored == 0)
+            break;
+
+        uint32_t i = stored - 1u;
+        if (m->symbol_hashes[i] == hash && strcmp(m->symbol_names[i], name) == 0)
             return i;
+        slot = (slot + 1u) & (m->symbol_index_cap - 1u);
     }
 
     if (m->num_symbols == m->symbol_cap) {
         uint32_t old_cap = m->symbol_cap;
         uint32_t new_cap = old_cap == 0 ? 64 : old_cap * 2;
         char **names = lr_arena_array(m->arena, char *, new_cap);
+        uint32_t *hashes = lr_arena_array(m->arena, uint32_t, new_cap);
         if (old_cap > 0)
             memcpy(names, m->symbol_names, sizeof(char *) * old_cap);
+        if (old_cap > 0)
+            memcpy(hashes, m->symbol_hashes, sizeof(uint32_t) * old_cap);
         m->symbol_names = names;
+        m->symbol_hashes = hashes;
         m->symbol_cap = new_cap;
+    }
+
+    if ((m->num_symbols + 1u) * 2u > m->symbol_index_cap) {
+        if (symbol_index_rebuild(m, m->num_symbols + 1u) != 0)
+            return UINT32_MAX;
     }
 
     uint32_t id = m->num_symbols++;
     m->symbol_names[id] = lr_arena_strdup(m->arena, name, strlen(name));
+    m->symbol_hashes[id] = hash;
+
+    slot = hash & (m->symbol_index_cap - 1u);
+    while (m->symbol_index[slot] != 0)
+        slot = (slot + 1u) & (m->symbol_index_cap - 1u);
+    m->symbol_index[slot] = id + 1u;
+
     return id;
 }
 
