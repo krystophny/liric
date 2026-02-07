@@ -24,6 +24,38 @@ For LFortran mass runs, prefer:
 python3 -m tools.lfortran_mass.run_mass --workers $(nproc)
 ```
 
+For a full refresh (ignore cache) with optional diagnostics:
+
+```bash
+python3 -m tools.lfortran_mass.run_mass --workers $(nproc) --force
+python3 -m tools.lfortran_mass.run_mass --workers $(nproc) --force \
+  --diag-fail-logs --diag-jit-coredump
+```
+
+Diagnostics flags are opt-in and write into `cache/<case_id>/diag/`:
+- `--diag-fail-logs`: saves stage stdout/stderr/meta for failing stages.
+- `--diag-jit-coredump`: on JIT signal failures (`jit_rc < 0`), captures
+  `coredumpctl info` and `eu-stack` output when available.
+
+Useful outputs from each run:
+- `/tmp/liric_lfortran_mass/summary.md`
+- `/tmp/liric_lfortran_mass/results.jsonl`
+- `/tmp/liric_lfortran_mass/failures.csv`
+
+Quick SIGSEGV count (`jit_rc = -11`) from canonical results:
+
+```bash
+python3 - <<'PY'
+import json
+seg = 0
+for line in open('/tmp/liric_lfortran_mass/results.jsonl'):
+    r = json.loads(line)
+    if r.get('classification') == 'liric_jit_fail' and r.get('jit_rc') == -11:
+        seg += 1
+print(seg)
+PY
+```
+
 ## Pipeline
 
 ```

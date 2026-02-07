@@ -651,12 +651,64 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
             }
             case LR_OP_STORE: {
                 /* store val(operands[0]) to ptr(operands[1]) */
-                emit_load_operand(mf, mb, &inst->operands[0], X86_RAX);
                 emit_load_operand(mf, mb, &inst->operands[1], X86_RCX);
+                size_t store_sz = lr_type_size(inst->operands[0].type);
+
+                /* Handle aggregate zeroinit stores by zeroing the destination bytes.
+                   LFortran frequently emits "store %struct zeroinitializer, ..." */
+                if (store_sz > 8 &&
+                    inst->operands[0].kind == LR_VAL_IMM_I64 &&
+                    inst->operands[0].imm_i64 == 0) {
+                    lr_minst_t *clr = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                    clr->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                    clr->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = 0 };
+                    clr->size = 8;
+                    mblock_append(mb, clr);
+
+                    size_t rem = store_sz;
+                    int32_t off = 0;
+                    while (rem >= 8) {
+                        lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                        st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RCX, .disp = off } };
+                        st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                        st->size = 8;
+                        mblock_append(mb, st);
+                        rem -= 8;
+                        off += 8;
+                    }
+                    if (rem >= 4) {
+                        lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                        st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RCX, .disp = off } };
+                        st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                        st->size = 4;
+                        mblock_append(mb, st);
+                        rem -= 4;
+                        off += 4;
+                    }
+                    if (rem >= 2) {
+                        lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                        st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RCX, .disp = off } };
+                        st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                        st->size = 2;
+                        mblock_append(mb, st);
+                        rem -= 2;
+                        off += 2;
+                    }
+                    if (rem == 1) {
+                        lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
+                        st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RCX, .disp = off } };
+                        st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                        st->size = 1;
+                        mblock_append(mb, st);
+                    }
+                    break;
+                }
+
+                emit_load_operand(mf, mb, &inst->operands[0], X86_RAX);
                 lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
                 st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = X86_RCX, .disp = 0 } };
                 st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
-                st->size = (uint8_t)lr_type_size(inst->operands[0].type);
+                st->size = (uint8_t)store_sz;
                 mblock_append(mb, st);
                 break;
             }
@@ -884,6 +936,14 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
                 }
 
                 /* Load callee address into r10 */
+                /* SysV ABI: %al carries the number of vector args for variadic calls.
+                   We currently pass all scalar args in GPRs/stack, so set it to 0. */
+                lr_minst_t *clr_rax = minst_new(mf->arena, LR_MIR_MOV_IMM);
+                clr_rax->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                clr_rax->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = 0 };
+                clr_rax->size = 8;
+                mblock_append(mb, clr_rax);
+
                 emit_load_operand(mf, mb, &inst->operands[0], X86_R10);
                 lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
                 call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_R10 };
@@ -1074,13 +1134,11 @@ static int x86_64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_
         for (lr_minst_t *mi = mb->first; mi; mi = mi->next) {
             switch (mi->op) {
             case LR_MIR_RET:
-                /* Epilogue: add rsp, N; pop rbp; ret */
-                if (mf->stack_size > 0) {
-                    emit_byte(buf, &pos, buflen, rex(true, false, false, false));
-                    emit_byte(buf, &pos, buflen, 0x81);
-                    emit_byte(buf, &pos, buflen, modrm(3, 0, X86_RSP));
-                    emit_u32(buf, &pos, buflen, mf->stack_size);
-                }
+                /* Epilogue: mov rsp, rbp; pop rbp; ret
+                   This correctly restores SP even when dynamic alloca changed it. */
+                emit_byte(buf, &pos, buflen, rex(true, false, false, false));
+                emit_byte(buf, &pos, buflen, 0x89);
+                emit_byte(buf, &pos, buflen, modrm(3, X86_RBP, X86_RSP));
                 emit_byte(buf, &pos, buflen, 0x5D); /* pop rbp */
                 emit_byte(buf, &pos, buflen, 0xC3); /* ret */
                 break;
@@ -1134,11 +1192,13 @@ static int x86_64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_
                     }
                 } else if (mi->dst.kind == LR_MOP_MEM && mi->src.kind == LR_MOP_REG) {
                     /* mov [base + disp], reg */
-                    encode_mem(buf, &pos, buflen, 0x89, mi->src.reg,
+                    uint8_t opcode = (mi->size == 1) ? 0x88 : 0x89;
+                    encode_mem(buf, &pos, buflen, opcode, mi->src.reg,
                                mi->dst.mem.base, mi->dst.mem.disp, mi->size);
                 } else if (mi->src.kind == LR_MOP_REG && mi->dst.kind == LR_MOP_REG) {
                     /* mov reg, reg */
-                    encode_alu_rr(buf, &pos, buflen, 0x89, mi->dst.reg, mi->src.reg, mi->size);
+                    uint8_t opcode = (mi->size == 1) ? 0x88 : 0x89;
+                    encode_alu_rr(buf, &pos, buflen, opcode, mi->dst.reg, mi->src.reg, mi->size);
                 }
                 break;
             }

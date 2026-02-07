@@ -26,14 +26,13 @@ Linux x86_64 and macOS arm64.
 
 ## Speed: liric vs LLVM lli
 
-1095 LFortran-generated `.ll` files, LLVM 21.1.6. `-O0` and `-O2` are
-nearly identical because LLVM JIT startup overhead dominates.
+1095 LFortran-generated `.ll` files, LLVM 21.1.6.
 
-| Metric | liric | lli -O0 | Speedup | lli -O2 | Speedup |
-|--------|------:|--------:|--------:|--------:|--------:|
-| Median | 1.35 ms | 12.87 ms | **9.5x** | 12.84 ms | **9.5x** |
-| Mean | 2.46 ms | 15.03 ms | **6.1x** | 15.01 ms | **6.1x** |
-| P90 | 4.12 ms | 20.37 ms | 4.9x | 19.96 ms | 4.8x |
+| Metric | liric | lli -O0 | Speedup |
+|--------|------:|--------:|--------:|
+| Median | 1.35 ms | 12.87 ms | **9.5x** |
+| Mean | 2.46 ms | 15.03 ms | **6.1x** |
+| P90 | 4.12 ms | 20.37 ms | 4.9x |
 
 Total: 2.7s (liric) vs 16.5s (lli). 100% of tests faster, 38% over 10x.
 
@@ -47,14 +46,16 @@ python3 -m tools.bench_compile_speed   # reproduce
 python3 -m tools.lfortran_mass.run_mass --workers $(nproc)
 ```
 
+Latest snapshot (February 7, 2026):
+
 | Classification | Count | % |
 |---------------|------:|--:|
-| **Pass** | 1107 | 45.8% |
-| JIT fail | 506 | 20.9% |
-| Unsupported feature | 351 | 14.5% |
+| **Pass** | 1207 | 50.0% |
+| JIT fail | 395 | 16.4% |
+| Unsupported feature | 350 | 14.5% |
 | Parse fail | 192 | 7.9% |
 | Unsupported ABI | 150 | 6.2% |
-| Mismatch | 108 | 4.5% |
+| Mismatch | 120 | 5.0% |
 
 ## License
 

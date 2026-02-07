@@ -62,6 +62,8 @@ Useful options:
 - `--include-expected-fail`: include expected-failure/error-handling tests
 - `--load-lib <path>`: preload runtime libraries into liric JIT (repeatable)
 - `--no-auto-runtime-lib`: disable automatic preload of `liblfortran_runtime`
+- `--diag-fail-logs`: write failing-stage stdout/stderr/meta under `cache/<case_id>/diag/`
+- `--diag-jit-coredump`: on JIT signal failures, capture `coredumpctl info` and `eu-stack` output when available
 
 ## Outputs
 All artifacts are written under `/tmp/liric_lfortran_mass/`:
