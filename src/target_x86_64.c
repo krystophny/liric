@@ -703,6 +703,12 @@ static int x86_64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
                 set->size = 1;
                 mblock_append(mb, set);
 
+                lr_minst_t *zx = minst_new(mf->arena, LR_MIR_MOVZX);
+                zx->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                zx->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = X86_RAX };
+                zx->size = 1;
+                mblock_append(mb, zx);
+
                 emit_store_slot(mf, mb, inst->dest, X86_RAX);
                 break;
             }
