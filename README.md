@@ -76,6 +76,27 @@ JIT compile only (no text parsing): **75.4x** median speedup.
 python3 -m tools.bench_h2h --workers $(nproc)   # reproduce
 ```
 
+## End-to-End: LFortran + liric vs LFortran + LLVM
+
+493 Fortran tests passing both backends, macOS arm64, 3 iterations each.
+Measures total wall-clock time from Fortran source to program output.
+
+- **liric path:** `lfortran --show-llvm` → `liric_probe_runner` (JIT)
+- **LLVM path:** `lfortran` (compile + link + run natively)
+
+| Metric | liric path | LLVM native | Speedup |
+|--------|----------:|-----------:|--------:|
+| Median | 156 ms | 3093 ms | **19.8x** |
+| Mean | 162 ms | 3065 ms | **18.9x** |
+| P90 | 161 ms | 3162 ms | **20.4x** |
+
+100% of tests faster. liric JIT takes 3.6 ms median; the rest is
+`lfortran --show-llvm` IR emission (153 ms).
+
+```bash
+python3 -m tools.bench_lfortran_e2e --workers $(nproc)   # reproduce
+```
+
 ## LFortran Test Suite
 
 ```bash
