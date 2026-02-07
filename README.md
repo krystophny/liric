@@ -78,15 +78,17 @@ python3 -m tools.bench_parse_overhead   # reproduce
 
 ## Speed: liric vs LLVM lli
 
-1196 LFortran-generated `.ll` files, LLVM 21.1.6.
+513 LFortran-generated `.ll` files, macOS arm64, LLVM 21.1.7.
 
 | Metric | liric | lli -O0 | Speedup |
 |--------|------:|--------:|--------:|
-| Median | 1.23 ms | 12.26 ms | **10.0x** |
-| Mean | 1.72 ms | 14.66 ms | **8.5x** |
-| P90 | 2.66 ms | 20.27 ms | 7.6x |
+| Median | 5.34 ms | 17.67 ms | **3.3x** |
+| Mean | 5.82 ms | 18.70 ms | **3.2x** |
+| P90 | 6.20 ms | 21.07 ms | 3.4x |
 
-Total: 2.06s (liric) vs 17.53s (lli). 100% of tests faster, 42.4% over 10x.
+Total: 2.99s (liric) vs 9.60s (lli). 99.8% of tests faster.
+Wall-clock times include process startup (~4ms); in-process JIT compile
+is sub-millisecond (see parse overhead above).
 
 ```bash
 python3 -m tools.bench_compile_speed   # reproduce
