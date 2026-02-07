@@ -6,11 +6,21 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+static double now_ms(void) {
+    static mach_timebase_info_data_t info = {0, 0};
+    if (info.denom == 0) mach_timebase_info(&info);
+    uint64_t t = mach_absolute_time();
+    return (double)(t * info.numer / info.denom) / 1e6;
+}
+#else
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
+#endif
 
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
