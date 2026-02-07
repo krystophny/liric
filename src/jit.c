@@ -550,20 +550,12 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             if (resolve_rc != 0)
                 return -1;
 
-            lr_mfunc_t *mf = lr_arena_new(j->arena, lr_mfunc_t);
-            mf->arena = j->arena;
-
-            JIT_PROF_START(isel);
-            int rc = j->target->isel_func(f, mf, m);
-            JIT_PROF_END(isel);
-            if (rc != 0) return rc;
-
             uint8_t *func_start = j->code_buf + j->code_size;
             size_t free_space = j->code_cap - j->code_size;
             size_t code_len = 0;
-            JIT_PROF_START(encode);
-            rc = j->target->encode_func(mf, func_start, free_space, &code_len);
-            JIT_PROF_END(encode);
+            JIT_PROF_START(compile);
+            int rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
+            JIT_PROF_END(compile);
             if (rc != 0) return rc;
 
             if (code_len > free_space)

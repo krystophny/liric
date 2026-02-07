@@ -116,21 +116,22 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 - Type singletons for primitives (void, i1-i64, float, double, ptr); composite types allocated per-use
 - Operands are tagged unions: vreg, immediate, block ref, global ref, null, undef
 
-**Machine IR** (`target.h`) is the ISel output:
-- `lr_mfunc_t` contains linked list of `lr_mblock_t` with `lr_minst_t`
-- Target-neutral `LR_MIR_*` opcodes and `LR_CC_*` condition codes shared across backends
-- Each backend has its own ISel using native register numbers (x86: RAX/RCX, aarch64: X9/X10)
+**Backend** (`target.h`) uses direct emission (no intermediate MIR):
+- Single-pass `compile_func` fuses ISel + binary encoding
+- Backend-local compile context holds code buffer, stack slots, and branch fixups
+- `LR_CC_*` condition codes shared across backends for integer and FP comparisons
+- Each backend uses native scratch registers (x86: RAX/RCX, aarch64: X9/X10)
 - Stack-based register allocation: every vreg gets a stack slot
-- PHI nodes lowered as stores in predecessor blocks before terminators
+- PHI copies built before emission, applied at block terminators
 
 **Backend interface** (`lr_target_t`):
 ```c
 typedef struct lr_target {
     const char *name;
     uint8_t ptr_size;
-    int (*isel_func)(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod);
-    int (*encode_func)(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_t *out_len);
-    int (*print_inst)(const lr_minst_t *mi, char *buf, size_t len);
+    int (*compile_func)(lr_func_t *func, lr_module_t *mod,
+                        uint8_t *buf, size_t buflen, size_t *out_len,
+                        lr_arena_t *arena);
 } lr_target_t;
 ```
 

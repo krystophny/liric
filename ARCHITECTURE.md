@@ -35,19 +35,18 @@
   ┌─────────────────v─────────────────────────────────────────┐
   │                ISel  (Instruction Selection)               │
   │                                                            │
-  │  target.h (132 LOC) -- vtable: isel_func + encode_func    │
+  │  target.h -- vtable: compile_func (single-pass)            │
   │                                                            │
   │  ┌──────────────────┐    ┌──────────────────┐             │
   │  │ target_x86_64.c  │    │ target_aarch64.c │             │
-  │  │    1575 LOC       │    │    1414 LOC       │             │
   │  │  System V ABI     │    │  AAPCS64 ABI      │             │
   │  │  RAX/RCX scratch  │    │  X9/X10 scratch    │             │
   │  │  XMM0/1 for FP    │    │  D0/D1 for FP      │             │
   │  └──────────────────┘    └──────────────────┘             │
   │                                                            │
-  │  Stack-based regalloc: every vreg -> [RBP - offset]        │
-  │  MIR: 32 opcodes, target-neutral condition codes           │
-  │  lr_mfunc_t -> lr_mblock_t -> lr_minst_t                  │
+  │  Stack-based regalloc: every vreg -> [FP - offset]         │
+  │  Direct emission: ISel + encoding fused in one pass        │
+  │  Pre-scan allocates all slots, then single code-gen walk   │
   └─────────────────┬──────────────────────────────────────────┘
                     |
   ┌─────────────────v─────────────────────────────────────────┐
@@ -124,11 +123,10 @@
 - `lr_operand_t`: tagged union (vreg, imm_i64, imm_f64, block, global, null, undef)
 - `lr_type_t`: kind enum + union (array, struct, func composites)
 
-**Machine IR** (`target.h`):
-- `lr_mfunc_t`: machine blocks + stack frame layout
-- `lr_mblock_t`: machine instruction list + code offset
-- `lr_minst_t`: MIR opcode + dst/src machine operands + size + condition code
-- `lr_moperand_t`: kind (REG, IMM, MEM, LABEL) + value union
+**Backend** (`target.h`):
+- `lr_target_t`: name, ptr_size, compile_func (single-pass ISel + encoding)
+- Backend-local compile context: code buffer, stack slots, branch fixups
+- PHI copies built before emission, applied at block terminators
 
 **JIT** (`jit.h`):
 - `lr_jit_t`: code/data buffers + symbol hash table + negative cache + arena
@@ -145,9 +143,9 @@
 typedef struct lr_target {
     const char *name;       // "x86_64", "aarch64"
     uint8_t ptr_size;       // 8 for both
-    int (*isel_func)(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod);
-    int (*encode_func)(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_t *out_len);
-    int (*print_inst)(const lr_minst_t *mi, char *buf, size_t len);
+    int (*compile_func)(lr_func_t *func, lr_module_t *mod,
+                        uint8_t *buf, size_t buflen, size_t *out_len,
+                        lr_arena_t *arena);
 } lr_target_t;
 ```
 

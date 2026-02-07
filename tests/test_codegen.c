@@ -31,16 +31,11 @@ int test_codegen_ret_42(void) {
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target exists");
-    lr_mfunc_t mf = {0};
-    mf.arena = arena;
-
-    int rc = target->isel_func(m->first_func, &mf, m);
-    TEST_ASSERT_EQ(rc, 0, "isel succeeds");
 
     uint8_t code[4096];
     size_t code_len = 0;
-    rc = target->encode_func(&mf, code, sizeof(code), &code_len);
-    TEST_ASSERT_EQ(rc, 0, "encoding succeeds");
+    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(code_len < 100, "code is reasonably small");
 
@@ -63,16 +58,11 @@ int test_codegen_add(void) {
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target exists");
-    lr_mfunc_t mf = {0};
-    mf.arena = arena;
-
-    int rc = target->isel_func(m->first_func, &mf, m);
-    TEST_ASSERT_EQ(rc, 0, "isel succeeds");
 
     uint8_t code[4096];
     size_t code_len = 0;
-    rc = target->encode_func(&mf, code, sizeof(code), &code_len);
-    TEST_ASSERT_EQ(rc, 0, "encoding succeeds");
+    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
 
     lr_arena_destroy(arena);

@@ -75,9 +75,8 @@ int main(int argc, char **argv) {
     if (!src) { fprintf(stderr, "failed to read %s\n", input_file); return 1; }
 
     double t_writable = 0, t_resolve = 0;
-    double t_isel = 0, t_encode = 0, t_executable = 0;
+    double t_compile = 0, t_executable = 0;
     uint32_t total_funcs = 0, total_globals = 0, total_ir_insts = 0;
-    uint32_t total_mir_insts = 0;
 
     for (int iter = 0; iter < iters; iter++) {
         char err[512] = {0};
@@ -103,26 +102,19 @@ int main(int argc, char **argv) {
 
         // --- Phase 1: make_writable ---
         double p0 = now_us();
-        // Access jit internals: make_writable is static in jit.c
-        // We'll measure the full lr_jit_add_module but with instrumented internals
-        // Instead, let's measure by reconstructing the pipeline:
 #if defined(__APPLE__) && defined(__aarch64__)
         pthread_jit_write_protect_np(0);
 #endif
         double p1 = now_us();
         t_writable += (p1 - p0);
 
-        // --- Phase 2: materialize globals ---
         // Count globals
         if (iter == 0) {
             for (lr_global_t *g = m->first_global; g; g = g->next)
                 total_globals++;
         }
-        // (globals are materialized inside lr_jit_add_module, we can't split further
-        //  without duplicating internal code, so we time the whole add_module below)
 
-        // Just time the entire lr_jit_add_module as one unit for now,
-        // then also time a version that skips globals:
+        // Time the entire lr_jit_add_module
         double p2 = now_us();
         int rc = lr_jit_add_module(jit, m);
         double p3 = now_us();
@@ -144,21 +136,16 @@ int main(int argc, char **argv) {
             }
         }
 
-        // For a more detailed breakdown, let's also time isel+encode separately
-        // by doing a second compilation pass (parse again, compile manually)
-        // --- Detailed phase timing (separate isel/encode) ---
+        // Detailed compile timing per function
         lr_arena_t *arena2 = lr_arena_create(0);
         lr_module_t *m2 = lr_parse_ll_text(src, src_len, arena2, err, sizeof(err));
         if (!m2) { lr_arena_destroy(arena2); lr_jit_destroy(jit); lr_arena_destroy(arena); continue; }
 
-        // Pre-resolve globals using the already-populated JIT symbol table
-        // (we can't easily split resolve vs isel without accessing internals)
-        // Instead, time isel+encode together per function
         const lr_target_t *target = jit->target;
         for (lr_func_t *f = m2->first_func; f; f = f->next) {
             if (f->is_decl) continue;
 
-            // Resolve global operands (convert LR_VAL_GLOBAL to LR_VAL_IMM_I64)
+            // Resolve global operands
             double r0 = now_us();
             for (lr_block_t *b = f->first_block; b; b = b->next) {
                 for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
@@ -179,28 +166,13 @@ int main(int argc, char **argv) {
             double r1 = now_us();
             t_resolve += (r1 - r0);
 
-            // ISel
-            lr_mfunc_t *mf = lr_arena_new(arena2, lr_mfunc_t);
-            mf->arena = arena2;
-            double i0 = now_us();
-            target->isel_func(f, mf, m2);
-            double i1 = now_us();
-            t_isel += (i1 - i0);
-
-            // Count MIR instructions
-            if (iter == 0) {
-                for (lr_mblock_t *mb = mf->first_block; mb; mb = mb->next)
-                    for (lr_minst_t *mi = mb->first; mi; mi = mi->next)
-                        total_mir_insts++;
-            }
-
-            // Encode
+            // Compile (single phase: ISel + encode combined)
             uint8_t tmp_buf[65536];
             size_t code_len = 0;
-            double e0 = now_us();
-            target->encode_func(mf, tmp_buf, sizeof(tmp_buf), &code_len);
-            double e1 = now_us();
-            t_encode += (e1 - e0);
+            double c0 = now_us();
+            target->compile_func(f, m2, tmp_buf, sizeof(tmp_buf), &code_len, arena2);
+            double c1 = now_us();
+            t_compile += (c1 - c0);
         }
 
         // make_executable
@@ -213,7 +185,6 @@ int main(int argc, char **argv) {
         double x1 = now_us();
         t_executable += (x1 - x0);
 
-        // subtract extra make_executable from total (we did it twice)
         double total_jit = (p3 - p2);
         (void)total_jit;
 
@@ -228,16 +199,13 @@ int main(int argc, char **argv) {
     printf("functions:     %u\n", total_funcs);
     printf("globals:       %u\n", total_globals);
     printf("ir_insts:      %u\n", total_ir_insts);
-    printf("mir_insts:     %u\n", total_mir_insts);
     printf("iters:         %d\n", iters);
     printf("\n--- Average per iteration (microseconds) ---\n");
     printf("make_writable:  %7.2f us\n", t_writable / d);
     printf("resolve_syms:   %7.2f us\n", t_resolve / d);
-    printf("isel:           %7.2f us\n", t_isel / d);
-    printf("encode:         %7.2f us\n", t_encode / d);
+    printf("compile:        %7.2f us\n", t_compile / d);
     printf("make_executable:%7.2f us\n", t_executable / d);
-    printf("isel+encode:    %7.2f us\n", (t_isel + t_encode) / d);
-    printf("resolve+isel+en:%7.2f us\n", (t_resolve + t_isel + t_encode) / d);
+    printf("resolve+compile:%7.2f us\n", (t_resolve + t_compile) / d);
 
     free(src);
     return 0;

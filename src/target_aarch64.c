@@ -6,155 +6,40 @@
 #include <string.h>
 
 /*
- * aarch64 ISel: stack-based register allocation mirroring the x86_64 strategy.
+ * aarch64 direct-emission backend: stack-based register allocation.
  *
  * All integer computation flows through X9 (primary) and X10 (secondary).
  * FP computation flows through D0 (primary) and D1 (secondary), both
  * caller-saved per AAPCS64, so no save/restore needed.
  * Every IR vreg gets a stack slot addressed via FP (X29).
- * AAPCS64 argument registers: X0-X7 (8 args, vs x86's 6).
+ * AAPCS64 argument registers: X0-X7 (8 args).
+ *
+ * ISel and encoding are fused into a single compile pass.
+ * A pre-scan allocates all stack slots before emitting the prologue so
+ * that the sub sp,N immediate is known up front.
  */
 
 #define FP_SCRATCH0  A64_D0
 #define FP_SCRATCH1  A64_D1
 
-static lr_minst_t *minst_new(lr_arena_t *a, lr_mir_op_t op) {
-    lr_minst_t *mi = lr_arena_new(a, lr_minst_t);
-    mi->op = op;
-    mi->size = 8;
-    return mi;
-}
+typedef struct phi_copy {
+    uint32_t dest_vreg;
+    lr_operand_t src_op;
+    struct phi_copy *next;
+} phi_copy_t;
 
-static void mblock_append(lr_mblock_t *mb, lr_minst_t *mi) {
-    if (!mb->first) mb->first = mi;
-    else mb->last->next = mi;
-    mb->last = mi;
-}
-
-static lr_mblock_t *mblock_new(lr_mfunc_t *mf) {
-    lr_mblock_t *mb = lr_arena_new(mf->arena, lr_mblock_t);
-    mb->id = mf->num_blocks++;
-    mb->offset = -1;
-    if (!mf->first_block) mf->first_block = mb;
-    else mf->last_block->next = mb;
-    mf->last_block = mb;
-    return mb;
-}
-
-static int32_t alloc_slot(lr_mfunc_t *mf, uint32_t vreg, uint8_t size) {
-    while (vreg >= mf->num_stack_slots) {
-        uint32_t old = mf->num_stack_slots;
-        uint32_t new_cap = old == 0 ? 64 : old * 2;
-        int32_t *ns = lr_arena_array(mf->arena, int32_t, new_cap);
-        if (old > 0) memcpy(ns, mf->stack_slots, old * sizeof(int32_t));
-        for (uint32_t i = old; i < new_cap; i++) ns[i] = 0;
-        mf->stack_slots = ns;
-        mf->num_stack_slots = new_cap;
-    }
-
-    if (mf->stack_slots[vreg] != 0)
-        return mf->stack_slots[vreg];
-
-    if (size < 8) size = 8;
-    mf->stack_size += size;
-    mf->stack_size = (mf->stack_size + size - 1) & ~(uint32_t)(size - 1);
-    int32_t offset = -(int32_t)mf->stack_size;
-    mf->stack_slots[vreg] = offset;
-    return offset;
-}
-
-static void emit_load_slot(lr_mfunc_t *mf, lr_mblock_t *mb, uint32_t vreg, uint8_t reg) {
-    int32_t off = alloc_slot(mf, vreg, 8);
-    lr_minst_t *mi = minst_new(mf->arena, LR_MIR_MOV);
-    mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
-    mi->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
-    mi->size = 8;
-    mblock_append(mb, mi);
-}
-
-static void emit_store_slot(lr_mfunc_t *mf, lr_mblock_t *mb, uint32_t vreg, uint8_t reg) {
-    int32_t off = alloc_slot(mf, vreg, 8);
-    lr_minst_t *mi = minst_new(mf->arena, LR_MIR_MOV);
-    mi->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
-    mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
-    mi->size = 8;
-    mblock_append(mb, mi);
-}
-
-static void emit_load_operand(lr_mfunc_t *mf, lr_mblock_t *mb,
-                               const lr_operand_t *op, uint8_t reg) {
-    if (op->kind == LR_VAL_IMM_I64) {
-        lr_minst_t *mi = minst_new(mf->arena, LR_MIR_MOV_IMM);
-        mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
-        mi->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = op->imm_i64 };
-        mi->size = 8;
-        mblock_append(mb, mi);
-    } else if (op->kind == LR_VAL_VREG) {
-        emit_load_slot(mf, mb, op->vreg, reg);
-    } else if (op->kind == LR_VAL_IMM_F64) {
-        int64_t imm_bits = 0;
-        if (op->type && op->type->kind == LR_TYPE_FLOAT) {
-            float fv = (float)op->imm_f64;
-            uint32_t bits = 0;
-            memcpy(&bits, &fv, sizeof(bits));
-            imm_bits = (int64_t)(uint64_t)bits;
-        } else {
-            uint64_t bits = 0;
-            memcpy(&bits, &op->imm_f64, sizeof(bits));
-            imm_bits = (int64_t)bits;
-        }
-        lr_minst_t *mi = minst_new(mf->arena, LR_MIR_MOV_IMM);
-        mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
-        mi->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = imm_bits };
-        mi->size = 8;
-        mblock_append(mb, mi);
-    } else if (op->kind == LR_VAL_NULL) {
-        lr_minst_t *mi = minst_new(mf->arena, LR_MIR_MOV_IMM);
-        mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = reg };
-        mi->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = 0 };
-        mi->size = 8;
-        mblock_append(mb, mi);
-    }
-}
-
-/* FP ISel helpers: load/store FP values between stack slots and FP regs.
- * Stack slots hold the raw bit representation; FP load/store instructions
- * interpret the same bits as float/double. */
-
-static void emit_load_fp_slot(lr_mfunc_t *mf, lr_mblock_t *mb,
-                               uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
-    int32_t off = alloc_slot(mf, vreg, 8);
-    lr_minst_t *mi = minst_new(mf->arena, LR_MIR_FMOV);
-    mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = fpreg };
-    mi->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
-    mi->size = fsize;
-    mblock_append(mb, mi);
-}
-
-static void emit_store_fp_slot(lr_mfunc_t *mf, lr_mblock_t *mb,
-                                uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
-    int32_t off = alloc_slot(mf, vreg, 8);
-    lr_minst_t *mi = minst_new(mf->arena, LR_MIR_FMOV);
-    mi->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
-    mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = fpreg };
-    mi->size = fsize;
-    mblock_append(mb, mi);
-}
-
-static void emit_load_fp_operand(lr_mfunc_t *mf, lr_mblock_t *mb,
-                                  const lr_operand_t *op, uint8_t fpreg,
-                                  uint8_t fsize) {
-    if (op->kind == LR_VAL_VREG) {
-        emit_load_fp_slot(mf, mb, op->vreg, fpreg, fsize);
-    } else {
-        emit_load_operand(mf, mb, op, A64_X9);
-        lr_minst_t *fmov = minst_new(mf->arena, LR_MIR_FMOV_FROM_GPR);
-        fmov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = fpreg };
-        fmov->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-        fmov->size = fsize;
-        mblock_append(mb, fmov);
-    }
-}
+typedef struct {
+    uint8_t *buf;
+    size_t buflen;
+    size_t pos;
+    uint32_t stack_size;
+    int32_t *stack_slots;
+    uint32_t num_stack_slots;
+    size_t block_offsets[1024];
+    struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } fixups[4096];
+    uint32_t num_fixups;
+    lr_arena_t *arena;
+} a64_compile_ctx_t;
 
 static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
     size_t off = 0;
@@ -172,638 +57,29 @@ static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
     return off;
 }
 
-static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) {
-    (void)mod;
-    mf->ir_func = func;
-    mf->name = func->name;
-
-    /* AAPCS64: X0-X7 for first 8 integer/pointer arguments */
-    static const uint8_t param_regs[] = {
-        A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
-    };
-
-    lr_mblock_t **mblocks = lr_arena_array(mf->arena, lr_mblock_t *, func->num_blocks);
-    uint32_t bi = 0;
-    for (lr_block_t *b = func->first_block; b; b = b->next) {
-        mblocks[bi] = mblock_new(mf);
-        bi++;
+static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t size) {
+    while (vreg >= ctx->num_stack_slots) {
+        uint32_t old = ctx->num_stack_slots;
+        uint32_t new_cap = old == 0 ? 64 : old * 2;
+        int32_t *ns = lr_arena_array(ctx->arena, int32_t, new_cap);
+        if (old > 0) memcpy(ns, ctx->stack_slots, old * sizeof(int32_t));
+        for (uint32_t i = old; i < new_cap; i++) ns[i] = 0;
+        ctx->stack_slots = ns;
+        ctx->num_stack_slots = new_cap;
     }
 
-    lr_mblock_t *entry_mb = mf->first_block;
-    for (uint32_t i = 0; i < func->num_params && i < 8; i++) {
-        emit_store_slot(mf, entry_mb, func->param_vregs[i], param_regs[i]);
-    }
-    /* Load stack-passed parameters (args 9+) from caller's frame.
-       After stp x29,x30,[sp,#-16]!; mov x29,sp the caller's stack args
-       are at [FP + 16], [FP + 24], ... */
-    for (uint32_t i = 8; i < func->num_params; i++) {
-        int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
-        lr_minst_t *ld = minst_new(mf->arena, LR_MIR_MOV);
-        ld->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-        ld->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = caller_off } };
-        ld->size = 8;
-        mblock_append(entry_mb, ld);
-        emit_store_slot(mf, entry_mb, func->param_vregs[i], A64_X9);
-    }
+    if (ctx->stack_slots[vreg] != 0)
+        return ctx->stack_slots[vreg];
 
-    bi = 0;
-    for (lr_block_t *b = func->first_block; b; b = b->next, bi++) {
-        lr_mblock_t *mb = mblocks[bi];
-
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            switch (inst->op) {
-            case LR_OP_RET: {
-                mb->before_term = mb->last;
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X0 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_RET);
-                mblock_append(mb, mi);
-                break;
-            }
-            case LR_OP_RET_VOID: {
-                mb->before_term = mb->last;
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_RET);
-                mblock_append(mb, mi);
-                break;
-            }
-            case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
-            case LR_OP_OR: case LR_OP_XOR: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                lr_mir_op_t mop;
-                switch (inst->op) {
-                case LR_OP_ADD: mop = LR_MIR_ADD; break;
-                case LR_OP_SUB: mop = LR_MIR_SUB; break;
-                case LR_OP_AND: mop = LR_MIR_AND; break;
-                case LR_OP_OR:  mop = LR_MIR_OR; break;
-                case LR_OP_XOR: mop = LR_MIR_XOR; break;
-                default: mop = LR_MIR_ADD; break;
-                }
-                lr_minst_t *mi = minst_new(mf->arena, mop);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                mi->size = (uint8_t)lr_type_size(inst->type);
-                mblock_append(mb, mi);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_MUL: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_IMUL);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                mi->size = (uint8_t)lr_type_size(inst->type);
-                mblock_append(mb, mi);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_FADD: case LR_OP_FSUB:
-            case LR_OP_FMUL: case LR_OP_FDIV: {
-                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
-                emit_load_fp_operand(mf, mb, &inst->operands[1], FP_SCRATCH1, fsize);
-                lr_mir_op_t mop;
-                switch (inst->op) {
-                case LR_OP_FADD: mop = LR_MIR_FADD; break;
-                case LR_OP_FSUB: mop = LR_MIR_FSUB; break;
-                case LR_OP_FMUL: mop = LR_MIR_FMUL; break;
-                case LR_OP_FDIV: mop = LR_MIR_FDIV; break;
-                default: mop = LR_MIR_FADD; break;
-                }
-                lr_minst_t *mi = minst_new(mf->arena, mop);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH1 };
-                mi->size = fsize;
-                mblock_append(mb, mi);
-                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, fsize);
-                break;
-            }
-            case LR_OP_FNEG: {
-                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_FNEG);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                mi->size = fsize;
-                mblock_append(mb, mi);
-                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, fsize);
-                break;
-            }
-            case LR_OP_SDIV: case LR_OP_SREM: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                /* aarch64 SDIV handles sign extension natively */
-                lr_minst_t *cqo = minst_new(mf->arena, LR_MIR_CDQ);
-                mblock_append(mb, cqo);
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_IDIV);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                mi->size = (uint8_t)lr_type_size(inst->type);
-                mblock_append(mb, mi);
-                if (inst->op == LR_OP_SREM) {
-                    /* remainder = dividend - quotient * divisor (via MSUB) */
-                    emit_store_slot(mf, mb, inst->dest, A64_X11);
-                } else {
-                    emit_store_slot(mf, mb, inst->dest, A64_X9);
-                }
-                break;
-            }
-            case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                lr_mir_op_t mop;
-                switch (inst->op) {
-                case LR_OP_SHL:  mop = LR_MIR_SAL; break;
-                case LR_OP_LSHR: mop = LR_MIR_SHR; break;
-                case LR_OP_ASHR: mop = LR_MIR_SAR; break;
-                default: mop = LR_MIR_SAL; break;
-                }
-                lr_minst_t *mi = minst_new(mf->arena, mop);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                mi->size = (uint8_t)lr_type_size(inst->type);
-                mblock_append(mb, mi);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_ICMP: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                lr_minst_t *cmp = minst_new(mf->arena, LR_MIR_CMP);
-                cmp->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                cmp->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                cmp->size = (uint8_t)lr_type_size(inst->operands[0].type);
-                mblock_append(mb, cmp);
-
-                uint8_t cc;
-                switch (inst->icmp_pred) {
-                case LR_ICMP_EQ:  cc = LR_CC_EQ; break;
-                case LR_ICMP_NE:  cc = LR_CC_NE; break;
-                case LR_ICMP_SGT: cc = LR_CC_SGT; break;
-                case LR_ICMP_SGE: cc = LR_CC_SGE; break;
-                case LR_ICMP_SLT: cc = LR_CC_SLT; break;
-                case LR_ICMP_SLE: cc = LR_CC_SLE; break;
-                case LR_ICMP_UGT: cc = LR_CC_UGT; break;
-                case LR_ICMP_UGE: cc = LR_CC_UGE; break;
-                case LR_ICMP_ULT: cc = LR_CC_ULT; break;
-                case LR_ICMP_ULE: cc = LR_CC_ULE; break;
-                default: cc = LR_CC_EQ; break;
-                }
-
-                lr_minst_t *set = minst_new(mf->arena, LR_MIR_SETCC);
-                set->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                set->cc = cc;
-                set->size = 1;
-                mblock_append(mb, set);
-
-                lr_minst_t *zx = minst_new(mf->arena, LR_MIR_MOVZX);
-                zx->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                zx->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                zx->size = 1;
-                mblock_append(mb, zx);
-
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SELECT: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                lr_minst_t *test = minst_new(mf->arena, LR_MIR_TEST);
-                test->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                test->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                test->size = 1;
-                mblock_append(mb, test);
-
-                emit_load_operand(mf, mb, &inst->operands[2], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                lr_minst_t *cmov = minst_new(mf->arena, LR_MIR_CMOVCC);
-                cmov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                cmov->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                cmov->cc = LR_CC_NE;
-                cmov->size = 8;
-                mblock_append(mb, cmov);
-
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_BR: {
-                mb->before_term = mb->last;
-                uint32_t target_id = inst->operands[0].block_id;
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_JMP);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_LABEL, .label = target_id };
-                mblock_append(mb, mi);
-                break;
-            }
-            case LR_OP_CONDBR: {
-                mb->before_term = mb->last;
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                lr_minst_t *test = minst_new(mf->arena, LR_MIR_TEST);
-                test->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                test->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                test->size = 1;
-                mblock_append(mb, test);
-
-                uint32_t true_id = inst->operands[1].block_id;
-                uint32_t false_id = inst->operands[2].block_id;
-
-                lr_minst_t *jcc = minst_new(mf->arena, LR_MIR_JCC);
-                jcc->dst = (lr_moperand_t){ .kind = LR_MOP_LABEL, .label = true_id };
-                jcc->cc = LR_CC_NE;
-                mblock_append(mb, jcc);
-
-                lr_minst_t *jmp = minst_new(mf->arena, LR_MIR_JMP);
-                jmp->dst = (lr_moperand_t){ .kind = LR_MOP_LABEL, .label = false_id };
-                mblock_append(mb, jmp);
-                break;
-            }
-            case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_type_size(inst->type);
-                if (elem_sz < 8) elem_sz = 8;
-
-                /* Check if we can use static alloca (no operands or constant count = 1) */
-                bool use_static = (inst->num_operands == 0);
-                if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
-                    inst->operands[0].imm_i64 == 1) {
-                    use_static = true;
-                }
-
-                if (use_static) {
-                    /* Static alloca: just allocate a stack slot, store its address */
-                    mf->stack_size += (uint32_t)elem_sz;
-                    mf->stack_size = (mf->stack_size + 7) & ~7u;
-                    int32_t off = -(int32_t)mf->stack_size;
-
-                    lr_minst_t *lea = minst_new(mf->arena, LR_MIR_LEA);
-                    lea->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                    lea->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
-                    lea->size = 8;
-                    mblock_append(mb, lea);
-                    emit_store_slot(mf, mb, inst->dest, A64_X9);
-                } else {
-                    /* Dynamic alloca: alloca <type>, <count_type> <count_operand> */
-                    /* Load count into X9 */
-                    emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-
-                    /* Multiply count by element size: X9 = X9 * elem_sz */
-                    if (elem_sz != 1) {
-                        lr_minst_t *mov_size = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                        mov_size->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                        mov_size->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)elem_sz };
-                        mov_size->size = 8;
-                        mblock_append(mb, mov_size);
-
-                        lr_minst_t *mul = minst_new(mf->arena, LR_MIR_IMUL);
-                        mul->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                        mul->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                        mul->size = 8;
-                        mblock_append(mb, mul);
-                    }
-
-                    /* Align total size to 16 bytes: X9 = (X9 + 15) & ~15 */
-                    lr_minst_t *add_align = minst_new(mf->arena, LR_MIR_ADD);
-                    add_align->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                    add_align->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = 15 };
-                    add_align->size = 8;
-                    mblock_append(mb, add_align);
-
-                    lr_minst_t *and_align = minst_new(mf->arena, LR_MIR_AND);
-                    and_align->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                    and_align->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = ~15LL };
-                    and_align->size = 8;
-                    mblock_append(mb, and_align);
-
-                    /* Subtract from SP: SP = SP - X9 */
-                    lr_minst_t *sub = minst_new(mf->arena, LR_MIR_SUB);
-                    sub->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_SP };
-                    sub->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                    sub->size = 8;
-                    mblock_append(mb, sub);
-
-                    /* Result pointer is now SP, move to X9 */
-                    lr_minst_t *mov_sp = minst_new(mf->arena, LR_MIR_MOV);
-                    mov_sp->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                    mov_sp->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_SP };
-                    mov_sp->size = 8;
-                    mblock_append(mb, mov_sp);
-
-                    emit_store_slot(mf, mb, inst->dest, A64_X9);
-                }
-                break;
-            }
-            case LR_OP_LOAD: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                lr_minst_t *ld = minst_new(mf->arena, LR_MIR_MOV);
-                ld->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                ld->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_X9, .disp = 0 } };
-                ld->size = (uint8_t)lr_type_size(inst->type);
-                mblock_append(mb, ld);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_STORE: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X10);
-                lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
-                st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_X10, .disp = 0 } };
-                st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                st->size = (uint8_t)lr_type_size(inst->operands[0].type);
-                mblock_append(mb, st);
-                break;
-            }
-            case LR_OP_GEP: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                const lr_type_t *cur_ty = inst->type;
-                for (uint32_t idx = 1; idx < inst->num_operands; idx++) {
-                    const lr_operand_t *idx_op = &inst->operands[idx];
-                    int64_t byte_off = 0;
-                    bool is_const = (idx_op->kind == LR_VAL_IMM_I64);
-                    if (idx == 1) {
-                        size_t elem_size = lr_type_size(cur_ty);
-                        if (is_const) {
-                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
-                        } else {
-                            emit_load_operand(mf, mb, idx_op, A64_X10);
-                            if (elem_size != 1) {
-                                lr_minst_t *imov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                                imov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X11 };
-                                imov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)elem_size };
-                                imov->size = 8;
-                                mblock_append(mb, imov);
-                                lr_minst_t *mul = minst_new(mf->arena, LR_MIR_IMUL);
-                                mul->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                                mul->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X11 };
-                                mul->size = 8;
-                                mblock_append(mb, mul);
-                            }
-                            lr_minst_t *add = minst_new(mf->arena, LR_MIR_ADD);
-                            add->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                            add->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                            add->size = 8;
-                            mblock_append(mb, add);
-                        }
-                    } else if (cur_ty && cur_ty->kind == LR_TYPE_STRUCT) {
-                        uint32_t field = (uint32_t)idx_op->imm_i64;
-                        byte_off = (int64_t)struct_field_offset(cur_ty, field);
-                        if (field < cur_ty->struc.num_fields)
-                            cur_ty = cur_ty->struc.fields[field];
-                        is_const = true;
-                    } else if (cur_ty && cur_ty->kind == LR_TYPE_ARRAY) {
-                        size_t elem_size = lr_type_size(cur_ty->array.elem);
-                        if (is_const) {
-                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
-                        } else {
-                            emit_load_operand(mf, mb, idx_op, A64_X10);
-                            if (elem_size != 1) {
-                                lr_minst_t *imov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                                imov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X11 };
-                                imov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)elem_size };
-                                imov->size = 8;
-                                mblock_append(mb, imov);
-                                lr_minst_t *mul = minst_new(mf->arena, LR_MIR_IMUL);
-                                mul->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                                mul->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X11 };
-                                mul->size = 8;
-                                mblock_append(mb, mul);
-                            }
-                            lr_minst_t *add = minst_new(mf->arena, LR_MIR_ADD);
-                            add->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                            add->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                            add->size = 8;
-                            mblock_append(mb, add);
-                        }
-                        cur_ty = cur_ty->array.elem;
-                    }
-                    if (is_const && byte_off != 0) {
-                        lr_minst_t *imov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                        imov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                        imov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = byte_off };
-                        imov->size = 8;
-                        mblock_append(mb, imov);
-                        lr_minst_t *add = minst_new(mf->arena, LR_MIR_ADD);
-                        add->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                        add->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X10 };
-                        add->size = 8;
-                        mblock_append(mb, add);
-                    }
-                }
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SEXT: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_MOVSX);
-                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                mi->size = (uint8_t)lr_type_size(inst->type);
-                mblock_append(mb, mi);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
-            case LR_OP_PTRTOINT: case LR_OP_INTTOPTR: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_FCMP: {
-                uint8_t fsize = (inst->operands[0].type &&
-                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
-                emit_load_fp_operand(mf, mb, &inst->operands[1], FP_SCRATCH1, fsize);
-
-                lr_minst_t *cmp = minst_new(mf->arena, LR_MIR_FCMP);
-                cmp->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cmp->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH1 };
-                cmp->size = fsize;
-                mblock_append(mb, cmp);
-
-                uint8_t cc;
-                switch (inst->fcmp_pred) {
-                case LR_FCMP_OEQ: cc = LR_CC_FP_OEQ; break;
-                case LR_FCMP_ONE: cc = LR_CC_FP_ONE; break;
-                case LR_FCMP_OGT: cc = LR_CC_FP_OGT; break;
-                case LR_FCMP_OGE: cc = LR_CC_FP_OGE; break;
-                case LR_FCMP_OLT: cc = LR_CC_FP_OLT; break;
-                case LR_FCMP_OLE: cc = LR_CC_FP_OLE; break;
-                case LR_FCMP_ORD: cc = LR_CC_FP_ORD; break;
-                case LR_FCMP_UNO: cc = LR_CC_FP_UNO; break;
-                case LR_FCMP_UEQ: cc = LR_CC_FP_UEQ; break;
-                case LR_FCMP_UNE: cc = LR_CC_FP_UNE; break;
-                case LR_FCMP_UGT: cc = LR_CC_FP_UGT; break;
-                case LR_FCMP_UGE: cc = LR_CC_FP_UGE; break;
-                case LR_FCMP_ULT: cc = LR_CC_FP_ULT; break;
-                case LR_FCMP_ULE: cc = LR_CC_FP_ULE; break;
-                default:          cc = LR_CC_FP_OEQ; break;
-                }
-
-                lr_minst_t *set = minst_new(mf->arena, LR_MIR_SETCC);
-                set->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                set->cc = cc;
-                set->size = 1;
-                mblock_append(mb, set);
-
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SITOFP: {
-                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_I2F);
-                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                cvt->size = fsize;
-                mblock_append(mb, cvt);
-                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, fsize);
-                break;
-            }
-            case LR_OP_FPTOSI: {
-                uint8_t fsize = (inst->operands[0].type &&
-                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
-                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_F2I);
-                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cvt->size = fsize;
-                mblock_append(mb, cvt);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_FPEXT: {
-                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, 4);
-                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_F2F);
-                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cvt->size = 8;
-                cvt->cc = 4;
-                mblock_append(mb, cvt);
-                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, 8);
-                break;
-            }
-            case LR_OP_FPTRUNC: {
-                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, 8);
-                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_F2F);
-                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
-                cvt->size = 4;
-                cvt->cc = 8;
-                mblock_append(mb, cvt);
-                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, 4);
-                break;
-            }
-            case LR_OP_EXTRACTVALUE: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_INSERTVALUE: {
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
-                emit_store_slot(mf, mb, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_CALL: {
-                static const uint8_t call_regs[] = {
-                    A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
-                };
-                uint32_t nargs = inst->num_operands - 1;
-                uint32_t nstack = nargs > 8 ? nargs - 8 : 0;
-                /* Round stack arg space to 16-byte alignment (AAPCS64) */
-                uint32_t stack_bytes = ((nstack * 8 + 15) & ~15u);
-
-                /* Reserve stack space for arguments beyond the first 8 */
-                if (stack_bytes > 0) {
-                    lr_minst_t *alloc = minst_new(mf->arena, LR_MIR_FRAME_ALLOC);
-                    alloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
-                    mblock_append(mb, alloc);
-                }
-
-                /* Store stack args to [SP + offset] */
-                for (uint32_t i = 0; i < nstack; i++) {
-                    uint32_t arg_idx = 8 + i;
-                    emit_load_operand(mf, mb, &inst->operands[arg_idx + 1], A64_X9);
-                    lr_minst_t *st = minst_new(mf->arena, LR_MIR_MOV);
-                    st->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_SP, .disp = (int32_t)(i * 8) } };
-                    st->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
-                    st->size = 8;
-                    mblock_append(mb, st);
-                }
-
-                /* Place first 8 args in AAPCS64 registers */
-                for (uint32_t i = 0; i < nargs && i < 8; i++) {
-                    emit_load_operand(mf, mb, &inst->operands[i + 1], call_regs[i]);
-                }
-
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X16);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-
-                /* Reclaim stack space after call */
-                if (stack_bytes > 0) {
-                    lr_minst_t *dealloc = minst_new(mf->arena, LR_MIR_FRAME_FREE);
-                    dealloc->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)stack_bytes };
-                    mblock_append(mb, dealloc);
-                }
-
-                if (inst->type && inst->type->kind != LR_TYPE_VOID)
-                    emit_store_slot(mf, mb, inst->dest, A64_X0);
-                break;
-            }
-            case LR_OP_PHI: {
-                alloc_slot(mf, inst->dest, 8);
-                break;
-            }
-            case LR_OP_UNREACHABLE: {
-                break;
-            }
-            default:
-                break;
-            }
-        }
-    }
-
-    /* Emit PHI stores: insert stores before terminators in predecessors */
-    bi = 0;
-    for (lr_block_t *b = func->first_block; b; b = b->next, bi++) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (inst->op != LR_OP_PHI) continue;
-            for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
-                uint32_t pred_id = inst->operands[i + 1].block_id;
-                if (pred_id >= func->num_blocks) continue;
-                lr_mblock_t *pred_mb = mblocks[pred_id];
-
-                lr_mblock_t tmp = {0};
-                emit_load_operand(mf, &tmp, &inst->operands[i], A64_X9);
-                emit_store_slot(mf, &tmp, inst->dest, A64_X9);
-
-                lr_minst_t *bt = pred_mb->before_term;
-                if (bt) {
-                    lr_minst_t *term_start = bt->next;
-                    bt->next = tmp.first;
-                    tmp.last->next = term_start;
-                } else {
-                    tmp.last->next = pred_mb->first;
-                    pred_mb->first = tmp.first;
-                }
-                pred_mb->before_term = tmp.last;
-            }
-        }
-    }
-
-    mf->stack_size = (mf->stack_size + 15) & ~15u;
-
-    return 0;
+    if (size < 8) size = 8;
+    ctx->stack_size += size;
+    ctx->stack_size = (ctx->stack_size + size - 1) & ~(uint32_t)(size - 1);
+    int32_t offset = -(int32_t)ctx->stack_size;
+    ctx->stack_slots[vreg] = offset;
+    return offset;
 }
 
-/*
- * aarch64 binary encoder.
- *
- * Prologue: stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, N
- * Epilogue: add sp, sp, N; ldp x29, x30, [sp], #16; ret
- */
+/* ---- Encoding helpers (pure byte-writing, unchanged) ---- */
 
 static void emit_u32(uint8_t *buf, size_t *pos, size_t len, uint32_t insn) {
     if (*pos + 4 <= len) {
@@ -875,15 +151,19 @@ static uint32_t enc_msub(bool is64, uint8_t rd, uint8_t rn, uint8_t rm, uint8_t 
          | ((uint32_t)ra << 10) | ((uint32_t)rn << 5) | rd;
 }
 
-static uint32_t enc_shiftv(lr_mir_op_t op, bool is64, uint8_t rd, uint8_t rn,
-                           uint8_t rm) {
-    uint32_t base;
-    switch (op) {
-    case LR_MIR_SHR: base = is64 ? 0x9AC02400u : 0x1AC02400u; break;
-    case LR_MIR_SAR: base = is64 ? 0x9AC02800u : 0x1AC02800u; break;
-    default:         base = is64 ? 0x9AC02000u : 0x1AC02000u; break;
-    }
-    return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | rd;
+static uint32_t enc_lslv(bool is64, uint8_t rd, uint8_t rn, uint8_t rm) {
+    return (is64 ? 0x9AC02000u : 0x1AC02000u) | ((uint32_t)rm << 16)
+         | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_lsrv(bool is64, uint8_t rd, uint8_t rn, uint8_t rm) {
+    return (is64 ? 0x9AC02400u : 0x1AC02400u) | ((uint32_t)rm << 16)
+         | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_asrv(bool is64, uint8_t rd, uint8_t rn, uint8_t rm) {
+    return (is64 ? 0x9AC02800u : 0x1AC02800u) | ((uint32_t)rm << 16)
+         | ((uint32_t)rn << 5) | rd;
 }
 
 static uint32_t enc_csel(bool is64, uint8_t rd, uint8_t rn, uint8_t rm,
@@ -989,8 +269,6 @@ static void emit_mov_reg(uint8_t *buf, size_t *pos, size_t len, uint8_t rd,
     emit_u32(buf, pos, len, enc_logic_reg(0xAA000000u, is64, rd, A64_SP, rm));
 }
 
-/* FP load/store encoding: LDUR/STUR for FP/SIMD registers (unscaled offset) */
-
 static uint32_t enc_fp_ldur(uint8_t fsize, uint8_t ft, uint8_t rn, int32_t imm9) {
     uint32_t base = (fsize == 4) ? 0xBC400000u : 0xFC400000u;
     return base | ((uint32_t)(imm9 & 0x1FF) << 12) | ((uint32_t)rn << 5) | ft;
@@ -1020,8 +298,6 @@ static void emit_fp_store(uint8_t *buf, size_t *pos, size_t len, uint8_t ft,
     emit_addr(buf, pos, len, A64_X15, rn, disp);
     emit_u32(buf, pos, len, enc_fp_stur(fsize, ft, A64_X15, 0));
 }
-
-/* FP arithmetic instruction encoders */
 
 static uint32_t enc_fadd(uint8_t fsize, uint8_t rd, uint8_t rn, uint8_t rm) {
     uint32_t base = (fsize == 8) ? 0x1E602800u : 0x1E202800u;
@@ -1071,24 +347,10 @@ static uint32_t enc_fcvt_f64_to_f32(uint8_t sd, uint8_t dn) {
     return 0x1E624000u | ((uint32_t)dn << 5) | sd;
 }
 
-static uint32_t enc_fmov_to_gpr(uint8_t fsize, uint8_t xd, uint8_t fn) {
-    uint32_t base = (fsize == 8) ? 0x9E660000u : 0x1E260000u;
-    return base | ((uint32_t)fn << 5) | xd;
-}
-
 static uint32_t enc_fmov_from_gpr(uint8_t fsize, uint8_t fd, uint8_t xn) {
     uint32_t base = (fsize == 8) ? 0x9E670000u : 0x1E270000u;
     return base | ((uint32_t)xn << 5) | fd;
 }
-
-/* Integer and FP condition code mapping to aarch64 hardware condition codes.
- *
- * After aarch64 FCMP, the NZCV flags encode:
- *   Less:      N=1, Z=0, C=0, V=0
- *   Equal:     N=0, Z=1, C=1, V=0
- *   Greater:   N=0, Z=0, C=1, V=0
- *   Unordered: N=0, Z=0, C=1, V=1
- */
 
 static uint8_t lr_cc_to_a64(uint8_t cc) {
     switch (cc) {
@@ -1126,287 +388,727 @@ static uint8_t lr_fp_cc_to_a64(uint8_t cc) {
     }
 }
 
-static int aarch64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen,
-                               size_t *out_len) {
-    size_t pos = 0;
-    size_t block_offsets[1024];
-    struct fixup_t {
-        size_t insn_pos;
-        uint32_t target;
-        uint8_t kind;
-        uint8_t cond;
-    } fixups[4096];
-    uint32_t nfix = 0;
-    uint32_t block_idx = 0;
+/* ---- Direct-emission ISel helpers ---- */
 
-    emit_u32(buf, &pos, buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
-    emit_u32(buf, &pos, buflen, 0x910003FDu); /* mov x29, sp */
-    if (mf->stack_size > 0)
-        emit_sp_adjust(buf, &pos, buflen, mf->stack_size, true);
+static void emit_load_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
+    int32_t off = alloc_slot(ctx, vreg, 8);
+    emit_load(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, off, 8);
+}
 
-    for (lr_mblock_t *mb = mf->first_block; mb; mb = mb->next, block_idx++) {
-        block_offsets[block_idx] = pos;
+static void emit_store_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
+    int32_t off = alloc_slot(ctx, vreg, 8);
+    emit_store(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, off, 8);
+}
 
-        for (lr_minst_t *mi = mb->first; mi; mi = mi->next) {
-            bool is64 = mi->size > 4;
-            uint8_t dst = mi->dst.reg;
-            uint8_t src = mi->src.reg;
+static void emit_load_operand(a64_compile_ctx_t *ctx,
+                               const lr_operand_t *op, uint8_t reg) {
+    if (op->kind == LR_VAL_IMM_I64) {
+        emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, op->imm_i64, true);
+    } else if (op->kind == LR_VAL_VREG) {
+        emit_load_slot(ctx, op->vreg, reg);
+    } else if (op->kind == LR_VAL_IMM_F64) {
+        int64_t imm_bits = 0;
+        if (op->type && op->type->kind == LR_TYPE_FLOAT) {
+            float fv = (float)op->imm_f64;
+            uint32_t bits = 0;
+            memcpy(&bits, &fv, sizeof(bits));
+            imm_bits = (int64_t)(uint64_t)bits;
+        } else {
+            uint64_t bits = 0;
+            memcpy(&bits, &op->imm_f64, sizeof(bits));
+            imm_bits = (int64_t)bits;
+        }
+        emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, imm_bits, true);
+    } else if (op->kind == LR_VAL_NULL) {
+        emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, 0, true);
+    }
+}
 
-            switch (mi->op) {
-            case LR_MIR_RET:
-                if (mf->stack_size > 0)
-                    emit_sp_adjust(buf, &pos, buflen, mf->stack_size, false);
-                emit_u32(buf, &pos, buflen, 0xA8C17BFDu); /* ldp x29, x30, [sp], #16 */
-                emit_u32(buf, &pos, buflen, 0xD65F03C0u); /* ret */
-                break;
+static void emit_load_fp_slot(a64_compile_ctx_t *ctx,
+                               uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
+    int32_t off = alloc_slot(ctx, vreg, 8);
+    emit_fp_load(ctx->buf, &ctx->pos, ctx->buflen, fpreg, A64_FP, off, fsize);
+}
 
-            case LR_MIR_MOV_IMM:
-                emit_move_imm(buf, &pos, buflen, dst, mi->src.imm, is64);
-                break;
+static void emit_store_fp_slot(a64_compile_ctx_t *ctx,
+                                uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
+    int32_t off = alloc_slot(ctx, vreg, 8);
+    emit_fp_store(ctx->buf, &ctx->pos, ctx->buflen, fpreg, A64_FP, off, fsize);
+}
 
-            case LR_MIR_MOV:
-                if (mi->src.kind == LR_MOP_MEM && mi->dst.kind == LR_MOP_REG) {
-                    emit_load(buf, &pos, buflen, dst, mi->src.mem.base,
-                              mi->src.mem.disp, mi->size);
-                } else if (mi->dst.kind == LR_MOP_MEM && mi->src.kind == LR_MOP_REG) {
-                    emit_store(buf, &pos, buflen, src, mi->dst.mem.base,
-                               mi->dst.mem.disp, mi->size);
-                } else if (mi->src.kind == LR_MOP_REG && mi->dst.kind == LR_MOP_REG) {
-                    emit_mov_reg(buf, &pos, buflen, dst, src, is64);
+static void emit_load_fp_operand(a64_compile_ctx_t *ctx,
+                                  const lr_operand_t *op, uint8_t fpreg,
+                                  uint8_t fsize) {
+    if (op->kind == LR_VAL_VREG) {
+        emit_load_fp_slot(ctx, op->vreg, fpreg, fsize);
+    } else {
+        emit_load_operand(ctx, op, A64_X9);
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                 enc_fmov_from_gpr(fsize, fpreg, A64_X9));
+    }
+}
+
+static void emit_setcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
+    if (cc >= LR_CC_FP_OEQ) {
+        if (cc == LR_CC_FP_ONE) {
+            emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, dst, 0, false);
+            emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, A64_X15, 1, false);
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_csel(false, dst, A64_X15, dst, 4));  /* MI */
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_csel(false, dst, A64_X15, dst, 12)); /* GT */
+        } else if (cc == LR_CC_FP_UEQ) {
+            emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, dst, 0, false);
+            emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, A64_X15, 1, false);
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_csel(false, dst, A64_X15, dst, 0));  /* EQ */
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_csel(false, dst, A64_X15, dst, 6));  /* VS */
+        } else {
+            uint8_t cond = lr_fp_cc_to_a64(cc);
+            emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, dst, 1, false);
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_csel(false, dst, dst, A64_SP, cond));
+        }
+    } else {
+        uint8_t cond = lr_cc_to_a64(cc);
+        emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, dst, 1, false);
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                 enc_csel(false, dst, dst, A64_SP, cond));
+    }
+}
+
+static void emit_epilogue_a64(a64_compile_ctx_t *ctx) {
+    if (ctx->stack_size > 0)
+        emit_sp_adjust(ctx->buf, &ctx->pos, ctx->buflen, ctx->stack_size, false);
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0xA8C17BFDu); /* ldp x29, x30, [sp], #16 */
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0xD65F03C0u); /* ret */
+}
+
+static void emit_jmp_a64(a64_compile_ctx_t *ctx, uint32_t target_block) {
+    if (ctx->num_fixups < 4096) {
+        ctx->fixups[ctx->num_fixups].insn_pos = ctx->pos;
+        ctx->fixups[ctx->num_fixups].target = target_block;
+        ctx->fixups[ctx->num_fixups].kind = 0;
+        ctx->fixups[ctx->num_fixups].cond = 0;
+        ctx->num_fixups++;
+    }
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x14000000u);
+}
+
+static void emit_jcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint32_t target_block) {
+    uint8_t cond = lr_cc_to_a64(cc);
+    if (ctx->num_fixups < 4096) {
+        ctx->fixups[ctx->num_fixups].insn_pos = ctx->pos;
+        ctx->fixups[ctx->num_fixups].target = target_block;
+        ctx->fixups[ctx->num_fixups].kind = 1;
+        ctx->fixups[ctx->num_fixups].cond = cond;
+        ctx->num_fixups++;
+    }
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x54000000u);
+}
+
+static void emit_phi_copies(a64_compile_ctx_t *ctx, phi_copy_t *copies) {
+    for (phi_copy_t *pc = copies; pc; pc = pc->next) {
+        emit_load_operand(ctx, &pc->src_op, A64_X9);
+        emit_store_slot(ctx, pc->dest_vreg, A64_X9);
+    }
+}
+
+/*
+ * Pre-scan: walk all instructions to allocate stack slots for every vreg
+ * destination and handle static allocas. This must run before the prologue
+ * so that stack_size is known.
+ */
+static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
+    for (lr_block_t *b = func->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            switch (inst->op) {
+            case LR_OP_ALLOCA: {
+                size_t elem_sz = lr_type_size(inst->type);
+                if (elem_sz < 8) elem_sz = 8;
+                bool use_static = (inst->num_operands == 0);
+                if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
+                    inst->operands[0].imm_i64 == 1) {
+                    use_static = true;
                 }
-                break;
-
-            case LR_MIR_ADD:
-                emit_u32(buf, &pos, buflen, enc_add_reg(is64, dst, dst, src));
-                break;
-            case LR_MIR_SUB:
-                emit_u32(buf, &pos, buflen, enc_sub_reg(is64, dst, dst, src));
-                break;
-            case LR_MIR_AND:
-                emit_u32(buf, &pos, buflen,
-                         enc_logic_reg(0x8A000000u, is64, dst, dst, src));
-                break;
-            case LR_MIR_OR:
-                emit_u32(buf, &pos, buflen,
-                         enc_logic_reg(0xAA000000u, is64, dst, dst, src));
-                break;
-            case LR_MIR_XOR:
-                emit_u32(buf, &pos, buflen,
-                         enc_logic_reg(0xCA000000u, is64, dst, dst, src));
-                break;
-
-            case LR_MIR_IMUL:
-                emit_u32(buf, &pos, buflen, enc_mul(is64, dst, dst, src));
-                break;
-
-            case LR_MIR_IDIV: {
-                /* dst = X9 (dividend/quotient), src = X10 (divisor) */
-                emit_mov_reg(buf, &pos, buflen, A64_X11, dst, is64);
-                emit_u32(buf, &pos, buflen, enc_sdiv(is64, dst, dst, src));
-                /* remainder into X11 = dividend - quotient * divisor */
-                emit_u32(buf, &pos, buflen, enc_msub(is64, A64_X11, dst, src, A64_X11));
+                if (use_static) {
+                    ctx->stack_size += (uint32_t)elem_sz;
+                    ctx->stack_size = (ctx->stack_size + 7) & ~7u;
+                }
+                alloc_slot(ctx, inst->dest, 8);
                 break;
             }
-
-            case LR_MIR_CDQ:
-            case LR_MIR_CQO:
+            case LR_OP_PHI:
+                alloc_slot(ctx, inst->dest, 8);
                 break;
-
-            case LR_MIR_SAL:
-            case LR_MIR_SAR:
-            case LR_MIR_SHR:
-                emit_u32(buf, &pos, buflen, enc_shiftv(mi->op, is64, dst, dst, src));
-                break;
-
-            case LR_MIR_CMP:
-                emit_u32(buf, &pos, buflen, enc_subs_reg(is64, dst, src));
-                break;
-
-            case LR_MIR_TEST:
-                emit_u32(buf, &pos, buflen, enc_ands_reg(is64, dst, src));
-                break;
-
-            case LR_MIR_SETCC: {
-                if (mi->cc >= LR_CC_FP_OEQ) {
-                    if (mi->cc == LR_CC_FP_ONE) {
-                        /* ONE = MI (less) OR GT (greater), excluding unordered and equal */
-                        emit_move_imm(buf, &pos, buflen, dst, 0, false);
-                        emit_move_imm(buf, &pos, buflen, A64_X15, 1, false);
-                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 4));  /* MI */
-                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 12)); /* GT */
-                    } else if (mi->cc == LR_CC_FP_UEQ) {
-                        /* UEQ = EQ (equal) OR VS (unordered) */
-                        emit_move_imm(buf, &pos, buflen, dst, 0, false);
-                        emit_move_imm(buf, &pos, buflen, A64_X15, 1, false);
-                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 0));  /* EQ */
-                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 6));  /* VS */
-                    } else {
-                        uint8_t cond = lr_fp_cc_to_a64(mi->cc);
-                        emit_move_imm(buf, &pos, buflen, dst, 1, false);
-                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, dst, A64_SP, cond));
-                    }
-                } else {
-                    uint8_t cond = lr_cc_to_a64(mi->cc);
-                    emit_move_imm(buf, &pos, buflen, dst, 1, false);
-                    emit_u32(buf, &pos, buflen, enc_csel(false, dst, dst, A64_SP, cond));
+            default:
+                if (inst->op != LR_OP_STORE && inst->op != LR_OP_BR &&
+                    inst->op != LR_OP_CONDBR && inst->op != LR_OP_RET &&
+                    inst->op != LR_OP_RET_VOID && inst->op != LR_OP_UNREACHABLE) {
+                    if (inst->type && inst->type->kind != LR_TYPE_VOID)
+                        alloc_slot(ctx, inst->dest, 8);
                 }
                 break;
             }
+        }
+    }
+    for (uint32_t i = 0; i < func->num_params; i++)
+        alloc_slot(ctx, func->param_vregs[i], 8);
+}
 
-            case LR_MIR_MOVZX:
-                if (mi->src.kind == LR_MOP_REG && mi->dst.kind == LR_MOP_REG && dst != src)
-                    emit_mov_reg(buf, &pos, buflen, dst, src, false);
-                break;
+/*
+ * Build per-block PHI copy lists.
+ * For each PHI instruction: %dest = phi [val0, %bb0], [val1, %bb1], ...
+ * Add a copy {dest_vreg, src_op} to block bb0's list, bb1's list, etc.
+ */
+static phi_copy_t **build_phi_copies(a64_compile_ctx_t *ctx, lr_func_t *func) {
+    phi_copy_t **copies = lr_arena_array(ctx->arena, phi_copy_t *, func->num_blocks);
+    for (uint32_t i = 0; i < func->num_blocks; i++)
+        copies[i] = NULL;
 
-            case LR_MIR_MOVSX:
-                if (is64)
-                    emit_u32(buf, &pos, buflen,
-                             0x93407C00u | ((uint32_t)src << 5) | dst); /* sxtw */
-                break;
+    for (lr_block_t *b = func->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op != LR_OP_PHI) continue;
+            for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+                uint32_t pred_id = inst->operands[i + 1].block_id;
+                if (pred_id >= func->num_blocks) continue;
+                phi_copy_t *pc = lr_arena_new(ctx->arena, phi_copy_t);
+                pc->dest_vreg = inst->dest;
+                pc->src_op = inst->operands[i];
+                pc->next = copies[pred_id];
+                copies[pred_id] = pc;
+            }
+        }
+    }
+    return copies;
+}
 
-            case LR_MIR_CMOVCC: {
-                uint8_t cond = lr_cc_to_a64(mi->cc);
-                emit_u32(buf, &pos, buflen, enc_csel(is64, dst, src, dst, cond));
+/*
+ * aarch64_compile_func: single-pass ISel + encoding.
+ * Replaces the old two-phase isel_func + encode_func approach.
+ */
+static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
+                                 uint8_t *buf, size_t buflen, size_t *out_len,
+                                 lr_arena_t *arena) {
+    (void)mod;
+
+    a64_compile_ctx_t ctx = {
+        .buf = buf,
+        .buflen = buflen,
+        .pos = 0,
+        .stack_size = 0,
+        .stack_slots = NULL,
+        .num_stack_slots = 0,
+        .num_fixups = 0,
+        .arena = arena,
+    };
+
+    prescan_slots(&ctx, func);
+
+    ctx.stack_size = (ctx.stack_size + 15) & ~15u;
+
+    phi_copy_t **phi_copies = build_phi_copies(&ctx, func);
+
+    /* Prologue: stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, N */
+    emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
+    emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x910003FDu); /* mov x29, sp */
+    if (ctx.stack_size > 0)
+        emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, ctx.stack_size, true);
+
+    /* Store parameters: first 8 from registers, rest from caller frame */
+    static const uint8_t param_regs[] = {
+        A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
+    };
+    for (uint32_t i = 0; i < func->num_params && i < 8; i++)
+        emit_store_slot(&ctx, func->param_vregs[i], param_regs[i]);
+    for (uint32_t i = 8; i < func->num_params; i++) {
+        int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
+        emit_load(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP, caller_off, 8);
+        emit_store_slot(&ctx, func->param_vregs[i], A64_X9);
+    }
+
+    /* Walk IR blocks and instructions, emitting code directly */
+    uint32_t bi = 0;
+    for (lr_block_t *b = func->first_block; b; b = b->next, bi++) {
+        ctx.block_offsets[bi] = ctx.pos;
+
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            switch (inst->op) {
+            case LR_OP_RET: {
+                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_mov_reg(ctx.buf, &ctx.pos, ctx.buflen, A64_X0, A64_X9, true);
+                emit_epilogue_a64(&ctx);
                 break;
             }
-
-            case LR_MIR_JMP:
-                if (nfix < 4096) {
-                    fixups[nfix].insn_pos = pos;
-                    fixups[nfix].target = mi->dst.label;
-                    fixups[nfix].kind = 0;
-                    fixups[nfix].cond = 0;
-                    nfix++;
-                }
-                emit_u32(buf, &pos, buflen, 0x14000000u);
-                break;
-
-            case LR_MIR_JCC: {
-                uint8_t cond = lr_cc_to_a64(mi->cc);
-                if (nfix < 4096) {
-                    fixups[nfix].insn_pos = pos;
-                    fixups[nfix].target = mi->dst.label;
-                    fixups[nfix].kind = 1;
-                    fixups[nfix].cond = cond;
-                    nfix++;
-                }
-                emit_u32(buf, &pos, buflen, 0x54000000u);
+            case LR_OP_RET_VOID: {
+                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_epilogue_a64(&ctx);
                 break;
             }
-
-            case LR_MIR_LEA:
-                emit_addr(buf, &pos, buflen, dst, mi->src.mem.base,
-                          mi->src.mem.disp);
-                break;
-
-            case LR_MIR_CALL:
-                emit_u32(buf, &pos, buflen, 0xD63F0000u | ((uint32_t)src << 5));
-                break;
-
-            case LR_MIR_FRAME_ALLOC:
-                emit_sp_adjust(buf, &pos, buflen, (uint32_t)mi->src.imm, true);
-                break;
-
-            case LR_MIR_FRAME_FREE:
-                emit_sp_adjust(buf, &pos, buflen, (uint32_t)mi->src.imm, false);
-                break;
-
-            /* FP load/store (FMOV between FP reg and memory or FP reg-reg) */
-            case LR_MIR_FMOV:
-                if (mi->src.kind == LR_MOP_MEM && mi->dst.kind == LR_MOP_REG) {
-                    emit_fp_load(buf, &pos, buflen, dst, mi->src.mem.base,
-                                 mi->src.mem.disp, mi->size);
-                } else if (mi->dst.kind == LR_MOP_MEM && mi->src.kind == LR_MOP_REG) {
-                    emit_fp_store(buf, &pos, buflen, src, mi->dst.mem.base,
-                                  mi->dst.mem.disp, mi->size);
-                } else if (mi->src.kind == LR_MOP_REG && mi->dst.kind == LR_MOP_REG) {
-                    uint32_t base = (mi->size == 8) ? 0x1E604000u : 0x1E204000u;
-                    emit_u32(buf, &pos, buflen, base | ((uint32_t)src << 5) | dst);
+            case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
+            case LR_OP_OR: case LR_OP_XOR: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
+                bool is64 = lr_type_size(inst->type) > 4;
+                switch (inst->op) {
+                case LR_OP_ADD:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_add_reg(is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                case LR_OP_SUB:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_sub_reg(is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                case LR_OP_AND:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_logic_reg(0x8A000000u, is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                case LR_OP_OR:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_logic_reg(0xAA000000u, is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                case LR_OP_XOR:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_logic_reg(0xCA000000u, is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                default: break;
                 }
+                emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
-
-            case LR_MIR_FADD:
-                emit_u32(buf, &pos, buflen, enc_fadd(mi->size, dst, dst, src));
+            }
+            case LR_OP_MUL: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
+                bool is64 = lr_type_size(inst->type) > 4;
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_mul(is64, A64_X9, A64_X9, A64_X10));
+                emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
-            case LR_MIR_FSUB:
-                emit_u32(buf, &pos, buflen, enc_fsub(mi->size, dst, dst, src));
+            }
+            case LR_OP_FADD: case LR_OP_FSUB:
+            case LR_OP_FMUL: case LR_OP_FDIV: {
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_load_fp_operand(&ctx, &inst->operands[1], FP_SCRATCH1, fsize);
+                switch (inst->op) {
+                case LR_OP_FADD:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_fadd(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
+                    break;
+                case LR_OP_FSUB:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_fsub(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
+                    break;
+                case LR_OP_FMUL:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_fmul(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
+                    break;
+                case LR_OP_FDIV:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_fdiv(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
+                    break;
+                default: break;
+                }
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
                 break;
-            case LR_MIR_FMUL:
-                emit_u32(buf, &pos, buflen, enc_fmul(mi->size, dst, dst, src));
+            }
+            case LR_OP_FNEG: {
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_fneg(fsize, FP_SCRATCH0, FP_SCRATCH0));
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
                 break;
-            case LR_MIR_FDIV:
-                emit_u32(buf, &pos, buflen, enc_fdiv(mi->size, dst, dst, src));
-                break;
-            case LR_MIR_FNEG:
-                emit_u32(buf, &pos, buflen, enc_fneg(mi->size, dst, src));
-                break;
-            case LR_MIR_FCMP:
-                emit_u32(buf, &pos, buflen, enc_fcmp(mi->size, dst, src));
-                break;
-            case LR_MIR_FCVT_I2F:
-                emit_u32(buf, &pos, buflen, enc_scvtf(mi->size, dst, src));
-                break;
-            case LR_MIR_FCVT_F2I:
-                emit_u32(buf, &pos, buflen, enc_fcvtzs(mi->size, dst, src));
-                break;
-            case LR_MIR_FCVT_F2F:
-                if (mi->size == 8)
-                    emit_u32(buf, &pos, buflen, enc_fcvt_f32_to_f64(dst, src));
+            }
+            case LR_OP_SDIV: case LR_OP_SREM: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
+                bool is64 = lr_type_size(inst->type) > 4;
+                emit_mov_reg(ctx.buf, &ctx.pos, ctx.buflen, A64_X11, A64_X9, is64);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_sdiv(is64, A64_X9, A64_X9, A64_X10));
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_msub(is64, A64_X11, A64_X9, A64_X10, A64_X11));
+                if (inst->op == LR_OP_SREM)
+                    emit_store_slot(&ctx, inst->dest, A64_X11);
                 else
-                    emit_u32(buf, &pos, buflen, enc_fcvt_f64_to_f32(dst, src));
+                    emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
-            case LR_MIR_FMOV_TO_GPR:
-                emit_u32(buf, &pos, buflen, enc_fmov_to_gpr(mi->size, dst, src));
+            }
+            case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
+                bool is64 = lr_type_size(inst->type) > 4;
+                switch (inst->op) {
+                case LR_OP_SHL:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_lslv(is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                case LR_OP_LSHR:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_lsrv(is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                case LR_OP_ASHR:
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_asrv(is64, A64_X9, A64_X9, A64_X10));
+                    break;
+                default: break;
+                }
+                emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
-            case LR_MIR_FMOV_FROM_GPR:
-                emit_u32(buf, &pos, buflen, enc_fmov_from_gpr(mi->size, dst, src));
-                break;
+            }
+            case LR_OP_ICMP: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
+                bool is64 = lr_type_size(inst->operands[0].type) > 4;
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_subs_reg(is64, A64_X9, A64_X10));
 
+                uint8_t cc;
+                switch (inst->icmp_pred) {
+                case LR_ICMP_EQ:  cc = LR_CC_EQ; break;
+                case LR_ICMP_NE:  cc = LR_CC_NE; break;
+                case LR_ICMP_SGT: cc = LR_CC_SGT; break;
+                case LR_ICMP_SGE: cc = LR_CC_SGE; break;
+                case LR_ICMP_SLT: cc = LR_CC_SLT; break;
+                case LR_ICMP_SLE: cc = LR_CC_SLE; break;
+                case LR_ICMP_UGT: cc = LR_CC_UGT; break;
+                case LR_ICMP_UGE: cc = LR_CC_UGE; break;
+                case LR_ICMP_ULT: cc = LR_CC_ULT; break;
+                case LR_ICMP_ULE: cc = LR_CC_ULE; break;
+                default: cc = LR_CC_EQ; break;
+                }
+
+                emit_setcc_a64(&ctx, cc, A64_X9);
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_SELECT: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_ands_reg(false, A64_X9, A64_X9));
+                emit_load_operand(&ctx, &inst->operands[2], A64_X9);  /* false value */
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10); /* true value */
+                uint8_t cond = lr_cc_to_a64(LR_CC_NE);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_csel(true, A64_X9, A64_X10, A64_X9, cond));
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_BR: {
+                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_jmp_a64(&ctx, inst->operands[0].block_id);
+                break;
+            }
+            case LR_OP_CONDBR: {
+                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_ands_reg(false, A64_X9, A64_X9));
+                emit_jcc_a64(&ctx, LR_CC_NE, inst->operands[1].block_id);
+                emit_jmp_a64(&ctx, inst->operands[2].block_id);
+                break;
+            }
+            case LR_OP_ALLOCA: {
+                size_t elem_sz = lr_type_size(inst->type);
+                if (elem_sz < 8) elem_sz = 8;
+
+                bool use_static = (inst->num_operands == 0);
+                if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
+                    inst->operands[0].imm_i64 == 1) {
+                    use_static = true;
+                }
+
+                if (use_static) {
+                    /* Re-walk prescan in order to find the FP offset for this
+                     * alloca's data region. We must replicate the exact same
+                     * stack_size bumps that prescan_slots performed, including
+                     * the alloc_slot calls for dest vregs, so that the alloca
+                     * data offsets land at the right positions. */
+                    uint32_t sim_ss = 0;
+                    int32_t off = 0;
+                    for (lr_block_t *sb = func->first_block; sb; sb = sb->next) {
+                        for (lr_inst_t *si = sb->first; si; si = si->next) {
+                            if (si->op != LR_OP_ALLOCA) continue;
+                            size_t esz = lr_type_size(si->type);
+                            if (esz < 8) esz = 8;
+                            bool si_static = (si->num_operands == 0);
+                            if (si->num_operands > 0 &&
+                                si->operands[0].kind == LR_VAL_IMM_I64 &&
+                                si->operands[0].imm_i64 == 1) {
+                                si_static = true;
+                            }
+                            if (!si_static) continue;
+                            sim_ss += (uint32_t)esz;
+                            sim_ss = (sim_ss + 7) & ~7u;
+                            if (si == inst) {
+                                off = -(int32_t)sim_ss;
+                                goto found_alloca;
+                            }
+                            /* Simulate the alloc_slot bump for dest vreg */
+                            sim_ss += 8;
+                            sim_ss = (sim_ss + 7) & ~7u;
+                        }
+                    }
+                    found_alloca:;
+                    emit_addr(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP, off);
+                    emit_store_slot(&ctx, inst->dest, A64_X9);
+                } else {
+                    emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                    if (elem_sz != 1) {
+                        emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
+                                      A64_X10, (int64_t)elem_sz, true);
+                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                 enc_mul(true, A64_X9, A64_X9, A64_X10));
+                    }
+                    /* Align to 16: X9 = (X9 + 15) & ~15 */
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_add_imm(true, A64_X9, A64_X9, 15));
+                    emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen, A64_X10, ~15LL, true);
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_logic_reg(0x8A000000u, true, A64_X9, A64_X9, A64_X10));
+                    /* sub sp, sp, X9 */
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_sub_reg(true, A64_SP, A64_SP, A64_X9));
+                    /* mov X9, sp */
+                    emit_mov_reg(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_SP, true);
+                    emit_store_slot(&ctx, inst->dest, A64_X9);
+                }
+                break;
+            }
+            case LR_OP_LOAD: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                uint8_t sz = (uint8_t)lr_type_size(inst->type);
+                emit_load(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X9, 0, sz);
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_STORE: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
+                uint8_t sz = (uint8_t)lr_type_size(inst->operands[0].type);
+                emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X10, 0, sz);
+                break;
+            }
+            case LR_OP_GEP: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                const lr_type_t *cur_ty = inst->type;
+                for (uint32_t idx = 1; idx < inst->num_operands; idx++) {
+                    const lr_operand_t *idx_op = &inst->operands[idx];
+                    int64_t byte_off = 0;
+                    bool is_const = (idx_op->kind == LR_VAL_IMM_I64);
+                    if (idx == 1) {
+                        size_t elem_size = lr_type_size(cur_ty);
+                        if (is_const) {
+                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
+                        } else {
+                            emit_load_operand(&ctx, idx_op, A64_X10);
+                            if (elem_size != 1) {
+                                emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
+                                              A64_X11, (int64_t)elem_size, true);
+                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                         enc_mul(true, A64_X10, A64_X10, A64_X11));
+                            }
+                            emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                     enc_add_reg(true, A64_X9, A64_X9, A64_X10));
+                        }
+                    } else if (cur_ty && cur_ty->kind == LR_TYPE_STRUCT) {
+                        uint32_t field = (uint32_t)idx_op->imm_i64;
+                        byte_off = (int64_t)struct_field_offset(cur_ty, field);
+                        if (field < cur_ty->struc.num_fields)
+                            cur_ty = cur_ty->struc.fields[field];
+                        is_const = true;
+                    } else if (cur_ty && cur_ty->kind == LR_TYPE_ARRAY) {
+                        size_t elem_size = lr_type_size(cur_ty->array.elem);
+                        if (is_const) {
+                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
+                        } else {
+                            emit_load_operand(&ctx, idx_op, A64_X10);
+                            if (elem_size != 1) {
+                                emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
+                                              A64_X11, (int64_t)elem_size, true);
+                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                         enc_mul(true, A64_X10, A64_X10, A64_X11));
+                            }
+                            emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                     enc_add_reg(true, A64_X9, A64_X9, A64_X10));
+                        }
+                        cur_ty = cur_ty->array.elem;
+                    }
+                    if (is_const && byte_off != 0) {
+                        emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
+                                      A64_X10, byte_off, true);
+                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                 enc_add_reg(true, A64_X9, A64_X9, A64_X10));
+                    }
+                }
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_SEXT: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                bool is64 = lr_type_size(inst->type) > 4;
+                if (is64)
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             0x93407C00u | ((uint32_t)A64_X9 << 5) | A64_X9); /* sxtw */
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
+            case LR_OP_PTRTOINT: case LR_OP_INTTOPTR: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_FCMP: {
+                uint8_t fsize = (inst->operands[0].type &&
+                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_load_fp_operand(&ctx, &inst->operands[1], FP_SCRATCH1, fsize);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_fcmp(fsize, FP_SCRATCH0, FP_SCRATCH1));
+
+                uint8_t cc;
+                switch (inst->fcmp_pred) {
+                case LR_FCMP_OEQ: cc = LR_CC_FP_OEQ; break;
+                case LR_FCMP_ONE: cc = LR_CC_FP_ONE; break;
+                case LR_FCMP_OGT: cc = LR_CC_FP_OGT; break;
+                case LR_FCMP_OGE: cc = LR_CC_FP_OGE; break;
+                case LR_FCMP_OLT: cc = LR_CC_FP_OLT; break;
+                case LR_FCMP_OLE: cc = LR_CC_FP_OLE; break;
+                case LR_FCMP_ORD: cc = LR_CC_FP_ORD; break;
+                case LR_FCMP_UNO: cc = LR_CC_FP_UNO; break;
+                case LR_FCMP_UEQ: cc = LR_CC_FP_UEQ; break;
+                case LR_FCMP_UNE: cc = LR_CC_FP_UNE; break;
+                case LR_FCMP_UGT: cc = LR_CC_FP_UGT; break;
+                case LR_FCMP_UGE: cc = LR_CC_FP_UGE; break;
+                case LR_FCMP_ULT: cc = LR_CC_FP_ULT; break;
+                case LR_FCMP_ULE: cc = LR_CC_FP_ULE; break;
+                default:          cc = LR_CC_FP_OEQ; break;
+                }
+
+                emit_setcc_a64(&ctx, cc, A64_X9);
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_SITOFP: {
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_scvtf(fsize, FP_SCRATCH0, A64_X9));
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
+                break;
+            }
+            case LR_OP_FPTOSI: {
+                uint8_t fsize = (inst->operands[0].type &&
+                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_fcvtzs(fsize, A64_X9, FP_SCRATCH0));
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_FPEXT: {
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, 4);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_fcvt_f32_to_f64(FP_SCRATCH0, FP_SCRATCH0));
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, 8);
+                break;
+            }
+            case LR_OP_FPTRUNC: {
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, 8);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         enc_fcvt_f64_to_f32(FP_SCRATCH0, FP_SCRATCH0));
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, 4);
+                break;
+            }
+            case LR_OP_EXTRACTVALUE: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_INSERTVALUE: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_CALL: {
+                static const uint8_t call_regs[] = {
+                    A64_X0, A64_X1, A64_X2, A64_X3,
+                    A64_X4, A64_X5, A64_X6, A64_X7
+                };
+                uint32_t nargs = inst->num_operands - 1;
+                uint32_t nstack = nargs > 8 ? nargs - 8 : 0;
+                uint32_t stack_bytes = ((nstack * 8 + 15) & ~15u);
+
+                if (stack_bytes > 0)
+                    emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, stack_bytes, true);
+
+                for (uint32_t i = 0; i < nstack; i++) {
+                    emit_load_operand(&ctx, &inst->operands[8 + i + 1], A64_X9);
+                    emit_store(ctx.buf, &ctx.pos, ctx.buflen,
+                               A64_X9, A64_SP, (int32_t)(i * 8), 8);
+                }
+
+                for (uint32_t i = 0; i < nargs && i < 8; i++)
+                    emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
+
+                emit_load_operand(&ctx, &inst->operands[0], A64_X16);
+                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                         0xD63F0000u | ((uint32_t)A64_X16 << 5)); /* blr x16 */
+
+                if (stack_bytes > 0)
+                    emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, stack_bytes, false);
+
+                if (inst->type && inst->type->kind != LR_TYPE_VOID)
+                    emit_store_slot(&ctx, inst->dest, A64_X0);
+                break;
+            }
+            case LR_OP_PHI:
+                break;
+            case LR_OP_UNREACHABLE:
+                break;
             default:
                 break;
             }
         }
     }
 
-    for (uint32_t i = 0; i < nfix; i++) {
-        const struct fixup_t *fx = &fixups[i];
-        if (fx->target >= block_idx) continue;
+    /* Fix up branch targets */
+    for (uint32_t i = 0; i < ctx.num_fixups; i++) {
+        if (ctx.fixups[i].target >= bi) continue;
 
-        int64_t target_pos = (int64_t)block_offsets[fx->target];
-        int64_t here = (int64_t)fx->insn_pos;
+        int64_t target_pos = (int64_t)ctx.block_offsets[ctx.fixups[i].target];
+        int64_t here = (int64_t)ctx.fixups[i].insn_pos;
         int64_t imm = (target_pos - here) / 4;
 
-        if (fx->kind == 0) {
+        if (ctx.fixups[i].kind == 0) {
             if (imm >= -(1LL << 25) && imm < (1LL << 25)) {
                 uint32_t insn = 0x14000000u | ((uint32_t)imm & 0x03FFFFFFu);
-                patch_u32(buf, buflen, fx->insn_pos, insn);
+                patch_u32(buf, buflen, ctx.fixups[i].insn_pos, insn);
             }
         } else {
             if (imm >= -(1LL << 18) && imm < (1LL << 18)) {
-                uint32_t insn = 0x54000000u | (((uint32_t)imm & 0x7FFFFu) << 5)
-                              | (fx->cond & 0xF);
-                patch_u32(buf, buflen, fx->insn_pos, insn);
+                uint32_t insn = 0x54000000u
+                              | (((uint32_t)imm & 0x7FFFFu) << 5)
+                              | (ctx.fixups[i].cond & 0xF);
+                patch_u32(buf, buflen, ctx.fixups[i].insn_pos, insn);
             }
         }
     }
 
-    *out_len = pos;
-    if (pos > buflen)
+    *out_len = ctx.pos;
+    if (ctx.pos > buflen)
         return -1;
     return 0;
-}
-
-static int aarch64_print_inst(const lr_minst_t *mi, char *buf, size_t len) {
-    (void)mi;
-    return snprintf(buf, len, "aarch64-op");
 }
 
 static const lr_target_t aarch64_target = {
     .name = "aarch64",
     .ptr_size = 8,
-    .isel_func = aarch64_isel_func,
-    .encode_func = aarch64_encode_func,
-    .print_inst = aarch64_print_inst,
+    .compile_func = aarch64_compile_func,
 };
 
 const lr_target_t *lr_target_aarch64(void) {
