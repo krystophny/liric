@@ -23,6 +23,7 @@ add_library(liric STATIC
     src/jit.c
     src/liric.c
     src/builder.c
+    src/liric_compat.c
 )
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
