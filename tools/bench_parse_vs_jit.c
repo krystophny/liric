@@ -30,23 +30,34 @@ static char *read_file(const char *path, size_t *out_len) {
 int main(int argc, char **argv) {
     int iters = 1;
     int json_output = 0;
+    int parse_only = 0;
     const char *input_file = NULL;
+    const char *load_libs[64];
+    int num_load_libs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc)
             iters = atoi(argv[++i]);
         else if (strcmp(argv[i], "--json") == 0)
             json_output = 1;
+        else if (strcmp(argv[i], "--parse-only") == 0)
+            parse_only = 1;
+        else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
+            if (num_load_libs < 64)
+                load_libs[num_load_libs++] = argv[++i];
+        }
         else if (argv[i][0] != '-')
             input_file = argv[i];
         else {
-            fprintf(stderr, "usage: bench_parse_vs_jit [--iters N] [--json] file.ll\n");
+            fprintf(stderr, "usage: bench_parse_vs_jit [--iters N] [--json] "
+                            "[--parse-only] [--load-lib LIB] file.ll\n");
             return 1;
         }
     }
 
     if (!input_file) {
-        fprintf(stderr, "usage: bench_parse_vs_jit [--iters N] [--json] file.ll\n");
+        fprintf(stderr, "usage: bench_parse_vs_jit [--iters N] [--json] "
+                        "[--parse-only] [--load-lib LIB] file.ll\n");
         return 1;
     }
 
@@ -83,50 +94,67 @@ int main(int argc, char **argv) {
                 num_funcs++;
         }
 
-        lr_jit_t *jit = lr_jit_create();
-        if (!jit) {
-            lr_arena_destroy(arena);
-            free(src);
-            return 1;
-        }
-
-        double t2 = now_ms();
-        int rc = lr_jit_add_module(jit, m);
-        double t3 = now_ms();
-
-        lr_jit_destroy(jit);
-        lr_arena_destroy(arena);
-
-        if (rc != 0) {
-            if (json_output)
-                printf("{\"file\":\"%s\",\"error\":\"jit\"}\n", input_file);
-            else
-                fprintf(stderr, "JIT compilation failed\n");
-            free(src);
-            return 1;
-        }
-
         parse_total += (t1 - t0);
-        jit_total += (t3 - t2);
+
+        if (!parse_only) {
+            lr_jit_t *jit = lr_jit_create();
+            if (!jit) {
+                lr_arena_destroy(arena);
+                free(src);
+                return 1;
+            }
+
+            for (int li = 0; li < num_load_libs; li++) {
+                if (lr_jit_load_library(jit, load_libs[li]) != 0) {
+                    fprintf(stderr, "failed to load library: %s\n", load_libs[li]);
+                    lr_jit_destroy(jit);
+                    lr_arena_destroy(arena);
+                    free(src);
+                    return 1;
+                }
+            }
+
+            double t2 = now_ms();
+            int rc = lr_jit_add_module(jit, m);
+            double t3 = now_ms();
+
+            lr_jit_destroy(jit);
+
+            if (rc != 0) {
+                if (json_output)
+                    printf("{\"file\":\"%s\",\"error\":\"jit\"}\n", input_file);
+                else
+                    fprintf(stderr, "JIT compilation failed\n");
+                lr_arena_destroy(arena);
+                free(src);
+                return 1;
+            }
+
+            jit_total += (t3 - t2);
+        }
+
+        lr_arena_destroy(arena);
     }
 
     double parse_avg = parse_total / iters;
-    double jit_avg = jit_total / iters;
+    double jit_avg = parse_only ? 0 : jit_total / iters;
     double total_avg = parse_avg + jit_avg;
-    double parse_pct = total_avg > 0 ? 100.0 * parse_avg / total_avg : 0;
+    double parse_pct = total_avg > 0 ? 100.0 * parse_avg / total_avg : 100.0;
 
     if (json_output) {
         printf("{\"file\":\"%s\",\"ll_bytes\":%zu,\"num_funcs\":%d,"
                "\"parse_ms\":%.3f,\"jit_ms\":%.3f,\"total_ms\":%.3f,"
-               "\"parse_pct\":%.1f,\"iters\":%d}\n",
+               "\"parse_pct\":%.1f,\"iters\":%d,\"parse_only\":%s}\n",
                input_file, src_len, num_funcs,
-               parse_avg, jit_avg, total_avg, parse_pct, iters);
+               parse_avg, jit_avg, total_avg, parse_pct, iters,
+               parse_only ? "true" : "false");
     } else {
         printf("file:      %s\n", input_file);
         printf("ll_bytes:  %zu\n", src_len);
         printf("num_funcs: %d\n", num_funcs);
         printf("parse:     %.3f ms (%.1f%%)\n", parse_avg, parse_pct);
-        printf("jit:       %.3f ms (%.1f%%)\n", jit_avg, 100.0 - parse_pct);
+        if (!parse_only)
+            printf("jit:       %.3f ms (%.1f%%)\n", jit_avg, 100.0 - parse_pct);
         printf("total:     %.3f ms\n", total_avg);
         printf("iters:     %d\n", iters);
     }

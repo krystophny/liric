@@ -14,24 +14,35 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import statistics
 import subprocess
 import sys
 from pathlib import Path
 
 
-def load_passing_ll_files(results_path: Path) -> list[str]:
-    paths = []
+def load_passing_tests(results_path: Path) -> list[dict]:
+    tests = []
     with open(results_path) as f:
         for line in f:
             r = json.loads(line)
             if r.get("classification") == "pass" and r.get("jit_cmd"):
-                for token in r["jit_cmd"].split():
-                    if token.endswith(".ll"):
-                        if Path(token).exists():
-                            paths.append(token)
-                        break
-    return paths
+                ll_path = None
+                load_libs = []
+                tokens = shlex.split(r["jit_cmd"])
+                i = 0
+                while i < len(tokens):
+                    if tokens[i] == "--load-lib" and i + 1 < len(tokens):
+                        load_libs.append(tokens[i + 1])
+                        i += 2
+                    elif tokens[i].endswith(".ll"):
+                        ll_path = tokens[i]
+                        i += 1
+                    else:
+                        i += 1
+                if ll_path and Path(ll_path).exists():
+                    tests.append({"ll_path": ll_path, "load_libs": load_libs})
+    return tests
 
 
 def percentile(data: list[float], p: float) -> float:
@@ -51,7 +62,6 @@ def main():
     parser.add_argument("--output", default="/tmp/parse_overhead_results.md")
     parser.add_argument("--bench-bin", default=None,
                         help="Path to bench_parse_vs_jit binary")
-    parser.add_argument("--workers", type=int, default=1)
     args = parser.parse_args()
 
     bench_bin = args.bench_bin
@@ -72,17 +82,19 @@ def main():
         print(f"ERROR: {results_path} not found. Run mass tests first.", file=sys.stderr)
         sys.exit(1)
 
-    ll_files = load_passing_ll_files(results_path)
-    print(f"Found {len(ll_files)} passing .ll files")
+    tests = load_passing_tests(results_path)
+    print(f"Found {len(tests)} passing tests with .ll files")
 
     results = []
     errors = 0
-    for i, ll_path in enumerate(ll_files):
+    for i, test in enumerate(tests):
+        cmd = [bench_bin, "--json", "--iters", str(args.iters)]
+        for lib in test["load_libs"]:
+            cmd += ["--load-lib", lib]
+        cmd.append(test["ll_path"])
+
         try:
-            p = subprocess.run(
-                [bench_bin, "--json", "--iters", str(args.iters), ll_path],
-                capture_output=True, text=True, timeout=30
-            )
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if p.returncode == 0 and p.stdout.strip():
                 r = json.loads(p.stdout.strip())
                 if "error" not in r:
@@ -94,8 +106,8 @@ def main():
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
             errors += 1
 
-        if (i + 1) % 200 == 0:
-            print(f"  {i+1}/{len(ll_files)} done, {len(results)} ok, {errors} errors")
+        if (i + 1) % 100 == 0:
+            print(f"  {i+1}/{len(tests)} done, {len(results)} ok, {errors} errors")
 
     print(f"\nCompleted: {len(results)} measured, {errors} errors")
 
@@ -142,6 +154,14 @@ def main():
             f"| {label} | {pfn(parse_times):.3f} | {pfn(jit_times):.3f} | "
             f"{pfn(total_times):.3f} | {pfn(parse_pcts):.1f}% |"
         )
+    lines.append("")
+
+    lines.append("## .ll File Size Distribution")
+    lines.append("")
+    lines.append(f"- Min: {min(ll_sizes):,} bytes")
+    lines.append(f"- Median: {statistics.median(ll_sizes):,.0f} bytes")
+    lines.append(f"- Mean: {statistics.mean(ll_sizes):,.0f} bytes")
+    lines.append(f"- Max: {max(ll_sizes):,} bytes")
     lines.append("")
 
     lines.append("## Parse Fraction Distribution")
