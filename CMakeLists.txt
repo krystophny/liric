@@ -23,6 +23,7 @@ add_library(liric STATIC
     src/jit.c
     src/liric.c
     src/builder.c
+    src/liric_compat.c
 )
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
@@ -66,3 +67,20 @@ add_executable(test_liric
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
 add_test(NAME liric_tests COMMAND test_liric)
+
+include(GNUInstallDirs)
+install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
+if(WITH_LLVM_COMPAT)
+    enable_language(CXX)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+    add_executable(test_llvm_compat tests/test_llvm_compat.cpp)
+    target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
+    target_compile_options(test_llvm_compat PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    add_test(NAME llvm_compat_tests COMMAND test_llvm_compat)
+endif()

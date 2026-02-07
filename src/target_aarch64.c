@@ -8,10 +8,15 @@
 /*
  * aarch64 ISel: stack-based register allocation mirroring the x86_64 strategy.
  *
- * All computation flows through X9 (primary) and X10 (secondary).
+ * All integer computation flows through X9 (primary) and X10 (secondary).
+ * FP computation flows through D0 (primary) and D1 (secondary), both
+ * caller-saved per AAPCS64, so no save/restore needed.
  * Every IR vreg gets a stack slot addressed via FP (X29).
  * AAPCS64 argument registers: X0-X7 (8 args, vs x86's 6).
  */
+
+#define FP_SCRATCH0  A64_D0
+#define FP_SCRATCH1  A64_D1
 
 static lr_minst_t *minst_new(lr_arena_t *a, lr_mir_op_t op) {
     lr_minst_t *mi = lr_arena_new(a, lr_minst_t);
@@ -112,194 +117,42 @@ static void emit_load_operand(lr_mfunc_t *mf, lr_mblock_t *mb,
     }
 }
 
-/* Floating-point helper trampolines (same as x86 ISel) */
+/* FP ISel helpers: load/store FP values between stack slots and FP regs.
+ * Stack slots hold the raw bit representation; FP load/store instructions
+ * interpret the same bits as float/double. */
 
-static uint32_t fp_add_f32_bits(uint32_t a_bits, uint32_t b_bits) {
-    float a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a + b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
+static void emit_load_fp_slot(lr_mfunc_t *mf, lr_mblock_t *mb,
+                               uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
+    int32_t off = alloc_slot(mf, vreg, 8);
+    lr_minst_t *mi = minst_new(mf->arena, LR_MIR_FMOV);
+    mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = fpreg };
+    mi->src = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
+    mi->size = fsize;
+    mblock_append(mb, mi);
 }
 
-static uint32_t fp_sub_f32_bits(uint32_t a_bits, uint32_t b_bits) {
-    float a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a - b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
+static void emit_store_fp_slot(lr_mfunc_t *mf, lr_mblock_t *mb,
+                                uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
+    int32_t off = alloc_slot(mf, vreg, 8);
+    lr_minst_t *mi = minst_new(mf->arena, LR_MIR_FMOV);
+    mi->dst = (lr_moperand_t){ .kind = LR_MOP_MEM, .mem = { .base = A64_FP, .disp = off } };
+    mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = fpreg };
+    mi->size = fsize;
+    mblock_append(mb, mi);
 }
 
-static uint32_t fp_mul_f32_bits(uint32_t a_bits, uint32_t b_bits) {
-    float a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a * b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint32_t fp_div_f32_bits(uint32_t a_bits, uint32_t b_bits) {
-    float a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a / b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint64_t fp_add_f64_bits(uint64_t a_bits, uint64_t b_bits) {
-    double a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a + b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint64_t fp_sub_f64_bits(uint64_t a_bits, uint64_t b_bits) {
-    double a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a - b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint64_t fp_mul_f64_bits(uint64_t a_bits, uint64_t b_bits) {
-    double a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a * b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint64_t fp_div_f64_bits(uint64_t a_bits, uint64_t b_bits) {
-    double a, b, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    out = a / b;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint32_t fp_neg_f32_bits(uint32_t a_bits) {
-    float a, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    out = -a;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint64_t fp_neg_f64_bits(uint64_t a_bits) {
-    double a, out;
-    memcpy(&a, &a_bits, sizeof(a));
-    out = -a;
-    memcpy(&a_bits, &out, sizeof(out));
-    return a_bits;
-}
-
-static uint64_t fp_cmp_f32_bits(uint64_t a_bits, uint64_t b_bits, uint64_t pred) {
-    uint32_t in_a = (uint32_t)a_bits, in_b = (uint32_t)b_bits;
-    float a, b;
-    memcpy(&a, &in_a, sizeof(a));
-    memcpy(&b, &in_b, sizeof(b));
-    switch (pred) {
-    case 0: return a == b;
-    case 1: return a != b;
-    case 2: return a > b;
-    case 3: return a >= b;
-    case 4: return a < b;
-    case 5: return a <= b;
-    case 6: return (a != a) || (b != b);
-    default: return 0;
-    }
-}
-
-static uint64_t fp_cmp_f64_bits(uint64_t a_bits, uint64_t b_bits, uint64_t pred) {
-    double a, b;
-    memcpy(&a, &a_bits, sizeof(a));
-    memcpy(&b, &b_bits, sizeof(b));
-    switch (pred) {
-    case 0: return a == b;
-    case 1: return a != b;
-    case 2: return a > b;
-    case 3: return a >= b;
-    case 4: return a < b;
-    case 5: return a <= b;
-    case 6: return (a != a) || (b != b);
-    default: return 0;
-    }
-}
-
-static uint64_t fp_sitofp_i64_f32(int64_t val) {
-    float f = (float)val;
-    uint32_t bits;
-    memcpy(&bits, &f, sizeof(bits));
-    return (uint64_t)bits;
-}
-
-static uint64_t fp_sitofp_i64_f64(int64_t val) {
-    double d = (double)val;
-    uint64_t bits;
-    memcpy(&bits, &d, sizeof(bits));
-    return bits;
-}
-
-static int64_t fp_fptosi_f32_i64(uint64_t val_bits) {
-    uint32_t in = (uint32_t)val_bits;
-    float f;
-    memcpy(&f, &in, sizeof(f));
-    return (int64_t)f;
-}
-
-static int64_t fp_fptosi_f64_i64(uint64_t val_bits) {
-    double d;
-    memcpy(&d, &val_bits, sizeof(d));
-    return (int64_t)d;
-}
-
-static uint64_t fp_fpext_f32_f64(uint64_t val_bits) {
-    uint32_t in = (uint32_t)val_bits;
-    float f;
-    memcpy(&f, &in, sizeof(f));
-    double d = (double)f;
-    uint64_t out;
-    memcpy(&out, &d, sizeof(out));
-    return out;
-}
-
-static uint64_t fp_fptrunc_f64_f32(uint64_t val_bits) {
-    double d;
-    memcpy(&d, &val_bits, sizeof(d));
-    float f = (float)d;
-    uint32_t out;
-    memcpy(&out, &f, sizeof(out));
-    return (uint64_t)out;
-}
-
-static int64_t fp_helper_addr(lr_opcode_t op, lr_type_t *type) {
-    bool is_f32 = type && type->kind == LR_TYPE_FLOAT;
-    if (is_f32) {
-        switch (op) {
-        case LR_OP_FADD: return (int64_t)(uintptr_t)&fp_add_f32_bits;
-        case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f32_bits;
-        case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f32_bits;
-        case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f32_bits;
-        case LR_OP_FNEG: return (int64_t)(uintptr_t)&fp_neg_f32_bits;
-        default: return 0;
-        }
-    }
-    switch (op) {
-    case LR_OP_FADD: return (int64_t)(uintptr_t)&fp_add_f64_bits;
-    case LR_OP_FSUB: return (int64_t)(uintptr_t)&fp_sub_f64_bits;
-    case LR_OP_FMUL: return (int64_t)(uintptr_t)&fp_mul_f64_bits;
-    case LR_OP_FDIV: return (int64_t)(uintptr_t)&fp_div_f64_bits;
-    case LR_OP_FNEG: return (int64_t)(uintptr_t)&fp_neg_f64_bits;
-    default: return 0;
+static void emit_load_fp_operand(lr_mfunc_t *mf, lr_mblock_t *mb,
+                                  const lr_operand_t *op, uint8_t fpreg,
+                                  uint8_t fsize) {
+    if (op->kind == LR_VAL_VREG) {
+        emit_load_fp_slot(mf, mb, op->vreg, fpreg, fsize);
+    } else {
+        emit_load_operand(mf, mb, op, A64_X9);
+        lr_minst_t *fmov = minst_new(mf->arena, LR_MIR_FMOV_FROM_GPR);
+        fmov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = fpreg };
+        fmov->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+        fmov->size = fsize;
+        mblock_append(mb, fmov);
     }
 }
 
@@ -411,32 +264,34 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
             }
             case LR_OP_FADD: case LR_OP_FSUB:
             case LR_OP_FMUL: case LR_OP_FDIV: {
-                int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X1);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_load_fp_operand(mf, mb, &inst->operands[1], FP_SCRATCH1, fsize);
+                lr_mir_op_t mop;
+                switch (inst->op) {
+                case LR_OP_FADD: mop = LR_MIR_FADD; break;
+                case LR_OP_FSUB: mop = LR_MIR_FSUB; break;
+                case LR_OP_FMUL: mop = LR_MIR_FMUL; break;
+                case LR_OP_FDIV: mop = LR_MIR_FDIV; break;
+                default: mop = LR_MIR_FADD; break;
+                }
+                lr_minst_t *mi = minst_new(mf->arena, mop);
+                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH1 };
+                mi->size = fsize;
+                mblock_append(mb, mi);
+                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, fsize);
                 break;
             }
             case LR_OP_FNEG: {
-                int64_t fn_addr = fp_helper_addr(inst->op, inst->type);
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
+                lr_minst_t *mi = minst_new(mf->arena, LR_MIR_FNEG);
+                mi->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                mi->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                mi->size = fsize;
+                mblock_append(mb, mi);
+                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, fsize);
                 break;
             }
             case LR_OP_SDIV: case LR_OP_SREM: {
@@ -755,87 +610,88 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
                 break;
             }
             case LR_OP_FCMP: {
-                bool is_f32 = inst->operands[0].type &&
-                              inst->operands[0].type->kind == LR_TYPE_FLOAT;
-                int64_t fn_addr = (int64_t)(uintptr_t)(is_f32
-                    ? &fp_cmp_f32_bits : &fp_cmp_f64_bits);
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                emit_load_operand(mf, mb, &inst->operands[1], A64_X1);
-                lr_minst_t *pred_mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                pred_mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X2 };
-                pred_mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = (int64_t)inst->fcmp_pred };
-                pred_mov->size = 8;
-                mblock_append(mb, pred_mov);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                uint8_t fsize = (inst->operands[0].type &&
+                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_load_fp_operand(mf, mb, &inst->operands[1], FP_SCRATCH1, fsize);
+
+                lr_minst_t *cmp = minst_new(mf->arena, LR_MIR_FCMP);
+                cmp->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cmp->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH1 };
+                cmp->size = fsize;
+                mblock_append(mb, cmp);
+
+                uint8_t cc;
+                switch (inst->fcmp_pred) {
+                case LR_FCMP_OEQ: cc = LR_CC_FP_OEQ; break;
+                case LR_FCMP_ONE: cc = LR_CC_FP_ONE; break;
+                case LR_FCMP_OGT: cc = LR_CC_FP_OGT; break;
+                case LR_FCMP_OGE: cc = LR_CC_FP_OGE; break;
+                case LR_FCMP_OLT: cc = LR_CC_FP_OLT; break;
+                case LR_FCMP_OLE: cc = LR_CC_FP_OLE; break;
+                case LR_FCMP_ORD: cc = LR_CC_FP_ORD; break;
+                case LR_FCMP_UNO: cc = LR_CC_FP_UNO; break;
+                case LR_FCMP_UEQ: cc = LR_CC_FP_UEQ; break;
+                case LR_FCMP_UNE: cc = LR_CC_FP_UNE; break;
+                case LR_FCMP_UGT: cc = LR_CC_FP_UGT; break;
+                case LR_FCMP_UGE: cc = LR_CC_FP_UGE; break;
+                case LR_FCMP_ULT: cc = LR_CC_FP_ULT; break;
+                case LR_FCMP_ULE: cc = LR_CC_FP_ULE; break;
+                default:          cc = LR_CC_FP_OEQ; break;
+                }
+
+                lr_minst_t *set = minst_new(mf->arena, LR_MIR_SETCC);
+                set->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                set->cc = cc;
+                set->size = 1;
+                mblock_append(mb, set);
+
+                emit_store_slot(mf, mb, inst->dest, A64_X9);
                 break;
             }
             case LR_OP_SITOFP: {
-                bool dst_f32 = inst->type && inst->type->kind == LR_TYPE_FLOAT;
-                int64_t fn_addr = (int64_t)(uintptr_t)(dst_f32
-                    ? &fp_sitofp_i64_f32 : &fp_sitofp_i64_f64);
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_operand(mf, mb, &inst->operands[0], A64_X9);
+                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_I2F);
+                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                cvt->size = fsize;
+                mblock_append(mb, cvt);
+                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, fsize);
                 break;
             }
             case LR_OP_FPTOSI: {
-                bool src_f32 = inst->operands[0].type &&
-                               inst->operands[0].type->kind == LR_TYPE_FLOAT;
-                int64_t fn_addr = (int64_t)(uintptr_t)(src_f32
-                    ? &fp_fptosi_f32_i64 : &fp_fptosi_f64_i64);
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                uint8_t fsize = (inst->operands[0].type &&
+                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, fsize);
+                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_F2I);
+                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X9 };
+                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cvt->size = fsize;
+                mblock_append(mb, cvt);
+                emit_store_slot(mf, mb, inst->dest, A64_X9);
                 break;
             }
             case LR_OP_FPEXT: {
-                int64_t fn_addr = (int64_t)(uintptr_t)&fp_fpext_f32_f64;
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, 4);
+                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_F2F);
+                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cvt->size = 8;
+                cvt->cc = 4;
+                mblock_append(mb, cvt);
+                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, 8);
                 break;
             }
             case LR_OP_FPTRUNC: {
-                int64_t fn_addr = (int64_t)(uintptr_t)&fp_fptrunc_f64_f32;
-                emit_load_operand(mf, mb, &inst->operands[0], A64_X0);
-                lr_minst_t *mov = minst_new(mf->arena, LR_MIR_MOV_IMM);
-                mov->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mov->src = (lr_moperand_t){ .kind = LR_MOP_IMM, .imm = fn_addr };
-                mov->size = 8;
-                mblock_append(mb, mov);
-                lr_minst_t *call = minst_new(mf->arena, LR_MIR_CALL);
-                call->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = A64_X16 };
-                mblock_append(mb, call);
-                emit_store_slot(mf, mb, inst->dest, A64_X0);
+                emit_load_fp_operand(mf, mb, &inst->operands[0], FP_SCRATCH0, 8);
+                lr_minst_t *cvt = minst_new(mf->arena, LR_MIR_FCVT_F2F);
+                cvt->dst = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cvt->src = (lr_moperand_t){ .kind = LR_MOP_REG, .reg = FP_SCRATCH0 };
+                cvt->size = 4;
+                cvt->cc = 8;
+                mblock_append(mb, cvt);
+                emit_store_fp_slot(mf, mb, inst->dest, FP_SCRATCH0, 4);
                 break;
             }
             case LR_OP_EXTRACTVALUE: {
@@ -1133,6 +989,107 @@ static void emit_mov_reg(uint8_t *buf, size_t *pos, size_t len, uint8_t rd,
     emit_u32(buf, pos, len, enc_logic_reg(0xAA000000u, is64, rd, A64_SP, rm));
 }
 
+/* FP load/store encoding: LDUR/STUR for FP/SIMD registers (unscaled offset) */
+
+static uint32_t enc_fp_ldur(uint8_t fsize, uint8_t ft, uint8_t rn, int32_t imm9) {
+    uint32_t base = (fsize == 4) ? 0xBC400000u : 0xFC400000u;
+    return base | ((uint32_t)(imm9 & 0x1FF) << 12) | ((uint32_t)rn << 5) | ft;
+}
+
+static uint32_t enc_fp_stur(uint8_t fsize, uint8_t ft, uint8_t rn, int32_t imm9) {
+    uint32_t base = (fsize == 4) ? 0xBC000000u : 0xFC000000u;
+    return base | ((uint32_t)(imm9 & 0x1FF) << 12) | ((uint32_t)rn << 5) | ft;
+}
+
+static void emit_fp_load(uint8_t *buf, size_t *pos, size_t len, uint8_t ft,
+                         uint8_t rn, int32_t disp, uint8_t fsize) {
+    if (disp >= -256 && disp <= 255) {
+        emit_u32(buf, pos, len, enc_fp_ldur(fsize, ft, rn, disp));
+        return;
+    }
+    emit_addr(buf, pos, len, A64_X15, rn, disp);
+    emit_u32(buf, pos, len, enc_fp_ldur(fsize, ft, A64_X15, 0));
+}
+
+static void emit_fp_store(uint8_t *buf, size_t *pos, size_t len, uint8_t ft,
+                          uint8_t rn, int32_t disp, uint8_t fsize) {
+    if (disp >= -256 && disp <= 255) {
+        emit_u32(buf, pos, len, enc_fp_stur(fsize, ft, rn, disp));
+        return;
+    }
+    emit_addr(buf, pos, len, A64_X15, rn, disp);
+    emit_u32(buf, pos, len, enc_fp_stur(fsize, ft, A64_X15, 0));
+}
+
+/* FP arithmetic instruction encoders */
+
+static uint32_t enc_fadd(uint8_t fsize, uint8_t rd, uint8_t rn, uint8_t rm) {
+    uint32_t base = (fsize == 8) ? 0x1E602800u : 0x1E202800u;
+    return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_fsub(uint8_t fsize, uint8_t rd, uint8_t rn, uint8_t rm) {
+    uint32_t base = (fsize == 8) ? 0x1E603800u : 0x1E203800u;
+    return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_fmul(uint8_t fsize, uint8_t rd, uint8_t rn, uint8_t rm) {
+    uint32_t base = (fsize == 8) ? 0x1E600800u : 0x1E200800u;
+    return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_fdiv(uint8_t fsize, uint8_t rd, uint8_t rn, uint8_t rm) {
+    uint32_t base = (fsize == 8) ? 0x1E601800u : 0x1E201800u;
+    return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_fneg(uint8_t fsize, uint8_t rd, uint8_t rn) {
+    uint32_t base = (fsize == 8) ? 0x1E614000u : 0x1E214000u;
+    return base | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_fcmp(uint8_t fsize, uint8_t rn, uint8_t rm) {
+    uint32_t base = (fsize == 8) ? 0x1E602000u : 0x1E202000u;
+    return base | ((uint32_t)rm << 16) | ((uint32_t)rn << 5);
+}
+
+static uint32_t enc_scvtf(uint8_t fsize, uint8_t fd, uint8_t xn) {
+    uint32_t base = (fsize == 8) ? 0x9E620000u : 0x9E220000u;
+    return base | ((uint32_t)xn << 5) | fd;
+}
+
+static uint32_t enc_fcvtzs(uint8_t fsize, uint8_t xd, uint8_t fn) {
+    uint32_t base = (fsize == 8) ? 0x9E780000u : 0x9E380000u;
+    return base | ((uint32_t)fn << 5) | xd;
+}
+
+static uint32_t enc_fcvt_f32_to_f64(uint8_t dd, uint8_t sn) {
+    return 0x1E22C000u | ((uint32_t)sn << 5) | dd;
+}
+
+static uint32_t enc_fcvt_f64_to_f32(uint8_t sd, uint8_t dn) {
+    return 0x1E624000u | ((uint32_t)dn << 5) | sd;
+}
+
+static uint32_t enc_fmov_to_gpr(uint8_t fsize, uint8_t xd, uint8_t fn) {
+    uint32_t base = (fsize == 8) ? 0x9E660000u : 0x1E260000u;
+    return base | ((uint32_t)fn << 5) | xd;
+}
+
+static uint32_t enc_fmov_from_gpr(uint8_t fsize, uint8_t fd, uint8_t xn) {
+    uint32_t base = (fsize == 8) ? 0x9E670000u : 0x1E270000u;
+    return base | ((uint32_t)xn << 5) | fd;
+}
+
+/* Integer and FP condition code mapping to aarch64 hardware condition codes.
+ *
+ * After aarch64 FCMP, the NZCV flags encode:
+ *   Less:      N=1, Z=0, C=0, V=0
+ *   Equal:     N=0, Z=1, C=1, V=0
+ *   Greater:   N=0, Z=0, C=1, V=0
+ *   Unordered: N=0, Z=0, C=1, V=1
+ */
+
 static uint8_t lr_cc_to_a64(uint8_t cc) {
     switch (cc) {
     case LR_CC_EQ:  return 0;  /* eq */
@@ -1148,6 +1105,24 @@ static uint8_t lr_cc_to_a64(uint8_t cc) {
     case LR_CC_O:   return 6;  /* vs */
     case LR_CC_NO:  return 7;  /* vc */
     default:        return 0;
+    }
+}
+
+static uint8_t lr_fp_cc_to_a64(uint8_t cc) {
+    switch (cc) {
+    case LR_CC_FP_OEQ: return 0;  /* EQ: ordered equal */
+    case LR_CC_FP_OGT: return 12; /* GT: ordered greater */
+    case LR_CC_FP_OGE: return 10; /* GE: ordered greater or equal */
+    case LR_CC_FP_OLT: return 4;  /* MI: N=1 (only set for ordered less) */
+    case LR_CC_FP_OLE: return 9;  /* LS: C=0 or Z=1 (less or equal) */
+    case LR_CC_FP_ORD: return 7;  /* VC: V=0 (not unordered) */
+    case LR_CC_FP_UNO: return 6;  /* VS: V=1 (unordered) */
+    case LR_CC_FP_UNE: return 1;  /* NE: not equal (includes unordered) */
+    case LR_CC_FP_UGT: return 8;  /* HI: C=1 and Z=0 (greater or unordered) */
+    case LR_CC_FP_UGE: return 2;  /* HS: C=1 (>= or unordered) */
+    case LR_CC_FP_ULT: return 11; /* LT: N!=V (less or unordered) */
+    case LR_CC_FP_ULE: return 13; /* LE: Z=1 or N!=V (<=, unordered) */
+    default:           return 0;
     }
 }
 
@@ -1252,9 +1227,29 @@ static int aarch64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen,
                 break;
 
             case LR_MIR_SETCC: {
-                uint8_t cond = lr_cc_to_a64(mi->cc);
-                emit_move_imm(buf, &pos, buflen, dst, 1, false);
-                emit_u32(buf, &pos, buflen, enc_csel(false, dst, dst, A64_SP, cond));
+                if (mi->cc >= LR_CC_FP_OEQ) {
+                    if (mi->cc == LR_CC_FP_ONE) {
+                        /* ONE = MI (less) OR GT (greater), excluding unordered and equal */
+                        emit_move_imm(buf, &pos, buflen, dst, 0, false);
+                        emit_move_imm(buf, &pos, buflen, A64_X15, 1, false);
+                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 4));  /* MI */
+                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 12)); /* GT */
+                    } else if (mi->cc == LR_CC_FP_UEQ) {
+                        /* UEQ = EQ (equal) OR VS (unordered) */
+                        emit_move_imm(buf, &pos, buflen, dst, 0, false);
+                        emit_move_imm(buf, &pos, buflen, A64_X15, 1, false);
+                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 0));  /* EQ */
+                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, A64_X15, dst, 6));  /* VS */
+                    } else {
+                        uint8_t cond = lr_fp_cc_to_a64(mi->cc);
+                        emit_move_imm(buf, &pos, buflen, dst, 1, false);
+                        emit_u32(buf, &pos, buflen, enc_csel(false, dst, dst, A64_SP, cond));
+                    }
+                } else {
+                    uint8_t cond = lr_cc_to_a64(mi->cc);
+                    emit_move_imm(buf, &pos, buflen, dst, 1, false);
+                    emit_u32(buf, &pos, buflen, enc_csel(false, dst, dst, A64_SP, cond));
+                }
                 break;
             }
 
@@ -1314,6 +1309,57 @@ static int aarch64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen,
 
             case LR_MIR_FRAME_FREE:
                 emit_sp_adjust(buf, &pos, buflen, (uint32_t)mi->src.imm, false);
+                break;
+
+            /* FP load/store (FMOV between FP reg and memory or FP reg-reg) */
+            case LR_MIR_FMOV:
+                if (mi->src.kind == LR_MOP_MEM && mi->dst.kind == LR_MOP_REG) {
+                    emit_fp_load(buf, &pos, buflen, dst, mi->src.mem.base,
+                                 mi->src.mem.disp, mi->size);
+                } else if (mi->dst.kind == LR_MOP_MEM && mi->src.kind == LR_MOP_REG) {
+                    emit_fp_store(buf, &pos, buflen, src, mi->dst.mem.base,
+                                  mi->dst.mem.disp, mi->size);
+                } else if (mi->src.kind == LR_MOP_REG && mi->dst.kind == LR_MOP_REG) {
+                    uint32_t base = (mi->size == 8) ? 0x1E604000u : 0x1E204000u;
+                    emit_u32(buf, &pos, buflen, base | ((uint32_t)src << 5) | dst);
+                }
+                break;
+
+            case LR_MIR_FADD:
+                emit_u32(buf, &pos, buflen, enc_fadd(mi->size, dst, dst, src));
+                break;
+            case LR_MIR_FSUB:
+                emit_u32(buf, &pos, buflen, enc_fsub(mi->size, dst, dst, src));
+                break;
+            case LR_MIR_FMUL:
+                emit_u32(buf, &pos, buflen, enc_fmul(mi->size, dst, dst, src));
+                break;
+            case LR_MIR_FDIV:
+                emit_u32(buf, &pos, buflen, enc_fdiv(mi->size, dst, dst, src));
+                break;
+            case LR_MIR_FNEG:
+                emit_u32(buf, &pos, buflen, enc_fneg(mi->size, dst, src));
+                break;
+            case LR_MIR_FCMP:
+                emit_u32(buf, &pos, buflen, enc_fcmp(mi->size, dst, src));
+                break;
+            case LR_MIR_FCVT_I2F:
+                emit_u32(buf, &pos, buflen, enc_scvtf(mi->size, dst, src));
+                break;
+            case LR_MIR_FCVT_F2I:
+                emit_u32(buf, &pos, buflen, enc_fcvtzs(mi->size, dst, src));
+                break;
+            case LR_MIR_FCVT_F2F:
+                if (mi->size == 8)
+                    emit_u32(buf, &pos, buflen, enc_fcvt_f32_to_f64(dst, src));
+                else
+                    emit_u32(buf, &pos, buflen, enc_fcvt_f64_to_f32(dst, src));
+                break;
+            case LR_MIR_FMOV_TO_GPR:
+                emit_u32(buf, &pos, buflen, enc_fmov_to_gpr(mi->size, dst, src));
+                break;
+            case LR_MIR_FMOV_FROM_GPR:
+                emit_u32(buf, &pos, buflen, enc_fmov_from_gpr(mi->size, dst, src));
                 break;
 
             default:

@@ -55,6 +55,20 @@ typedef enum lr_mir_op {
     LR_MIR_NOP,
     LR_MIR_FRAME_ALLOC,
     LR_MIR_FRAME_FREE,
+    /* Floating-point MIR opcodes */
+    LR_MIR_FMOV,       /* FP reg-reg move or FP load/store via FP reg */
+    LR_MIR_FMOV_IMM,   /* Load FP immediate (from GPR or literal pool) */
+    LR_MIR_FADD,
+    LR_MIR_FSUB,
+    LR_MIR_FMUL,
+    LR_MIR_FDIV,
+    LR_MIR_FNEG,
+    LR_MIR_FCMP,       /* FP compare (sets flags) */
+    LR_MIR_FCVT_I2F,   /* signed int (GPR) -> FP (FP reg) */
+    LR_MIR_FCVT_F2I,   /* FP (FP reg) -> signed int (GPR) */
+    LR_MIR_FCVT_F2F,   /* FP widening/narrowing (f32<->f64) */
+    LR_MIR_FMOV_TO_GPR,  /* FP reg -> GPR (bitwise) */
+    LR_MIR_FMOV_FROM_GPR, /* GPR -> FP reg (bitwise) */
 } lr_mir_op_t;
 
 /* Target-neutral condition codes used by JCC/SETCC/CMOVCC */
@@ -62,6 +76,11 @@ enum {
     LR_CC_EQ = 0, LR_CC_NE, LR_CC_UGT, LR_CC_UGE, LR_CC_ULT, LR_CC_ULE,
     LR_CC_SGT, LR_CC_SGE, LR_CC_SLT, LR_CC_SLE,
     LR_CC_O, LR_CC_NO,
+    /* FP condition codes for FCMP (ucomisd/fcmp semantics) */
+    LR_CC_FP_OEQ, LR_CC_FP_ONE, LR_CC_FP_OGT, LR_CC_FP_OGE,
+    LR_CC_FP_OLT, LR_CC_FP_OLE, LR_CC_FP_ORD, LR_CC_FP_UNO,
+    LR_CC_FP_UEQ, LR_CC_FP_UNE, LR_CC_FP_UGT, LR_CC_FP_UGE,
+    LR_CC_FP_ULT, LR_CC_FP_ULE,
 };
 
 typedef struct lr_minst {

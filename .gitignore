@@ -1,5 +1,16 @@
 build/
+build-*/
 *.o
 *.a
 __pycache__/
 *.py[cod]
+
+# lfortran mass run artifacts
+*.out
+*.mod
+*.smod
+*.bin
+_lfortran_generated_file_*
+file_*_data.txt
+file_common_block_*.mod
+SESSION_STATE.md
