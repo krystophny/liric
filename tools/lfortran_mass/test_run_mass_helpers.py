@@ -15,7 +15,7 @@ class RunMassHelperTests(unittest.TestCase):
     def test_probe_run_command_ignore_retcode_flag(self) -> None:
         cfg = run_mass.RunnerConfig(
             lfortran_bin=Path("/tmp/lfortran"),
-            liric_cli=Path("/tmp/liric_cli"),
+            liric_bin=Path("/tmp/liric"),
             probe_runner=Path("/tmp/liric_probe_runner"),
             cache_dir=Path("/tmp/cache"),
             timeout_emit=1,

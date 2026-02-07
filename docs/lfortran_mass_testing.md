@@ -43,7 +43,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 The mass harness expects these binaries:
-- `build/liric_cli`
+- `build/liric`
 - `build/liric_probe_runner`
 
 ## Run Mass Campaign

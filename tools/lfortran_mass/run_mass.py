@@ -51,7 +51,7 @@ class CommandResult:
 @dataclass(frozen=True)
 class RunnerConfig:
     lfortran_bin: Path
-    liric_cli: Path
+    liric_bin: Path
     probe_runner: Path
     cache_dir: Path
     timeout_emit: int
@@ -467,7 +467,7 @@ def process_case(
     ir_text = ll_path.read_text(encoding="utf-8", errors="replace")
 
     row["parse_attempted"] = True
-    parse_cmd = [str(cfg.liric_cli), "--dump-ir", str(ll_path)]
+    parse_cmd = [str(cfg.liric_bin), "--dump-ir", str(ll_path)]
     parse_result = run_cmd(parse_cmd, cwd=case_dir, timeout_sec=cfg.timeout_parse)
     row["parse_cmd"] = parse_result.command
     row["parse_rc"] = parse_result.rc
@@ -608,9 +608,9 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--liric-cli",
-        default=str((root / "build" / "liric_cli").resolve()),
-        help="Path to liric_cli binary",
+        "--liric-bin",
+        default=str((root / "build" / "liric").resolve()),
+        help="Path to liric binary",
     )
     parser.add_argument(
         "--probe-runner",
@@ -779,7 +779,7 @@ def main() -> int:
         else resolve_default_lfortran_bin(lfortran_root)
     )
 
-    liric_cli = Path(args.liric_cli).resolve()
+    liric_bin = Path(args.liric_bin).resolve()
     probe_runner = Path(args.probe_runner).resolve()
     output_root = Path(args.output_root).resolve()
     cache_dir = output_root / "cache"
@@ -790,7 +790,7 @@ def main() -> int:
     if not args.skip_integration_cmake:
         ensure_exists(integration_cmake, "integration CMakeLists")
     ensure_exists(lfortran_bin, "lfortran binary")
-    ensure_exists(liric_cli, "liric_cli binary")
+    ensure_exists(liric_bin, "liric binary")
     ensure_exists(probe_runner, "liric_probe_runner binary")
 
     runtime_libs: List[str] = []
@@ -900,7 +900,7 @@ def main() -> int:
 
     cfg = RunnerConfig(
         lfortran_bin=lfortran_bin,
-        liric_cli=liric_cli,
+        liric_bin=liric_bin,
         probe_runner=probe_runner,
         cache_dir=cache_dir,
         timeout_emit=args.timeout_emit,
