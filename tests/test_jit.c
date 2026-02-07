@@ -876,3 +876,307 @@ int test_jit_call_many_stack_args(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_fsub_double(void) {
+    const char *src =
+        "define double @fsub64(double %a, double %b) {\n"
+        "entry:\n"
+        "  %c = fsub double %a, %b\n"
+        "  ret double %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t, uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "fsub64");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double a = 10.5, b = 3.25;
+    uint64_t a_bits = 0, b_bits = 0;
+    memcpy(&a_bits, &a, sizeof(a));
+    memcpy(&b_bits, &b, sizeof(b));
+
+    uint64_t out_bits = fn(a_bits, b_bits);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out > 7.24 && out < 7.26, "fsub64 result is 7.25");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fdiv_double(void) {
+    const char *src =
+        "define double @fdiv64(double %a, double %b) {\n"
+        "entry:\n"
+        "  %c = fdiv double %a, %b\n"
+        "  ret double %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t, uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "fdiv64");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double a = 15.0, b = 4.0;
+    uint64_t a_bits = 0, b_bits = 0;
+    memcpy(&a_bits, &a, sizeof(a));
+    memcpy(&b_bits, &b, sizeof(b));
+
+    uint64_t out_bits = fn(a_bits, b_bits);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out > 3.74 && out < 3.76, "fdiv64 result is 3.75");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fneg_double(void) {
+    const char *src =
+        "define double @fneg64(double %a) {\n"
+        "entry:\n"
+        "  %c = fneg double %a\n"
+        "  ret double %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "fneg64");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double a = 42.5;
+    uint64_t a_bits = 0;
+    memcpy(&a_bits, &a, sizeof(a));
+
+    uint64_t out_bits = fn(a_bits);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out < -42.49 && out > -42.51, "fneg64 result is -42.5");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_sitofp_i64_f64(void) {
+    const char *src =
+        "define double @i2d(i64 %x) {\n"
+        "entry:\n"
+        "  %d = sitofp i64 %x to double\n"
+        "  ret double %d\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(int64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "i2d");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    uint64_t out_bits = fn(42);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out > 41.99 && out < 42.01, "sitofp 42 -> 42.0");
+
+    out_bits = fn(-7);
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out < -6.99 && out > -7.01, "sitofp -7 -> -7.0");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fptosi_f64_i64(void) {
+    const char *src =
+        "define i64 @d2i(double %x) {\n"
+        "entry:\n"
+        "  %i = fptosi double %x to i64\n"
+        "  ret i64 %i\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "d2i");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double val = 42.9;
+    uint64_t val_bits = 0;
+    memcpy(&val_bits, &val, sizeof(val));
+    TEST_ASSERT_EQ(fn(val_bits), 42, "fptosi 42.9 -> 42");
+
+    val = -7.1;
+    memcpy(&val_bits, &val, sizeof(val));
+    TEST_ASSERT_EQ(fn(val_bits), -7, "fptosi -7.1 -> -7");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fpext_f32_f64(void) {
+    const char *src =
+        "define double @ext(float %x) {\n"
+        "entry:\n"
+        "  %d = fpext float %x to double\n"
+        "  ret double %d\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "ext");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    float f = 3.5f;
+    uint32_t f_bits = 0;
+    memcpy(&f_bits, &f, sizeof(f));
+
+    uint64_t out_bits = fn((uint64_t)f_bits);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out > 3.49 && out < 3.51, "fpext 3.5f -> 3.5");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fptrunc_f64_f32(void) {
+    const char *src =
+        "define float @trunc(double %x) {\n"
+        "entry:\n"
+        "  %f = fptrunc double %x to float\n"
+        "  ret float %f\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "trunc");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double d = 2.75;
+    uint64_t d_bits = 0;
+    memcpy(&d_bits, &d, sizeof(d));
+
+    uint64_t out_bits = fn(d_bits);
+    uint32_t out_bits32 = (uint32_t)out_bits;
+    float out = 0.0f;
+    memcpy(&out, &out_bits32, sizeof(out));
+    TEST_ASSERT(out > 2.74f && out < 2.76f, "fptrunc 2.75 -> 2.75f");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fcmp_oeq(void) {
+    const char *src =
+        "define i1 @cmp_oeq(double %a, double %b) {\n"
+        "entry:\n"
+        "  %c = fcmp oeq double %a, %b\n"
+        "  ret i1 %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t, uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "cmp_oeq");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double a = 3.14, b = 3.14, c = 2.71;
+    uint64_t a_bits = 0, b_bits = 0, c_bits = 0;
+    memcpy(&a_bits, &a, sizeof(a));
+    memcpy(&b_bits, &b, sizeof(b));
+    memcpy(&c_bits, &c, sizeof(c));
+
+    TEST_ASSERT_EQ(fn(a_bits, b_bits), 1, "3.14 oeq 3.14 = true");
+    TEST_ASSERT_EQ(fn(a_bits, c_bits), 0, "3.14 oeq 2.71 = false");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_fp_arithmetic_chain(void) {
+    const char *src =
+        "define double @chain(double %a, double %b) {\n"
+        "entry:\n"
+        "  %sum = fadd double %a, %b\n"
+        "  %prod = fmul double %sum, %a\n"
+        "  %diff = fsub double %prod, %b\n"
+        "  ret double %diff\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(uint64_t, uint64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "chain");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    double a = 3.0, b = 2.0;
+    uint64_t a_bits = 0, b_bits = 0;
+    memcpy(&a_bits, &a, sizeof(a));
+    memcpy(&b_bits, &b, sizeof(b));
+
+    /* (3+2)*3 - 2 = 15 - 2 = 13 */
+    uint64_t out_bits = fn(a_bits, b_bits);
+    double out = 0.0;
+    memcpy(&out, &out_bits, sizeof(out));
+    TEST_ASSERT(out > 12.99 && out < 13.01, "chain(3,2) = 13.0");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
