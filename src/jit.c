@@ -9,6 +9,30 @@
 #include <dlfcn.h>
 #include <math.h>
 
+#ifdef LR_JIT_PROFILE
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+static double lr_jit_now_us(void) {
+    static mach_timebase_info_data_t info = {0, 0};
+    if (info.denom == 0) mach_timebase_info(&info);
+    uint64_t t = mach_absolute_time();
+    return (double)(t * info.numer / info.denom) / 1e3;
+}
+#else
+#include <time.h>
+static double lr_jit_now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
+#endif
+#define JIT_PROF_START(name) double _prof_##name = lr_jit_now_us()
+#define JIT_PROF_END(name) fprintf(stderr, "  jit-prof %-20s %7.2f us\n", #name, lr_jit_now_us() - _prof_##name)
+#else
+#define JIT_PROF_START(name) ((void)0)
+#define JIT_PROF_END(name) ((void)0)
+#endif
+
 #if defined(__APPLE__) && defined(__aarch64__) && defined(MAP_JIT)
 #include <pthread.h>
 #define LR_CAN_USE_MAP_JIT 1
@@ -357,8 +381,14 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->name || !g->name[0])
             continue;
-        if (lookup_symbol(j, g->name))
-            continue;
+        if (g->is_external) {
+            if (lookup_symbol(j, g->name))
+                continue;
+        } else {
+            uint32_t hash = symbol_hash(g->name);
+            if (find_symbol_entry(j, g->name, hash))
+                continue;
+        }
 
         size_t align = lr_type_align(g->type);
         if (align == 0)
@@ -459,8 +489,14 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
+
+    JIT_PROF_START(make_writable);
     if (make_writable(j) != 0) return -1;
+    JIT_PROF_END(make_writable);
+
+    JIT_PROF_START(globals);
     if (materialize_module_globals(j, m) != 0) return -1;
+    JIT_PROF_END(globals);
 
     uint32_t nfuncs = 0;
     for (lr_func_t *f = m->first_func; f; f = f->next) {
@@ -474,14 +510,27 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         return 0;
     }
 
+    /* Pre-populate miss cache for all module-defined function names.
+       This prevents dlsym from being called when resolving intra-module
+       cross-references — the miss cache hit is O(1) vs dlsym at ~5 us. */
+    JIT_PROF_START(pre_register);
     lr_func_t **funcs = lr_arena_array(j->arena, lr_func_t *, nfuncs);
-    bool *compiled = lr_arena_array(j->arena, bool, nfuncs);
     uint32_t fi = 0;
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (!f->is_decl)
             funcs[fi++] = f;
     }
 
+    /* Resolve function declarations eagerly — these are external symbols
+       that will be needed during compilation (e.g., runtime functions). */
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->is_decl && f->name && f->name[0])
+            lookup_symbol(j, f->name);
+    }
+    JIT_PROF_END(pre_register);
+
+    JIT_PROF_START(compile_loop);
+    bool *compiled = lr_arena_array(j->arena, bool, nfuncs);
     uint32_t remaining = nfuncs;
     while (remaining > 0) {
         bool progress = false;
@@ -493,7 +542,9 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
 
             lr_func_t *f = funcs[i];
             void *self_addr = j->code_buf + j->code_size;
+            JIT_PROF_START(resolve);
             int resolve_rc = resolve_global_operands(j, m, f, self_addr, &last_missing);
+            JIT_PROF_END(resolve);
             if (resolve_rc == 1)
                 continue;
             if (resolve_rc != 0)
@@ -502,13 +553,17 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             lr_mfunc_t *mf = lr_arena_new(j->arena, lr_mfunc_t);
             mf->arena = j->arena;
 
+            JIT_PROF_START(isel);
             int rc = j->target->isel_func(f, mf, m);
+            JIT_PROF_END(isel);
             if (rc != 0) return rc;
 
             uint8_t *func_start = j->code_buf + j->code_size;
             size_t free_space = j->code_cap - j->code_size;
             size_t code_len = 0;
+            JIT_PROF_START(encode);
             rc = j->target->encode_func(mf, func_start, free_space, &code_len);
+            JIT_PROF_END(encode);
             if (rc != 0) return rc;
 
             if (code_len > free_space)
@@ -528,9 +583,12 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             return -1;
         }
     }
+    JIT_PROF_END(compile_loop);
 
+    JIT_PROF_START(make_exec);
     if (make_executable(j) != 0)
         return -1;
+    JIT_PROF_END(make_exec);
 
     return 0;
 }
