@@ -1,0 +1,6 @@
+#ifndef LLVM_SUPPORT_COMPILER_H
+#define LLVM_SUPPORT_COMPILER_H
+
+#define LLVM_ABI
+
+#endif

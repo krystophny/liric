@@ -24,6 +24,7 @@ add_library(liric STATIC
     src/liric.c
     src/builder.c
     src/liric_compat.c
+    src/llvm_stubs.c
 )
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)

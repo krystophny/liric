@@ -1,0 +1,5 @@
+#ifndef LLVM_DISASSEMBLER
+#define LLVM_DISASSEMBLER(TargetName)
+#endif
+
+#undef LLVM_DISASSEMBLER

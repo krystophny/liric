@@ -1,6 +1,8 @@
 #ifndef LLVM_PASSES_PASSBUILDER_H
 #define LLVM_PASSES_PASSBUILDER_H
 
+#include "llvm/Passes/OptimizationLevel.h"
+
 namespace llvm {
 
 class Module;
@@ -61,13 +63,14 @@ public:
                               CGSCCAnalysisManager &,
                               ModuleAnalysisManager &) {}
 
-    ModulePassManager buildPerModuleDefaultPipeline(int) {
+    ModulePassManager buildPerModuleDefaultPipeline(OptimizationLevel) {
         return ModulePassManager();
     }
-    ModulePassManager buildO0DefaultPipeline(int = 0, bool = false) {
+    ModulePassManager buildO0DefaultPipeline(OptimizationLevel = OptimizationLevel::O0,
+                                              bool = false) {
         return ModulePassManager();
     }
-    FunctionPassManager buildFunctionSimplificationPipeline(int, int) {
+    FunctionPassManager buildFunctionSimplificationPipeline(OptimizationLevel, int) {
         return FunctionPassManager();
     }
 };

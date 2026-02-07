@@ -1,0 +1,8 @@
+#ifndef LLVM_ASM_PARSER
+#define LLVM_ASM_PARSER(TargetName)
+#endif
+
+LLVM_ASM_PARSER(AArch64)
+LLVM_ASM_PARSER(X86)
+
+#undef LLVM_ASM_PARSER

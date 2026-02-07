@@ -1,0 +1,10 @@
+void LLVMInitializeAArch64Target(void) {}
+void LLVMInitializeAArch64TargetInfo(void) {}
+void LLVMInitializeAArch64TargetMC(void) {}
+void LLVMInitializeAArch64AsmPrinter(void) {}
+void LLVMInitializeAArch64AsmParser(void) {}
+void LLVMInitializeX86Target(void) {}
+void LLVMInitializeX86TargetInfo(void) {}
+void LLVMInitializeX86TargetMC(void) {}
+void LLVMInitializeX86AsmPrinter(void) {}
+void LLVMInitializeX86AsmParser(void) {}

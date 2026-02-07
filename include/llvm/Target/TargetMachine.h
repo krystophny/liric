@@ -3,6 +3,11 @@
 
 #include "llvm/IR/DataLayout.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/CodeGen.h"
+#include "llvm/Target/TargetOptions.h"
+#include "llvm/TargetParser/Triple.h"
+#include "llvm/Support/Error.h"
+#include "llvm/MC/TargetRegistry.h"
 #include <string>
 
 namespace llvm {
@@ -10,30 +15,6 @@ namespace llvm {
 class Module;
 class raw_ostream;
 class raw_pwrite_stream;
-
-class TargetOptions {
-public:
-    bool UnsafeFPMath = false;
-    bool NoInfsFPMath = false;
-    bool NoNaNsFPMath = false;
-    bool HonorSignDependentRoundingFPMathOption = false;
-    bool NoZerosInBSS = false;
-    bool GuaranteedTailCallOpt = false;
-    bool StackAlignmentOverride = false;
-    bool EnableFastISel = false;
-};
-
-class Target {
-public:
-    const char *getName() const { return "liric"; }
-    const char *getShortDescription() const { return "liric JIT target"; }
-
-    TargetMachine *createTargetMachine(StringRef, StringRef, StringRef,
-                                       const TargetOptions &, int,
-                                       int = 0, int = 0) const {
-        return nullptr;
-    }
-};
 
 class TargetMachine {
 public:
@@ -44,12 +25,17 @@ public:
         return dl;
     }
 
-    StringRef getTargetTriple() const { return ""; }
+    DataLayout createDataLayout() const { return DataLayout(); }
+
+    const Triple &getTargetTriple() const {
+        static Triple t;
+        return t;
+    }
 
     void setFastISel(bool) {}
 
-    bool addPassesToEmitFile(void *, raw_pwrite_stream &, void *, int,
-                             bool = true, void * = nullptr) {
+    bool addPassesToEmitFile(void *, raw_pwrite_stream &, raw_pwrite_stream *,
+                             CodeGenFileType, bool = true, void * = nullptr) {
         return false;
     }
 
@@ -57,13 +43,9 @@ public:
         static Target t;
         return t;
     }
-};
 
-namespace TargetRegistry {
-    inline const Target *lookupTarget(StringRef, std::string &) {
-        return nullptr;
-    }
-}
+    TargetOptions Options;
+};
 
 inline std::string sys_getDefaultTargetTriple() { return ""; }
 inline std::string sys_getHostCPUName() { return "generic"; }

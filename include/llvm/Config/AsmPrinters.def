@@ -1,0 +1,8 @@
+#ifndef LLVM_ASM_PRINTER
+#define LLVM_ASM_PRINTER(TargetName)
+#endif
+
+LLVM_ASM_PRINTER(AArch64)
+LLVM_ASM_PRINTER(X86)
+
+#undef LLVM_ASM_PRINTER

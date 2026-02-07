@@ -71,7 +71,7 @@ static int tests_failed = 0;
 } while (0)
 
 static int test_llvm_version() {
-    TEST_ASSERT_EQ(LLVM_VERSION_MAJOR, 17, "version major");
+    TEST_ASSERT_EQ(LLVM_VERSION_MAJOR, 21, "version major");
     return 0;
 }
 

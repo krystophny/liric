@@ -1,0 +1,5 @@
+#ifndef LLVM_TARGETMCA
+#define LLVM_TARGETMCA(TargetName)
+#endif
+
+#undef LLVM_TARGETMCA

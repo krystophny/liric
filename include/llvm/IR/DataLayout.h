@@ -1,7 +1,7 @@
 #ifndef LLVM_IR_DATALAYOUT_H
 #define LLVM_IR_DATALAYOUT_H
 
-#include "llvm/IR/Type.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/ADT/StringRef.h"
 #include <liric/liric_compat.h>
 #include <cstdint>
