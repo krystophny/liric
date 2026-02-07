@@ -23,6 +23,7 @@ static double now_us(void) {
     return (double)(t * info.numer / info.denom) / 1e3;
 }
 #else
+#include <time.h>
 static double now_us(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
