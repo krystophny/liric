@@ -26,15 +26,15 @@ Linux x86_64 and macOS arm64.
 
 ## Speed: liric vs LLVM lli
 
-1195 LFortran-generated `.ll` files, LLVM 21.1.6.
+1196 LFortran-generated `.ll` files, LLVM 21.1.6.
 
 | Metric | liric | lli -O0 | Speedup |
 |--------|------:|--------:|--------:|
-| Median | 1.23 ms | 12.35 ms | **10.0x** |
-| Mean | 1.78 ms | 14.72 ms | **8.3x** |
-| P90 | 2.77 ms | 20.56 ms | 7.4x |
+| Median | 1.23 ms | 12.26 ms | **10.0x** |
+| Mean | 1.72 ms | 14.66 ms | **8.5x** |
+| P90 | 2.66 ms | 20.27 ms | 7.6x |
 
-Total: 2.1s (liric) vs 17.6s (lli). 100% of tests faster, 45% over 10x.
+Total: 2.06s (liric) vs 17.53s (lli). 100% of tests faster, 42.4% over 10x.
 
 ```bash
 python3 -m tools.bench_compile_speed   # reproduce

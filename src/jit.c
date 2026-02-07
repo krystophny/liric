@@ -18,9 +18,20 @@
 
 #define CODE_PAGE_SIZE (1024 * 1024)
 #define DATA_PAGE_SIZE (256 * 1024)
+#define SYM_BUCKET_COUNT 8192u
+#define MISS_BUCKET_COUNT 4096u
 
 static void register_builtin_symbols(lr_jit_t *j);
 static const char *resolve_global_name(lr_module_t *m, uint32_t global_id);
+
+static uint32_t symbol_hash(const char *name) {
+    uint32_t h = 2166136261u;
+    while (*name) {
+        h ^= (uint8_t)*name++;
+        h *= 16777619u;
+    }
+    return h;
+}
 
 static uint64_t llvm_fabs_f32_bits(uint64_t x_bits) {
     uint32_t in_bits = (uint32_t)x_bits;
@@ -156,6 +167,17 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
         free(j);
         return NULL;
     }
+    j->sym_bucket_count = SYM_BUCKET_COUNT;
+    j->miss_bucket_count = MISS_BUCKET_COUNT;
+    j->sym_buckets = calloc(j->sym_bucket_count, sizeof(*j->sym_buckets));
+    j->miss_buckets = calloc(j->miss_bucket_count, sizeof(*j->miss_buckets));
+    if (!j->sym_buckets || !j->miss_buckets) {
+        free(j->miss_buckets);
+        free(j->sym_buckets);
+        lr_arena_destroy(j->arena);
+        free(j);
+        return NULL;
+    }
 
     j->code_cap = CODE_PAGE_SIZE;
     int code_prot = PROT_READ | PROT_WRITE;
@@ -175,6 +197,8 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
         if (j->code_buf == MAP_FAILED)
 #endif
         {
+            free(j->miss_buckets);
+            free(j->sym_buckets);
             lr_arena_destroy(j->arena);
             free(j);
             return NULL;
@@ -191,6 +215,8 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (j->data_buf == MAP_FAILED) {
         munmap(j->code_buf, j->code_cap);
+        free(j->miss_buckets);
+        free(j->sym_buckets);
         lr_arena_destroy(j->arena);
         free(j);
         return NULL;
@@ -199,6 +225,8 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     if (make_executable(j) != 0) {
         munmap(j->data_buf, j->data_cap);
         munmap(j->code_buf, j->code_cap);
+        free(j->miss_buckets);
+        free(j->sym_buckets);
         lr_arena_destroy(j->arena);
         free(j);
         return NULL;
@@ -214,12 +242,62 @@ lr_jit_t *lr_jit_create(void) {
     return host ? lr_jit_create_for_target(host) : NULL;
 }
 
+static lr_sym_entry_t *find_symbol_entry(lr_jit_t *j, const char *name, uint32_t hash) {
+    if (!j || !j->sym_buckets || j->sym_bucket_count == 0)
+        return NULL;
+    uint32_t bucket = hash & (j->sym_bucket_count - 1u);
+    for (lr_sym_entry_t *e = j->sym_buckets[bucket]; e; e = e->bucket_next) {
+        if (e->hash == hash && strcmp(e->name, name) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+static bool miss_cache_contains(lr_jit_t *j, const char *name, uint32_t hash) {
+    if (!j || !j->miss_buckets || j->miss_bucket_count == 0)
+        return false;
+    uint32_t bucket = hash & (j->miss_bucket_count - 1u);
+    for (lr_sym_miss_entry_t *m = j->miss_buckets[bucket]; m; m = m->bucket_next) {
+        if (m->hash == hash && strcmp(m->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void miss_cache_add(lr_jit_t *j, const char *name, uint32_t hash) {
+    if (!j || !j->miss_buckets || j->miss_bucket_count == 0)
+        return;
+    uint32_t bucket = hash & (j->miss_bucket_count - 1u);
+    lr_sym_miss_entry_t *m = lr_arena_new(j->arena, lr_sym_miss_entry_t);
+    m->name = lr_arena_strdup(j->arena, name, strlen(name));
+    m->hash = hash;
+    m->bucket_next = j->miss_buckets[bucket];
+    j->miss_buckets[bucket] = m;
+}
+
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
+    if (!j || !name || !name[0])
+        return;
+    uint32_t hash = symbol_hash(name);
+    lr_sym_entry_t *existing = find_symbol_entry(j, name, hash);
+    if (existing) {
+        existing->addr = addr;
+        return;
+    }
+
     lr_sym_entry_t *e = lr_arena_new(j->arena, lr_sym_entry_t);
     e->name = lr_arena_strdup(j->arena, name, strlen(name));
+    e->hash = hash;
     e->addr = addr;
     e->next = j->symbols;
     j->symbols = e;
+    if (j->sym_buckets && j->sym_bucket_count > 0) {
+        uint32_t bucket = hash & (j->sym_bucket_count - 1u);
+        e->bucket_next = j->sym_buckets[bucket];
+        j->sym_buckets[bucket] = e;
+    } else {
+        e->bucket_next = NULL;
+    }
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
@@ -243,20 +321,34 @@ int lr_jit_load_library(lr_jit_t *j, const char *path) {
     entry->handle = handle;
     entry->next = j->libs;
     j->libs = entry;
+    if (j->miss_buckets && j->miss_bucket_count > 0) {
+        memset(j->miss_buckets, 0, j->miss_bucket_count * sizeof(*j->miss_buckets));
+    }
     return 0;
 }
 
 static void *lookup_symbol(lr_jit_t *j, const char *name) {
-    for (lr_sym_entry_t *e = j->symbols; e; e = e->next) {
-        if (strcmp(e->name, name) == 0)
-            return e->addr;
-    }
+    uint32_t hash = symbol_hash(name);
+    lr_sym_entry_t *local = find_symbol_entry(j, name, hash);
+    if (local)
+        return local->addr;
+
+    if (miss_cache_contains(j, name, hash))
+        return NULL;
+
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
         void *addr = dlsym(l->handle, name);
-        if (addr)
+        if (addr) {
+            lr_jit_add_symbol(j, name, addr);
             return addr;
+        }
     }
     void *addr = dlsym(RTLD_DEFAULT, name);
+    if (addr) {
+        lr_jit_add_symbol(j, name, addr);
+        return addr;
+    }
+    miss_cache_add(j, name, hash);
     return addr;
 }
 
@@ -413,16 +505,15 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             int rc = j->target->isel_func(f, mf, m);
             if (rc != 0) return rc;
 
-            uint8_t tmp_buf[65536];
+            uint8_t *func_start = j->code_buf + j->code_size;
+            size_t free_space = j->code_cap - j->code_size;
             size_t code_len = 0;
-            rc = j->target->encode_func(mf, tmp_buf, sizeof(tmp_buf), &code_len);
+            rc = j->target->encode_func(mf, func_start, free_space, &code_len);
             if (rc != 0) return rc;
 
-            if (j->code_size + code_len > j->code_cap)
+            if (code_len > free_space)
                 return -1;
 
-            uint8_t *func_start = j->code_buf + j->code_size;
-            memcpy(func_start, tmp_buf, code_len);
             j->code_size += code_len;
 
             lr_jit_add_symbol(j, f->name, func_start);
@@ -458,6 +549,8 @@ void lr_jit_destroy(lr_jit_t *j) {
         munmap(j->code_buf, j->code_cap);
     if (j->data_buf && j->data_buf != MAP_FAILED)
         munmap(j->data_buf, j->data_cap);
+    free(j->miss_buckets);
+    free(j->sym_buckets);
     lr_arena_destroy(j->arena);
     free(j);
 }
