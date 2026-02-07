@@ -626,3 +626,66 @@ int test_parser_named_params_no_collision(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_parser_cast_expr_in_aggregate_init(void) {
+    const char *src =
+        "%tt_class = type { i8*, i8* }\n"
+        "%array = type { i32, i32 }\n"
+        "declare void @_copy_tt(i8*, i8*)\n"
+        "declare void @_alloc_tt(i8**)\n"
+        "declare void @_method_tt(%tt_class*, %array**)\n"
+        "@_Name_tt = private constant [3 x i8] c\"tt\\00\"\n"
+        "@_Type_Info_tt = constant { i8* } { i8* getelementptr inbounds "
+        "([3 x i8], [3 x i8]* @_Name_tt, i32 0, i32 0) }\n"
+        "@_VTable_tt = constant { [5 x i8*] } { [5 x i8*] [\n"
+        "  i8* null,\n"
+        "  i8* bitcast ({ i8* }* @_Type_Info_tt to i8*),\n"
+        "  i8* bitcast (void (i8*, i8*)* @_copy_tt to i8*),\n"
+        "  i8* bitcast (void (i8**)* @_alloc_tt to i8*),\n"
+        "  i8* bitcast (void (%tt_class*, %array**)* @_method_tt to i8*)\n"
+        "] }\n"
+        "@_Type_Int4 = constant { i8*, i8* } {\n"
+        "  i8* inttoptr (i32 4 to i8*),\n"
+        "  i8* inttoptr (i8 4 to i8*)\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_global_t *vtable = NULL;
+    lr_global_t *typeint = NULL;
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (strcmp(g->name, "_VTable_tt") == 0)
+            vtable = g;
+        if (strcmp(g->name, "_Type_Int4") == 0)
+            typeint = g;
+    }
+    TEST_ASSERT(vtable != NULL, "vtable global parsed");
+    TEST_ASSERT(vtable->init_data != NULL, "vtable has init data");
+
+    int reloc_count = 0;
+    bool has_type_info_reloc = false;
+    bool has_copy_reloc = false;
+    bool has_method_reloc = false;
+    for (lr_reloc_t *r = vtable->relocs; r; r = r->next) {
+        reloc_count++;
+        if (strcmp(r->symbol_name, "_Type_Info_tt") == 0)
+            has_type_info_reloc = true;
+        if (strcmp(r->symbol_name, "_copy_tt") == 0)
+            has_copy_reloc = true;
+        if (strcmp(r->symbol_name, "_method_tt") == 0)
+            has_method_reloc = true;
+    }
+    TEST_ASSERT(reloc_count >= 4, "vtable has at least 4 relocations from bitcast exprs");
+    TEST_ASSERT(has_type_info_reloc, "bitcast of struct ptr produces relocation");
+    TEST_ASSERT(has_copy_reloc, "bitcast of simple func ptr produces relocation");
+    TEST_ASSERT(has_method_reloc, "bitcast of func ptr with named-type params produces relocation");
+
+    TEST_ASSERT(typeint != NULL, "inttoptr struct global parsed");
+    TEST_ASSERT(typeint->init_data != NULL, "inttoptr struct has init data");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
