@@ -35,7 +35,10 @@ class IRBuilder {
     lr_func_t *func_;
     LLVMContext &ctx_;
 
-    lc_module_compat_t *M() const { return mod_; }
+    lc_module_compat_t *M() const {
+        if (mod_) return mod_;
+        return Module::getCurrentModule();
+    }
     lr_block_t *B() const { return block_; }
     lr_func_t *F() const { return func_; }
 
@@ -519,20 +522,20 @@ public:
                       const Twine &Name = "") {
         std::vector<lc_value_t *> args(Args.size());
         for (size_t i = 0; i < Args.size(); i++) {
-            args[i] = Args[i]->impl();
+            args[i] = Args[i] ? Args[i]->impl() : nullptr;
         }
         return Value::wrap(lc_create_call(
-            M(), B(), F(), FTy->impl(), Callee->impl(),
+            M(), B(), F(), FTy ? FTy->impl() : nullptr,
+            Callee ? Callee->impl() : nullptr,
             args.empty() ? nullptr : args.data(),
             static_cast<unsigned>(args.size()), Name.c_str()));
     }
 
     Value *CreateCall(Function *Callee, ArrayRef<Value *> Args = {},
                       const Twine &Name = "") {
-        FunctionType *fty = Callee->getFunctionType();
-        return CreateCall(fty, static_cast<Value *>(Callee->getFuncVal()
-                          ? Value::wrap(Callee->getFuncVal())
-                          : nullptr), Args, Name);
+        FunctionType *fty = Callee ? Callee->getFunctionType() : nullptr;
+        lc_value_t *fv = Callee ? Callee->getFuncVal() : nullptr;
+        return CreateCall(fty, fv ? Value::wrap(fv) : nullptr, Args, Name);
     }
 
     PHINode *CreatePHI(Type *Ty, unsigned NumReservedValues,

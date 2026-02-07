@@ -42,7 +42,9 @@ public:
     Module(const Module &) = delete;
     Module &operator=(const Module &) = delete;
 
-    static lc_module_compat_t *getCurrentModule() { return current_; }
+    static lc_module_compat_t *getCurrentModule() {
+        return current_ ? current_ : detail::fallback_module;
+    }
     static void setCurrentModule(lc_module_compat_t *m) { current_ = m; }
 
     lc_module_compat_t *getCompat() const { return compat_; }
@@ -367,9 +369,11 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        Function *Parent,
                                        BasicBlock *InsertBefore) {
     (void)Context; (void)InsertBefore;
-    if (!Parent) return nullptr;
-    lc_module_compat_t *mod = Parent->getCompatMod();
-    lr_func_t *f = Parent->getIRFunc();
+    Function *fn = Parent ? Parent : detail::current_function;
+    if (!fn) return nullptr;
+    if (Parent) detail::current_function = Parent;
+    lc_module_compat_t *mod = fn->getCompatMod();
+    lr_func_t *f = fn->getIRFunc();
     if (!mod || !f) return nullptr;
     lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
     return BasicBlock::wrap(bv);

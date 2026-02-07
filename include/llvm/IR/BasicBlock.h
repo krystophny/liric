@@ -28,7 +28,7 @@ public:
                               Function *Parent = nullptr,
                               BasicBlock *InsertBefore = nullptr);
 
-    Function *getParent() const { return nullptr; }
+    Function *getParent() const { return detail::current_function; }
     Module *getModule() const { return nullptr; }
 
     bool empty() const { return true; }
