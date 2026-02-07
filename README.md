@@ -56,21 +56,23 @@ Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake
 
 ## Compile Speed: liric vs LLVM lli
 
-Benchmarked on 1096 LFortran-generated `.ll` files (matched pairs where both
-tools succeed). LLVM version 21.1.6.
+Benchmarked on 1095 LFortran-generated `.ll` files (matched pairs where both
+tools succeed). LLVM version 21.1.6. Note: `lli -O0` and `lli -O2` show
+nearly identical times because JIT startup overhead dominates at these file
+sizes.
 
-| Metric | liric | lli | Speedup |
-|--------|------:|----:|--------:|
-| Median | 1.34 ms | 12.95 ms | **9.7x** |
-| Mean | 2.45 ms | 15.23 ms | **6.2x** |
-| P25 | 1.09 ms | 11.76 ms | 10.8x |
-| P75 | 2.03 ms | 15.32 ms | 7.6x |
-| P90 | 4.18 ms | 20.88 ms | 5.0x |
-| P95 | 7.75 ms | 30.36 ms | 3.9x |
-| P99 | 16.92 ms | 43.96 ms | 2.6x |
+| Metric | liric | lli -O0 | Speedup | lli -O2 | Speedup |
+|--------|------:|--------:|--------:|--------:|--------:|
+| Median | 1.35 ms | 12.87 ms | **9.5x** | 12.84 ms | **9.5x** |
+| Mean | 2.46 ms | 15.03 ms | **6.1x** | 15.01 ms | **6.1x** |
+| P25 | 1.11 ms | 11.65 ms | 10.5x | 11.59 ms | 10.5x |
+| P75 | 2.11 ms | 15.20 ms | 7.2x | 15.20 ms | 7.2x |
+| P90 | 4.12 ms | 20.37 ms | 4.9x | 19.96 ms | 4.8x |
+| P95 | 7.77 ms | 29.13 ms | 3.7x | 28.38 ms | 3.7x |
+| P99 | 17.32 ms | 43.40 ms | 2.5x | 45.20 ms | 2.6x |
 
-- **Total wall-clock:** 2.7s (liric) vs 16.7s (lli) = **6.2x overall**
-- **100%** of tests faster with liric, **42.5%** over 10x faster
+- **Total wall-clock:** 2.7s (liric) vs 16.5s (lli -O0) vs 16.4s (lli -O2)
+- **100%** of tests faster with liric, **37.8%** over 10x faster
 - `.ll` files range from 494 bytes to 1MB
 
 Reproduce with:

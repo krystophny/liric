@@ -2,7 +2,8 @@
 """Benchmark liric JIT compile+run speed vs LLVM lli on lfortran-generated .ll files.
 
 Reads results from a prior mass test run, selects passing tests, and times
-both liric and lli on the same .ll files. Produces a markdown report.
+both liric and lli (at -O0 and -O2) on the same .ll files. Produces a
+markdown report.
 
 Usage:
     python3 -m tools.bench_compile_speed [--results PATH] [--output PATH]
@@ -18,7 +19,7 @@ import statistics
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
@@ -30,8 +31,7 @@ class BenchResult:
     ll_bytes: int
     ll_lines: int
     liric_time: float
-    lli_time: float
-    speedup: float
+    lli_times: dict  # opt_level -> seconds
 
 
 def find_lli() -> Optional[str]:
@@ -82,9 +82,9 @@ def load_passing_tests(results_path: Path) -> list[dict]:
 
 def bench_one(
     test: dict,
-    liric_cli: str,
     lli: str,
     runtime_lib: Optional[str],
+    opt_levels: List[str],
     timeout: float = 30.0,
 ) -> Optional[BenchResult]:
     ll_path = test["_ll_path"]
@@ -111,29 +111,30 @@ def bench_one(
     except (subprocess.TimeoutExpired, OSError):
         return None
 
-    lli_cmd = [lli]
-    if runtime_lib:
-        lli_cmd += ["-load", runtime_lib]
-    lli_cmd.append(ll_path)
+    lli_times = {}
+    for opt in opt_levels:
+        lli_cmd = [lli, f"-O{opt}"]
+        if runtime_lib:
+            lli_cmd += ["-load", runtime_lib]
+        lli_cmd.append(ll_path)
 
-    try:
-        t0 = time.monotonic()
-        p = subprocess.run(lli_cmd, capture_output=True, timeout=timeout, env=env)
-        lli_time = time.monotonic() - t0
-        if p.returncode != 0:
+        try:
+            t0 = time.monotonic()
+            p = subprocess.run(lli_cmd, capture_output=True, timeout=timeout, env=env)
+            lli_t = time.monotonic() - t0
+            if p.returncode != 0:
+                return None
+            lli_times[opt] = lli_t
+        except (subprocess.TimeoutExpired, OSError):
             return None
-    except (subprocess.TimeoutExpired, OSError):
-        return None
 
-    speedup = lli_time / liric_time if liric_time > 0 else float("inf")
     return BenchResult(
         filename=filename,
         ll_path=ll_path,
         ll_bytes=ll_bytes,
         ll_lines=ll_lines,
         liric_time=liric_time,
-        lli_time=lli_time,
-        speedup=speedup,
+        lli_times=lli_times,
     )
 
 
@@ -149,29 +150,35 @@ def percentile(data: List[float], p: float) -> float:
     return data_sorted[f] + (k - f) * (data_sorted[c] - data_sorted[f])
 
 
-def generate_report(results: List[BenchResult], lli_version: str) -> str:
+def generate_report(results: List[BenchResult], lli_version: str,
+                    opt_levels: List[str]) -> str:
     liric_times = [r.liric_time * 1000 for r in results]
-    lli_times = [r.lli_time * 1000 for r in results]
-    speedups = [r.speedup for r in results]
     ll_sizes = [r.ll_bytes for r in results]
 
     total_liric = sum(liric_times)
-    total_lli = sum(lli_times)
 
     lines = []
     lines.append("# Compile Speed Benchmark: liric vs lli")
     lines.append("")
-    lines.append(f"- **Tests benchmarked:** {len(results)} (matched pairs, both succeed)")
+    lines.append(f"- **Tests benchmarked:** {len(results)} (matched pairs, all succeed)")
     lines.append(f"- **LLVM version:** {lli_version}")
     lines.append(f"- **Total wall-clock (liric):** {total_liric:.1f} ms")
-    lines.append(f"- **Total wall-clock (lli):** {total_lli:.1f} ms")
-    lines.append(f"- **Overall speedup:** {total_lli / total_liric:.1f}x")
+    for opt in opt_levels:
+        total_lli = sum(r.lli_times[opt] * 1000 for r in results)
+        lines.append(f"- **Total wall-clock (lli -O{opt}):** {total_lli:.1f} ms "
+                      f"(liric **{total_lli / total_liric:.1f}x** faster)")
     lines.append("")
 
     lines.append("## Aggregate Statistics (milliseconds)")
     lines.append("")
-    lines.append("| Metric | liric | lli | Speedup |")
-    lines.append("|--------|------:|----:|--------:|")
+    header = "| Metric | liric |"
+    sep = "|--------|------:|"
+    for opt in opt_levels:
+        header += f" lli -O{opt} | Speedup |"
+        sep += "-------:|--------:|"
+    lines.append(header)
+    lines.append(sep)
+
     for label, pfn in [
         ("Median", lambda d: statistics.median(d)),
         ("Mean", lambda d: statistics.mean(d)),
@@ -184,9 +191,13 @@ def generate_report(results: List[BenchResult], lli_version: str) -> str:
         ("Max", lambda d: max(d)),
     ]:
         lv = pfn(liric_times)
-        rv = pfn(lli_times)
-        sp = rv / lv if lv > 0 else float("inf")
-        lines.append(f"| {label} | {lv:.2f} | {rv:.2f} | {sp:.1f}x |")
+        row = f"| {label} | {lv:.2f} |"
+        for opt in opt_levels:
+            lli_t = [r.lli_times[opt] * 1000 for r in results]
+            rv = pfn(lli_t)
+            sp = rv / lv if lv > 0 else float("inf")
+            row += f" {rv:.2f} | {sp:.1f}x |"
+        lines.append(row)
     lines.append("")
 
     lines.append("## .ll File Size Distribution")
@@ -197,35 +208,55 @@ def generate_report(results: List[BenchResult], lli_version: str) -> str:
     lines.append(f"- Max: {max(ll_sizes):,} bytes")
     lines.append("")
 
-    lines.append("## Speedup Distribution")
+    for opt in opt_levels:
+        speedups = [r.lli_times[opt] / r.liric_time if r.liric_time > 0 else float("inf")
+                    for r in results]
+        lines.append(f"## Speedup Distribution (vs lli -O{opt})")
+        lines.append("")
+        thresholds = [100, 50, 20, 10, 5, 2, 1]
+        for t in thresholds:
+            count = sum(1 for s in speedups if s >= t)
+            pct = 100.0 * count / len(speedups)
+            lines.append(f"- >={t}x faster: {count} tests ({pct:.1f}%)")
+        lines.append("")
+
+    ref_opt = opt_levels[-1]
+    lines.append(f"## Top 10 Largest Speedups (vs lli -O{ref_opt})")
     lines.append("")
-    thresholds = [100, 50, 20, 10, 5, 2, 1]
-    for t in thresholds:
-        count = sum(1 for s in speedups if s >= t)
-        pct = 100.0 * count / len(speedups)
-        lines.append(f"- >={t}x faster: {count} tests ({pct:.1f}%)")
+    header = "| File | .ll size | liric (ms) |"
+    sep = "|------|:--------:|:----------:|"
+    for opt in opt_levels:
+        header += f" lli -O{opt} (ms) | Speedup |"
+        sep += ":--------------:|--------:|"
+    lines.append(header)
+    lines.append(sep)
+
+    sorted_by_ref = sorted(results,
+                           key=lambda x: -(x.lli_times[ref_opt] / x.liric_time
+                                           if x.liric_time > 0 else 0))
+    for r in sorted_by_ref[:10]:
+        row = f"| {r.filename} | {r.ll_bytes:,} | {r.liric_time*1000:.1f} |"
+        for opt in opt_levels:
+            t = r.lli_times[opt] * 1000
+            sp = r.lli_times[opt] / r.liric_time if r.liric_time > 0 else float("inf")
+            row += f" {t:.1f} | {sp:.1f}x |"
+        lines.append(row)
     lines.append("")
 
-    lines.append("## Top 10 Largest Speedups")
+    lines.append(f"## Top 10 Smallest Speedups (vs lli -O{ref_opt})")
     lines.append("")
-    lines.append("| File | .ll size | liric (ms) | lli (ms) | Speedup |")
-    lines.append("|------|:--------:|:----------:|:--------:|--------:|")
-    for r in sorted(results, key=lambda x: -x.speedup)[:10]:
-        lines.append(
-            f"| {r.filename} | {r.ll_bytes:,} | {r.liric_time*1000:.1f} | "
-            f"{r.lli_time*1000:.1f} | {r.speedup:.1f}x |"
-        )
-    lines.append("")
-
-    lines.append("## Top 10 Smallest Speedups")
-    lines.append("")
-    lines.append("| File | .ll size | liric (ms) | lli (ms) | Speedup |")
-    lines.append("|------|:--------:|:----------:|:--------:|--------:|")
-    for r in sorted(results, key=lambda x: x.speedup)[:10]:
-        lines.append(
-            f"| {r.filename} | {r.ll_bytes:,} | {r.liric_time*1000:.1f} | "
-            f"{r.lli_time*1000:.1f} | {r.speedup:.1f}x |"
-        )
+    lines.append(header)
+    lines.append(sep)
+    sorted_by_ref_asc = sorted(results,
+                                key=lambda x: (x.lli_times[ref_opt] / x.liric_time
+                                               if x.liric_time > 0 else 0))
+    for r in sorted_by_ref_asc[:10]:
+        row = f"| {r.filename} | {r.ll_bytes:,} | {r.liric_time*1000:.1f} |"
+        for opt in opt_levels:
+            t = r.lli_times[opt] * 1000
+            sp = r.lli_times[opt] / r.liric_time if r.liric_time > 0 else float("inf")
+            row += f" {t:.1f} | {sp:.1f}x |"
+        lines.append(row)
     lines.append("")
 
     return "\n".join(lines)
@@ -249,14 +280,14 @@ def main():
         default=30.0,
         help="Per-test timeout in seconds (default: 30)",
     )
+    parser.add_argument(
+        "--opt-levels",
+        default="0,2",
+        help="Comma-separated lli optimization levels to benchmark (default: 0,2)",
+    )
     args = parser.parse_args()
 
-    liric_cli = str(
-        Path(__file__).resolve().parent.parent / "build" / "liric_cli"
-    )
-    if not Path(liric_cli).exists():
-        print(f"ERROR: liric_cli not found at {liric_cli}", file=sys.stderr)
-        sys.exit(1)
+    opt_levels = [x.strip() for x in args.opt_levels.split(",")]
 
     lli = find_lli()
     if not lli:
@@ -274,9 +305,9 @@ def main():
         pass
 
     runtime_lib = find_runtime_lib()
-    print(f"liric_cli: {liric_cli}")
-    print(f"lli:       {lli} ({lli_version})")
-    print(f"runtime:   {runtime_lib}")
+    print(f"lli:         {lli} ({lli_version})")
+    print(f"runtime:     {runtime_lib}")
+    print(f"opt levels:  {', '.join(f'-O{o}' for o in opt_levels)}")
     print()
 
     results_path = Path(args.results)
@@ -290,7 +321,7 @@ def main():
     bench_results: List[BenchResult] = []
     skipped = 0
     for i, test in enumerate(tests):
-        r = bench_one(test, liric_cli, lli, runtime_lib, timeout=args.timeout)
+        r = bench_one(test, lli, runtime_lib, opt_levels, timeout=args.timeout)
         if r:
             bench_results.append(r)
         else:
@@ -304,7 +335,7 @@ def main():
         print("ERROR: no matched pairs found", file=sys.stderr)
         sys.exit(1)
 
-    report = generate_report(bench_results, lli_version)
+    report = generate_report(bench_results, lli_version, opt_levels)
     Path(args.output).write_text(report)
     print(f"Report written to {args.output}")
     print(report)
