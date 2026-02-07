@@ -916,10 +916,8 @@ static int aarch64_isel_func(lr_func_t *func, lr_mfunc_t *mf, lr_module_t *mod) 
             if (inst->op != LR_OP_PHI) continue;
             for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
                 uint32_t pred_id = inst->operands[i + 1].block_id;
-                lr_mblock_t *pred_mb = mf->first_block;
-                for (uint32_t j = 0; j < pred_id && pred_mb; j++)
-                    pred_mb = pred_mb->next;
-                if (!pred_mb) continue;
+                if (pred_id >= func->num_blocks) continue;
+                lr_mblock_t *pred_mb = mblocks[pred_id];
 
                 lr_mblock_t tmp = {0};
                 emit_load_operand(mf, &tmp, &inst->operands[i], A64_X9);
