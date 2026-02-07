@@ -106,6 +106,15 @@ int test_wasm_jit_add_args(void);
 int test_wasm_jit_branch(void);
 int test_wasm_jit_loop(void);
 int test_wasm_jit_call(void);
+int test_builder_ret_42(void);
+int test_builder_add_args(void);
+int test_builder_arithmetic(void);
+int test_builder_icmp_branch(void);
+int test_builder_loop_phi(void);
+int test_builder_alloca_load_store(void);
+int test_builder_call(void);
+int test_builder_select(void);
+int test_builder_roundtrip(void);
 
 int main(void) {
     fprintf(stderr, "liric test suite\n");
@@ -201,6 +210,17 @@ int main(void) {
     RUN_TEST(test_wasm_jit_branch);
     RUN_TEST(test_wasm_jit_loop);
     RUN_TEST(test_wasm_jit_call);
+
+    fprintf(stderr, "\nBuilder API tests:\n");
+    RUN_TEST(test_builder_ret_42);
+    RUN_TEST(test_builder_add_args);
+    RUN_TEST(test_builder_arithmetic);
+    RUN_TEST(test_builder_icmp_branch);
+    RUN_TEST(test_builder_loop_phi);
+    RUN_TEST(test_builder_alloca_load_store);
+    RUN_TEST(test_builder_call);
+    RUN_TEST(test_builder_select);
+    RUN_TEST(test_builder_roundtrip);
 
     fprintf(stderr, "\n================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",

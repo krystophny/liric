@@ -22,6 +22,7 @@ add_library(liric STATIC
     src/target_aarch64.c
     src/jit.c
     src/liric.c
+    src/builder.c
 )
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
@@ -42,6 +43,10 @@ add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
 
+add_executable(bench_parse_vs_jit tools/bench_parse_vs_jit.c)
+target_link_libraries(bench_parse_vs_jit PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+target_include_directories(bench_parse_vs_jit PRIVATE src)
+
 enable_testing()
 add_executable(test_liric
     tests/test_main.c
@@ -52,6 +57,7 @@ add_executable(test_liric
     tests/test_jit.c
     tests/test_e2e.c
     tests/test_wasm.c
+    tests/test_builder.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)

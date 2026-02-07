@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
+import shlex
 import shutil
 import statistics
 import subprocess
@@ -22,6 +24,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+
+IS_MACOS = platform.system() == "Darwin"
+DYLIB_EXT = ".dylib" if IS_MACOS else ".so"
+LIB_PATH_VAR = "DYLD_LIBRARY_PATH" if IS_MACOS else "LD_LIBRARY_PATH"
 
 
 @dataclass
@@ -35,30 +41,42 @@ class BenchResult:
 
 
 def find_lli() -> Optional[str]:
-    for name in ["lli", "lli-21", "lli-19", "lli-18", "lli-17", "lli-16", "lli-15",
-                 "lli-14", "lli-13", "lli-12", "lli-11"]:
+    for name in ["lli", "lli-21", "lli-20", "lli-19", "lli-18", "lli-17", "lli-16",
+                 "lli-15", "lli-14", "lli-13", "lli-12", "lli-11"]:
         path = shutil.which(name)
         if path:
             return path
+    if IS_MACOS:
+        for d in sorted(Path("/opt/homebrew/opt").glob("llvm*/bin"), reverse=True):
+            p = d / "lli"
+            if p.exists():
+                return str(p)
     return None
 
 
 def find_runtime_lib() -> Optional[str]:
+    base = Path(__file__).resolve().parent.parent.parent
     candidates = [
-        Path(__file__).resolve().parent.parent.parent
-        / "lfortran/build/src/runtime/liblfortran_runtime.so",
+        base / f"lfortran/build/src/runtime/liblfortran_runtime{DYLIB_EXT}",
+        base / "lfortran/build/src/runtime/liblfortran_runtime.so",
     ]
-    for p in sorted(
-        Path("/home").glob("*/code/lfortran*/lfortran/build/src/runtime/liblfortran_runtime.so*")
-    ):
-        candidates.append(p)
+    if not IS_MACOS:
+        for p in sorted(
+            Path("/home").glob(
+                "*/code/lfortran*/lfortran/build/src/runtime/liblfortran_runtime.so*"
+            )
+        ):
+            candidates.append(p)
 
     for c in candidates:
         if c.exists():
             return str(c)
 
-    for d in os.environ.get("LD_LIBRARY_PATH", "").split(":"):
-        for f in Path(d).glob("liblfortran_runtime.so*") if Path(d).is_dir() else []:
+    for d in os.environ.get(LIB_PATH_VAR, "").split(":"):
+        dp = Path(d)
+        if not dp.is_dir():
+            continue
+        for f in dp.glob(f"liblfortran_runtime{DYLIB_EXT}*"):
             return str(f)
     return None
 
@@ -70,12 +88,21 @@ def load_passing_tests(results_path: Path) -> list[dict]:
             r = json.loads(line)
             if r.get("classification") == "pass" and r.get("jit_cmd"):
                 ll_path = None
-                for token in r["jit_cmd"].split():
-                    if token.endswith(".ll"):
-                        ll_path = token
-                        break
+                load_libs = []
+                tokens = shlex.split(r["jit_cmd"])
+                i = 0
+                while i < len(tokens):
+                    if tokens[i] == "--load-lib" and i + 1 < len(tokens):
+                        load_libs.append(tokens[i + 1])
+                        i += 2
+                    elif tokens[i].endswith(".ll"):
+                        ll_path = tokens[i]
+                        i += 1
+                    else:
+                        i += 1
                 if ll_path and Path(ll_path).exists():
                     r["_ll_path"] = ll_path
+                    r["_load_libs"] = load_libs
                     tests.append(r)
     return tests
 
@@ -88,6 +115,7 @@ def bench_one(
     timeout: float = 30.0,
 ) -> Optional[BenchResult]:
     ll_path = test["_ll_path"]
+    load_libs = test.get("_load_libs", [])
     filename = test.get("filename", Path(ll_path).name)
 
     ll_stat = Path(ll_path).stat()
@@ -95,12 +123,17 @@ def bench_one(
     with open(ll_path) as f:
         ll_lines = sum(1 for _ in f)
 
-    jit_cmd = test["jit_cmd"].split()
+    jit_cmd = shlex.split(test["jit_cmd"])
 
     env = os.environ.copy()
+    lib_dirs = set()
+    for lib in load_libs:
+        lib_dirs.add(str(Path(lib).parent))
     if runtime_lib:
-        rt_dir = str(Path(runtime_lib).parent)
-        env["LD_LIBRARY_PATH"] = rt_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+        lib_dirs.add(str(Path(runtime_lib).parent))
+    if lib_dirs:
+        existing = env.get(LIB_PATH_VAR, "")
+        env[LIB_PATH_VAR] = ":".join(lib_dirs) + (":" + existing if existing else "")
 
     try:
         t0 = time.monotonic()
@@ -114,7 +147,9 @@ def bench_one(
     lli_times = {}
     for opt in opt_levels:
         lli_cmd = [lli, f"-O{opt}"]
-        if runtime_lib:
+        for lib in load_libs:
+            lli_cmd += ["-load", lib]
+        if runtime_lib and runtime_lib not in load_libs:
             lli_cmd += ["-load", runtime_lib]
         lli_cmd.append(ll_path)
 
