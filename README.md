@@ -30,11 +30,11 @@ Linux x86_64 and macOS arm64.
 
 | Metric | liric | lli -O0 | Speedup |
 |--------|------:|--------:|--------:|
-| Median | 1.43 ms | 12.55 ms | **8.8x** |
-| Mean | 2.27 ms | 14.98 ms | **6.6x** |
-| P90 | 3.97 ms | 20.40 ms | 5.1x |
+| Median | 1.23 ms | 12.35 ms | **10.0x** |
+| Mean | 1.79 ms | 14.76 ms | **8.2x** |
+| P90 | 2.73 ms | 20.63 ms | 7.5x |
 
-Total: 2.7s (liric) vs 17.9s (lli). 100% of tests faster, 24% over 10x.
+Total: 2.1s (liric) vs 17.6s (lli). 100% of tests faster, 45% over 10x.
 
 ```bash
 python3 -m tools.bench_compile_speed   # reproduce

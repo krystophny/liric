@@ -40,7 +40,7 @@ static void skip_whitespace_and_comments(lr_lexer_t *lex) {
 
 typedef struct { const char *name; lr_tok_t tok; } keyword_t;
 
-static const keyword_t keywords[] = {
+static const keyword_t keywords[] __attribute__((unused)) = {
     {"define", LR_TOK_DEFINE},
     {"declare", LR_TOK_DECLARE},
     {"ret", LR_TOK_RET},
@@ -145,31 +145,341 @@ static const keyword_t keywords[] = {
     {NULL, LR_TOK_EOF}
 };
 
-static lr_tok_t lookup_keyword(const char *s, size_t len) {
-    for (const keyword_t *kw = keywords; kw->name; kw++) {
-        size_t klen = strlen(kw->name);
-        if (klen == len && memcmp(s, kw->name, len) == 0)
-            return kw->tok;
+static uint32_t keyword_hash(const char *s, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)s[i];
+        h *= 16777619u;
     }
-    /* i1, i8, i16, i32, i64 */
-    if (len >= 2 && s[0] == 'i' && isdigit((unsigned char)s[1])) {
-        char buf[16];
-        if (len < sizeof(buf)) {
-            memcpy(buf, s + 1, len - 1);
-            buf[len - 1] = '\0';
-            int bits = atoi(buf);
-            switch (bits) {
-            case 1:  return LR_TOK_I1;
-            case 8:  return LR_TOK_I8;
-            case 16: return LR_TOK_I16;
-            case 32: return LR_TOK_I32;
-            case 64: return LR_TOK_I64;
-            }
+    return h;
+}
+
+static lr_tok_t lookup_keyword(const char *s, size_t len) {
+    if (len == 0)
+        return LR_TOK_EOF;
+
+    /* fast path for i1/i8/i16/i32/i64 */
+    if (s[0] == 'i') {
+        if (len == 2) {
+            if (s[1] == '1') return LR_TOK_I1;
+            if (s[1] == '8') return LR_TOK_I8;
+        } else if (len == 3 && s[1] >= '0' && s[1] <= '9' &&
+                   s[2] >= '0' && s[2] <= '9') {
+            if (s[1] == '1' && s[2] == '6') return LR_TOK_I16;
+            if (s[1] == '3' && s[2] == '2') return LR_TOK_I32;
+            if (s[1] == '6' && s[2] == '4') return LR_TOK_I64;
         }
+    }
+
+    switch (keyword_hash(s, len)) {
+    case 0x01f7e39fu:
+        if (len == 7 && memcmp(s, "signext", 7) == 0) return LR_TOK_SIGNEXT;
+        break;
+    case 0x0684099cu:
+        if (len == 4 && memcmp(s, "urem", 4) == 0) return LR_TOK_UREM;
+        break;
+    case 0x0691ea25u:
+        if (len == 8 && memcmp(s, "constant", 8) == 0) return LR_TOK_CONSTANT;
+        break;
+    case 0x0b069958u:
+        if (len == 5 && memcmp(s, "false", 5) == 0) return LR_TOK_FALSE;
+        break;
+    case 0x0f29c2a6u:
+        if (len == 3 && memcmp(s, "and", 3) == 0) return LR_TOK_AND;
+        break;
+    case 0x11c2662du:
+        if (len == 6 && memcmp(s, "select", 6) == 0) return LR_TOK_SELECT;
+        break;
+    case 0x13266a9cu:
+        if (len == 4 && memcmp(s, "ninf", 4) == 0) return LR_TOK_NINF;
+        break;
+    case 0x186c5d43u:
+        if (len == 3 && memcmp(s, "nsw", 3) == 0) return LR_TOK_NSW;
+        break;
+    case 0x1c362229u:
+        if (len == 4 && memcmp(s, "fsub", 4) == 0) return LR_TOK_FSUB;
+        break;
+    case 0x1cb0ec77u:
+        if (len == 4 && memcmp(s, "ashr", 4) == 0) return LR_TOK_ASHR;
+        break;
+    case 0x1dff06aeu:
+        if (len == 6 && memcmp(s, "global", 6) == 0) return LR_TOK_GLOBAL;
+        break;
+    case 0x236c6e94u:
+        if (len == 3 && memcmp(s, "nsz", 3) == 0) return LR_TOK_NSZ;
+        break;
+    case 0x287286a1u:
+        if (len == 3 && memcmp(s, "nuw", 3) == 0) return LR_TOK_NUW;
+        break;
+    case 0x2c9151f9u:
+        if (len == 7 && memcmp(s, "nonnull", 7) == 0) return LR_TOK_NONNULL;
+        break;
+    case 0x30dbb8a6u:
+        if (len == 4 && memcmp(s, "srem", 4) == 0) return LR_TOK_SREM;
+        break;
+    case 0x30f467acu:
+        if (len == 3 && memcmp(s, "ret", 3) == 0) return LR_TOK_RET;
+        break;
+    case 0x331d748au:
+        if (len == 8 && memcmp(s, "external", 8) == 0) return LR_TOK_EXTERNAL;
+        break;
+    case 0x33952f14u:
+        if (len == 4 && memcmp(s, "fdiv", 4) == 0) return LR_TOK_FDIV;
+        break;
+    case 0x34efc59fu:
+        if (len == 7 && memcmp(s, "bitcast", 7) == 0) return LR_TOK_BITCAST;
+        break;
+    case 0x36cff9c0u:
+        if (len == 3 && memcmp(s, "ult", 3) == 0) return LR_TOK_ULT;
+        break;
+    case 0x38c330f3u:
+        if (len == 3 && memcmp(s, "ugt", 3) == 0) return LR_TOK_UGT;
+        break;
+    case 0x39262605u:
+        if (len == 7 && memcmp(s, "declare", 7) == 0) return LR_TOK_DECLARE;
+        break;
+    case 0x3b391274u:
+        if (len == 3 && memcmp(s, "add", 3) == 0) return LR_TOK_ADD;
+        break;
+    case 0x41437d99u:
+        if (len == 11 && memcmp(s, "insertvalue", 11) == 0) return LR_TOK_INSERTVALUE;
+        break;
+    case 0x42454824u:
+        if (len == 2 && memcmp(s, "to", 2) == 0) return LR_TOK_TO;
+        break;
+    case 0x441a6a43u:
+        if (len == 2 && memcmp(s, "eq", 2) == 0) return LR_TOK_EQ;
+        break;
+    case 0x47c34890u:
+        if (len == 3 && memcmp(s, "uge", 3) == 0) return LR_TOK_UGE;
+        break;
+    case 0x47d01483u:
+        if (len == 3 && memcmp(s, "ule", 3) == 0) return LR_TOK_ULE;
+        break;
+    case 0x48b5725fu:
+        if (len == 4 && memcmp(s, "void", 4) == 0) return LR_TOK_VOID;
+        break;
+    case 0x4c75e965u:
+        if (len == 4 && memcmp(s, "fmul", 4) == 0) return LR_TOK_FMUL;
+        break;
+    case 0x4d5b0474u:
+        if (len == 6 && memcmp(s, "common", 6) == 0) return LR_TOK_COMMON;
+        break;
+    case 0x4db211e5u:
+        if (len == 4 && memcmp(s, "true", 4) == 0) return LR_TOK_TRUE;
+        break;
+    case 0x4f2bc4b5u:
+        if (len == 2 && memcmp(s, "br", 2) == 0) return LR_TOK_BR;
+        break;
+    case 0x4fbed7fau:
+        if (len == 3 && memcmp(s, "ueq", 3) == 0) return LR_TOK_UEQ;
+        break;
+    case 0x4ff85ef6u:
+        if (len == 4 && memcmp(s, "lshr", 4) == 0) return LR_TOK_LSHR;
+        break;
+    case 0x5127f14du:
+        if (len == 4 && memcmp(s, "type", 4) == 0) return LR_TOK_TYPE;
+        break;
+    case 0x51d4a16fu:
+        if (len == 3 && memcmp(s, "uno", 3) == 0) return LR_TOK_UNO;
+        break;
+    case 0x5244aa84u:
+        if (len == 3 && memcmp(s, "phi", 3) == 0) return LR_TOK_PHI;
+        break;
+    case 0x55764c09u:
+        if (len == 3 && memcmp(s, "ptr", 3) == 0) return LR_TOK_PTR;
+        break;
+    case 0x5836603cu:
+        if (len == 2 && memcmp(s, "ne", 2) == 0) return LR_TOK_NE;
+        break;
+    case 0x58b04806u:
+        if (len == 5 && memcmp(s, "fpext", 5) == 0) return LR_TOK_FPEXT;
+        break;
+    case 0x5bd4b12du:
+        if (len == 3 && memcmp(s, "une", 3) == 0) return LR_TOK_UNE;
+        break;
+    case 0x5cca1c55u:
+        if (len == 6 && memcmp(s, "alloca", 6) == 0) return LR_TOK_ALLOCA;
+        break;
+    case 0x5d342984u:
+        if (len == 2 && memcmp(s, "or", 2) == 0) return LR_TOK_OR;
+        break;
+    case 0x602c63deu:
+        if (len == 5 && memcmp(s, "align", 5) == 0) return LR_TOK_ALIGN;
+        break;
+    case 0x62cb0d0cu:
+        if (len == 7 && memcmp(s, "private", 7) == 0) return LR_TOK_PRIVATE;
+        break;
+    case 0x668cbeb0u:
+        if (len == 7 && memcmp(s, "noundef", 7) == 0) return LR_TOK_NOUNDEF;
+        break;
+    case 0x668d4269u:
+        if (len == 4 && memcmp(s, "sext", 4) == 0) return LR_TOK_SEXT;
+        break;
+    case 0x670195b6u:
+        if (len == 6 && memcmp(s, "sitofp", 6) == 0) return LR_TOK_SITOFP;
+        break;
+    case 0x6a9f8552u:
+        if (len == 6 && memcmp(s, "define", 6) == 0) return LR_TOK_DEFINE;
+        break;
+    case 0x6f15601eu:
+        if (len == 6 && memcmp(s, "opaque", 6) == 0) return LR_TOK_OPAQUE;
+        break;
+    case 0x705624fcu:
+        if (len == 4 && memcmp(s, "zext", 4) == 0) return LR_TOK_ZEXT;
+        break;
+    case 0x75191b51u:
+        if (len == 5 && memcmp(s, "undef", 5) == 0) return LR_TOK_UNDEF;
+        break;
+    case 0x77074ba4u:
+        if (len == 4 && memcmp(s, "null", 4) == 0) return LR_TOK_NULL;
+        break;
+    case 0x7f6a0e3fu:
+        if (len == 12 && memcmp(s, "extractvalue", 12) == 0) return LR_TOK_EXTRACTVALUE;
+        break;
+    case 0x7f795119u:
+        if (len == 8 && memcmp(s, "ptrtoint", 8) == 0) return LR_TOK_PTRTOINT;
+        break;
+    case 0x91fa8f16u:
+        if (len == 9 && memcmp(s, "writeonly", 9) == 0) return LR_TOK_WRITEONLY;
+        break;
+    case 0x991deba0u:
+        if (len == 3 && memcmp(s, "ord", 3) == 0) return LR_TOK_ORD;
+        break;
+    case 0x9a796d00u:
+        if (len == 8 && memcmp(s, "internal", 8) == 0) return LR_TOK_INTERNAL;
+        break;
+    case 0xa02c414du:
+        if (len == 13 && memcmp(s, "getelementptr", 13) == 0) return LR_TOK_GETELEMENTPTR;
+        break;
+    case 0xa0eb0f08u:
+        if (len == 6 && memcmp(s, "double", 6) == 0) return LR_TOK_DOUBLE;
+        break;
+    case 0xa642d0f0u:
+        if (len == 3 && memcmp(s, "oeq", 3) == 0) return LR_TOK_OEQ;
+        break;
+    case 0xa6c45d85u:
+        if (len == 5 && memcmp(s, "float", 5) == 0) return LR_TOK_FLOAT;
+        break;
+    case 0xa7105b55u:
+        if (len == 4 && memcmp(s, "fneg", 4) == 0) return LR_TOK_FNEG;
+        break;
+    case 0xaaedf37fu:
+        if (len == 8 && memcmp(s, "inbounds", 8) == 0) return LR_TOK_INBOUNDS;
+        break;
+    case 0xad2b82a6u:
+        if (len == 3 && memcmp(s, "olt", 3) == 0) return LR_TOK_OLT;
+        break;
+    case 0xb3f184a9u:
+        if (len == 4 && memcmp(s, "call", 4) == 0) return LR_TOK_CALL;
+        break;
+    case 0xb6b438feu:
+        if (len == 7 && memcmp(s, "zeroext", 7) == 0) return LR_TOK_ZEROEXT;
+        break;
+    case 0xb736d533u:
+        if (len == 18 && memcmp(s, "local_unnamed_addr", 18) == 0) return LR_TOK_LOCAL_UNNAMED_ADDR;
+        break;
+    case 0xba2719efu:
+        if (len == 3 && memcmp(s, "one", 3) == 0) return LR_TOK_ONE;
+        break;
+    case 0xbe2b9d69u:
+        if (len == 3 && memcmp(s, "ole", 3) == 0) return LR_TOK_OLE;
+        break;
+    case 0xbf3ce81du:
+        if (len == 3 && memcmp(s, "ogt", 3) == 0) return LR_TOK_OGT;
+        break;
+    case 0xc7649392u:
+        if (len == 6 && memcmp(s, "fptosi", 6) == 0) return LR_TOK_FPTOSI;
+        break;
+    case 0xc7e7bc2eu:
+        if (len == 5 && memcmp(s, "store", 5) == 0) return LR_TOK_STORE;
+        break;
+    case 0xc93854ddu:
+        if (len == 3 && memcmp(s, "sle", 3) == 0) return LR_TOK_SLE;
+        break;
+    case 0xcc6bdb7eu:
+        if (len == 3 && memcmp(s, "xor", 3) == 0) return LR_TOK_XOR;
+        break;
+    case 0xce0beff7u:
+        if (len == 8 && memcmp(s, "readonly", 8) == 0) return LR_TOK_READONLY;
+        break;
+    case 0xce3cffbau:
+        if (len == 3 && memcmp(s, "oge", 3) == 0) return LR_TOK_OGE;
+        break;
+    case 0xd522b60du:
+        if (len == 9 && memcmp(s, "dso_local", 9) == 0) return LR_TOK_DSOLOCAL;
+        break;
+    case 0xd55e61e5u:
+        if (len == 5 && memcmp(s, "trunc", 5) == 0) return LR_TOK_TRUNC;
+        break;
+    case 0xd809e3a3u:
+        if (len == 12 && memcmp(s, "unnamed_addr", 12) == 0) return LR_TOK_UNNAMED_ADDR;
+        break;
+    case 0xd8386c7au:
+        if (len == 3 && memcmp(s, "slt", 3) == 0) return LR_TOK_SLT;
+        break;
+    case 0xd83b82b8u:
+        if (len == 4 && memcmp(s, "icmp", 4) == 0) return LR_TOK_ICMP;
+        break;
+    case 0xd89e21f1u:
+        if (len == 11 && memcmp(s, "unreachable", 11) == 0) return LR_TOK_UNREACHABLE;
+        break;
+    case 0xda211651u:
+        if (len == 3 && memcmp(s, "sgt", 3) == 0) return LR_TOK_SGT;
+        break;
+    case 0xdc4e3915u:
+        if (len == 3 && memcmp(s, "sub", 3) == 0) return LR_TOK_SUB;
+        break;
+    case 0xe02debb6u:
+        if (len == 3 && memcmp(s, "shl", 3) == 0) return LR_TOK_SHL;
+        break;
+    case 0xe0c77861u:
+        if (len == 15 && memcmp(s, "zeroinitializer", 15) == 0) return LR_TOK_ZEROINITIALIZER;
+        break;
+    case 0xe2f81043u:
+        if (len == 7 && memcmp(s, "fptrunc", 7) == 0) return LR_TOK_FPTRUNC;
+        break;
+    case 0xe60759e9u:
+        if (len == 4 && memcmp(s, "load", 4) == 0) return LR_TOK_LOAD;
+        break;
+    case 0xe81fa798u:
+        if (len == 9 && memcmp(s, "nocapture", 9) == 0) return LR_TOK_NOCAPTURE;
+        break;
+    case 0xe9212deeu:
+        if (len == 3 && memcmp(s, "sge", 3) == 0) return LR_TOK_SGE;
+        break;
+    case 0xe9f1dd8bu:
+        if (len == 4 && memcmp(s, "fcmp", 4) == 0) return LR_TOK_FCMP;
+        break;
+    case 0xeb84ed81u:
+        if (len == 3 && memcmp(s, "mul", 3) == 0) return LR_TOK_MUL;
+        break;
+    case 0xf06d8280u:
+        if (len == 4 && memcmp(s, "fadd", 4) == 0) return LR_TOK_FADD;
+        break;
+    case 0xf18b906cu:
+        if (len == 12 && memcmp(s, "linkonce_odr", 12) == 0) return LR_TOK_LINKONCE_ODR;
+        break;
+    case 0xf577d25eu:
+        if (len == 4 && memcmp(s, "nnan", 4) == 0) return LR_TOK_NNAN;
+        break;
+    case 0xf69717fdu:
+        if (len == 5 && memcmp(s, "label", 5) == 0) return LR_TOK_LABEL;
+        break;
+    case 0xf7c31c4fu:
+        if (len == 8 && memcmp(s, "inttoptr", 8) == 0) return LR_TOK_INTTOPTR;
+        break;
+    case 0xf820d675u:
+        if (len == 4 && memcmp(s, "sdiv", 4) == 0) return LR_TOK_SDIV;
+        break;
+    case 0xfd0c5087u:
+        if (len == 1 && memcmp(s, "x", 1) == 0) return LR_TOK_X;
+        break;
+    default:
+        break;
     }
     return LR_TOK_EOF;
 }
-
 static lr_token_t make_token(lr_lexer_t *lex, lr_tok_t kind,
                               const char *start, size_t len) {
     lr_token_t t = {0};
