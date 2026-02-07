@@ -1347,6 +1347,8 @@ static int aarch64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen,
     }
 
     *out_len = pos;
+    if (pos > buflen)
+        return -1;
     return 0;
 }
 

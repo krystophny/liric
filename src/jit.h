@@ -7,14 +7,22 @@
 
 typedef struct lr_sym_entry {
     char *name;
+    uint32_t hash;
     void *addr;
-    struct lr_sym_entry *next;
+    struct lr_sym_entry *next;        /* insertion order chain */
+    struct lr_sym_entry *bucket_next; /* hash bucket chain */
 } lr_sym_entry_t;
 
 typedef struct lr_lib_entry {
     void *handle;
     struct lr_lib_entry *next;
 } lr_lib_entry_t;
+
+typedef struct lr_sym_miss_entry {
+    char *name;
+    uint32_t hash;
+    struct lr_sym_miss_entry *bucket_next;
+} lr_sym_miss_entry_t;
 
 typedef struct lr_jit {
     const lr_target_t *target;
@@ -26,6 +34,10 @@ typedef struct lr_jit {
     size_t data_size;
     size_t data_cap;
     lr_sym_entry_t *symbols;
+    lr_sym_entry_t **sym_buckets;
+    uint32_t sym_bucket_count;
+    lr_sym_miss_entry_t **miss_buckets;
+    uint32_t miss_bucket_count;
     lr_lib_entry_t *libs;
     lr_arena_t *arena;
 } lr_jit_t;

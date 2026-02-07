@@ -1393,6 +1393,8 @@ static int x86_64_encode_func(lr_mfunc_t *mf, uint8_t *buf, size_t buflen, size_
     }
 
     *out_len = pos;
+    if (pos > buflen)
+        return -1;
     return 0;
 }
 

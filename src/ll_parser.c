@@ -28,11 +28,15 @@ typedef struct lr_parser {
     struct { char *name; uint32_t id; uint32_t hash; } vreg_map[VREG_MAP_CAP];
     uint32_t vreg_map_count;
     int32_t vreg_index[VREG_INDEX_CAP];
+    uint32_t vreg_used_slots[VREG_MAP_CAP];
+    uint32_t vreg_used_slot_count;
 
     /* block name -> id mapping for current function */
     struct { char *name; uint32_t id; lr_block_t *block; uint32_t hash; } block_map[BLOCK_MAP_CAP];
     uint32_t block_map_count;
     int32_t block_index[BLOCK_INDEX_CAP];
+    uint32_t block_used_slots[BLOCK_MAP_CAP];
+    uint32_t block_used_slot_count;
 
     /* global/function symbol name -> id mapping */
     struct { char *name; uint32_t id; uint32_t hash; } global_map[GLOBAL_MAP_CAP];
@@ -114,6 +118,11 @@ static void clear_index(int32_t *index, size_t n) {
         index[i] = -1;
 }
 
+static void reset_used_index_slots(int32_t *index, const uint32_t *slots, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++)
+        index[slots[i]] = -1;
+}
+
 static uint32_t index_find_vreg(const lr_parser_t *p, const char *name, uint32_t hash) {
     uint32_t slot = hash & (VREG_INDEX_CAP - 1u);
     for (;;) {
@@ -131,6 +140,8 @@ static void index_insert_vreg(lr_parser_t *p, uint32_t idx) {
     while (p->vreg_index[slot] >= 0)
         slot = (slot + 1u) & (VREG_INDEX_CAP - 1u);
     p->vreg_index[slot] = (int32_t)idx;
+    if (p->vreg_used_slot_count < VREG_MAP_CAP)
+        p->vreg_used_slots[p->vreg_used_slot_count++] = slot;
 }
 
 static uint32_t index_find_block(const lr_parser_t *p, const char *name, uint32_t hash) {
@@ -150,6 +161,8 @@ static void index_insert_block(lr_parser_t *p, uint32_t idx) {
     while (p->block_index[slot] >= 0)
         slot = (slot + 1u) & (BLOCK_INDEX_CAP - 1u);
     p->block_index[slot] = (int32_t)idx;
+    if (p->block_used_slot_count < BLOCK_MAP_CAP)
+        p->block_used_slots[p->block_used_slot_count++] = slot;
 }
 
 static uint32_t index_find_global(const lr_parser_t *p, const char *name, uint32_t hash) {
@@ -1105,8 +1118,10 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     p->cur_func = func;
     p->vreg_map_count = 0;
     p->block_map_count = 0;
-    clear_index(p->vreg_index, VREG_INDEX_CAP);
-    clear_index(p->block_index, BLOCK_INDEX_CAP);
+    reset_used_index_slots(p->vreg_index, p->vreg_used_slots, p->vreg_used_slot_count);
+    reset_used_index_slots(p->block_index, p->block_used_slots, p->block_used_slot_count);
+    p->vreg_used_slot_count = 0;
+    p->block_used_slot_count = 0;
 
     /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
@@ -1601,6 +1616,8 @@ lr_module_t *lr_parse_ll_text(const char *src, size_t len,
     clear_index(p.vreg_index, VREG_INDEX_CAP);
     clear_index(p.block_index, BLOCK_INDEX_CAP);
     clear_index(p.global_index, GLOBAL_INDEX_CAP);
+    p.vreg_used_slot_count = 0;
+    p.block_used_slot_count = 0;
     next(&p);
 
     while (!check(&p, LR_TOK_EOF) && !p.had_error) {
