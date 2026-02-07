@@ -46,6 +46,7 @@ class CommandResult:
     stdout: str
     stderr: str
     duration_sec: float
+    pid: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,8 @@ class RunnerConfig:
     timeout_run: int
     force: bool
     runtime_libs: Tuple[str, ...]
+    diag_fail_logs: bool = False
+    diag_jit_coredump: bool = False
 
 
 def split_options(options: str) -> List[str]:
@@ -82,17 +85,26 @@ def normalize_output(text: str) -> str:
 
 def run_cmd(cmd: List[str], cwd: Path, timeout_sec: int) -> CommandResult:
     start = time.monotonic()
+    pid: Optional[int] = None
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd,
             cwd=str(cwd),
-            capture_output=True,
-            timeout=timeout_sec,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
-        rc = proc.returncode
-        stdout = proc.stdout.decode("utf-8", errors="replace")
-        stderr = proc.stderr.decode("utf-8", errors="replace")
+        pid = proc.pid
+        try:
+            out_bytes, err_bytes = proc.communicate(timeout=timeout_sec)
+            rc = proc.returncode
+            stdout = out_bytes.decode("utf-8", errors="replace")
+            stderr = err_bytes.decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out_bytes, err_bytes = proc.communicate()
+            rc = 124
+            stdout = out_bytes.decode("utf-8", errors="replace")
+            stderr = err_bytes.decode("utf-8", errors="replace") + "\ncommand timed out"
     except subprocess.TimeoutExpired as exc:
         rc = 124
         timeout_out = exc.stdout if isinstance(exc.stdout, bytes) else (exc.stdout or b"")
@@ -111,7 +123,84 @@ def run_cmd(cmd: List[str], cwd: Path, timeout_sec: int) -> CommandResult:
         stdout=stdout,
         stderr=stderr,
         duration_sec=duration,
+        pid=pid,
     )
+
+
+def write_diag_logs(case_dir: Path, stage: str, result: CommandResult) -> None:
+    diag_dir = case_dir / "diag"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    (diag_dir / f"{stage}.stdout.txt").write_text(result.stdout, encoding="utf-8")
+    (diag_dir / f"{stage}.stderr.txt").write_text(result.stderr, encoding="utf-8")
+    meta = {
+        "stage": stage,
+        "command": result.command,
+        "rc": result.rc,
+        "duration_sec": result.duration_sec,
+        "pid": result.pid,
+    }
+    (diag_dir / f"{stage}.meta.json").write_text(
+        json.dumps(meta, ensure_ascii=True, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def collect_jit_coredump_diag(
+    cfg: RunnerConfig,
+    case_dir: Path,
+    jit_result: CommandResult,
+    row: Dict[str, Any],
+) -> None:
+    if (not cfg.diag_jit_coredump) or jit_result.rc >= 0 or jit_result.pid is None:
+        return
+    coredumpctl = shutil.which("coredumpctl")
+    if not coredumpctl:
+        row["diag_coredump"] = "coredumpctl_not_found"
+        return
+
+    diag_dir = case_dir / "diag"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+    info_cmd = [coredumpctl, "--no-pager", "info", str(jit_result.pid)]
+    info_res = run_cmd(info_cmd, cwd=case_dir, timeout_sec=20)
+    (diag_dir / "jit.coredump.info.txt").write_text(
+        info_res.stdout + ("\n" + info_res.stderr if info_res.stderr else ""),
+        encoding="utf-8",
+    )
+    row["diag_coredump_info_cmd"] = info_res.command
+    row["diag_coredump_info_rc"] = info_res.rc
+
+    core_path: Optional[Path] = None
+    for line in (info_res.stdout + "\n" + info_res.stderr).splitlines():
+        if "Storage:" not in line:
+            continue
+        storage = line.split("Storage:", 1)[1].strip()
+        candidate = storage.split(" ", 1)[0].strip()
+        if candidate and candidate != "none":
+            p = Path(candidate)
+            if p.exists():
+                core_path = p
+                break
+
+    if core_path is not None:
+        row["diag_coredump_storage"] = str(core_path)
+        eu_stack = shutil.which("eu-stack")
+        if eu_stack:
+            stack_cmd = [
+                eu_stack,
+                "-a",
+                "-b",
+                "-m",
+                "-e",
+                str(cfg.probe_runner),
+                "--core",
+                str(core_path),
+            ]
+            stack_res = run_cmd(stack_cmd, cwd=case_dir, timeout_sec=20)
+            (diag_dir / "jit.coredump.stack.txt").write_text(
+                stack_res.stdout + ("\n" + stack_res.stderr if stack_res.stderr else ""),
+                encoding="utf-8",
+            )
+            row["diag_coredump_stack_cmd"] = stack_res.command
+            row["diag_coredump_stack_rc"] = stack_res.rc
 
 
 def choose_emit_recipe(entry: Any) -> str:
@@ -425,6 +514,8 @@ def process_case(
         row["reason"] = prep_result.stderr.strip() or "failed to compile extrafiles"
         row["emit_prep_rc"] = prep_result.rc
         row["emit_prep_cmd"] = prep_result.command
+        if cfg.diag_fail_logs:
+            write_diag_logs(case_dir, "emit_prep", prep_result)
         persist_case_result(case_dir, row)
         return row
 
@@ -439,6 +530,8 @@ def process_case(
         row["stage"] = "emit"
         row["classification"] = classify.LFORTRAN_EMIT_FAIL
         row["reason"] = emit_result.stderr.strip() or "lfortran llvm emission failed"
+        if cfg.diag_fail_logs:
+            write_diag_logs(case_dir, "emit", emit_result)
         persist_case_result(case_dir, row)
         return row
 
@@ -479,6 +572,8 @@ def process_case(
             parse_result.stderr, ir_text
         )
         row["reason"] = parse_result.stderr.strip() or "liric parse failed"
+        if cfg.diag_fail_logs:
+            write_diag_logs(case_dir, "parse", parse_result)
         persist_case_result(case_dir, row)
         return row
 
@@ -514,11 +609,15 @@ def process_case(
     row["jit_cmd"] = jit_result.command
     row["jit_rc"] = jit_result.rc
     row["jit_duration_sec"] = jit_result.duration_sec
+    row["jit_pid"] = jit_result.pid
 
     if jit_result.rc != 0:
         row["stage"] = "jit"
         row["classification"] = classify.classify_jit_failure(jit_result.stderr, ir_text)
         row["reason"] = jit_result.stderr.strip() or "liric jit failed"
+        if cfg.diag_fail_logs:
+            write_diag_logs(case_dir, "jit", jit_result)
+        collect_jit_coredump_diag(cfg, case_dir, jit_result, row)
         persist_case_result(case_dir, row)
         return row
 
@@ -564,6 +663,9 @@ def process_case(
             row["classification"] = classify.MISMATCH
             row["stage"] = "differential"
             row["reason"] = "reference and liric runtime outputs differ"
+            if cfg.diag_fail_logs:
+                write_diag_logs(case_dir, "diff_ref", ref_result)
+                write_diag_logs(case_dir, "diff_probe", probe_result)
         else:
             row["classification"] = classify.PASS
             row["stage"] = "differential"
@@ -680,6 +782,22 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Disable automatic preload of liblfortran_runtime from the local "
             "LFortran build/install tree"
+        ),
+    )
+    parser.add_argument(
+        "--diag-fail-logs",
+        action="store_true",
+        help=(
+            "Write per-case diagnostics logs (stdout/stderr/meta) in "
+            "cache/<case_id>/diag/ for failed stages"
+        ),
+    )
+    parser.add_argument(
+        "--diag-jit-coredump",
+        action="store_true",
+        help=(
+            "On JIT signal failures, capture coredumpctl info and eu-stack "
+            "(when available) into cache/<case_id>/diag/"
         ),
     )
     return parser.parse_args()
@@ -909,6 +1027,8 @@ def main() -> int:
         timeout_run=args.timeout_run,
         force=args.force,
         runtime_libs=tuple(runtime_libs),
+        diag_fail_logs=bool(args.diag_fail_logs),
+        diag_jit_coredump=bool(args.diag_jit_coredump),
     )
 
     work_items = list(zip(entries, manifest_rows))
