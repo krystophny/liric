@@ -15,4 +15,11 @@ enum {
     A64_X28 = 28, A64_FP = 29, A64_LR = 30, A64_SP = 31,
 };
 
+/* AArch64 FP/SIMD register numbers (separate namespace from GPRs) */
+enum {
+    A64_D0 = 0, A64_D1 = 1, A64_D2 = 2, A64_D3 = 3,
+    A64_D4 = 4, A64_D5 = 5, A64_D6 = 6, A64_D7 = 7,
+    A64_D8 = 8, A64_D9 = 9, A64_D10 = 10, A64_D11 = 11,
+};
+
 #endif
