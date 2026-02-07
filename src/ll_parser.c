@@ -4,6 +4,16 @@
 #include <string.h>
 #include <stdlib.h>
 
+#define VREG_MAP_CAP 4096u
+#define BLOCK_MAP_CAP 1024u
+#define GLOBAL_MAP_CAP 4096u
+#define FUNC_MAP_CAP 1024u
+#define TYPE_MAP_CAP 256u
+
+#define VREG_INDEX_CAP 8192u
+#define BLOCK_INDEX_CAP 2048u
+#define GLOBAL_INDEX_CAP 8192u
+
 typedef struct lr_parser {
     lr_lexer_t lex;
     lr_token_t cur;
@@ -15,23 +25,26 @@ typedef struct lr_parser {
     bool had_error;
 
     /* vreg name -> id mapping for current function */
-    struct { char *name; uint32_t id; } vreg_map[4096];
+    struct { char *name; uint32_t id; uint32_t hash; } vreg_map[VREG_MAP_CAP];
     uint32_t vreg_map_count;
+    int32_t vreg_index[VREG_INDEX_CAP];
 
     /* block name -> id mapping for current function */
-    struct { char *name; uint32_t id; lr_block_t *block; } block_map[1024];
+    struct { char *name; uint32_t id; lr_block_t *block; uint32_t hash; } block_map[BLOCK_MAP_CAP];
     uint32_t block_map_count;
+    int32_t block_index[BLOCK_INDEX_CAP];
 
     /* global/function symbol name -> id mapping */
-    struct { char *name; uint32_t id; } global_map[4096];
+    struct { char *name; uint32_t id; uint32_t hash; } global_map[GLOBAL_MAP_CAP];
     uint32_t global_map_count;
+    int32_t global_index[GLOBAL_INDEX_CAP];
 
     /* function name -> func mapping */
-    struct { char *name; lr_func_t *func; } func_map[1024];
+    struct { char *name; lr_func_t *func; } func_map[FUNC_MAP_CAP];
     uint32_t func_map_count;
 
     /* named type alias mapping (e.g. %string_descriptor -> struct type) */
-    struct { char *name; lr_type_t *type; } type_map[256];
+    struct { char *name; lr_type_t *type; } type_map[TYPE_MAP_CAP];
     uint32_t type_map_count;
 
     lr_func_t *cur_func;
@@ -87,70 +100,159 @@ static char *tok_name(lr_parser_t *p, const lr_token_t *t) {
     return lr_arena_strdup(p->arena, s, len);
 }
 
-static uint32_t resolve_vreg(lr_parser_t *p, const char *name) {
-    for (uint32_t i = 0; i < p->vreg_map_count; i++) {
-        if (strcmp(p->vreg_map[i].name, name) == 0)
-            return p->vreg_map[i].id;
+static uint32_t hash_name(const char *name) {
+    uint32_t h = 2166136261u;
+    while (*name) {
+        h ^= (uint8_t)*name++;
+        h *= 16777619u;
     }
+    return h;
+}
+
+static void clear_index(int32_t *index, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        index[i] = -1;
+}
+
+static uint32_t index_find_vreg(const lr_parser_t *p, const char *name, uint32_t hash) {
+    uint32_t slot = hash & (VREG_INDEX_CAP - 1u);
+    for (;;) {
+        int32_t idx = p->vreg_index[slot];
+        if (idx < 0)
+            return UINT32_MAX;
+        if (p->vreg_map[idx].hash == hash && strcmp(p->vreg_map[idx].name, name) == 0)
+            return (uint32_t)idx;
+        slot = (slot + 1u) & (VREG_INDEX_CAP - 1u);
+    }
+}
+
+static void index_insert_vreg(lr_parser_t *p, uint32_t idx) {
+    uint32_t slot = p->vreg_map[idx].hash & (VREG_INDEX_CAP - 1u);
+    while (p->vreg_index[slot] >= 0)
+        slot = (slot + 1u) & (VREG_INDEX_CAP - 1u);
+    p->vreg_index[slot] = (int32_t)idx;
+}
+
+static uint32_t index_find_block(const lr_parser_t *p, const char *name, uint32_t hash) {
+    uint32_t slot = hash & (BLOCK_INDEX_CAP - 1u);
+    for (;;) {
+        int32_t idx = p->block_index[slot];
+        if (idx < 0)
+            return UINT32_MAX;
+        if (p->block_map[idx].hash == hash && strcmp(p->block_map[idx].name, name) == 0)
+            return (uint32_t)idx;
+        slot = (slot + 1u) & (BLOCK_INDEX_CAP - 1u);
+    }
+}
+
+static void index_insert_block(lr_parser_t *p, uint32_t idx) {
+    uint32_t slot = p->block_map[idx].hash & (BLOCK_INDEX_CAP - 1u);
+    while (p->block_index[slot] >= 0)
+        slot = (slot + 1u) & (BLOCK_INDEX_CAP - 1u);
+    p->block_index[slot] = (int32_t)idx;
+}
+
+static uint32_t index_find_global(const lr_parser_t *p, const char *name, uint32_t hash) {
+    uint32_t slot = hash & (GLOBAL_INDEX_CAP - 1u);
+    for (;;) {
+        int32_t idx = p->global_index[slot];
+        if (idx < 0)
+            return UINT32_MAX;
+        if (p->global_map[idx].hash == hash && strcmp(p->global_map[idx].name, name) == 0)
+            return (uint32_t)idx;
+        slot = (slot + 1u) & (GLOBAL_INDEX_CAP - 1u);
+    }
+}
+
+static void index_insert_global(lr_parser_t *p, uint32_t idx) {
+    uint32_t slot = p->global_map[idx].hash & (GLOBAL_INDEX_CAP - 1u);
+    while (p->global_index[slot] >= 0)
+        slot = (slot + 1u) & (GLOBAL_INDEX_CAP - 1u);
+    p->global_index[slot] = (int32_t)idx;
+}
+
+static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
+    uint32_t hash;
+    uint32_t idx;
+
+    if (p->vreg_map_count >= VREG_MAP_CAP)
+        return;
+
+    hash = hash_name(name);
+    idx = p->vreg_map_count++;
+    p->vreg_map[idx].name = name;
+    p->vreg_map[idx].id = id;
+    p->vreg_map[idx].hash = hash;
+    index_insert_vreg(p, idx);
+}
+
+static uint32_t resolve_vreg(lr_parser_t *p, const char *name) {
+    uint32_t hash = hash_name(name);
+    uint32_t idx = index_find_vreg(p, name, hash);
+    if (idx != UINT32_MAX)
+        return p->vreg_map[idx].id;
+
     /* auto-create */
     uint32_t id = lr_vreg_new(p->cur_func);
-    if (p->vreg_map_count < 4096) {
-        p->vreg_map[p->vreg_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->vreg_map[p->vreg_map_count].id = id;
-        p->vreg_map_count++;
-    }
+    register_vreg_name(p, lr_arena_strdup(p->arena, name, strlen(name)), id);
     return id;
 }
 
 static uint32_t resolve_block(lr_parser_t *p, const char *name) {
-    for (uint32_t i = 0; i < p->block_map_count; i++) {
-        if (strcmp(p->block_map[i].name, name) == 0)
-            return p->block_map[i].id;
-    }
+    uint32_t hash = hash_name(name);
+    uint32_t idx = index_find_block(p, name, hash);
+    if (idx != UINT32_MAX)
+        return p->block_map[idx].id;
+
     /* forward reference: create block */
     lr_block_t *b = lr_block_create(p->cur_func, p->arena, name);
-    if (p->block_map_count < 1024) {
-        p->block_map[p->block_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->block_map[p->block_map_count].id = b->id;
-        p->block_map[p->block_map_count].block = b;
-        p->block_map_count++;
+    if (p->block_map_count < BLOCK_MAP_CAP) {
+        uint32_t ins = p->block_map_count++;
+        p->block_map[ins].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->block_map[ins].id = b->id;
+        p->block_map[ins].block = b;
+        p->block_map[ins].hash = hash;
+        index_insert_block(p, ins);
     }
     return b->id;
 }
 
 static lr_block_t *resolve_block_ptr(lr_parser_t *p, const char *name) {
-    for (uint32_t i = 0; i < p->block_map_count; i++) {
-        if (strcmp(p->block_map[i].name, name) == 0)
-            return p->block_map[i].block;
-    }
+    uint32_t hash = hash_name(name);
+    uint32_t idx = index_find_block(p, name, hash);
+    if (idx != UINT32_MAX)
+        return p->block_map[idx].block;
+
     lr_block_t *b = lr_block_create(p->cur_func, p->arena, name);
-    if (p->block_map_count < 1024) {
-        p->block_map[p->block_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->block_map[p->block_map_count].id = b->id;
-        p->block_map[p->block_map_count].block = b;
-        p->block_map_count++;
+    if (p->block_map_count < BLOCK_MAP_CAP) {
+        uint32_t ins = p->block_map_count++;
+        p->block_map[ins].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->block_map[ins].id = b->id;
+        p->block_map[ins].block = b;
+        p->block_map[ins].hash = hash;
+        index_insert_block(p, ins);
     }
     return b;
 }
 
 static uint32_t resolve_global(lr_parser_t *p, const char *name) {
-    for (uint32_t i = 0; i < p->global_map_count; i++) {
-        if (strcmp(p->global_map[i].name, name) == 0)
-            return p->global_map[i].id;
-    }
-    return UINT32_MAX;
+    uint32_t hash = hash_name(name);
+    uint32_t idx = index_find_global(p, name, hash);
+    return idx == UINT32_MAX ? UINT32_MAX : p->global_map[idx].id;
 }
 
 static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
-    if (p->global_map_count < 4096) {
-        p->global_map[p->global_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->global_map[p->global_map_count].id = id;
-        p->global_map_count++;
+    if (p->global_map_count < GLOBAL_MAP_CAP) {
+        uint32_t idx = p->global_map_count++;
+        p->global_map[idx].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->global_map[idx].id = id;
+        p->global_map[idx].hash = hash_name(name);
+        index_insert_global(p, idx);
     }
 }
 
 static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
-    if (p->func_map_count < 1024) {
+    if (p->func_map_count < FUNC_MAP_CAP) {
         p->func_map[p->func_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
         p->func_map[p->func_map_count].func = f;
         p->func_map_count++;
@@ -158,7 +260,7 @@ static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
 }
 
 static void register_type(lr_parser_t *p, const char *name, lr_type_t *ty) {
-    if (p->type_map_count < 256) {
+    if (p->type_map_count < TYPE_MAP_CAP) {
         p->type_map[p->type_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
         p->type_map[p->type_map_count].type = ty;
         p->type_map_count++;
@@ -1003,25 +1105,20 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     p->cur_func = func;
     p->vreg_map_count = 0;
     p->block_map_count = 0;
+    clear_index(p->vreg_index, VREG_INDEX_CAP);
+    clear_index(p->block_index, BLOCK_INDEX_CAP);
 
     /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
         if (param_names && param_names[i]) {
             /* named parameter: register only the name, not numeric alias */
-            if (p->vreg_map_count < 4096) {
-                p->vreg_map[p->vreg_map_count].name = param_names[i];
-                p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
-                p->vreg_map_count++;
-            }
+            register_vreg_name(p, param_names[i], func->param_vregs[i]);
         } else {
             /* unnamed parameter: register numeric alias */
             char buf[32];
             snprintf(buf, sizeof(buf), "%u", i);
-            if (p->vreg_map_count < 4096) {
-                p->vreg_map[p->vreg_map_count].name = lr_arena_strdup(p->arena, buf, strlen(buf));
-                p->vreg_map[p->vreg_map_count].id = func->param_vregs[i];
-                p->vreg_map_count++;
-            }
+            register_vreg_name(p, lr_arena_strdup(p->arena, buf, strlen(buf)),
+                               func->param_vregs[i]);
         }
     }
 
@@ -1501,6 +1598,9 @@ lr_module_t *lr_parse_ll_text(const char *src, size_t len,
     if (err && errlen > 0) err[0] = '\0';
 
     p.module = lr_module_create(arena);
+    clear_index(p.vreg_index, VREG_INDEX_CAP);
+    clear_index(p.block_index, BLOCK_INDEX_CAP);
+    clear_index(p.global_index, GLOBAL_INDEX_CAP);
     next(&p);
 
     while (!check(&p, LR_TOK_EOF) && !p.had_error) {
