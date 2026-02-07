@@ -116,9 +116,16 @@ bool lc_type_is_integer(lr_type_t *ty);
 bool lc_type_is_floating(lr_type_t *ty);
 bool lc_type_is_pointer(lr_type_t *ty);
 unsigned lc_type_int_width(lr_type_t *ty);
+unsigned lc_type_primitive_size_bits(lr_type_t *ty);
 size_t lc_type_size_bits(lr_type_t *ty);
 size_t lc_type_store_size(lr_type_t *ty);
 size_t lc_type_alloc_size(lr_type_t *ty);
+lr_type_t *lc_type_struct_field(lr_type_t *ty, unsigned idx);
+lr_type_t *lc_type_contained(lr_type_t *ty, unsigned idx);
+unsigned lc_type_struct_num_fields(lr_type_t *ty);
+bool lc_type_struct_has_name(lr_type_t *ty);
+lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
+                                        const char *name, lr_type_t *type);
 
 /* ---- Function ---- */
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
@@ -235,6 +242,12 @@ lc_value_t *lc_create_icmp_ult(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_icmp_uge(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name);
+lc_value_t *lc_create_icmp_ugt(lc_module_compat_t *mod, lr_block_t *b,
+                                lr_func_t *f, lc_value_t *lhs,
+                                lc_value_t *rhs, const char *name);
+lc_value_t *lc_create_icmp_ule(lc_module_compat_t *mod, lr_block_t *b,
+                                lr_func_t *f, lc_value_t *lhs,
+                                lc_value_t *rhs, const char *name);
 lc_value_t *lc_create_fcmp_oeq(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name);
@@ -260,6 +273,9 @@ lc_value_t *lc_create_fcmp_ord(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name);
 lc_value_t *lc_create_fcmp_uno(lc_module_compat_t *mod, lr_block_t *b,
+                                lr_func_t *f, lc_value_t *lhs,
+                                lc_value_t *rhs, const char *name);
+lc_value_t *lc_create_fcmp_ueq(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name);
 
@@ -374,6 +390,8 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *src, lc_value_t *size);
 void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *val, lc_value_t *size);
+void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                       lc_value_t *dst, lc_value_t *src, lc_value_t *size);
 
 #ifdef __cplusplus
 }

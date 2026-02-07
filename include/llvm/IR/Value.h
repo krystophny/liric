@@ -7,6 +7,8 @@
 
 namespace llvm {
 
+class raw_ostream;
+
 class Value {
 public:
     lc_value_t *impl() const {
@@ -30,6 +32,10 @@ public:
     StringRef getName() const { return ""; }
 
     bool hasName() const { return false; }
+
+    void print(raw_ostream &OS, bool IsForDebug = false) const {
+        (void)OS; (void)IsForDebug;
+    }
 
     using use_iterator = Value **;
     bool use_empty() const { return true; }

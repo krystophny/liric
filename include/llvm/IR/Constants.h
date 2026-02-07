@@ -12,6 +12,8 @@
 namespace llvm {
 
 class Module;
+class Function;
+class BasicBlock;
 
 lc_module_compat_t *liric_get_current_module();
 
@@ -45,6 +47,19 @@ public:
         if (impl()->kind == LC_VAL_CONST_FP) return impl()->const_fp.val == 0.0;
         return false;
     }
+
+    Constant *getAggregateElement(unsigned Elt) const {
+        (void)Elt;
+        return nullptr;
+    }
+
+    static bool classof(const Value *V) {
+        if (!V) return false;
+        lc_value_kind_t k = V->impl()->kind;
+        return k == LC_VAL_CONST_INT || k == LC_VAL_CONST_FP ||
+               k == LC_VAL_CONST_NULL || k == LC_VAL_CONST_UNDEF ||
+               k == LC_VAL_CONST_AGGREGATE || k == LC_VAL_GLOBAL;
+    }
 };
 
 class ConstantInt : public Constant {
@@ -73,6 +88,10 @@ public:
             lc_value_const_int(mod, ty,
                                static_cast<int64_t>(V.getZExtValue()),
                                width)));
+    }
+
+    static ConstantInt *get(Type *Ty, const APInt &V) {
+        return get(Ty, V.getZExtValue(), false);
     }
 
     static ConstantInt *getSigned(Type *Ty, int64_t V) {
@@ -112,6 +131,10 @@ public:
     bool isZero() const { return impl()->const_int.val == 0; }
     bool isOne() const { return impl()->const_int.val == 1; }
     bool isNegative() const { return impl()->const_int.val < 0; }
+
+    static bool classof(const Value *V) {
+        return V && V->impl()->kind == LC_VAL_CONST_INT;
+    }
 };
 
 class ConstantFP : public Constant {
@@ -152,6 +175,10 @@ public:
     }
 
     bool isZero() const { return impl()->const_fp.val == 0.0; }
+
+    static bool classof(const Value *V) {
+        return V && V->impl()->kind == LC_VAL_CONST_FP;
+    }
 };
 
 class ConstantPointerNull : public Constant {
@@ -233,6 +260,16 @@ public:
     }
 };
 
+class ConstantAggregateZero : public Constant {
+public:
+    static ConstantAggregateZero *get(Type *Ty) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        return static_cast<ConstantAggregateZero *>(Value::wrap(
+            lc_value_const_null(mod, Ty->impl())));
+    }
+};
+
 class ConstantExpr : public Constant {
 public:
     static Constant *getBitCast(Constant *C, Type *Ty) {
@@ -261,6 +298,17 @@ public:
                                       Constant *Idx,
                                       bool InBounds = false) {
         (void)Ty; (void)Idx; (void)InBounds;
+        return C;
+    }
+
+    static Constant *getCast(unsigned Op, Constant *C, Type *Ty) {
+        (void)Op; (void)Ty;
+        return C;
+    }
+
+    static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
+                                              ArrayRef<Constant *> IdxList) {
+        (void)Ty; (void)IdxList;
         return C;
     }
 };

@@ -3,6 +3,7 @@
 
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Error.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/TargetParser/Triple.h"
 #include "llvm/Target/TargetMachine.h"
 #include <memory>
@@ -31,6 +32,10 @@ public:
     }
 
     const Triple &getTargetTriple() const { return TT; }
+
+    Expected<DataLayout> getDefaultDataLayoutForTarget() const {
+        return DataLayout();
+    }
 
     Expected<std::unique_ptr<TargetMachine>> createTargetMachine() const {
         return std::make_unique<TargetMachine>();

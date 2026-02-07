@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <string>
 #include <system_error>
+#include <type_traits>
 #include <vector>
 
 namespace llvm {
@@ -127,18 +128,30 @@ public:
 };
 
 class raw_svector_ostream : public raw_pwrite_stream {
-    std::string internal_;
+    std::vector<char> *vec_ = nullptr;
+    std::string fallback_;
 
 public:
-    template <typename VecT>
+    explicit raw_svector_ostream(std::vector<char> &v) : vec_(&v) {}
+
+    template <typename VecT,
+              typename = std::enable_if_t<!std::is_same_v<
+                  std::decay_t<VecT>, std::vector<char>>>>
     explicit raw_svector_ostream(VecT &) {}
 
     raw_ostream &write(const char *ptr, size_t size) override {
-        internal_.append(ptr, size);
+        if (vec_)
+            vec_->insert(vec_->end(), ptr, ptr + size);
+        else
+            fallback_.append(ptr, size);
         return *this;
     }
 
-    StringRef str() const { return StringRef(internal_); }
+    StringRef str() const {
+        if (vec_ && !vec_->empty())
+            return StringRef(vec_->data(), vec_->size());
+        return StringRef(fallback_);
+    }
 };
 
 inline raw_fd_ostream &errs() {

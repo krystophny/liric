@@ -12,6 +12,8 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/DIBuilder.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -84,6 +86,8 @@ public:
 
     void ClearInsertionPoint() { block_ = nullptr; }
 
+    void SetCurrentDebugLocation(const DebugLoc &) {}
+
     Type *getVoidTy() { return Type::getVoidTy(ctx_); }
     Type *getFloatTy() { return Type::getFloatTy(ctx_); }
     Type *getDoubleTy() { return Type::getDoubleTy(ctx_); }
@@ -98,6 +102,9 @@ public:
     }
     ConstantInt *getInt8(uint8_t V) {
         return ConstantInt::get(getInt8Ty(), V);
+    }
+    ConstantInt *getInt16(uint16_t V) {
+        return ConstantInt::get(getInt16Ty(), V);
     }
     ConstantInt *getInt32(uint32_t V) {
         return ConstantInt::get(getInt32Ty(), V);
@@ -176,6 +183,15 @@ public:
     Value *CreateOr(Value *LHS, Value *RHS, const Twine &Name = "") {
         return Value::wrap(lc_create_or(M(), B(), F(),
                            LHS->impl(), RHS->impl(), Name.c_str()));
+    }
+
+    Value *CreateOr(ArrayRef<Value *> Ops, const Twine &Name = "") {
+        if (Ops.empty()) return Constant::getNullValue(getInt1Ty());
+        Value *result = Ops[0];
+        for (size_t i = 1; i < Ops.size(); i++) {
+            result = CreateOr(result, Ops[i], Name);
+        }
+        return result;
     }
 
     Value *CreateXor(Value *LHS, Value *RHS, const Twine &Name = "") {
@@ -283,6 +299,16 @@ public:
                            LHS->impl(), RHS->impl(), Name.c_str()));
     }
 
+    Value *CreateICmpUGT(Value *LHS, Value *RHS, const Twine &Name = "") {
+        return Value::wrap(lc_create_icmp_ugt(M(), B(), F(),
+                           LHS->impl(), RHS->impl(), Name.c_str()));
+    }
+
+    Value *CreateICmpULE(Value *LHS, Value *RHS, const Twine &Name = "") {
+        return Value::wrap(lc_create_icmp_ule(M(), B(), F(),
+                           LHS->impl(), RHS->impl(), Name.c_str()));
+    }
+
     Value *CreateICmp(CmpInst::Predicate P, Value *LHS, Value *RHS,
                       const Twine &Name = "") {
         switch (P) {
@@ -292,14 +318,10 @@ public:
         case CmpInst::ICMP_SGE: return CreateICmpSGE(LHS, RHS, Name);
         case CmpInst::ICMP_SLT: return CreateICmpSLT(LHS, RHS, Name);
         case CmpInst::ICMP_SLE: return CreateICmpSLE(LHS, RHS, Name);
-        case CmpInst::ICMP_UGT:
-            return Value::wrap(lc_create_icmp_uge(M(), B(), F(),
-                               LHS->impl(), RHS->impl(), Name.c_str()));
+        case CmpInst::ICMP_UGT: return CreateICmpUGT(LHS, RHS, Name);
         case CmpInst::ICMP_UGE: return CreateICmpUGE(LHS, RHS, Name);
         case CmpInst::ICMP_ULT: return CreateICmpULT(LHS, RHS, Name);
-        case CmpInst::ICMP_ULE:
-            return Value::wrap(lc_create_icmp_sle(M(), B(), F(),
-                               LHS->impl(), RHS->impl(), Name.c_str()));
+        case CmpInst::ICMP_ULE: return CreateICmpULE(LHS, RHS, Name);
         default: return CreateICmpEQ(LHS, RHS, Name);
         }
     }
@@ -339,6 +361,11 @@ public:
                            LHS->impl(), RHS->impl(), Name.c_str()));
     }
 
+    Value *CreateFCmpUEQ(Value *LHS, Value *RHS, const Twine &Name = "") {
+        return Value::wrap(lc_create_fcmp_ueq(M(), B(), F(),
+                           LHS->impl(), RHS->impl(), Name.c_str()));
+    }
+
     Value *CreateFCmpORD(Value *LHS, Value *RHS, const Twine &Name = "") {
         return Value::wrap(lc_create_fcmp_ord(M(), B(), F(),
                            LHS->impl(), RHS->impl(), Name.c_str()));
@@ -359,6 +386,7 @@ public:
         case CmpInst::FCMP_OGT: return CreateFCmpOGT(LHS, RHS, Name);
         case CmpInst::FCMP_OGE: return CreateFCmpOGE(LHS, RHS, Name);
         case CmpInst::FCMP_UNE: return CreateFCmpUNE(LHS, RHS, Name);
+        case CmpInst::FCMP_UEQ: return CreateFCmpUEQ(LHS, RHS, Name);
         case CmpInst::FCMP_ORD: return CreateFCmpORD(LHS, RHS, Name);
         case CmpInst::FCMP_UNO: return CreateFCmpUNO(LHS, RHS, Name);
         default: return CreateFCmpOEQ(LHS, RHS, Name);
@@ -444,6 +472,15 @@ public:
         return Value::wrap(lc_create_struct_gep(
             M(), B(), F(), Ty->impl(), Ptr->impl(),
             Idx, Name.c_str()));
+    }
+
+    Value *CreateConstGEP2_32(Type *Ty, Value *Ptr,
+                              unsigned Idx0, unsigned Idx1,
+                              const Twine &Name = "") {
+        Value *i0 = ConstantInt::get(getInt32Ty(), Idx0);
+        Value *i1 = ConstantInt::get(getInt32Ty(), Idx1);
+        Value *idxs[2] = { i0, i1 };
+        return CreateGEP(Ty, Ptr, ArrayRef<Value *>(idxs, 2), Name);
     }
 
     ReturnInst *CreateRet(Value *V) {
@@ -580,6 +617,14 @@ public:
             M(), B(), F(), V->impl(), DestTy->impl(), Name.c_str()));
     }
 
+    Value *CreateSExtOrBitCast(Value *V, Type *DestTy,
+                               const Twine &Name = "") {
+        unsigned src_bits = V->getType()->getScalarSizeInBits();
+        unsigned dst_bits = DestTy->getScalarSizeInBits();
+        if (src_bits < dst_bits) return CreateSExt(V, DestTy, Name);
+        return CreateBitCast(V, DestTy, Name);
+    }
+
     Value *CreateExtractValue(Value *Agg, ArrayRef<unsigned> Idxs,
                               const Twine &Name = "") {
         std::vector<unsigned> idx_vec(Idxs.begin(), Idxs.end());
@@ -599,6 +644,34 @@ public:
             static_cast<unsigned>(idx_vec.size()), Name.c_str()));
     }
 
+    Value *CreateExtractElement(Value *Vec, Value *Idx,
+                                const Twine &Name = "") {
+        if (auto *CI = static_cast<ConstantInt *>(Idx)) {
+            unsigned idx_val = static_cast<unsigned>(CI->getZExtValue());
+            return CreateExtractValue(Vec, {idx_val}, Name);
+        }
+        return CreateExtractValue(Vec, {0}, Name);
+    }
+
+    Value *CreateExtractElement(Value *Vec, uint64_t Idx,
+                                const Twine &Name = "") {
+        return CreateExtractValue(Vec, {static_cast<unsigned>(Idx)}, Name);
+    }
+
+    Value *CreateInsertElement(Value *Vec, Value *NewElt, Value *Idx,
+                               const Twine &Name = "") {
+        if (auto *CI = static_cast<ConstantInt *>(Idx)) {
+            unsigned idx_val = static_cast<unsigned>(CI->getZExtValue());
+            return CreateInsertValue(Vec, NewElt, {idx_val}, Name);
+        }
+        return CreateInsertValue(Vec, NewElt, {0}, Name);
+    }
+
+    Value *CreateInsertElement(Value *Vec, Value *NewElt, uint64_t Idx,
+                               const Twine &Name = "") {
+        return CreateInsertValue(Vec, NewElt, {static_cast<unsigned>(Idx)}, Name);
+    }
+
     Value *CreateMemCpy(Value *Dst, unsigned DstAlign,
                         Value *Src, unsigned SrcAlign,
                         Value *Size, bool isVolatile = false) {
@@ -613,6 +686,22 @@ public:
                         uint64_t Size, bool isVolatile = false) {
         Value *sz = ConstantInt::get(Type::getInt64Ty(ctx_), Size);
         return CreateMemCpy(Dst, DstAlign, Src, SrcAlign, sz, isVolatile);
+    }
+
+    Value *CreateMemMove(Value *Dst, unsigned DstAlign,
+                         Value *Src, unsigned SrcAlign,
+                         Value *Size, bool isVolatile = false) {
+        (void)DstAlign; (void)SrcAlign; (void)isVolatile;
+        lc_create_memmove(M(), B(), F(),
+                          Dst->impl(), Src->impl(), Size->impl());
+        return nullptr;
+    }
+
+    Value *CreateMemMove(Value *Dst, unsigned DstAlign,
+                         Value *Src, unsigned SrcAlign,
+                         uint64_t Size, bool isVolatile = false) {
+        Value *sz = ConstantInt::get(Type::getInt64Ty(ctx_), Size);
+        return CreateMemMove(Dst, DstAlign, Src, SrcAlign, sz, isVolatile);
     }
 
     Value *CreateMemSet(Value *Ptr, Value *Val, Value *Size,
@@ -660,11 +749,102 @@ public:
 
     Value *CreateGlobalStringPtr(StringRef Str, const Twine &Name = "",
                                  unsigned AddressSpace = 0) {
-        (void)Name; (void)AddressSpace;
-        Constant *str_const = ConstantDataArray::getString(ctx_, Str);
-        (void)str_const;
-        return Constant::getNullValue(
-            PointerType::get(ctx_, AddressSpace));
+        (void)AddressSpace;
+        size_t len = Str.size() + 1;
+        lc_value_t *gv = lc_global_create(
+            M(), Name.c_str(),
+            lc_get_int_type(M(), 8),
+            true, Str.data(), len);
+        return Value::wrap(gv);
+    }
+
+    Value *CreateGlobalString(StringRef Str, const Twine &Name = "",
+                              unsigned AddressSpace = 0) {
+        return CreateGlobalStringPtr(Str, Name, AddressSpace);
+    }
+
+    Value *CreateIntrinsic(Intrinsic::ID ID, ArrayRef<Type *> Types,
+                           ArrayRef<Value *> Args,
+                           const Twine &Name = "") {
+        const char *intrinsic_name = intrinsic_id_to_name(ID);
+        if (!intrinsic_name) return nullptr;
+
+        lc_module_compat_t *mod = M();
+        lr_module_t *m = lc_module_get_ir(mod);
+
+        lr_type_t *ret_ty = lc_get_void_type(mod);
+        if (!Args.empty() && Args[0]) {
+            ret_ty = Args[0]->getType()->impl();
+        }
+        if (!Types.empty() && Types[0]) {
+            ret_ty = Types[0]->impl();
+        }
+
+        std::vector<lr_type_t *> param_types(Args.size());
+        for (size_t i = 0; i < Args.size(); i++) {
+            param_types[i] = Args[i]->getType()->impl();
+        }
+
+        lr_type_t *ft = lr_type_func_new(
+            m, ret_ty,
+            param_types.empty() ? nullptr : param_types.data(),
+            static_cast<uint32_t>(param_types.size()), false);
+
+        lc_value_t *callee_val = lc_global_lookup_or_create(
+            mod, intrinsic_name, ft);
+
+        std::vector<lc_value_t *> args(Args.size());
+        for (size_t i = 0; i < Args.size(); i++) {
+            args[i] = Args[i]->impl();
+        }
+
+        return Value::wrap(lc_create_call(
+            mod, B(), F(), ft, callee_val,
+            args.empty() ? nullptr : args.data(),
+            static_cast<unsigned>(args.size()), Name.c_str()));
+    }
+
+    Value *CreateUnaryIntrinsic(Intrinsic::ID ID, Value *V,
+                                const Twine &Name = "") {
+        Type *ty = V->getType();
+        return CreateIntrinsic(ID, {ty}, {V}, Name);
+    }
+
+private:
+    static const char *intrinsic_id_to_name(Intrinsic::ID ID) {
+        switch (ID) {
+        case Intrinsic::abs:       return "abs";
+        case Intrinsic::copysign:  return "copysign";
+        case Intrinsic::cos:       return "cos";
+        case Intrinsic::ctlz:      return "ctlz";
+        case Intrinsic::ctpop:     return "ctpop";
+        case Intrinsic::cttz:      return "cttz";
+        case Intrinsic::exp:       return "exp";
+        case Intrinsic::exp2:      return "exp2";
+        case Intrinsic::fabs:      return "fabs";
+        case Intrinsic::floor:     return "floor";
+        case Intrinsic::ceil:      return "ceil";
+        case Intrinsic::round:     return "round";
+        case Intrinsic::trunc:     return "trunc";
+        case Intrinsic::fma:       return "fma";
+        case Intrinsic::fmuladd:   return "fma";
+        case Intrinsic::log:       return "log";
+        case Intrinsic::log2:      return "log2";
+        case Intrinsic::log10:     return "log10";
+        case Intrinsic::maximum:   return "fmax";
+        case Intrinsic::maxnum:    return "fmax";
+        case Intrinsic::minimum:   return "fmin";
+        case Intrinsic::minnum:    return "fmin";
+        case Intrinsic::memcpy:    return "memcpy";
+        case Intrinsic::memmove:   return "memmove";
+        case Intrinsic::memset:    return "memset";
+        case Intrinsic::pow:       return "pow";
+        case Intrinsic::powi:      return "powi";
+        case Intrinsic::sin:       return "sin";
+        case Intrinsic::sqrt:      return "sqrt";
+        case Intrinsic::trap:      return "abort";
+        default: return nullptr;
+        }
     }
 };
 

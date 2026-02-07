@@ -79,6 +79,18 @@ public:
         return arg_iterator(compat_mod_, func_val_, arg_size());
     }
 
+    class arg_range {
+        arg_iterator b_, e_;
+    public:
+        arg_range(arg_iterator b, arg_iterator e) : b_(b), e_(e) {}
+        arg_iterator begin() const { return b_; }
+        arg_iterator end() const { return e_; }
+    };
+
+    arg_range args() {
+        return arg_range(arg_begin(), arg_end());
+    }
+
     Argument *getArg(unsigned i) {
         lc_value_t *av = lc_func_get_arg(compat_mod_, func_val_, i);
         return reinterpret_cast<Argument *>(av);
@@ -111,6 +123,31 @@ public:
                                      const Twine &Name, Module *M = nullptr);
 
     void eraseFromParent() {}
+    void removeFromParent() {}
+
+    void setSubprogram(void *) {}
+
+    Module *getParent() const { return nullptr; }
+
+    BasicBlock &getEntryBlock() const {
+        static BasicBlock dummy;
+        return dummy;
+    }
+
+    class BasicBlockListType {
+    public:
+        using iterator = BasicBlock *;
+        iterator begin() { return nullptr; }
+        iterator end() { return nullptr; }
+        unsigned size() const { return 0; }
+    };
+
+    BasicBlockListType &getBasicBlockList() {
+        static BasicBlockListType bbl;
+        return bbl;
+    }
+
+    void insert(BasicBlock *, BasicBlock *) {}
 
     using iterator = BasicBlock *;
     BasicBlock *begin() { return nullptr; }

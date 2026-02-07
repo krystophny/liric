@@ -431,6 +431,63 @@ size_t lc_type_alloc_size(lr_type_t *ty) {
     return (sz + al - 1) & ~(al - 1);
 }
 
+unsigned lc_type_primitive_size_bits(lr_type_t *ty) {
+    switch (ty->kind) {
+    case LR_TYPE_I1:     return 1;
+    case LR_TYPE_I8:     return 8;
+    case LR_TYPE_I16:    return 16;
+    case LR_TYPE_I32:    return 32;
+    case LR_TYPE_I64:    return 64;
+    case LR_TYPE_FLOAT:  return 32;
+    case LR_TYPE_DOUBLE: return 64;
+    case LR_TYPE_PTR:    return 64;
+    default:             return 0;
+    }
+}
+
+lr_type_t *lc_type_struct_field(lr_type_t *ty, unsigned idx) {
+    if (ty->kind != LR_TYPE_STRUCT) return NULL;
+    if (idx >= ty->struc.num_fields) return NULL;
+    return ty->struc.fields[idx];
+}
+
+lr_type_t *lc_type_contained(lr_type_t *ty, unsigned idx) {
+    switch (ty->kind) {
+    case LR_TYPE_STRUCT:
+        if (idx < ty->struc.num_fields) return ty->struc.fields[idx];
+        return NULL;
+    case LR_TYPE_FUNC:
+        if (idx < ty->func.num_params) return ty->func.params[idx];
+        return NULL;
+    case LR_TYPE_ARRAY:
+        return ty->array.elem;
+    default:
+        return NULL;
+    }
+}
+
+unsigned lc_type_struct_num_fields(lr_type_t *ty) {
+    if (ty->kind != LR_TYPE_STRUCT) return 0;
+    return ty->struc.num_fields;
+}
+
+bool lc_type_struct_has_name(lr_type_t *ty) {
+    if (ty->kind != LR_TYPE_STRUCT) return false;
+    return ty->struc.name != NULL;
+}
+
+lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
+                                        const char *name, lr_type_t *type) {
+    lr_module_t *m = mod->mod;
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (strcmp(g->name, name) == 0) {
+            return lc_value_global(mod, g->id, m->type_ptr, g->name);
+        }
+    }
+    lr_global_t *g = lr_global_create(m, name, type, false);
+    return lc_value_global(mod, g->id, m->type_ptr, g->name);
+}
+
 /* ---- Function ---- */
 
 static lc_value_t *create_func_value(lc_module_compat_t *mod,
@@ -826,6 +883,20 @@ lc_value_t *lc_create_icmp_uge(lc_module_compat_t *mod, lr_block_t *b,
     return compat_icmp(mod, b, f, LR_ICMP_UGE, lhs, rhs);
 }
 
+lc_value_t *lc_create_icmp_ugt(lc_module_compat_t *mod, lr_block_t *b,
+                                lr_func_t *f, lc_value_t *lhs,
+                                lc_value_t *rhs, const char *name) {
+    (void)name;
+    return compat_icmp(mod, b, f, LR_ICMP_UGT, lhs, rhs);
+}
+
+lc_value_t *lc_create_icmp_ule(lc_module_compat_t *mod, lr_block_t *b,
+                                lr_func_t *f, lc_value_t *lhs,
+                                lc_value_t *rhs, const char *name) {
+    (void)name;
+    return compat_icmp(mod, b, f, LR_ICMP_ULE, lhs, rhs);
+}
+
 lc_value_t *lc_create_fcmp_oeq(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
@@ -887,6 +958,13 @@ lc_value_t *lc_create_fcmp_uno(lc_module_compat_t *mod, lr_block_t *b,
                                 lc_value_t *rhs, const char *name) {
     (void)name;
     return compat_fcmp(mod, b, f, LR_FCMP_UNO, lhs, rhs);
+}
+
+lc_value_t *lc_create_fcmp_ueq(lc_module_compat_t *mod, lr_block_t *b,
+                                lr_func_t *f, lc_value_t *lhs,
+                                lc_value_t *rhs, const char *name) {
+    (void)name;
+    return compat_fcmp(mod, b, f, LR_FCMP_UEQ, lhs, rhs);
 }
 
 /* ---- Memory ---- */
@@ -1388,3 +1466,29 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                                       ops, nops);
     lr_block_append(b, inst);
 }
+
+void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                       lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
+    lr_module_t *m = mod->mod;
+    lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
+    lr_func_t *decl = ensure_libc_decl(m, "memmove", m->type_ptr, params, 3);
+    uint32_t sym_id = lr_module_intern_symbol(m, "memmove");
+    (void)decl;
+
+    lr_operand_desc_t dd = lc_value_to_desc(dst);
+    lr_operand_desc_t sd = lc_value_to_desc(src);
+    lr_operand_desc_t sz = lc_value_to_desc(size);
+
+    uint32_t nops = 4;
+    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
+    ops[0] = lr_op_global(sym_id, m->type_ptr);
+    ops[1] = desc_to_op(dd);
+    ops[2] = desc_to_op(sd);
+    ops[3] = desc_to_op(sz);
+
+    lr_inst_t *inst2 = lr_inst_create(m->arena, LR_OP_CALL,
+                                       m->type_ptr, lr_vreg_new(f),
+                                       ops, nops);
+    lr_block_append(b, inst2);
+}
+

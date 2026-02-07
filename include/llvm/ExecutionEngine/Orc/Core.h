@@ -17,6 +17,11 @@
 namespace llvm {
 namespace orc {
 
+class DefinitionGenerator {
+public:
+    virtual ~DefinitionGenerator() = default;
+};
+
 class JITDylib {
     std::string Name;
 
@@ -25,11 +30,10 @@ public:
     JITDylib(const std::string &N) : Name(N) {}
 
     const std::string &getName() const { return Name; }
-};
 
-class DefinitionGenerator {
-public:
-    virtual ~DefinitionGenerator() = default;
+    void addGenerator(std::unique_ptr<DefinitionGenerator>) {}
+
+    void setGenerator(std::unique_ptr<DefinitionGenerator>) {}
 };
 
 class ExecutionSession {

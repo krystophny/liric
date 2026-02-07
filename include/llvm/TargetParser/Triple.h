@@ -60,6 +60,10 @@ public:
     bool isArch64Bit() const { return true; }
     bool isArch32Bit() const { return false; }
 
+    bool isOSBinFormatCOFF() const { return false; }
+    bool isOSBinFormatELF() const { return getObjectFormat() == ELF; }
+    bool isOSBinFormatMachO() const { return getObjectFormat() == MachO; }
+
     ObjectFormatType getObjectFormat() const {
         if (isOSDarwin()) return MachO;
         return ELF;
@@ -72,6 +76,8 @@ public:
     }
 
     std::string normalize() const { return Data; }
+
+    operator StringRef() const { return StringRef(Data); }
 
     bool operator==(const Triple &Other) const { return Data == Other.Data; }
     bool operator!=(const Triple &Other) const { return Data != Other.Data; }

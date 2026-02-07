@@ -1,14 +1,14 @@
 #ifndef LLVM_IR_GLOBALVALUE_H
 #define LLVM_IR_GLOBALVALUE_H
 
-#include "llvm/IR/Value.h"
+#include "llvm/IR/Constants.h"
 
 namespace llvm {
 
 class Module;
 class PointerType;
 
-class GlobalValue : public Value {
+class GlobalValue : public Constant {
 public:
     enum LinkageTypes {
         ExternalLinkage = 0,

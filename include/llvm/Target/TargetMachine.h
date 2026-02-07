@@ -15,6 +15,7 @@ namespace llvm {
 class Module;
 class raw_ostream;
 class raw_pwrite_stream;
+namespace legacy { class PassManager; }
 
 class TargetMachine {
 public:
@@ -34,8 +35,9 @@ public:
 
     void setFastISel(bool) {}
 
-    bool addPassesToEmitFile(void *, raw_pwrite_stream &, raw_pwrite_stream *,
-                             CodeGenFileType, bool = true, void * = nullptr) {
+    bool addPassesToEmitFile(legacy::PassManager &, raw_pwrite_stream &,
+                             raw_pwrite_stream *,
+                             CodeGenFileType, bool = true) {
         return false;
     }
 

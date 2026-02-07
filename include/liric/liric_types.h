@@ -138,6 +138,10 @@ struct lr_module {
     lr_type_t *type_ptr;
 };
 
+lr_func_t *lr_func_declare(lr_module_t *m, const char *name, lr_type_t *ret,
+                            lr_type_t **params, uint32_t num_params, bool vararg);
+uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
+
 #ifdef __cplusplus
 }
 #endif

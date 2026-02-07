@@ -25,6 +25,9 @@ public:
     bool operator!=(const APInt &other) const { return val_ != other.val_; }
     bool operator==(uint64_t v) const { return val_ == v; }
 
+    bool needsCleanup() const { return false; }
+    const uint64_t *getRawData() const { return &val_; }
+
     APInt zext(unsigned width) const { return APInt(width, val_); }
     APInt sext(unsigned width) const { return APInt(width, val_, true); }
     APInt trunc(unsigned width) const {

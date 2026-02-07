@@ -2,6 +2,7 @@
 #define LLVM_IR_DIBUILDER_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/IR/Value.h"
 #include <cstdint>
 
@@ -14,24 +15,62 @@ class Instruction;
 class Type;
 class LLVMContext;
 
-class DIType {};
+class Metadata {};
+
+class DINode {
+public:
+    enum DIFlags {
+        FlagZero = 0,
+        FlagPrototyped = (1 << 8),
+    };
+};
+
+class DIScope {
+public:
+    DIScope *getContext() { return nullptr; }
+};
+
+class DIType : public DIScope {};
 class DIBasicType : public DIType {};
 class DIDerivedType : public DIType {};
 class DICompositeType : public DIType {};
 class DISubroutineType : public DIType {};
-class DIFile {};
-class DICompileUnit {};
-class DISubprogram {};
-class DIScope {};
+class DIFile : public DIScope {};
+
+class DICompileUnit : public DIScope {
+public:
+    StringRef getFilename() const { return ""; }
+    StringRef getDirectory() const { return ""; }
+};
+
+class DISubprogram : public DIScope {
+public:
+    enum DISPFlags {
+        SPFlagZero = 0,
+        SPFlagDefinition = (1 << 1),
+    };
+};
+
 class DILocalVariable {};
 class DIGlobalVariableExpression {};
 class DIExpression {};
-class DILocation {};
-class DILexicalBlock : public DIScope {};
-class DINode {
+
+class DILocation {
 public:
-    enum DIFlags { FlagZero = 0 };
+    static DILocation *get(LLVMContext &Ctx, unsigned Line, unsigned Col,
+                           DIScope *Scope, DILocation *InlinedAt = nullptr) {
+        (void)Ctx; (void)Line; (void)Col; (void)Scope; (void)InlinedAt;
+        return nullptr;
+    }
 };
+
+class DILexicalBlock : public DIScope {};
+
+class DITypeRefArray {
+public:
+    DITypeRefArray() = default;
+};
+
 class DebugLoc {
 public:
     DebugLoc() = default;
@@ -87,6 +126,10 @@ public:
 
     DISubroutineType *createSubroutineType(void *) { return nullptr; }
 
+    DISubroutineType *createSubroutineType(DITypeRefArray) {
+        return nullptr;
+    }
+
     DISubprogram *createFunction(DIScope *, StringRef, StringRef,
                                  DIFile *, unsigned, DISubroutineType *,
                                  unsigned, unsigned, unsigned) {
@@ -119,6 +162,11 @@ public:
 
     DIExpression *createExpression() { return nullptr; }
 
+    DITypeRefArray getOrCreateTypeArray(ArrayRef<Metadata *> Elements) {
+        (void)Elements;
+        return DITypeRefArray();
+    }
+
     Instruction *insertDeclare(Value *, DILocalVariable *, DIExpression *,
                                const DebugLoc &, BasicBlock *) {
         return nullptr;
@@ -133,13 +181,15 @@ public:
 
 namespace dwarf {
 enum {
-    DW_ATE_float = 4,
-    DW_ATE_signed = 5,
-    DW_ATE_unsigned = 7,
+    DW_ATE_address = 1,
     DW_ATE_boolean = 2,
     DW_ATE_complex_float = 3,
-    DW_ATE_unsigned_char = 8,
+    DW_ATE_float = 4,
+    DW_ATE_signed = 5,
     DW_ATE_signed_char = 6,
+    DW_ATE_unsigned = 7,
+    DW_ATE_unsigned_char = 8,
+    DW_LANG_C = 0x0001,
     DW_LANG_Fortran95 = 0x0018,
     DW_LANG_Fortran03 = 0x0022,
     DW_LANG_Fortran08 = 0x0023,

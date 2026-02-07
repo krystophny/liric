@@ -84,6 +84,12 @@ public:
         return getGlobalVariable(Name);
     }
 
+    Constant *getOrInsertGlobal(StringRef Name, Type *Ty) {
+        lc_value_t *gv = lc_global_lookup_or_create(compat_, Name.data(),
+                                                      Ty->impl());
+        return static_cast<Constant *>(Value::wrap(gv));
+    }
+
     void print(raw_ostream &OS, void * = nullptr) const {
         (void)OS;
         lc_module_dump(compat_);
@@ -184,6 +190,37 @@ inline IntegerType *Type::getInt64Ty(LLVMContext &C) {
     (void)C;
     lc_module_compat_t *mod = Module::getCurrentModule();
     return mod ? IntegerType::wrap(lc_get_int_type(mod, 64)) : nullptr;
+}
+
+inline void Type::print(raw_ostream &OS, bool IsForDebug) const {
+    (void)IsForDebug;
+    lr_type_t *t = impl();
+    switch (t->kind) {
+    case LR_TYPE_VOID:   OS << "void"; break;
+    case LR_TYPE_I1:     OS << "i1"; break;
+    case LR_TYPE_I8:     OS << "i8"; break;
+    case LR_TYPE_I16:    OS << "i16"; break;
+    case LR_TYPE_I32:    OS << "i32"; break;
+    case LR_TYPE_I64:    OS << "i64"; break;
+    case LR_TYPE_FLOAT:  OS << "float"; break;
+    case LR_TYPE_DOUBLE: OS << "double"; break;
+    case LR_TYPE_PTR:    OS << "ptr"; break;
+    default:             OS << "type"; break;
+    }
+}
+
+inline Type *Type::getPointerElementType() const {
+    lc_module_compat_t *mod = Module::getCurrentModule();
+    return mod ? Type::wrap(lc_get_ptr_type(mod)) : nullptr;
+}
+
+inline PointerType *Type::getInt8PtrTy(LLVMContext &C, unsigned AS) {
+    (void)AS;
+    return PointerType::get(C, 0);
+}
+
+inline IntegerType *Type::getIntNTy(LLVMContext &C, unsigned N) {
+    return IntegerType::get(C, N);
 }
 
 inline PointerType *Type::getPointerTo(unsigned AddrSpace) const {
@@ -306,9 +343,9 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
                                        Constant *Initializer,
                                        const Twine &Name,
                                        GlobalVariable *InsertBefore,
-                                       bool ThreadLocal,
+                                       ThreadLocalMode TLMode,
                                        unsigned AddressSpace) {
-    (void)InsertBefore; (void)ThreadLocal; (void)AddressSpace;
+    (void)InsertBefore; (void)TLMode; (void)AddressSpace;
     (void)Initializer;
     M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
 }

@@ -71,6 +71,14 @@ public:
         return cached;
     }
 
+    char getGlobalPrefix() const {
+#if defined(__APPLE__)
+        return '_';
+#else
+        return '\0';
+#endif
+    }
+
     bool operator==(const DataLayout &) const { return true; }
     bool operator!=(const DataLayout &) const { return false; }
 };

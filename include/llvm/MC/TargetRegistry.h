@@ -10,6 +10,7 @@
 
 namespace llvm {
 
+class raw_ostream;
 class TargetMachine;
 class TargetOptions;
 
@@ -47,6 +48,10 @@ struct TargetRegistry {
         Error.clear();
         static Target t;
         return &t;
+    }
+
+    static void printRegisteredTargetsForVersion(raw_ostream &OS) {
+        OS << "  liric - liric JIT target\n";
     }
 };
 

@@ -20,6 +20,10 @@ public:
     static IntegerType *wrap(lr_type_t *t) {
         return static_cast<IntegerType *>(Type::wrap(t));
     }
+
+    static bool classof(const Type *T) {
+        return T && T->getTypeID() == IntegerTyID;
+    }
 };
 
 class FunctionType : public Type {
@@ -46,6 +50,10 @@ public:
     static FunctionType *wrap(lr_type_t *t) {
         return static_cast<FunctionType *>(Type::wrap(t));
     }
+
+    static bool classof(const Type *T) {
+        return T && T->getTypeID() == FunctionTyID;
+    }
 };
 
 class StructType : public Type {
@@ -62,6 +70,11 @@ public:
 
     bool isOpaque() const { return impl()->struc.num_fields == 0; }
     bool isLiteral() const { return impl()->struc.name == nullptr; }
+    bool hasName() const { return lc_type_struct_has_name(impl()); }
+
+    Type *getStructElementType(unsigned i) const {
+        return Type::wrap(lc_type_struct_field(impl(), i));
+    }
 
     StringRef getName() const {
         if (impl()->struc.name) return impl()->struc.name;
@@ -80,6 +93,10 @@ public:
     static StructType *wrap(lr_type_t *t) {
         return static_cast<StructType *>(Type::wrap(t));
     }
+
+    static bool classof(const Type *T) {
+        return T && T->getTypeID() == StructTyID;
+    }
 };
 
 class ArrayType : public Type {
@@ -95,6 +112,10 @@ public:
     static ArrayType *wrap(lr_type_t *t) {
         return static_cast<ArrayType *>(Type::wrap(t));
     }
+
+    static bool classof(const Type *T) {
+        return T && T->getTypeID() == ArrayTyID;
+    }
 };
 
 class PointerType : public Type {
@@ -107,6 +128,39 @@ public:
 
     static PointerType *wrap(lr_type_t *t) {
         return static_cast<PointerType *>(Type::wrap(t));
+    }
+
+    static bool classof(const Type *T) {
+        return T && T->getTypeID() == PointerTyID;
+    }
+};
+
+class VectorType : public Type {
+public:
+    static VectorType *wrap(lr_type_t *t) {
+        return static_cast<VectorType *>(Type::wrap(t));
+    }
+
+    static bool classof(const Type *T) {
+        if (!T) return false;
+        auto id = T->getTypeID();
+        return id == FixedVectorTyID || id == ScalableVectorTyID;
+    }
+};
+
+class FixedVectorType : public VectorType {
+public:
+    static FixedVectorType *get(Type *ElementTy, unsigned NumElts) {
+        (void)ElementTy; (void)NumElts;
+        return nullptr;
+    }
+
+    static FixedVectorType *wrap(lr_type_t *t) {
+        return static_cast<FixedVectorType *>(Type::wrap(t));
+    }
+
+    static bool classof(const Type *T) {
+        return T && T->getTypeID() == FixedVectorTyID;
     }
 };
 

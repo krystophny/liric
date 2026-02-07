@@ -11,12 +11,21 @@ class Module;
 
 class GlobalVariable : public GlobalValue {
 public:
+    enum ThreadLocalMode {
+        NotThreadLocal = 0,
+        GeneralDynamicTLSModel,
+        LocalDynamicTLSModel,
+        InitialExecTLSModel,
+        LocalExecTLSModel,
+    };
+
     GlobalVariable() = default;
 
     GlobalVariable(Module &M, Type *Ty, bool isConstant,
                    LinkageTypes Linkage, Constant *Initializer = nullptr,
                    const Twine &Name = "", GlobalVariable *InsertBefore = nullptr,
-                   bool ThreadLocal = false, unsigned AddressSpace = 0);
+                   ThreadLocalMode TLMode = NotThreadLocal,
+                   unsigned AddressSpace = 0);
 
     bool isConstant() const { return false; }
     void setConstant(bool v) { (void)v; }
@@ -25,8 +34,8 @@ public:
     Constant *getInitializer() const { return nullptr; }
     void setInitializer(Constant *InitVal) { (void)InitVal; }
 
-    void setAlignment(unsigned A) { (void)A; }
-    void setAlignment(uint64_t A) { (void)A; }
+    template <typename AlignTy>
+    void setAlignment(AlignTy A) { (void)A; }
 };
 
 } // namespace llvm

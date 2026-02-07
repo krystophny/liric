@@ -7,6 +7,8 @@
 
 namespace llvm {
 
+class raw_ostream;
+
 class PointerType;
 class IntegerType;
 class FunctionType;
@@ -78,6 +80,7 @@ public:
     bool isStructTy() const { return impl()->kind == LR_TYPE_STRUCT; }
     bool isArrayTy() const { return impl()->kind == LR_TYPE_ARRAY; }
     bool isFunctionTy() const { return impl()->kind == LR_TYPE_FUNC; }
+    bool isVectorTy() const { return false; }
 
     unsigned getIntegerBitWidth() const { return lc_type_int_width(impl()); }
 
@@ -89,7 +92,27 @@ public:
         return 0;
     }
 
+    unsigned getPrimitiveSizeInBits() const {
+        return lc_type_primitive_size_bits(impl());
+    }
+
     Type *getScalarType() { return this; }
+
+    Type *getPointerElementType() const;
+
+    Type *getContainedType(unsigned i) const {
+        return Type::wrap(lc_type_contained(impl(), i));
+    }
+
+    Type *getStructElementType(unsigned i) const {
+        return Type::wrap(lc_type_struct_field(impl(), i));
+    }
+
+    unsigned getStructNumElements() const {
+        return lc_type_struct_num_fields(impl());
+    }
+
+    void print(raw_ostream &OS, bool IsForDebug = false) const;
 
     PointerType *getPointerTo(unsigned AddrSpace = 0) const;
 
@@ -103,6 +126,8 @@ public:
     static IntegerType *getInt16Ty(LLVMContext &C);
     static IntegerType *getInt32Ty(LLVMContext &C);
     static IntegerType *getInt64Ty(LLVMContext &C);
+    static PointerType *getInt8PtrTy(LLVMContext &C, unsigned AS = 0);
+    static IntegerType *getIntNTy(LLVMContext &C, unsigned N);
 };
 
 } // namespace llvm

@@ -9,6 +9,21 @@ namespace llvm {
 
 class Instruction : public Value {
 public:
+    enum CastOps {
+        Trunc = 38,
+        ZExt = 39,
+        SExt = 40,
+        FPToUI = 41,
+        FPToSI = 42,
+        UIToFP = 43,
+        SIToFP = 44,
+        FPTrunc = 45,
+        FPExt = 46,
+        PtrToInt = 47,
+        IntToPtr = 48,
+        BitCast = 49,
+    };
+
     void eraseFromParent() {}
     BasicBlock *getParent() const { return nullptr; }
 };

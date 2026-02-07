@@ -8,11 +8,14 @@
 namespace llvm {
 
 class Function;
+class Instruction;
 class LLVMContext;
 class Module;
 
 class BasicBlock : public Value {
 public:
+    using iterator = Instruction *;
+
     lr_block_t *impl_block() const {
         return lc_value_get_block(impl());
     }
@@ -29,6 +32,11 @@ public:
     Module *getModule() const { return nullptr; }
 
     bool empty() const { return true; }
+
+    iterator end() { return nullptr; }
+    iterator getFirstInsertionPt() { return nullptr; }
+
+    Instruction *getTerminator() const { return nullptr; }
 
     void eraseFromParent() {}
     void moveAfter(BasicBlock *) {}
