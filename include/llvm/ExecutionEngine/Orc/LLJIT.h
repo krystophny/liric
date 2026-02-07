@@ -22,7 +22,7 @@ public:
 
     lr_jit_t *getJIT() const { return jit_; }
 
-    int addModule(Module &M);
+    inline int addModule(Module &M);
 
     void *lookup(StringRef Name) {
         return lr_jit_get_function(jit_, Name.data());
@@ -44,5 +44,12 @@ public:
 
 } // namespace orc
 } // namespace llvm
+
+#include "llvm/IR/Module.h"
+
+inline int llvm::orc::LLJIT::addModule(llvm::Module &M) {
+    lc_module_finalize_phis(M.getCompat());
+    return lr_jit_add_module(jit_, M.getIR());
+}
 
 #endif

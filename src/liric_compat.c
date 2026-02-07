@@ -46,12 +46,12 @@ typedef struct lc_value {
     lc_value_kind_t kind;
     lr_type_t *type;
     union {
-        struct { uint32_t id; lr_func_t *func; } vreg;
+        struct { uint32_t id; lr_func_t *func; void *phi_node; } vreg;
         struct { int64_t val; unsigned width; } const_int;
         struct { double val; bool is_double; } const_fp;
         struct { uint32_t id; const char *name; lr_func_t *func; } global;
         struct { uint32_t param_idx; lr_func_t *func; } argument;
-        struct { lr_block_t *block; } block;
+        struct { lr_block_t *block; lr_func_t *func; } block;
         struct { const void *data; size_t size; } aggregate;
     };
 } lc_value_t;
@@ -59,6 +59,8 @@ typedef struct lc_value {
 typedef struct lc_context {
     lr_module_t *mod;
 } lc_context_t;
+
+typedef struct lc_phi_node lc_phi_node_t;
 
 typedef struct lc_module_compat {
     lr_module_t *mod;
@@ -70,9 +72,12 @@ typedef struct lc_module_compat {
     lc_value_t **func_values;
     uint32_t func_value_count;
     uint32_t func_value_cap;
+    lc_phi_node_t **pending_phis;
+    uint32_t phi_count;
+    uint32_t phi_cap;
 } lc_module_compat_t;
 
-typedef struct lc_phi_node {
+struct lc_phi_node {
     lc_value_t *result;
     lr_type_t *type;
     lr_block_t *block;
@@ -83,7 +88,7 @@ typedef struct lc_phi_node {
     uint32_t num_incoming;
     uint32_t cap_incoming;
     bool finalized;
-} lc_phi_node_t;
+};
 
 typedef struct lc_alloca_inst {
     lc_value_t *result;
@@ -274,6 +279,7 @@ lc_value_t *lc_value_vreg(lc_module_compat_t *mod, uint32_t id,
     v->type = type;
     v->vreg.id = id;
     v->vreg.func = func;
+    v->vreg.phi_node = NULL;
     return v;
 }
 
@@ -343,6 +349,7 @@ lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block) {
     v->kind = LC_VAL_BLOCK;
     v->type = NULL;
     v->block.block = block;
+    v->block.func = NULL;
     return v;
 }
 
@@ -491,12 +498,24 @@ unsigned lc_func_arg_count(lc_value_t *func_val) {
 lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
                              const char *name) {
     lr_block_t *b = lr_block_create(func, mod->mod->arena, name);
-    return lc_value_block_ref(mod, b);
+    lc_value_t *v = lc_value_block_ref(mod, b);
+    if (v) v->block.func = func;
+    return v;
 }
 
 lr_block_t *lc_value_get_block(lc_value_t *val) {
     if (!val || val->kind != LC_VAL_BLOCK) return NULL;
     return val->block.block;
+}
+
+lr_func_t *lc_value_get_block_func(lc_value_t *val) {
+    if (!val || val->kind != LC_VAL_BLOCK) return NULL;
+    return val->block.func;
+}
+
+lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val) {
+    if (!val || val->kind != LC_VAL_VREG) return NULL;
+    return (lc_phi_node_t *)val->vreg.phi_node;
 }
 
 /* ---- Global variable ---- */
@@ -1061,6 +1080,7 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
 
     lc_phi_node_t *phi = (lc_phi_node_t *)calloc(1, sizeof(lc_phi_node_t));
     phi->result = wrap_vreg(mod, vreg_id, ty, f);
+    phi->result->vreg.phi_node = phi;
     phi->type = ty;
     phi->block = b;
     phi->func = f;
@@ -1070,6 +1090,14 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
         phi->cap_incoming, sizeof(lc_value_t *));
     phi->incoming_block_ids = (uint32_t *)calloc(
         phi->cap_incoming, sizeof(uint32_t));
+
+    if (mod->phi_count == mod->phi_cap) {
+        uint32_t new_cap = mod->phi_cap ? mod->phi_cap * 2 : 16;
+        mod->pending_phis = (lc_phi_node_t **)realloc(
+            mod->pending_phis, sizeof(lc_phi_node_t *) * new_cap);
+        mod->phi_cap = new_cap;
+    }
+    mod->pending_phis[mod->phi_count++] = phi;
     return phi;
 }
 
@@ -1110,6 +1138,16 @@ void lc_phi_finalize(lc_phi_node_t *phi) {
     free(phi->incoming_vals);
     free(phi->incoming_block_ids);
     free(phi);
+}
+
+void lc_module_finalize_phis(lc_module_compat_t *mod) {
+    for (uint32_t i = 0; i < mod->phi_count; i++) {
+        lc_phi_finalize(mod->pending_phis[i]);
+    }
+    free(mod->pending_phis);
+    mod->pending_phis = NULL;
+    mod->phi_count = 0;
+    mod->phi_cap = 0;
 }
 
 /* ---- Select ---- */

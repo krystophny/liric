@@ -313,6 +313,19 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
     M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
 }
 
+inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+                                    const Twine &Name, Module &M) {
+    bool is_decl = (Linkage == GlobalValue::ExternalLinkage &&
+                    Ty->getReturnType() == nullptr);
+    return M.createFunction(Name.c_str(), Ty, is_decl);
+}
+
+inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+                                    const Twine &Name, Module *M) {
+    if (!M) return nullptr;
+    return Function::Create(Ty, Linkage, Name, *M);
+}
+
 inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        Function *Parent,
                                        BasicBlock *InsertBefore) {

@@ -27,23 +27,28 @@ public:
 };
 
 class PHINode : public Instruction {
-    lc_phi_node_t *phi_impl_;
-
 public:
-    PHINode() : phi_impl_(nullptr) {}
-
-    void setPhiImpl(lc_phi_node_t *phi) { phi_impl_ = phi; }
-    lc_phi_node_t *getPhiImpl() const { return phi_impl_; }
+    static PHINode *wrap(lc_value_t *v) {
+        return reinterpret_cast<PHINode *>(v);
+    }
 
     void addIncoming(Value *V, BasicBlock *BB) {
-        if (phi_impl_) {
-            lc_phi_add_incoming(phi_impl_, V->impl(),
-                                BB->impl_block());
+        lc_phi_node_t *phi = lc_value_get_phi_node(impl());
+        if (phi) {
+            lc_phi_add_incoming(phi, V->impl(), BB->impl_block());
         }
     }
 
+    void finalize() {
+        lc_phi_node_t *phi = lc_value_get_phi_node(impl());
+        if (phi) lc_phi_finalize(phi);
+    }
+
     unsigned getNumIncomingValues() const {
-        return phi_impl_ ? phi_impl_->num_incoming : 0;
+        lc_phi_node_t *phi = lc_value_get_phi_node(
+            const_cast<lc_value_t *>(
+                reinterpret_cast<const lc_value_t *>(this)));
+        return phi ? phi->num_incoming : 0;
     }
 };
 

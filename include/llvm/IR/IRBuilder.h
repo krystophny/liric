@@ -38,20 +38,29 @@ class IRBuilder {
 
 public:
     explicit IRBuilder(LLVMContext &C)
-        : mod_(nullptr), block_(nullptr), func_(nullptr), ctx_(C) {}
+        : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr), ctx_(C) {}
+
+    explicit IRBuilder(BasicBlock *BB)
+        : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr),
+          ctx_(LLVMContext::getGlobal()) {
+        SetInsertPoint(BB);
+    }
 
     IRBuilder(BasicBlock *BB, LLVMContext &C)
-        : mod_(nullptr), block_(nullptr), func_(nullptr), ctx_(C) {
+        : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr), ctx_(C) {
         SetInsertPoint(BB);
     }
 
     LLVMContext &getContext() const { return ctx_; }
 
     void SetModule(lc_module_compat_t *mod) { mod_ = mod; }
+    void SetModule(Module *mod) { mod_ = mod ? mod->getCompat() : nullptr; }
 
     void SetInsertPoint(BasicBlock *BB) {
         if (!BB) return;
         block_ = BB->impl_block();
+        lr_func_t *f = lc_value_get_block_func(BB->impl());
+        if (f) func_ = f;
     }
 
     void SetInsertPoint(BasicBlock *BB, BasicBlock::use_iterator) {
@@ -489,9 +498,7 @@ public:
         (void)NumReservedValues;
         lc_phi_node_t *phi = lc_create_phi(M(), B(), F(),
                                             Ty->impl(), Name.c_str());
-        auto *node = new PHINode();
-        node->setPhiImpl(phi);
-        return node;
+        return PHINode::wrap(phi->result);
     }
 
     Value *CreateSelect(Value *C, Value *True, Value *False,

@@ -68,6 +68,12 @@ target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
 add_test(NAME liric_tests COMMAND test_liric)
 
+include(GNUInstallDirs)
+install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
 if(WITH_LLVM_COMPAT)
     enable_language(CXX)

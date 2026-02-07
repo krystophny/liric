@@ -105,6 +105,11 @@ public:
         return f ? (f->first_block == nullptr) : true;
     }
 
+    static inline Function *Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+                                     const Twine &Name, Module &M);
+    static inline Function *Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
+                                     const Twine &Name, Module *M = nullptr);
+
     void eraseFromParent() {}
 
     using iterator = BasicBlock *;

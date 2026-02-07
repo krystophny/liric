@@ -16,6 +16,11 @@ public:
     LLVMContext &operator=(const LLVMContext &) = delete;
 
     lc_context_t *impl() const { return ctx_; }
+
+    static LLVMContext &getGlobal() {
+        static LLVMContext global;
+        return global;
+    }
 };
 
 } // namespace llvm

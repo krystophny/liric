@@ -298,7 +298,7 @@ static int test_irbuilder_control_flow() {
     TEST_ASSERT(phi != nullptr, "phi created");
     phi->addIncoming(v1, then_bb);
     phi->addIncoming(v2, else_bb);
-    lc_phi_finalize(phi->getPhiImpl());
+    phi->finalize();
 
     builder.CreateRet(phi);
 
@@ -730,6 +730,98 @@ static int test_target_select_noop() {
     return 0;
 }
 
+static int test_jit_smoke_ret_42() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_smoke", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    auto *fty = llvm::FunctionType::get(i32, false);
+    auto *fn = llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage,
+                                       "ret42", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 42));
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("ret42");
+    TEST_ASSERT(fp != nullptr, "lookup ret42");
+    int result = fp();
+    TEST_ASSERT_EQ(result, 42, "ret42() == 42");
+    return 0;
+}
+
+static int test_jit_smoke_add_args() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_add", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *params[] = {i32, i32};
+    auto *fty = llvm::FunctionType::get(i32, llvm::ArrayRef<llvm::Type *>(params, 2), false);
+    auto *fn = llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage,
+                                       "add_args", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *a = fn->getArg(0);
+    llvm::Value *b = fn->getArg(1);
+    llvm::Value *sum = builder.CreateAdd(a, b, "sum");
+    builder.CreateRet(sum);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(int, int);
+    fn_t fp = (fn_t)jit.lookup("add_args");
+    TEST_ASSERT(fp != nullptr, "lookup add_args");
+    int result = fp(17, 25);
+    TEST_ASSERT_EQ(result, 42, "add_args(17,25) == 42");
+    return 0;
+}
+
+static int test_jit_smoke_branch() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_branch", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *params[] = {i32};
+    auto *fty = llvm::FunctionType::get(i32, llvm::ArrayRef<llvm::Type *>(params, 1), false);
+    auto *fn = llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage,
+                                       "abs_val", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    auto *then_bb = llvm::BasicBlock::Create(ctx, "then", fn);
+    auto *else_bb = llvm::BasicBlock::Create(ctx, "else", fn);
+    auto *merge_bb = llvm::BasicBlock::Create(ctx, "merge", fn);
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *x = fn->getArg(0);
+    llvm::Value *zero = llvm::ConstantInt::get(i32, 0);
+    llvm::Value *cmp = builder.CreateICmpSLT(x, zero, "neg");
+    builder.CreateCondBr(cmp, then_bb, else_bb);
+
+    builder.SetInsertPoint(then_bb);
+    llvm::Value *negx = builder.CreateSub(zero, x, "negx");
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(else_bb);
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(merge_bb);
+    auto *phi = builder.CreatePHI(i32, 2, "result");
+    phi->addIncoming(negx, then_bb);
+    phi->addIncoming(x, else_bb);
+    builder.CreateRet(phi);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(int);
+    fn_t fp = (fn_t)jit.lookup("abs_val");
+    TEST_ASSERT(fp != nullptr, "lookup abs_val");
+    TEST_ASSERT_EQ(fp(5), 5, "abs_val(5) == 5");
+    TEST_ASSERT_EQ(fp(-7), 7, "abs_val(-7) == 7");
+    TEST_ASSERT_EQ(fp(0), 0, "abs_val(0) == 0");
+    return 0;
+}
+
 int main() {
     fprintf(stderr, "LLVM C++ compat test suite\n");
     fprintf(stderr, "==========================\n\n");
@@ -772,6 +864,11 @@ int main() {
     RUN_TEST(test_noop_passes);
     RUN_TEST(test_noop_verifier);
     RUN_TEST(test_noop_di_builder);
+
+    fprintf(stderr, "\nJIT smoke tests:\n");
+    RUN_TEST(test_jit_smoke_ret_42);
+    RUN_TEST(test_jit_smoke_add_args);
+    RUN_TEST(test_jit_smoke_branch);
 
     fprintf(stderr, "\n==========================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",
