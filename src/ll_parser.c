@@ -317,6 +317,11 @@ static void skip_attrs(lr_parser_t *p) {
             p->cur.kind == LR_TOK_READONLY || p->cur.kind == LR_TOK_WRITEONLY ||
             p->cur.kind == LR_TOK_NNAN || p->cur.kind == LR_TOK_NINF ||
             p->cur.kind == LR_TOK_NSZ || p->cur.kind == LR_TOK_DSOLOCAL ||
+            p->cur.kind == LR_TOK_LINKONCE_ODR ||
+            p->cur.kind == LR_TOK_EXTERNAL || p->cur.kind == LR_TOK_INTERNAL ||
+            p->cur.kind == LR_TOK_PRIVATE || p->cur.kind == LR_TOK_COMMON ||
+            p->cur.kind == LR_TOK_UNNAMED_ADDR ||
+            p->cur.kind == LR_TOK_LOCAL_UNNAMED_ADDR ||
             p->cur.kind == LR_TOK_ATTR_GROUP || p->cur.kind == LR_TOK_METADATA_ID) {
             next(p);
             continue;
@@ -1190,6 +1195,27 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
         lr_operand_t gep = parse_const_gep_operand(p, p->module->type_ptr);
         if (gep.kind == LR_VAL_GLOBAL) {
             const char *ref = lr_module_symbol_name(p->module, gep.global_id);
+            if (ref) {
+                lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
+                r->offset = field_off;
+                r->symbol_name = lr_arena_strdup(p->arena, ref, strlen(ref));
+                r->next = g->relocs;
+                g->relocs = r;
+            }
+        }
+    } else if (check(p, LR_TOK_BITCAST) || check(p, LR_TOK_INTTOPTR) ||
+               check(p, LR_TOK_PTRTOINT) || check(p, LR_TOK_SEXT) ||
+               check(p, LR_TOK_ZEXT) || check(p, LR_TOK_TRUNC) ||
+               check(p, LR_TOK_SITOFP) || check(p, LR_TOK_FPTOSI) ||
+               check(p, LR_TOK_FPEXT) || check(p, LR_TOK_FPTRUNC)) {
+        next(p);
+        expect(p, LR_TOK_LPAREN);
+        lr_operand_t src = parse_typed_operand(p);
+        expect(p, LR_TOK_TO);
+        (void)parse_type(p);
+        expect(p, LR_TOK_RPAREN);
+        if (src.kind == LR_VAL_GLOBAL) {
+            const char *ref = lr_module_symbol_name(p->module, src.global_id);
             if (ref) {
                 lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
                 r->offset = field_off;
