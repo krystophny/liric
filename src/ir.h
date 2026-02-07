@@ -174,8 +174,11 @@ typedef struct lr_module {
     lr_global_t *last_global;
     uint32_t num_globals;
     char **symbol_names;
+    uint32_t *symbol_hashes;
     uint32_t num_symbols;
     uint32_t symbol_cap;
+    uint32_t *symbol_index;
+    uint32_t symbol_index_cap;
     lr_type_t *type_void;
     lr_type_t *type_i1;
     lr_type_t *type_i8;
