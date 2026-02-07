@@ -55,46 +55,25 @@ printf("%d\n", fn(10, 32));  // 42
 Full API: `include/liric/liric.h` — types, functions, blocks, 40+ instruction
 builders, globals, PHI, GEP, calls, type conversions, JIT lifecycle.
 
-## Parse Overhead Analysis
-
-Across 520 LFortran-generated `.ll` files, text parsing accounts for
-a significant fraction of total compile time. The C builder API eliminates
-this overhead entirely.
-
-| Metric | Parse | JIT | Total | Parse % |
-|--------|------:|----:|------:|--------:|
-| Median | 0.091 ms | 0.138 ms | 0.234 ms | 42.2% |
-| Mean | 0.194 ms | 0.286 ms | 0.480 ms | 46.5% |
-| P90 | 0.394 ms | 0.604 ms | 0.948 ms | 79.6% |
-| P95 | 0.562 ms | 0.801 ms | 1.395 ms | 81.2% |
-
-- Aggregate parse fraction: 40.5% of total compile time
-- 57% of tests have >=40% parse overhead
-- 13% of tests have >=70% parse overhead (builder API gives 3-9x speedup)
-
-```bash
-python3 -m tools.bench_parse_overhead   # reproduce
-```
-
 ## Speed: liric vs LLVM ORC JIT
 
 514 LFortran-generated `.ll` files, in-process measurement, macOS arm64,
-LLVM 21.1.7. Measures actual parse + JIT compile time (no process startup).
+LLVM 21.1.7, 100 iterations per file. Both compilers load the same runtime
+library. Only files passing both compilers are counted.
 
 | Metric | liric | LLVM ORC | Speedup |
 |--------|------:|---------:|--------:|
-| Median | 0.245 ms | 1.678 ms | **7.2x** |
-| Mean | 0.493 ms | 2.515 ms | **5.1x** |
-| P90 | 0.966 ms | 4.294 ms | **20.8x** |
-| P95 | 1.403 ms | 5.342 ms | 28.6x |
+| Median | 0.067 ms | 1.382 ms | **23.3x** |
+| Mean | 0.117 ms | 2.363 ms | **26.2x** |
+| P90 | 0.242 ms | 4.556 ms | **42.5x** |
+| P95 | 0.316 ms | 5.716 ms | 50.7x |
 
-Aggregate: 253ms (liric) vs 1293ms (LLVM). 99.6% of tests faster.
+Aggregate: 60 ms (liric) vs 1214 ms (LLVM). 99.8% of tests faster.
 
-With the C builder API (eliminates text parsing): **8.7x** aggregate,
-**13.0x** median speedup.
+JIT compile only (no text parsing): **75.4x** median speedup.
 
 ```bash
-python3 -m tools.bench_inprocess_h2h   # reproduce
+python3 -m tools.bench_h2h --workers $(nproc)   # reproduce
 ```
 
 ## LFortran Test Suite

@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <dlfcn.h>
 
 #ifdef __APPLE__
 #include <mach/mach_time.h>
@@ -51,23 +52,35 @@ int main(int argc, char **argv) {
     int iters = 1;
     int json_output = 0;
     const char *input_file = NULL;
+    const char *load_libs[64];
+    int num_load_libs = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc)
             iters = atoi(argv[++i]);
         else if (strcmp(argv[i], "--json") == 0)
             json_output = 1;
+        else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
+            if (num_load_libs < 64) load_libs[num_load_libs++] = argv[++i];
+        }
         else if (argv[i][0] != '-')
             input_file = argv[i];
         else {
-            fprintf(stderr, "usage: bench_llvm_jit [--iters N] [--json] file.ll\n");
+            fprintf(stderr, "usage: bench_llvm_jit [--iters N] [--json] [--load-lib LIB] file.ll\n");
             return 1;
         }
     }
 
     if (!input_file) {
-        fprintf(stderr, "usage: bench_llvm_jit [--iters N] [--json] file.ll\n");
+        fprintf(stderr, "usage: bench_llvm_jit [--iters N] [--json] [--load-lib LIB] file.ll\n");
         return 1;
+    }
+
+    for (int i = 0; i < num_load_libs; i++) {
+        if (!dlopen(load_libs[i], RTLD_NOW | RTLD_GLOBAL)) {
+            fprintf(stderr, "failed to load: %s: %s\n", load_libs[i], dlerror());
+            return 1;
+        }
     }
 
     size_t src_len;
