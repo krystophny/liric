@@ -16,7 +16,15 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake.
+To build with the LLVM C++ compatibility layer tests:
+
+```bash
+cmake -S . -B build -G Ninja -DWITH_LLVM_COMPAT=ON
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake (plus a C++17 compiler when `WITH_LLVM_COMPAT=ON`).
 
 For LFortran mass runs, prefer:
 
@@ -89,9 +97,12 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 | **aarch64 backend** | `src/target_aarch64.c/.h` | ISel (IR -> machine insts) + aarch64 binary encoder |
 | **JIT engine** | `src/jit.c/.h` | mmap, W^X transitions, symbol table, module compilation |
 | **Public API** | `include/liric/liric.h` | 9 functions: parse (.ll and .wasm), module management, JIT lifecycle |
+| **Compat C API** | `include/liric/liric_compat.h`, `src/liric_compat.c` | LLVM-style builder using lc_value_t handles |
+| **Public types** | `include/liric/liric_types.h` | Complete type definitions for C++ compat headers |
+| **LLVM C++ compat** | `include/llvm/**/*.h` | Header-only C++17 wrappers (37 headers) mapping LLVM API to liric |
 | **API wrapper** | `src/liric.c` | Thin bridge between public API and internal modules |
 | **CLI** | `tools/liric_main.c` | `--jit`, `--dump-ir`, `--func` |
-| **Tests** | `tests/test_*.c` | Lexer, parser, codegen, target, JIT, end-to-end |
+| **Tests** | `tests/test_*.c`, `tests/test_llvm_compat.cpp` | Lexer, parser, codegen, target, JIT, e2e, LLVM compat |
 
 ## Architecture Details
 
@@ -157,6 +168,8 @@ Tests are a single executable (`test_liric`) with categories:
 - **WASM Decoder** (3): binary format parsing, section decoding, error handling
 - **WASM IR** (2): WASM-to-IR conversion correctness
 - **WASM JIT** (5): end-to-end WASM parse+compile+execute (constants, arithmetic, branches, loops, calls)
+- **Builder** (9): C builder API for programmatic IR construction
+- **LLVM Compat** (27, separate exe, requires `-DWITH_LLVM_COMPAT=ON`): C++ header-only LLVM API wrapper tests
 
 Test pattern:
 ```c

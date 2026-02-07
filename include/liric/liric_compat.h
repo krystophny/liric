@@ -2,6 +2,7 @@
 #define LIRIC_COMPAT_H
 
 #include <liric/liric.h>
+#include <liric/liric_types.h>
 
 #ifdef __cplusplus
 extern "C" {
