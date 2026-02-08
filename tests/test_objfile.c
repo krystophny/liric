@@ -37,6 +37,8 @@ static lr_module_t *build_ret42_module(void) {
     return m;
 }
 
+#if !defined(__APPLE__)
+
 static lr_module_t *build_call_module(void) {
     lr_module_t *m = lr_module_create_new();
     if (!m) return NULL;
@@ -59,8 +61,6 @@ static lr_module_t *build_call_module(void) {
     lr_build_ret(m, entry, LR_VREG(result, i32));
     return m;
 }
-
-#if !defined(__APPLE__)
 
 int test_objfile_elf_header(void) {
     lr_module_t *m = build_ret42_module();
