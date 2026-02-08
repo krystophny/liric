@@ -243,6 +243,56 @@ int test_parser_forward_named_type_by_value(void) {
     return 0;
 }
 
+int test_parser_gep_runtime_index_canonicalized_i64(void) {
+    const char *src =
+        "define ptr @f(i32 %idx) {\n"
+        "entry:\n"
+        "  %arr = alloca [4 x i64], align 8\n"
+        "  %p = getelementptr [4 x i64], ptr %arr, i32 0, i32 %idx\n"
+        "  ret ptr %p\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT_EQ(f->num_params, 1, "one param");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *inst = b->first;
+    bool saw_sext = false;
+    uint32_t sext_dest = 0;
+    lr_inst_t *gep = NULL;
+    while (inst) {
+        if (inst->op == LR_OP_SEXT) {
+            saw_sext = true;
+            sext_dest = inst->dest;
+            TEST_ASSERT(inst->type->kind == LR_TYPE_I64, "sext result is i64");
+            TEST_ASSERT(inst->num_operands == 1, "sext has one operand");
+            TEST_ASSERT(inst->operands[0].kind == LR_VAL_VREG, "sext source is vreg");
+            TEST_ASSERT(inst->operands[0].vreg == f->param_vregs[0], "sext source is idx param");
+        }
+        if (inst->op == LR_OP_GEP)
+            gep = inst;
+        inst = inst->next;
+    }
+
+    TEST_ASSERT(saw_sext, "parser inserts sext for runtime gep index");
+    TEST_ASSERT(gep != NULL, "gep exists");
+    TEST_ASSERT_EQ(gep->num_operands, 3, "gep has base + 2 indices");
+    TEST_ASSERT(gep->operands[2].kind == LR_VAL_VREG, "runtime index is vreg");
+    TEST_ASSERT(gep->operands[2].type->kind == LR_TYPE_I64, "runtime index type canonicalized to i64");
+    TEST_ASSERT(gep->operands[2].vreg == sext_dest, "gep uses canonicalized sext vreg");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_decl_with_modern_param_attrs(void) {
     const char *src =
         "declare void @llvm.memcpy.p0.p0.i32("
