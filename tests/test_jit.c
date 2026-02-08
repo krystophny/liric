@@ -765,6 +765,40 @@ int test_jit_gep_array_index(void) {
     return 0;
 }
 
+int test_jit_gep_negative_i32_index(void) {
+    const char *src =
+        "define i64 @gep_negative_i32() {\n"
+        "entry:\n"
+        "  %arr = alloca [3 x i64], align 8\n"
+        "  %p0 = getelementptr [3 x i64], [3 x i64]* %arr, i32 0, i32 0\n"
+        "  %p1 = getelementptr [3 x i64], [3 x i64]* %arr, i32 0, i32 1\n"
+        "  store i64 40, i64* %p0, align 8\n"
+        "  store i64 2, i64* %p1, align 8\n"
+        "  %idx = add i32 0, -1\n"
+        "  %back = getelementptr i64, i64* %p1, i32 %idx\n"
+        "  %v = load i64, i64* %back, align 8\n"
+        "  ret i64 %v\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "gep_negative_i32");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 40, "GEP i32 index -1 must sign-extend");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_global_string_constant(void) {
     const char *src =
         "@hello = private unnamed_addr constant [5 x i8] c\"Hello\", align 1\n"
