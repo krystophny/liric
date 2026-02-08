@@ -527,6 +527,15 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             funcs[fi++] = f;
     }
 
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        const char *name = funcs[i]->name;
+        if (name && name[0]) {
+            uint32_t hash = symbol_hash(name);
+            if (!find_symbol_entry(j, name, hash))
+                miss_cache_add(j, name, hash);
+        }
+    }
+
     /* Resolve function declarations eagerly — these are external symbols
        that will be needed during compilation (e.g., runtime functions). */
     for (lr_func_t *f = m->first_func; f; f = f->next) {
