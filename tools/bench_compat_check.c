@@ -834,6 +834,11 @@ int main(int argc, char **argv) {
     size_t compat_api_cap = 0, compat_ll_cap = 0, opts_api_cap = 0, opts_ll_cap = 0;
     size_t i;
     size_t eligible = 0;
+    size_t processed = 0;
+    size_t llvm_ok_count = 0;
+    size_t liric_match_count = 0;
+    size_t lli_match_count = 0;
+    size_t both_match_count = 0;
 
     ensure_dir(cfg.bench_dir);
     ensure_dir(ll_dir);
@@ -882,7 +887,7 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        if (cfg.limit > 0 && (int)compat_api_n >= cfg.limit) break;
+        if (cfg.limit > 0 && (int)processed >= cfg.limit) break;
 
         ll_path = path_join2(ll_dir, t->name);
         {
@@ -999,6 +1004,11 @@ int main(int argc, char **argv) {
         write_json_row(jsonl, t->name, t->source, t->options_joined,
                        llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
                        llvm_rc, liric_rc, lli_rc, error);
+        processed++;
+        if (llvm_ok) llvm_ok_count++;
+        if (liric_match) liric_match_count++;
+        if (lli_match) lli_match_count++;
+        if (liric_match && lli_match) both_match_count++;
 
         if (liric_match) {
             if (compat_api_n == compat_api_cap) {
@@ -1044,8 +1054,14 @@ int main(int argc, char **argv) {
             opts_ll_n++;
         }
 
-        printf("  [%zu/%zu] %s: llvm_ok=%d liric_match=%d lli_match=%d\n",
-               i + 1, tests.n, t->name, llvm_ok, liric_match, lli_match);
+        if (processed % 50 == 0) {
+            printf("  progress %zu/%zu: llvm_ok=%zu liric_match=%zu (%.1f%%) lli_match=%zu both=%zu\n",
+                   processed, eligible,
+                   llvm_ok_count,
+                   liric_match_count, processed ? (100.0 * (double)liric_match_count / (double)processed) : 0.0,
+                   lli_match_count,
+                   both_match_count);
+        }
 
         free_cmd_result(&run_r);
         free_cmd_result(&jit_r);
@@ -1099,6 +1115,11 @@ int main(int argc, char **argv) {
     }
 
     printf("\nResults written to %s\n", jsonl_path);
+    printf("processed:  %zu/%zu\n", processed, eligible);
+    printf("llvm_ok:    %zu (%.1f%%)\n", llvm_ok_count, processed ? (100.0 * (double)llvm_ok_count / (double)processed) : 0.0);
+    printf("liric_match:%zu (%.1f%%)\n", liric_match_count, processed ? (100.0 * (double)liric_match_count / (double)processed) : 0.0);
+    printf("lli_match:  %zu (%.1f%%)\n", lli_match_count, processed ? (100.0 * (double)lli_match_count / (double)processed) : 0.0);
+    printf("both_match: %zu (%.1f%%)\n", both_match_count, processed ? (100.0 * (double)both_match_count / (double)processed) : 0.0);
     printf("compat_api: %zu tests -> %s\n", compat_api_n, compat_api_path);
     printf("compat_ll:  %zu tests -> %s\n", compat_ll_n, compat_ll_path);
 
