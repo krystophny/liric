@@ -789,7 +789,41 @@ static void skip_optional_callee_signature(lr_parser_t *p) {
     }
 }
 
-static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
+static bool is_integer_type(const lr_type_t *ty) {
+    if (!ty) return false;
+    return ty->kind == LR_TYPE_I1 || ty->kind == LR_TYPE_I8 ||
+           ty->kind == LR_TYPE_I16 || ty->kind == LR_TYPE_I32 ||
+           ty->kind == LR_TYPE_I64;
+}
+
+static lr_operand_t canonicalize_gep_index_operand(lr_parser_t *p,
+                                                    lr_func_t *func,
+                                                    lr_block_t *block,
+                                                    const lr_operand_t *op) {
+    lr_operand_t out = *op;
+    if (!is_integer_type(op->type))
+        return out;
+
+    if (op->kind == LR_VAL_IMM_I64) {
+        out.type = p->module->type_i64;
+        return out;
+    }
+
+    if (op->kind == LR_VAL_VREG && op->type->kind != LR_TYPE_I64) {
+        uint32_t tmp_vreg = lr_vreg_new(func);
+        lr_operand_t cast_ops[1] = {*op};
+        lr_inst_t *cast = lr_inst_create(p->arena, LR_OP_SEXT,
+                                         p->module->type_i64,
+                                         tmp_vreg, cast_ops, 1);
+        lr_block_append(block, cast);
+        return lr_op_vreg(tmp_vreg, p->module->type_i64);
+    }
+
+    out.type = p->module->type_i64;
+    return out;
+}
+
+static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block) {
     /* Check for label: */
     if (check(p, LR_TOK_LOCAL_ID)) {
         /* Could be: %x = ... or a label. Peek ahead for = */
@@ -1011,8 +1045,11 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
                 lr_operand_t ops[16];
                 uint32_t nops = 0;
                 ops[nops++] = parse_typed_operand(p);
-                while (match(p, LR_TOK_COMMA))
-                    ops[nops++] = parse_typed_operand(p);
+                while (match(p, LR_TOK_COMMA)) {
+                    lr_operand_t idx = parse_typed_operand(p);
+                    idx = canonicalize_gep_index_operand(p, func, block, &idx);
+                    ops[nops++] = idx;
+                }
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_GEP,
                     p->module->type_ptr, dest, ops, nops);
                 /* store base type in inst->type for GEP offset computation */
@@ -1306,7 +1343,7 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             cur_block = resolve_block_ptr(p, "entry");
         }
 
-        parse_instruction(p, cur_block);
+        parse_instruction(p, func, cur_block);
     }
 
     expect(p, LR_TOK_RBRACE);
