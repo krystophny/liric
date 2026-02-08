@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -105,6 +106,23 @@ static char *xstrdup(const char *s) {
     return p;
 }
 
+static char *to_abs_path(const char *path) {
+    char cwd[PATH_MAX];
+    size_t nc, np;
+    char *out;
+    if (!path) return NULL;
+    if (path[0] == '/') return xstrdup(path);
+    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed", NULL);
+    nc = strlen(cwd);
+    np = strlen(path);
+    out = (char *)malloc(nc + 1 + np + 1);
+    if (!out) die("out of memory", NULL);
+    memcpy(out, cwd, nc);
+    out[nc] = '/';
+    memcpy(out + nc + 1, path, np + 1);
+    return out;
+}
+
 static char *path_join2(const char *a, const char *b) {
     size_t na = strlen(a), nb = strlen(b);
     int need = (na > 0 && a[na - 1] != '/');
@@ -181,7 +199,8 @@ static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
     }
 }
 
-static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env_lib_dir) {
+static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env_lib_dir,
+                            const char *work_dir) {
     cmd_result_t r;
     char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
     char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
@@ -205,6 +224,7 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env
     if (pid < 0) die("fork failed", NULL);
 
     if (pid == 0) {
+        if (work_dir && chdir(work_dir) != 0) _exit(127);
         if (env_lib_dir) {
             setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
             setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
@@ -315,22 +335,23 @@ static double percentile(const double *vals, size_t n, double p) {
     return out;
 }
 
+static int parse_timing_field(const char *text, const char *key, double *out_us) {
+    const char *p = strstr(text, key);
+    if (!p) return 0;
+    p += strlen(key);
+    *out_us = strtod(p, NULL);
+    return 1;
+}
+
 static int parse_probe_timing(const char *stderr_text, double *out_parse_ms, double *out_compile_ms) {
     const char *p = strstr(stderr_text, "TIMING ");
-    double read_us, parse_us, jit_create_us, load_lib_us, compile_us, total_us;
+    double parse_us, compile_us;
     if (!p) return 0;
-    if (sscanf(p,
-               "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf total_us=%lf",
-               &read_us, &parse_us, &jit_create_us, &load_lib_us, &compile_us, &total_us) == 6) {
-        (void)read_us;
-        (void)jit_create_us;
-        (void)load_lib_us;
-        (void)total_us;
-        *out_parse_ms = parse_us / 1000.0;
-        *out_compile_ms = compile_us / 1000.0;
-        return 1;
-    }
-    return 0;
+    if (!parse_timing_field(p, "parse_us=", &parse_us)) return 0;
+    if (!parse_timing_field(p, "compile_us=", &compile_us)) return 0;
+    *out_parse_ms = parse_us / 1000.0;
+    *out_compile_ms = compile_us / 1000.0;
+    return 1;
 }
 
 static int parse_time_report(const char *stderr_text, double *out_ms) {
@@ -546,6 +567,12 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!file_exists(cfg.probe_runner)) die("probe runner not found", cfg.probe_runner);
     if (!file_exists(cfg.runtime_lib)) die("runtime lib not found", cfg.runtime_lib);
 
+    cfg.lfortran = to_abs_path(cfg.lfortran);
+    cfg.probe_runner = to_abs_path(cfg.probe_runner);
+    cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
+    cfg.test_dir = to_abs_path(cfg.test_dir);
+    cfg.bench_dir = to_abs_path(cfg.bench_dir);
+
     return cfg;
 }
 
@@ -613,6 +640,18 @@ int main(int argc, char **argv) {
             size_t ok_n = 0;
             int skipped = 0;
             int have_llvm_internal = 0;
+            char work_tpl[] = "/tmp/liric_bench/work_api_XXXXXX";
+            const char *work_dir = NULL;
+
+            if (!mkdtemp(work_tpl)) {
+                printf("  [%zu/%zu] %s: skipped (failed to create temp work dir)\n", i + 1, tests.n, name);
+                free(liric_wall);
+                free(llvm_wall);
+                free(liric_internal);
+                free(llvm_internal);
+                continue;
+            }
+            work_dir = work_tpl;
 
             opt_toks = tokenize_options(test_opts);
 
@@ -661,7 +700,7 @@ int main(int argc, char **argv) {
                 compile_argv[4 + opt_toks.n] = bin_path;
                 compile_argv[5 + opt_toks.n] = NULL;
 
-                compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL);
+                compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, work_dir);
                 free(compile_argv);
                 if (compile_r.rc != 0) {
                     skipped = 1;
@@ -673,7 +712,7 @@ int main(int argc, char **argv) {
 
                 run_argv[0] = bin_path;
                 run_argv[1] = NULL;
-                run_r = run_cmd((char *const *)run_argv, cfg.timeout_sec, NULL);
+                run_r = run_cmd((char *const *)run_argv, cfg.timeout_sec, NULL, work_dir);
                 if (run_r.rc != 0) {
                     skipped = 1;
                     free_cmd_result(&run_r);
@@ -693,7 +732,7 @@ int main(int argc, char **argv) {
                 probe_argv[6] = ll_path;
                 probe_argv[7] = NULL;
 
-                probe_r = run_cmd((char *const *)probe_argv, cfg.timeout_sec, NULL);
+                probe_r = run_cmd((char *const *)probe_argv, cfg.timeout_sec, NULL, work_dir);
                 if (probe_r.rc < 0 || !parse_probe_timing(probe_r.stderr_text, &parse_ms, &compile_jit_ms)) {
                     skipped = 1;
                     free_cmd_result(&probe_r);
@@ -721,7 +760,7 @@ int main(int argc, char **argv) {
                     tr_argv[5 + opt_toks.n] = "/dev/null";
                     tr_argv[6 + opt_toks.n] = NULL;
 
-                    tr_r = run_cmd(tr_argv, cfg.timeout_sec, NULL);
+                    tr_r = run_cmd(tr_argv, cfg.timeout_sec, NULL, work_dir);
                     free(tr_argv);
                     if (tr_r.rc == 0 && parse_time_report(tr_r.stderr_text, &tr_ms)) {
                         if (it == 0) have_llvm_internal = 1;
@@ -776,6 +815,7 @@ int main(int argc, char **argv) {
             }
 
 next_test:
+            if (work_dir) rmdir(work_dir);
             free(source_path);
             free(ll_path);
             free(bin_path);
