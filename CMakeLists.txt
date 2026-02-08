@@ -54,6 +54,9 @@ target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_ll tools/bench_ll.c)
 target_link_libraries(bench_ll PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+add_executable(bench_api tools/bench_api.c)
+target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
+
 find_program(LLVM_CONFIG_EXE llvm-config)
 if(LLVM_CONFIG_EXE)
     execute_process(
