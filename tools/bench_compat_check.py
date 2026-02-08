@@ -176,7 +176,7 @@ def check_one_test(args: tuple) -> dict:
     result["llvm_rc"] = rc
 
     # Step 3: liric JIT
-    jit_cmd = [probe, "--load-lib", runtime, ll_path]
+    jit_cmd = [probe, "--sig", "i32_argc_argv", "--load-lib", runtime, ll_path]
     jit_rc, liric_stdout, stderr = run_cmd(jit_cmd, timeout)
     if jit_rc < 0:
         result["error"] = f"liric jit failed (rc={jit_rc}): {stderr[:200]}"
@@ -190,7 +190,7 @@ def check_one_test(args: tuple) -> dict:
     lli_env = os.environ.copy()
     lli_env["DYLD_LIBRARY_PATH"] = runtime_dir
     lli_env["LD_LIBRARY_PATH"] = runtime_dir
-    lli_cmd = [lli, "-O0", ll_path]
+    lli_cmd = [lli, "-O0", "--dlopen", runtime, ll_path]
     lli_rc, lli_stdout, stderr = run_cmd(lli_cmd, timeout, env=lli_env)
     if lli_rc < 0:
         pass

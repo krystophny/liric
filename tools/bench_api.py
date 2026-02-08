@@ -4,7 +4,10 @@
 Reads /tmp/liric_bench/compat_api.txt (from bench_compat_check) and times the
 full pipeline for each path:
   - LLVM: lfortran compile + run
-  - liric: lfortran --show-llvm + liric_probe_runner JIT
+  - liric: lfortran --show-llvm + liric_probe_runner --timing JIT
+
+Reports both wall-clock and JIT-internal timing (parse + compile only,
+excluding process startup and dlopen overhead).
 
 Usage:
     python3 -m tools.bench_api [--iters N]
@@ -15,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import statistics
 import subprocess
@@ -25,6 +29,11 @@ from pathlib import Path
 BENCH_DIR = Path("/tmp/liric_bench")
 LL_DIR = BENCH_DIR / "ll"
 BIN_DIR = BENCH_DIR / "bin"
+
+TIMING_RE = re.compile(
+    r"TIMING\s+read_us=([\d.]+)\s+parse_us=([\d.]+)\s+jit_create_us=([\d.]+)\s+"
+    r"load_lib_us=([\d.]+)\s+compile_us=([\d.]+)\s+total_us=([\d.]+)"
+)
 
 
 def detect_paths(args: argparse.Namespace) -> dict:
@@ -97,6 +106,31 @@ def time_emit_ll(cmd: list[str], out_path: str, timeout: int) -> tuple[float, in
         return 0.0, -1
 
 
+def run_liric_timed(cmd: list[str], timeout: int) -> tuple[float, int, dict | None]:
+    """Run liric_probe_runner with --timing, return (wall_s, rc, timing_dict)."""
+    t0 = time.monotonic()
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        wall_s = time.monotonic() - t0
+        stderr = p.stderr.decode("utf-8", errors="replace")
+        timing = None
+        m = TIMING_RE.search(stderr)
+        if m:
+            timing = {
+                "read_us": float(m.group(1)),
+                "parse_us": float(m.group(2)),
+                "jit_create_us": float(m.group(3)),
+                "load_lib_us": float(m.group(4)),
+                "compile_us": float(m.group(5)),
+                "total_us": float(m.group(6)),
+            }
+        return wall_s, p.returncode, timing
+    except subprocess.TimeoutExpired:
+        return timeout, -99, None
+    except Exception:
+        return 0.0, -1, None
+
+
 def pct(data: list[float], p: float) -> float:
     s = sorted(data)
     k = (len(s) - 1) * p / 100.0
@@ -157,11 +191,11 @@ def main() -> None:
                 continue
 
             llvm_times = []
-            liric_times = []
+            liric_wall_times = []
+            liric_jit_times = []
             skipped = False
 
             for it in range(args.iters):
-                # LLVM path: compile + run
                 t_compile, rc, _ = time_cmd(
                     [lfortran, "--no-color"] + opts + [source, "-o", bin_path],
                     timeout,
@@ -175,7 +209,6 @@ def main() -> None:
                     break
                 llvm_times.append(t_compile + t_run)
 
-                # liric path: emit .ll (stdout redirect) + JIT
                 t_emit, rc = time_emit_ll(
                     [lfortran, "--no-color", "--show-llvm"] + opts + [source],
                     ll_path,
@@ -184,69 +217,100 @@ def main() -> None:
                 if rc != 0:
                     skipped = True
                     break
-                t_jit, rc, _ = time_cmd(
-                    [probe, "--load-lib", runtime, ll_path],
+                t_jit_wall, rc, timing = run_liric_timed(
+                    [probe, "--timing", "--sig", "i32_argc_argv", "--load-lib", runtime, ll_path],
                     timeout,
                 )
                 if rc < 0:
                     skipped = True
                     break
-                liric_times.append(t_emit + t_jit)
+                liric_wall_times.append(t_emit + t_jit_wall)
+                if timing:
+                    jit_ms = (timing["parse_us"] + timing["compile_us"]) / 1000.0
+                    liric_jit_times.append(jit_ms)
 
-            if skipped or not llvm_times or not liric_times:
+            if skipped or not llvm_times or not liric_wall_times:
                 print(f"  [{idx+1}/{len(tests)}] {name}: skipped (runtime error)")
                 continue
 
             llvm_ms = [t * 1000 for t in llvm_times]
-            liric_ms = [t * 1000 for t in liric_times]
-            speedup = statistics.median(llvm_ms) / statistics.median(liric_ms) if statistics.median(liric_ms) > 0 else 0
+            liric_wall_ms = [t * 1000 for t in liric_wall_times]
+            wall_speedup = statistics.median(llvm_ms) / statistics.median(liric_wall_ms) if statistics.median(liric_wall_ms) > 0 else 0
 
             row = {
                 "name": name,
                 "llvm_median_ms": round(statistics.median(llvm_ms), 3),
-                "liric_median_ms": round(statistics.median(liric_ms), 3),
-                "llvm_mean_ms": round(statistics.mean(llvm_ms), 3),
-                "liric_mean_ms": round(statistics.mean(liric_ms), 3),
-                "speedup": round(speedup, 3),
+                "liric_wall_median_ms": round(statistics.median(liric_wall_ms), 3),
+                "wall_speedup": round(wall_speedup, 3),
                 "iters": args.iters,
             }
+
+            if liric_jit_times:
+                liric_jit_median = statistics.median(liric_jit_times)
+                jit_speedup = statistics.median(llvm_ms) / liric_jit_median if liric_jit_median > 0 else 0
+                row["liric_jit_median_ms"] = round(liric_jit_median, 4)
+                row["jit_speedup"] = round(jit_speedup, 1)
+
             results.append(row)
             jf.write(json.dumps(row) + "\n")
 
-            marker = "+" if speedup > 1 else "-"
+            jit_tag = ""
+            if "jit_speedup" in row:
+                jit_tag = f" jit={row['liric_jit_median_ms']:.3f}ms({row['jit_speedup']:.0f}x)"
+            marker = "+" if wall_speedup > 1 else "-"
             print(f"  [{idx+1}/{len(tests)}] {name}: "
                   f"llvm={statistics.median(llvm_ms):.1f}ms "
-                  f"liric={statistics.median(liric_ms):.1f}ms "
-                  f"{marker}{speedup:.2f}x")
+                  f"liric={statistics.median(liric_wall_ms):.1f}ms "
+                  f"{marker}{wall_speedup:.2f}x{jit_tag}")
 
     if not results:
         print("ERROR: no benchmark results", file=sys.stderr)
         sys.exit(1)
 
     llvm_med = [r["llvm_median_ms"] for r in results]
-    liric_med = [r["liric_median_ms"] for r in results]
-    speedups = [r["speedup"] for r in results]
-    faster = sum(1 for s in speedups if s > 1)
+    liric_wall_med = [r["liric_wall_median_ms"] for r in results]
+    wall_speedups = [r["wall_speedup"] for r in results]
+    wall_faster = sum(1 for s in wall_speedups if s > 1)
 
-    print(f"\n{'='*64}")
+    has_jit = sum(1 for r in results if "jit_speedup" in r) > len(results) // 2
+    liric_jit_med = [r["liric_jit_median_ms"] for r in results if "liric_jit_median_ms" in r]
+    jit_speedups = [r["jit_speedup"] for r in results if "jit_speedup" in r]
+
+    print(f"\n{'='*72}")
     print(f"  liric JIT  vs  lfortran LLVM native  (API path, -O0)")
     print(f"  {len(results)} tests, {args.iters} iterations each")
-    print(f"{'='*64}")
-    print(f"\n  {'':12s} {'liric':>12s} {'LLVM native':>12s} {'Speedup':>10s}")
-    print(f"  {'':12s} {'---'*4:>12s} {'---'*4:>12s} {'---'*3:>10s}")
+    print(f"{'='*72}")
 
+    print(f"\n  WALL-CLOCK (full subprocess pipeline)")
+    print(f"  {'':12s} {'liric':>12s} {'LLVM native':>12s} {'Speedup':>10s}")
+    print(f"  {'':12s} {'---'*4:>12s} {'---'*4:>12s} {'---'*3:>10s}")
     for label, pfn in [
         ("Median", statistics.median),
         ("Mean", statistics.mean),
         ("P90", lambda d: pct(d, 90)),
         ("P95", lambda d: pct(d, 95)),
     ]:
-        print(f"  {label:12s} {pfn(liric_med):10.1f} ms {pfn(llvm_med):10.1f} ms {pfn(speedups):8.2f}x")
+        print(f"  {label:12s} {pfn(liric_wall_med):10.1f} ms {pfn(llvm_med):10.1f} ms {pfn(wall_speedups):8.2f}x")
+    agg_wall = sum(llvm_med) / sum(liric_wall_med) if sum(liric_wall_med) > 0 else 0
+    print(f"  {'Aggregate':12s} {sum(liric_wall_med):10.0f} ms {sum(llvm_med):10.0f} ms {agg_wall:8.2f}x")
+    print(f"\n  Faster: {wall_faster}/{len(results)} ({100*wall_faster/len(results):.1f}%)")
 
-    agg_speedup = sum(llvm_med) / sum(liric_med) if sum(liric_med) > 0 else 0
-    print(f"  {'Aggregate':12s} {sum(liric_med):10.0f} ms {sum(llvm_med):10.0f} ms {agg_speedup:8.2f}x")
+    if has_jit and liric_jit_med:
+        jit_faster = sum(1 for s in jit_speedups if s > 1)
+        print(f"\n  JIT-INTERNAL (parse + compile only, vs LLVM native full pipeline)")
+        print(f"  {'':12s} {'liric JIT':>12s} {'LLVM native':>12s} {'Speedup':>10s}")
+        print(f"  {'':12s} {'---'*4:>12s} {'---'*4:>12s} {'---'*3:>10s}")
+        for label, pfn in [
+            ("Median", statistics.median),
+            ("Mean", statistics.mean),
+            ("P90", lambda d: pct(d, 90)),
+            ("P95", lambda d: pct(d, 95)),
+        ]:
+            print(f"  {label:12s} {pfn(liric_jit_med):10.3f} ms {pfn(llvm_med):10.1f} ms {pfn(jit_speedups):8.1f}x")
+        agg_jit = sum(llvm_med) / sum(liric_jit_med) if sum(liric_jit_med) > 0 else 0
+        print(f"  {'Aggregate':12s} {sum(liric_jit_med):10.1f} ms {sum(llvm_med):10.0f} ms {agg_jit:8.1f}x")
+        print(f"\n  Faster: {jit_faster}/{len(results)} ({100*jit_faster/len(results):.1f}%)")
 
-    print(f"\n  Faster: {faster}/{len(results)} ({100*faster/len(results):.1f}%)")
     print(f"\n  Results: {jsonl_path}")
 
 

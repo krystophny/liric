@@ -6,44 +6,85 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
-static char *read_file(const char *path, size_t *out_len) {
-    FILE *f = fopen(path, "rb");
-    char *buf = NULL;
-    size_t nread = 0;
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+static double now_us(void) {
+    static mach_timebase_info_data_t info = {0, 0};
+    if (info.denom == 0) mach_timebase_info(&info);
+    uint64_t t = mach_absolute_time();
+    return (double)(t * info.numer / info.denom) / 1e3;
+}
+#else
+#include <time.h>
+static double now_us(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
+#endif
 
-    if (!f) {
-        return NULL;
+typedef struct {
+    char *data;
+    size_t len;
+    int fd;
+    int is_mmap;
+} file_buf_t;
+
+static int read_file(const char *path, file_buf_t *out) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return -1;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return -1;
     }
 
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return NULL;
+    size_t len = (size_t)st.st_size;
+    char *data = mmap(NULL, len + 1, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0);
+    if (data != MAP_FAILED) {
+        data[len] = '\0';
+        out->data = data;
+        out->len = len;
+        out->fd = fd;
+        out->is_mmap = 1;
+        return 0;
     }
 
-    long flen = ftell(f);
-    if (flen < 0) {
-        fclose(f);
-        return NULL;
-    }
-
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return NULL;
-    }
-
-    buf = (char *)malloc((size_t)flen + 1u);
+    char *buf = malloc(len + 1);
     if (!buf) {
-        fclose(f);
-        return NULL;
+        close(fd);
+        return -1;
     }
-
-    nread = fread(buf, 1, (size_t)flen, f);
+    size_t nread = 0;
+    while (nread < len) {
+        ssize_t n = read(fd, buf + nread, len - nread);
+        if (n <= 0) break;
+        nread += (size_t)n;
+    }
     buf[nread] = '\0';
-    fclose(f);
+    close(fd);
 
-    *out_len = nread;
-    return buf;
+    out->data = buf;
+    out->len = nread;
+    out->fd = -1;
+    out->is_mmap = 0;
+    return 0;
+}
+
+static void free_file(file_buf_t *f) {
+    if (f->is_mmap) {
+        munmap(f->data, f->len + 1);
+        close(f->fd);
+    } else {
+        free(f->data);
+    }
 }
 
 static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int ignore_retcode) {
@@ -61,9 +102,7 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int
         int32_t (*fn)(void) = NULL;
         int32_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        if (!fn) {
-            return 3;
-        }
+        if (!fn) return 3;
         ret = fn();
         return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
@@ -72,9 +111,7 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int
         int64_t (*fn)(void) = NULL;
         int64_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        if (!fn) {
-            return 3;
-        }
+        if (!fn) return 3;
         ret = fn();
         return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
@@ -82,9 +119,7 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int
     if (strcmp(sig, "void") == 0) {
         void (*fn)(void) = NULL;
         lr_jit_fn_to_ptr(&fn, sym);
-        if (!fn) {
-            return 3;
-        }
+        if (!fn) return 3;
         fn();
         return 0;
     }
@@ -93,9 +128,7 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int
         int32_t (*fn)(int, char **) = NULL;
         int32_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        if (!fn) {
-            return 3;
-        }
+        if (!fn) return 3;
         ret = fn(host_argc, host_argv);
         return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
@@ -104,9 +137,7 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int
         int64_t (*fn)(int, char **) = NULL;
         int64_t ret = 0;
         lr_jit_fn_to_ptr(&fn, sym);
-        if (!fn) {
-            return 3;
-        }
+        if (!fn) return 3;
         ret = fn(host_argc, host_argv);
         return ignore_retcode ? 0 : (int)(ret & 0xff);
     }
@@ -114,9 +145,7 @@ static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int
     if (strcmp(sig, "void_argc_argv") == 0) {
         void (*fn)(int, char **) = NULL;
         lr_jit_fn_to_ptr(&fn, sym);
-        if (!fn) {
-            return 3;
-        }
+        if (!fn) return 3;
         fn(host_argc, host_argv);
         return 0;
     }
@@ -130,6 +159,7 @@ int main(int argc, char **argv) {
     const char *sig = "i32";
     const char *input_file = NULL;
     int ignore_retcode = 0;
+    int timing = 0;
     const char *load_libs[64];
     int num_load_libs = 0;
 
@@ -140,6 +170,8 @@ int main(int argc, char **argv) {
             sig = argv[++i];
         } else if (strcmp(argv[i], "--ignore-retcode") == 0) {
             ignore_retcode = 1;
+        } else if (strcmp(argv[i], "--timing") == 0) {
+            timing = 1;
         } else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
             if (num_load_libs < 64) {
                 load_libs[num_load_libs++] = argv[++i];
@@ -160,52 +192,79 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    size_t src_len = 0;
-    char *src = read_file(input_file, &src_len);
-    if (!src) {
+    double t_read_start = 0, t_read_end = 0;
+    double t_parse_start = 0, t_parse_end = 0;
+    double t_jit_create_start = 0, t_jit_create_end = 0;
+    double t_load_lib_start = 0, t_load_lib_end = 0;
+    double t_compile_start = 0, t_compile_end = 0;
+
+    if (timing) t_read_start = now_us();
+    file_buf_t src = {0};
+    if (read_file(input_file, &src) != 0) {
         fprintf(stderr, "failed to read input file\n");
         return 1;
     }
+    if (timing) t_read_end = now_us();
 
+    if (timing) t_parse_start = now_us();
     char err[512] = {0};
-    lr_module_t *m = lr_parse_ll(src, src_len, err, sizeof(err));
+    lr_module_t *m = lr_parse_ll(src.data, src.len, err, sizeof(err));
     if (!m) {
         fprintf(stderr, "parse error: %s\n", err);
-        free(src);
+        free_file(&src);
         return 1;
     }
+    if (timing) t_parse_end = now_us();
 
+    if (timing) t_jit_create_start = now_us();
     lr_jit_t *jit = lr_jit_create();
     if (!jit) {
         fprintf(stderr, "failed to create JIT\n");
         lr_module_free(m);
-        free(src);
+        free_file(&src);
         return 1;
     }
+    if (timing) t_jit_create_end = now_us();
 
+    if (timing) t_load_lib_start = now_us();
     for (int i = 0; i < num_load_libs; i++) {
         if (lr_jit_load_library(jit, load_libs[i]) != 0) {
             fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
             lr_jit_destroy(jit);
             lr_module_free(m);
-            free(src);
+            free_file(&src);
             return 1;
         }
     }
+    if (timing) t_load_lib_end = now_us();
 
+    if (timing) t_compile_start = now_us();
     int rc = lr_jit_add_module(jit, m);
     if (rc != 0) {
         fprintf(stderr, "JIT compilation failed\n");
         lr_jit_destroy(jit);
         lr_module_free(m);
-        free(src);
+        free_file(&src);
         return 1;
     }
+    if (timing) t_compile_end = now_us();
 
     int run_rc = run_symbol(jit, func_name, sig, ignore_retcode);
 
+    if (timing) {
+        double read_us = t_read_end - t_read_start;
+        double parse_us = t_parse_end - t_parse_start;
+        double jit_create_us = t_jit_create_end - t_jit_create_start;
+        double load_lib_us = t_load_lib_end - t_load_lib_start;
+        double compile_us = t_compile_end - t_compile_start;
+        double total_us = read_us + parse_us + jit_create_us + load_lib_us + compile_us;
+        fprintf(stderr, "TIMING read_us=%.1f parse_us=%.1f jit_create_us=%.1f "
+                "load_lib_us=%.1f compile_us=%.1f total_us=%.1f\n",
+                read_us, parse_us, jit_create_us, load_lib_us, compile_us, total_us);
+    }
+
     lr_jit_destroy(jit);
     lr_module_free(m);
-    free(src);
+    free_file(&src);
     return run_rc;
 }
