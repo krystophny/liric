@@ -46,6 +46,52 @@ add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
 
+add_executable(bench_compat_check tools/bench_compat_check.c)
+target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
+
+add_executable(bench_ll tools/bench_ll.c)
+target_link_libraries(bench_ll PRIVATE ${LIRIC_PLATFORM_LIBS})
+
+find_program(LLVM_CONFIG_EXE llvm-config)
+if(LLVM_CONFIG_EXE)
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --includedir
+        OUTPUT_VARIABLE LLVM_INCLUDE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --ldflags
+        OUTPUT_VARIABLE LLVM_LDFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --libs core orcjit native irreader
+        OUTPUT_VARIABLE LLVM_LIBS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --system-libs
+        OUTPUT_VARIABLE LLVM_SYSTEM_LIBS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    separate_arguments(LLVM_LDFLAGS_LIST NATIVE_COMMAND "${LLVM_LDFLAGS}")
+    separate_arguments(LLVM_LIBS_LIST NATIVE_COMMAND "${LLVM_LIBS}")
+    separate_arguments(LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LLVM_SYSTEM_LIBS}")
+
+    add_executable(bench_lli_phases tools/bench_lli_phases.c)
+    target_include_directories(bench_lli_phases PRIVATE ${LLVM_INCLUDE_DIR})
+    target_link_options(bench_lli_phases PRIVATE ${LLVM_LDFLAGS_LIST})
+    target_link_libraries(
+        bench_lli_phases PRIVATE
+        ${LLVM_LIBS_LIST}
+        ${LLVM_SYSTEM_LIBS_LIST}
+        ${LIRIC_PLATFORM_LIBS}
+        stdc++
+    )
+else()
+    message(STATUS "llvm-config not found: bench_lli_phases target will not be built")
+endif()
+
 enable_testing()
 add_executable(test_liric
     tests/test_main.c

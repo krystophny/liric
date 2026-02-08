@@ -109,30 +109,31 @@ If signature/ABI is unsupported by the runner, classify as `unsupported_abi`.
 
 ## Benchmarking
 
-Standalone benchmark scripts compare liric JIT performance against LLVM on integration tests.
+Standalone C tools compare liric JIT performance against LLVM on integration tests.
 These do NOT depend on mass run results; they discover tests directly from CMakeLists.txt.
 
 ### Workflow
 
 1. **Compatibility check** (required first):
    ```bash
-   python3 -m tools.bench_compat_check --workers $(nproc)
+   ./build/bench_compat_check --timeout 15
    ```
    Runs each eligible integration test through lfortran LLVM native, liric JIT, and lli.
    Only tests producing identical output are included in benchmarks.
    Outputs: `/tmp/liric_bench/compat_api.txt`, `/tmp/liric_bench/compat_ll.txt`
 
-2. **API benchmark** (liric JIT vs lfortran LLVM native compile+run):
+2. **LL-file benchmark** (liric JIT vs LLVM lli):
    ```bash
-   python3 -m tools.bench_api --iters 3
+   ./build/bench_ll --iters 3
    ```
-   Times the full pipeline: `lfortran --show-llvm + liric_probe_runner` vs `lfortran -o binary && ./binary`.
+   Reports two metrics:
+   - WALL-CLOCK: subprocess `liric_probe_runner` vs subprocess `lli -O0`
+   - JIT-INTERNAL: in-process `liric` parse+compile vs in-process LLVM ORC parse+compile
 
-3. **LL-file benchmark** (liric JIT vs LLVM lli):
+3. **Optional per-file LLVM in-process phase timing**:
    ```bash
-   python3 -m tools.bench_ll --iters 3
+   ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
    ```
-   Times JIT execution on pre-generated .ll files: `liric_probe_runner` vs `lli -O0`.
 
 ### Test Selection for Benchmarks
 - Integration tests with `llvm` label from CMakeLists.txt
@@ -144,5 +145,4 @@ All artifacts in `/tmp/liric_bench/`:
 - `compat_check.jsonl`: per-test compatibility results
 - `compat_api.txt`: test names passing liric compat
 - `compat_ll.txt`: test names passing liric + lli compat
-- `bench_api.jsonl`: API benchmark timing data
 - `bench_ll.jsonl`: LL-file benchmark timing data
