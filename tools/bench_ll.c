@@ -47,12 +47,14 @@ typedef struct {
     double lli_wall_ms;
     double liric_parse_ms;
     double liric_compile_ms;
+    double liric_lookup_ms;
     double lli_parse_ms;
     double lli_jit_ms;
     double lli_lookup_ms;
-    double liric_internal_ms;
-    double lli_internal_ms;
-    double lli_internal_with_lookup_ms;
+    double liric_parse_compile_ms;
+    double liric_parse_compile_lookup_ms;
+    double lli_parse_jit_ms;
+    double lli_parse_jit_lookup_ms;
 } row_t;
 
 typedef struct {
@@ -318,10 +320,24 @@ static double percentile(const double *vals, size_t n, double p) {
     return out;
 }
 
-static int parse_probe_timing(const char *stderr_text, double *out_parse_ms, double *out_compile_ms) {
+static int parse_probe_timing(const char *stderr_text, double *out_parse_ms,
+                              double *out_compile_ms, double *out_lookup_ms) {
     const char *p = strstr(stderr_text, "TIMING ");
-    double read_us, parse_us, jit_create_us, load_lib_us, compile_us, total_us;
+    double read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us;
     if (!p) return 0;
+    if (sscanf(p,
+               "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf lookup_us=%lf exec_us=%lf total_us=%lf",
+               &read_us, &parse_us, &jit_create_us, &load_lib_us, &compile_us, &lookup_us, &exec_us, &total_us) == 8) {
+        (void)read_us;
+        (void)jit_create_us;
+        (void)load_lib_us;
+        (void)exec_us;
+        (void)total_us;
+        *out_parse_ms = parse_us / 1000.0;
+        *out_compile_ms = compile_us / 1000.0;
+        *out_lookup_ms = lookup_us / 1000.0;
+        return 1;
+    }
     if (sscanf(p,
                "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf total_us=%lf",
                &read_us, &parse_us, &jit_create_us, &load_lib_us, &compile_us, &total_us) == 6) {
@@ -331,6 +347,7 @@ static int parse_probe_timing(const char *stderr_text, double *out_parse_ms, dou
         (void)total_us;
         *out_parse_ms = parse_us / 1000.0;
         *out_compile_ms = compile_us / 1000.0;
+        *out_lookup_ms = 0.0;
         return 1;
     }
     return 0;
@@ -472,12 +489,14 @@ int main(int argc, char **argv) {
             double *lli_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *liric_parse = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *liric_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *lli_parse = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *lli_jit = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *lli_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_internal = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *lli_internal = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *lli_internal_with_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_parse_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_parse_compile_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *lli_parse_jit = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *lli_parse_jit_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             int skipped = 0;
             char work_tpl[] = "/tmp/liric_bench/work_ll_XXXXXX";
@@ -490,12 +509,14 @@ int main(int argc, char **argv) {
                 free(lli_wall);
                 free(liric_parse);
                 free(liric_compile);
+                free(liric_lookup);
                 free(lli_parse);
                 free(lli_jit);
                 free(lli_lookup);
-                free(liric_internal);
-                free(lli_internal);
-                free(lli_internal_with_lookup);
+                free(liric_parse_compile);
+                free(liric_parse_compile_lookup);
+                free(lli_parse_jit);
+                free(lli_parse_jit_lookup);
                 continue;
             }
             work_dir = work_tpl;
@@ -510,12 +531,14 @@ int main(int argc, char **argv) {
                 free(lli_wall);
                 free(liric_parse);
                 free(liric_compile);
+                free(liric_lookup);
                 free(lli_parse);
                 free(lli_jit);
                 free(lli_lookup);
-                free(liric_internal);
-                free(lli_internal);
-                free(lli_internal_with_lookup);
+                free(liric_parse_compile);
+                free(liric_parse_compile_lookup);
+                free(lli_parse_jit);
+                free(lli_parse_jit_lookup);
                 continue;
             }
 
@@ -524,7 +547,7 @@ int main(int argc, char **argv) {
                 char *lli_argv[6];
                 char *ph_argv[12];
                 cmd_result_t rp, rl, ri;
-                double parse_ms = 0.0, compile_ms = 0.0;
+                double parse_ms = 0.0, compile_ms = 0.0, lookup_ms = 0.0;
                 double lli_parse_ms = 0.0, lli_jit_ms = 0.0, lli_lookup_ms = 0.0;
 
                 probe_argv[0] = (char *)cfg.probe_runner;
@@ -537,7 +560,7 @@ int main(int argc, char **argv) {
                 probe_argv[7] = NULL;
 
                 rp = run_cmd(probe_argv, cfg.timeout_sec, NULL, work_dir);
-                if (rp.rc < 0 || !parse_probe_timing(rp.stderr_text, &parse_ms, &compile_ms)) {
+                if (rp.rc < 0 || !parse_probe_timing(rp.stderr_text, &parse_ms, &compile_ms, &lookup_ms)) {
                     skipped = 1;
                     free_cmd_result(&rp);
                     break;
@@ -545,7 +568,9 @@ int main(int argc, char **argv) {
                 liric_wall[ok_n] = rp.elapsed_ms;
                 liric_parse[ok_n] = parse_ms;
                 liric_compile[ok_n] = compile_ms;
-                liric_internal[ok_n] = parse_ms + compile_ms;
+                liric_lookup[ok_n] = lookup_ms;
+                liric_parse_compile[ok_n] = parse_ms + compile_ms;
+                liric_parse_compile_lookup[ok_n] = parse_ms + compile_ms + lookup_ms;
                 free_cmd_result(&rp);
 
                 lli_argv[0] = (char *)cfg.lli;
@@ -589,8 +614,8 @@ int main(int argc, char **argv) {
                 lli_parse[ok_n] = lli_parse_ms;
                 lli_jit[ok_n] = lli_jit_ms;
                 lli_lookup[ok_n] = lli_lookup_ms;
-                lli_internal[ok_n] = lli_parse_ms + lli_jit_ms;
-                lli_internal_with_lookup[ok_n] = lli_parse_ms + lli_jit_ms + lli_lookup_ms;
+                lli_parse_jit[ok_n] = lli_parse_ms + lli_jit_ms;
+                lli_parse_jit_lookup[ok_n] = lli_parse_ms + lli_jit_ms + lli_lookup_ms;
                 free_cmd_result(&ri);
 
                 ok_n++;
@@ -603,12 +628,14 @@ int main(int argc, char **argv) {
                 free(lli_wall);
                 free(liric_parse);
                 free(liric_compile);
+                free(liric_lookup);
                 free(lli_parse);
                 free(lli_jit);
                 free(lli_lookup);
-                free(liric_internal);
-                free(lli_internal);
-                free(lli_internal_with_lookup);
+                free(liric_parse_compile);
+                free(liric_parse_compile_lookup);
+                free(lli_parse_jit);
+                free(lli_parse_jit_lookup);
                 continue;
             }
 
@@ -617,14 +644,17 @@ int main(int argc, char **argv) {
                 double ew = median(lli_wall, ok_n);
                 double lp = median(liric_parse, ok_n);
                 double lc = median(liric_compile, ok_n);
+                double ll = median(liric_lookup, ok_n);
                 double ep = median(lli_parse, ok_n);
                 double ej = median(lli_jit, ok_n);
                 double el = median(lli_lookup, ok_n);
-                double li = median(liric_internal, ok_n);
-                double ei = median(lli_internal, ok_n);
-                double eik = median(lli_internal_with_lookup, ok_n);
+                double li = median(liric_parse_compile, ok_n);
+                double lik = median(liric_parse_compile_lookup, ok_n);
+                double ei = median(lli_parse_jit, ok_n);
+                double eik = median(lli_parse_jit_lookup, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
-                double int_sp = li > 0 ? ei / li : 0.0;
+                double fair_sp = lik > 0 ? eik / lik : 0.0;
+                double legacy_sp = li > 0 ? ei / li : 0.0;
                 row_t row;
 
                 row.name = xstrdup(tests.items[i]);
@@ -632,12 +662,14 @@ int main(int argc, char **argv) {
                 row.lli_wall_ms = ew;
                 row.liric_parse_ms = lp;
                 row.liric_compile_ms = lc;
+                row.liric_lookup_ms = ll;
                 row.lli_parse_ms = ep;
                 row.lli_jit_ms = ej;
                 row.lli_lookup_ms = el;
-                row.liric_internal_ms = li;
-                row.lli_internal_ms = ei;
-                row.lli_internal_with_lookup_ms = eik;
+                row.liric_parse_compile_ms = li;
+                row.liric_parse_compile_lookup_ms = lik;
+                row.lli_parse_jit_ms = ei;
+                row.lli_parse_jit_lookup_ms = eik;
                 rowlist_push(&rows, row);
 
                 fprintf(jf,
@@ -645,14 +677,15 @@ int main(int argc, char **argv) {
                     "\"liric_wall_median_ms\":%.6f,\"lli_wall_median_ms\":%.6f,"
                     "\"wall_speedup\":%.6f,"
                     "\"liric_parse_median_ms\":%.6f,\"liric_compile_median_ms\":%.6f,"
+                    "\"liric_lookup_median_ms\":%.6f,"
                     "\"lli_parse_median_ms\":%.6f,\"lli_jit_median_ms\":%.6f,\"lli_lookup_median_ms\":%.6f,"
-                    "\"liric_internal_median_ms\":%.6f,\"lli_internal_median_ms\":%.6f,"
-                    "\"lli_internal_with_lookup_median_ms\":%.6f,"
-                    "\"internal_speedup\":%.6f}\n",
-                    tests.items[i], ok_n, lw, ew, wall_sp, lp, lc, ep, ej, el, li, ei, eik, int_sp);
+                    "\"liric_parse_compile_median_ms\":%.6f,\"liric_parse_compile_lookup_median_ms\":%.6f,"
+                    "\"lli_parse_jit_median_ms\":%.6f,\"lli_parse_jit_lookup_median_ms\":%.6f,"
+                    "\"materialization_speedup\":%.6f,\"legacy_parse_jit_speedup\":%.6f}\n",
+                    tests.items[i], ok_n, lw, ew, wall_sp, lp, lc, ll, ep, ej, el, li, lik, ei, eik, fair_sp, legacy_sp);
 
-                printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx), internal %.3fms vs %.3fms (%.2fx)\n",
-                       i + 1, tests.n, tests.items[i], lw, ew, wall_sp, li, ei, int_sp);
+                printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx), materialized %.3fms vs %.3fms (%.2fx)\n",
+                       i + 1, tests.n, tests.items[i], lw, ew, wall_sp, lik, eik, fair_sp);
             }
 
             free(ll_path);
@@ -660,12 +693,14 @@ int main(int argc, char **argv) {
             free(lli_wall);
             free(liric_parse);
             free(liric_compile);
+            free(liric_lookup);
             free(lli_parse);
             free(lli_jit);
             free(lli_lookup);
-            free(liric_internal);
-            free(lli_internal);
-            free(lli_internal_with_lookup);
+            free(liric_parse_compile);
+            free(liric_parse_compile_lookup);
+            free(lli_parse_jit);
+            free(lli_parse_jit_lookup);
         }
 
         fclose(jf);
@@ -680,20 +715,22 @@ int main(int argc, char **argv) {
         double *ew = (double *)malloc(rows.n * sizeof(double));
         double *lp = (double *)malloc(rows.n * sizeof(double));
         double *lc = (double *)malloc(rows.n * sizeof(double));
+        double *ll = (double *)malloc(rows.n * sizeof(double));
         double *ep = (double *)malloc(rows.n * sizeof(double));
         double *ej = (double *)malloc(rows.n * sizeof(double));
         double *el = (double *)malloc(rows.n * sizeof(double));
         double *li = (double *)malloc(rows.n * sizeof(double));
+        double *lik = (double *)malloc(rows.n * sizeof(double));
         double *ei = (double *)malloc(rows.n * sizeof(double));
         double *eik = (double *)malloc(rows.n * sizeof(double));
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
-        double *int_sp = (double *)malloc(rows.n * sizeof(double));
+        double *fair_sp = (double *)malloc(rows.n * sizeof(double));
+        double *legacy_sp = (double *)malloc(rows.n * sizeof(double));
         size_t j;
         size_t wall_faster = 0;
-        size_t int_faster = 0;
-        double sum_lw = 0.0, sum_ew = 0.0, sum_lp = 0.0, sum_lc = 0.0;
-        double sum_ep = 0.0, sum_ej = 0.0, sum_el = 0.0;
-        double sum_li = 0.0, sum_ei = 0.0, sum_eik = 0.0;
+        size_t fair_faster = 0;
+        double sum_lw = 0.0, sum_ew = 0.0;
+        double sum_lik = 0.0, sum_eik = 0.0;
         char *summary_path = path_join2(cfg.bench_dir, "bench_ll_summary.json");
 
         for (j = 0; j < rows.n; j++) {
@@ -701,25 +738,22 @@ int main(int argc, char **argv) {
             ew[j] = rows.items[j].lli_wall_ms;
             lp[j] = rows.items[j].liric_parse_ms;
             lc[j] = rows.items[j].liric_compile_ms;
+            ll[j] = rows.items[j].liric_lookup_ms;
             ep[j] = rows.items[j].lli_parse_ms;
             ej[j] = rows.items[j].lli_jit_ms;
             el[j] = rows.items[j].lli_lookup_ms;
-            li[j] = rows.items[j].liric_internal_ms;
-            ei[j] = rows.items[j].lli_internal_ms;
-            eik[j] = rows.items[j].lli_internal_with_lookup_ms;
+            li[j] = rows.items[j].liric_parse_compile_ms;
+            lik[j] = rows.items[j].liric_parse_compile_lookup_ms;
+            ei[j] = rows.items[j].lli_parse_jit_ms;
+            eik[j] = rows.items[j].lli_parse_jit_lookup_ms;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
-            int_sp[j] = li[j] > 0 ? ei[j] / li[j] : 0.0;
+            fair_sp[j] = lik[j] > 0 ? eik[j] / lik[j] : 0.0;
+            legacy_sp[j] = li[j] > 0 ? ei[j] / li[j] : 0.0;
             if (wall_sp[j] > 1.0) wall_faster++;
-            if (int_sp[j] > 1.0) int_faster++;
+            if (fair_sp[j] > 1.0) fair_faster++;
             sum_lw += lw[j];
             sum_ew += ew[j];
-            sum_lp += lp[j];
-            sum_lc += lc[j];
-            sum_ep += ep[j];
-            sum_ej += ej[j];
-            sum_el += el[j];
-            sum_li += li[j];
-            sum_ei += ei[j];
+            sum_lik += lik[j];
             sum_eik += eik[j];
         }
 
@@ -736,17 +770,18 @@ int main(int argc, char **argv) {
         printf("  P90/P95:   %.2fx / %.2fx\n", percentile(wall_sp, rows.n, 90), percentile(wall_sp, rows.n, 95));
         printf("  Faster:    %zu/%zu (%.1f%%)\n", wall_faster, rows.n, 100.0 * (double)wall_faster / (double)rows.n);
 
-        printf("\n  JIT-INTERNAL (fair in-process compare: parse+compile vs parse+compile)\n");
+        printf("\n  JIT-INTERNAL (fair materialization: parse+compile+lookup vs parse+jit+lookup)\n");
         printf("  Median:    liric %.6f ms, lli %.6f ms, speedup %.2fx\n",
-               median(li, rows.n), median(ei, rows.n), median(int_sp, rows.n));
+               median(lik, rows.n), median(eik, rows.n), median(fair_sp, rows.n));
         printf("  Aggregate: %.3f ms vs %.3f ms, speedup %.2fx\n",
-               sum_li, sum_ei, (sum_li > 0 ? sum_ei / sum_li : 0.0));
-        printf("  Split:     liric parse %.3f ms + compile %.3f ms | lli parse %.3f ms + jit %.3f ms (+ lookup %.3f ms)\n",
-               median(lp, rows.n), median(lc, rows.n), median(ep, rows.n), median(ej, rows.n), median(el, rows.n));
-        printf("  Material.: lli parse+jit+lookup median %.6f ms (aggregate %.3f ms)\n",
-               median(eik, rows.n), sum_eik);
-        printf("  P90/P95:   %.2fx / %.2fx\n", percentile(int_sp, rows.n, 90), percentile(int_sp, rows.n, 95));
-        printf("  Faster:    %zu/%zu (%.1f%%)\n", int_faster, rows.n, 100.0 * (double)int_faster / (double)rows.n);
+               sum_lik, sum_eik, (sum_lik > 0 ? sum_eik / sum_lik : 0.0));
+        printf("  Split:     liric parse %.3f ms + compile %.3f ms + lookup %.3f ms | lli parse %.3f ms + jit %.3f ms + lookup %.3f ms\n",
+               median(lp, rows.n), median(lc, rows.n), median(ll, rows.n),
+               median(ep, rows.n), median(ej, rows.n), median(el, rows.n));
+        printf("  P90/P95:   %.2fx / %.2fx\n", percentile(fair_sp, rows.n, 90), percentile(fair_sp, rows.n, 95));
+        printf("  Faster:    %zu/%zu (%.1f%%)\n", fair_faster, rows.n, 100.0 * (double)fair_faster / (double)rows.n);
+        printf("  Legacy:    parse+compile vs parse+jit speedup median %.2fx (not materialization-fair)\n",
+               median(legacy_sp, rows.n));
 
         printf("\n  Results: %s\n", jsonl_path);
         {
@@ -764,25 +799,31 @@ int main(int argc, char **argv) {
                         "\"lli_aggregate_ms\":%.6f"
                         "},"
                         "\"internal\":{"
-                        "\"liric_median_ms\":%.6f,"
-                        "\"lli_median_ms\":%.6f,"
+                        "\"liric_materialized_median_ms\":%.6f,"
+                        "\"lli_materialized_median_ms\":%.6f,"
                         "\"speedup_median\":%.6f,"
-                        "\"liric_aggregate_ms\":%.6f,"
-                        "\"lli_aggregate_ms\":%.6f,"
+                        "\"liric_materialized_aggregate_ms\":%.6f,"
+                        "\"lli_materialized_aggregate_ms\":%.6f,"
                         "\"liric_parse_median_ms\":%.6f,"
                         "\"liric_compile_median_ms\":%.6f,"
+                        "\"liric_lookup_median_ms\":%.6f,"
                         "\"lli_parse_median_ms\":%.6f,"
                         "\"lli_jit_median_ms\":%.6f,"
                         "\"lli_lookup_median_ms\":%.6f,"
+                        "\"liric_parse_compile_median_ms\":%.6f,"
+                        "\"liric_parse_compile_lookup_median_ms\":%.6f,"
+                        "\"lli_parse_jit_median_ms\":%.6f,"
                         "\"lli_parse_jit_lookup_median_ms\":%.6f,"
-                        "\"lli_parse_jit_lookup_aggregate_ms\":%.6f"
+                        "\"lli_parse_jit_lookup_aggregate_ms\":%.6f,"
+                        "\"legacy_parse_jit_speedup_median\":%.6f"
                         "}"
                         "}\n",
                         rows.n, cfg.iters,
                         median(lw, rows.n), median(ew, rows.n), median(wall_sp, rows.n), sum_lw, sum_ew,
-                        median(li, rows.n), median(ei, rows.n), median(int_sp, rows.n), sum_li, sum_ei,
-                        median(lp, rows.n), median(lc, rows.n), median(ep, rows.n), median(ej, rows.n), median(el, rows.n),
-                        median(eik, rows.n), sum_eik);
+                        median(lik, rows.n), median(eik, rows.n), median(fair_sp, rows.n), sum_lik, sum_eik,
+                        median(lp, rows.n), median(lc, rows.n), median(ll, rows.n), median(ep, rows.n), median(ej, rows.n), median(el, rows.n),
+                        median(li, rows.n), median(lik, rows.n), median(ei, rows.n), median(eik, rows.n), sum_eik,
+                        median(legacy_sp, rows.n));
                 fclose(sf);
             }
         }
@@ -792,14 +833,17 @@ int main(int argc, char **argv) {
         free(ew);
         free(lp);
         free(lc);
+        free(ll);
         free(ep);
         free(ej);
         free(el);
         free(li);
+        free(lik);
         free(ei);
         free(eik);
         free(wall_sp);
-        free(int_sp);
+        free(fair_sp);
+        free(legacy_sp);
         free(summary_path);
     }
 

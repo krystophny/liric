@@ -87,16 +87,10 @@ static void free_file(file_buf_t *f) {
     }
 }
 
-static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int ignore_retcode) {
-    void *sym = lr_jit_get_function(jit, func_name);
+static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     char argv0[] = "liric";
     char *host_argv[] = {argv0, NULL};
     int host_argc = 1;
-
-    if (!sym) {
-        fprintf(stderr, "function '%s' not found\n", func_name);
-        return 3;
-    }
 
     if (strcmp(sig, "i32") == 0) {
         int32_t (*fn)(void) = NULL;
@@ -197,6 +191,8 @@ int main(int argc, char **argv) {
     double t_jit_create_start = 0, t_jit_create_end = 0;
     double t_load_lib_start = 0, t_load_lib_end = 0;
     double t_compile_start = 0, t_compile_end = 0;
+    double t_lookup_start = 0, t_lookup_end = 0;
+    double t_exec_start = 0, t_exec_end = 0;
 
     if (timing) t_read_start = now_us();
     file_buf_t src = {0};
@@ -249,7 +245,20 @@ int main(int argc, char **argv) {
     }
     if (timing) t_compile_end = now_us();
 
-    int run_rc = run_symbol(jit, func_name, sig, ignore_retcode);
+    if (timing) t_lookup_start = now_us();
+    void *sym = lr_jit_get_function(jit, func_name);
+    if (timing) t_lookup_end = now_us();
+    if (!sym) {
+        fprintf(stderr, "function '%s' not found\n", func_name);
+        lr_jit_destroy(jit);
+        lr_module_free(m);
+        free_file(&src);
+        return 3;
+    }
+
+    if (timing) t_exec_start = now_us();
+    int run_rc = run_symbol_ptr(sym, sig, ignore_retcode);
+    if (timing) t_exec_end = now_us();
 
     if (timing) {
         double read_us = t_read_end - t_read_start;
@@ -257,10 +266,12 @@ int main(int argc, char **argv) {
         double jit_create_us = t_jit_create_end - t_jit_create_start;
         double load_lib_us = t_load_lib_end - t_load_lib_start;
         double compile_us = t_compile_end - t_compile_start;
-        double total_us = read_us + parse_us + jit_create_us + load_lib_us + compile_us;
+        double lookup_us = t_lookup_end - t_lookup_start;
+        double exec_us = t_exec_end - t_exec_start;
+        double total_us = read_us + parse_us + jit_create_us + load_lib_us + compile_us + lookup_us + exec_us;
         fprintf(stderr, "TIMING read_us=%.1f parse_us=%.1f jit_create_us=%.1f "
-                "load_lib_us=%.1f compile_us=%.1f total_us=%.1f\n",
-                read_us, parse_us, jit_create_us, load_lib_us, compile_us, total_us);
+                "load_lib_us=%.1f compile_us=%.1f lookup_us=%.1f exec_us=%.1f total_us=%.1f\n",
+                read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us);
     }
 
     lr_jit_destroy(jit);

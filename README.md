@@ -103,7 +103,7 @@ Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`
 | Aggregate | 10024 ms | 20606 ms | 2.06x |
 | P90 / P95 | - | - | 2.00x / 3.00x |
 
-| Metric | liric internal | lli internal | Internal speedup |
+| Metric | liric parse+compile | lli parse+jit | Legacy speedup |
 |--------|---------------:|-------------:|-----------------:|
 | Median | 0.368150 ms | 0.223440 ms | **0.54x** |
 | Aggregate | 590.492 ms | 309.075 ms | 0.52x |
@@ -115,7 +115,9 @@ Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`
 | compile/jit | 0.054450 ms | 0.003066 ms |
 | lookup/materialization | n/a | 3.331356 ms |
 
-The internal metric remains parse+compile parity (`liric`: parse+compile vs `LLVM`: parse+jit). `bench_ll_summary.json` additionally tracks `parse+jit+lookup` for LLVM materialization visibility.
+`bench_ll` now uses materialization-fair internal speedup as the primary metric:
+`liric` parse+compile+lookup vs `LLVM` parse+jit+lookup. The parse+compile vs
+parse+jit value is still emitted as a legacy metric for diagnostic use.
 
 ## License
 
