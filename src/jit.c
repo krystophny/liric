@@ -114,6 +114,72 @@ static uint64_t llvm_copysign_f32_bits(uint64_t x_bits, uint64_t y_bits) {
     return (uint64_t)out_bits;
 }
 
+static uint64_t llvm_sqrt_f64_bits(uint64_t x_bits) {
+    double x = 0.0, out = 0.0;
+    uint64_t out_bits = 0;
+    memcpy(&x, &x_bits, sizeof(x_bits));
+    out = sqrt(x);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return out_bits;
+}
+
+static uint64_t llvm_exp_f64_bits(uint64_t x_bits) {
+    double x = 0.0, out = 0.0;
+    uint64_t out_bits = 0;
+    memcpy(&x, &x_bits, sizeof(x_bits));
+    out = exp(x);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return out_bits;
+}
+
+static uint64_t llvm_pow_f64_bits(uint64_t x_bits, uint64_t y_bits) {
+    double x = 0.0, y = 0.0, out = 0.0;
+    uint64_t out_bits = 0;
+    memcpy(&x, &x_bits, sizeof(x_bits));
+    memcpy(&y, &y_bits, sizeof(y_bits));
+    out = pow(x, y);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return out_bits;
+}
+
+static uint64_t llvm_copysign_f64_bits(uint64_t x_bits, uint64_t y_bits) {
+    double x = 0.0, y = 0.0, out = 0.0;
+    uint64_t out_bits = 0;
+    memcpy(&x, &x_bits, sizeof(x_bits));
+    memcpy(&y, &y_bits, sizeof(y_bits));
+    out = copysign(x, y);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return out_bits;
+}
+
+static uint64_t llvm_powi_f32_bits(uint64_t x_bits, uint64_t e_bits) {
+    uint32_t in_bits = (uint32_t)x_bits;
+    int32_t e = (int32_t)e_bits;
+    float x = 0.0f, out = 0.0f;
+    uint32_t out_bits = 0;
+    memcpy(&x, &in_bits, sizeof(in_bits));
+    out = powf(x, (float)e);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return (uint64_t)out_bits;
+}
+
+static uint64_t llvm_powi_f64_bits(uint64_t x_bits, uint64_t e_bits) {
+    double x = 0.0, out = 0.0;
+    uint64_t out_bits = 0;
+    int32_t e = (int32_t)e_bits;
+    memcpy(&x, &x_bits, sizeof(x_bits));
+    out = pow(x, (double)e);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return out_bits;
+}
+
+static void llvm_memset_p0i8_i64(void *dst, uint64_t val, int64_t len, uint64_t is_volatile) {
+    (void)is_volatile;
+    if (!dst || len <= 0)
+        return;
+    memset(dst, (int)(uint8_t)val, (size_t)len);
+}
+
 static void llvm_memset_p0i8_i32(void *dst, uint64_t val, int32_t len, uint64_t is_volatile) {
     (void)is_volatile;
     if (!dst || len <= 0)
@@ -328,9 +394,16 @@ static void register_builtin_symbols(lr_jit_t *j) {
     lr_jit_add_symbol(j, "llvm.fabs.f32", (void *)(uintptr_t)&llvm_fabs_f32_bits);
     lr_jit_add_symbol(j, "llvm.fabs.f64", (void *)(uintptr_t)&llvm_fabs_f64_bits);
     lr_jit_add_symbol(j, "llvm.sqrt.f32", (void *)(uintptr_t)&llvm_sqrt_f32_bits);
+    lr_jit_add_symbol(j, "llvm.sqrt.f64", (void *)(uintptr_t)&llvm_sqrt_f64_bits);
     lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32_bits);
+    lr_jit_add_symbol(j, "llvm.exp.f64", (void *)(uintptr_t)&llvm_exp_f64_bits);
+    lr_jit_add_symbol(j, "llvm.pow.f64", (void *)(uintptr_t)&llvm_pow_f64_bits);
     lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32_bits);
+    lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64_bits);
+    lr_jit_add_symbol(j, "llvm.powi.f32", (void *)(uintptr_t)&llvm_powi_f32_bits);
+    lr_jit_add_symbol(j, "llvm.powi.f64", (void *)(uintptr_t)&llvm_powi_f64_bits);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
 }
