@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -105,6 +106,23 @@ static char *xstrdup(const char *s) {
     if (!p) die("out of memory");
     memcpy(p, s, n + 1);
     return p;
+}
+
+static char *to_abs_path(const char *path) {
+    char cwd[PATH_MAX];
+    size_t nc, np;
+    char *out;
+    if (!path) return NULL;
+    if (path[0] == '/') return xstrdup(path);
+    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed: %s", strerror(errno));
+    nc = strlen(cwd);
+    np = strlen(path);
+    out = (char *)malloc(nc + 1 + np + 1);
+    if (!out) die("out of memory");
+    memcpy(out, cwd, nc);
+    out[nc] = '/';
+    memcpy(out + nc + 1, path, np + 1);
+    return out;
 }
 
 static void strlist_init(strlist_t *l) {
@@ -279,7 +297,7 @@ static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
 }
 
 static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *stdout_path,
-                            const char *env_lib_dir) {
+                            const char *env_lib_dir, const char *work_dir) {
     cmd_result_t r;
     char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
     char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
@@ -309,6 +327,7 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *std
     if (pid == 0) {
         int fdout;
         int fderr;
+        if (work_dir && chdir(work_dir) != 0) _exit(127);
         if (env_lib_dir) {
             setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
             setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
@@ -811,6 +830,12 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!file_exists(cfg.runtime_lib)) die("runtime lib not found: %s", cfg.runtime_lib);
     if (!file_exists(cfg.cmake)) die("cmake file not found: %s", cfg.cmake);
 
+    cfg.lfortran = to_abs_path(cfg.lfortran);
+    cfg.probe_runner = to_abs_path(cfg.probe_runner);
+    cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
+    cfg.cmake = to_abs_path(cfg.cmake);
+    if (strchr(cfg.lli, '/')) cfg.lli = to_abs_path(cfg.lli);
+
     return cfg;
 }
 
@@ -894,6 +919,8 @@ int main(int argc, char **argv) {
         int llvm_rc = -1, liric_rc = -1, lli_rc = -1;
         char *error = xstrdup("");
         char *n_llvm_out = NULL, *n_liric_out = NULL, *n_lli_out = NULL;
+        char work_tpl[] = "/tmp/liric_bench/work_compat_XXXXXX";
+        const char *work_dir = NULL;
         size_t j;
 
         if (!t->llvm || t->expected_fail || t->extrafiles.n > 0 ||
@@ -905,6 +932,18 @@ int main(int argc, char **argv) {
         }
 
         if (cfg.limit > 0 && (int)processed >= cfg.limit) break;
+
+        if (!mkdtemp(work_tpl)) {
+            free(error);
+            error = xstrdup("failed to create temp work dir");
+            write_json_row(jsonl, t->name, t->source, t->options_joined,
+                           llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                           llvm_rc, liric_rc, lli_rc, error);
+            UPDATE_STATS_AND_PROGRESS();
+            free(error);
+            continue;
+        }
+        work_dir = work_tpl;
 
         ll_path = path_join2(ll_dir, t->name);
         {
@@ -923,7 +962,7 @@ int main(int argc, char **argv) {
         emit_argv[3 + t->extra_args.n] = t->source;
         emit_argv[4 + t->extra_args.n] = NULL;
 
-        emit_r = run_cmd(emit_argv, cfg.timeout_sec, ll_path, NULL);
+        emit_r = run_cmd(emit_argv, cfg.timeout_sec, ll_path, NULL, NULL);
         if (emit_r.rc != 0 || !file_exists(ll_path)) {
             free(error);
             error = xstrdup("emit failed");
@@ -950,7 +989,7 @@ int main(int argc, char **argv) {
         compile_argv[4 + t->extra_args.n] = bin_path;
         compile_argv[5 + t->extra_args.n] = NULL;
 
-        compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, NULL);
+        compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, NULL, NULL);
         free(compile_argv);
         if (compile_r.rc != 0) {
             free(error);
@@ -972,7 +1011,7 @@ int main(int argc, char **argv) {
             runv[0] = bin_path;
             runv[1] = NULL;
             run_argv = runv;
-            run_r = run_cmd((char *const *)run_argv, cfg.timeout_sec, NULL, NULL);
+            run_r = run_cmd((char *const *)run_argv, cfg.timeout_sec, NULL, NULL, work_dir);
         }
         llvm_rc = run_r.rc;
         if (run_r.rc >= 0) {
@@ -993,7 +1032,7 @@ int main(int argc, char **argv) {
             jitv[5] = ll_path;
             jitv[6] = NULL;
             jit_argv = jitv;
-            jit_r = run_cmd((char *const *)jit_argv, cfg.timeout_sec, NULL, NULL);
+            jit_r = run_cmd((char *const *)jit_argv, cfg.timeout_sec, NULL, NULL, work_dir);
         }
         liric_rc = jit_r.rc;
         if (jit_r.rc >= 0 && llvm_ok) {
@@ -1011,7 +1050,7 @@ int main(int argc, char **argv) {
             lliv[4] = ll_path;
             lliv[5] = NULL;
             lli_argv = lliv;
-            lli_r = run_cmd((char *const *)lli_argv, cfg.timeout_sec, NULL, runtime_dir);
+            lli_r = run_cmd((char *const *)lli_argv, cfg.timeout_sec, NULL, runtime_dir, work_dir);
         }
         lli_rc = lli_r.rc;
         if (lli_r.rc >= 0 && llvm_ok) {

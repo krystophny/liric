@@ -120,6 +120,8 @@ These do NOT depend on mass run results; they discover tests directly from CMake
    ```
    Runs each eligible integration test through lfortran LLVM native, liric JIT, and lli.
    Only tests producing identical output are included in benchmarks.
+   Executed binaries run in isolated temp workdirs under `/tmp/liric_bench/`
+   so benchmark runs do not leave generated files in the repo root.
    Outputs: `/tmp/liric_bench/compat_api.txt`, `/tmp/liric_bench/compat_ll.txt`
 
 2. **LL-file benchmark** (liric JIT vs LLVM lli):

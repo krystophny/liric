@@ -69,6 +69,10 @@ Benchmark flow is fully C-based:
 ./build/bench_ll --iters 3
 ```
 
+Both harnesses run executed test binaries in isolated temporary working
+directories under `/tmp/liric_bench/` to avoid polluting the repository root
+with runtime-generated files.
+
 3. The fair in-process LLVM phase timer used by `bench_ll`:
 ```bash
 ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll

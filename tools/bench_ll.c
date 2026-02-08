@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -86,6 +87,23 @@ static char *xstrdup(const char *s) {
     if (!p) die("out of memory", NULL);
     memcpy(p, s, n + 1);
     return p;
+}
+
+static char *to_abs_path(const char *path) {
+    char cwd[PATH_MAX];
+    size_t nc, np;
+    char *out;
+    if (!path) return NULL;
+    if (path[0] == '/') return xstrdup(path);
+    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed", NULL);
+    nc = strlen(cwd);
+    np = strlen(path);
+    out = (char *)malloc(nc + 1 + np + 1);
+    if (!out) die("out of memory", NULL);
+    memcpy(out, cwd, nc);
+    out[nc] = '/';
+    memcpy(out + nc + 1, path, np + 1);
+    return out;
 }
 
 static char *path_join2(const char *a, const char *b) {
@@ -164,7 +182,8 @@ static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
     }
 }
 
-static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env_lib_dir) {
+static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env_lib_dir,
+                            const char *work_dir) {
     cmd_result_t r;
     char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
     char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
@@ -188,6 +207,7 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env
     if (pid < 0) die("fork failed", NULL);
 
     if (pid == 0) {
+        if (work_dir && chdir(work_dir) != 0) _exit(127);
         if (env_lib_dir) {
             setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
             setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
@@ -399,6 +419,11 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!file_exists(cfg.runtime_lib)) die("runtime lib not found", cfg.runtime_lib);
     if (!file_exists(cfg.lli_phases)) die("bench_lli_phases not found", cfg.lli_phases);
 
+    cfg.probe_runner = to_abs_path(cfg.probe_runner);
+    cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
+    cfg.lli_phases = to_abs_path(cfg.lli_phases);
+    if (strchr(cfg.lli, '/')) cfg.lli = to_abs_path(cfg.lli);
+
     return cfg;
 }
 
@@ -455,6 +480,25 @@ int main(int argc, char **argv) {
             double *lli_internal_with_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             int skipped = 0;
+            char work_tpl[] = "/tmp/liric_bench/work_ll_XXXXXX";
+            const char *work_dir = NULL;
+
+            if (!mkdtemp(work_tpl)) {
+                printf("  [%zu/%zu] %s: skipped (failed to create temp work dir)\n", i + 1, tests.n, tests.items[i]);
+                free(ll_path);
+                free(liric_wall);
+                free(lli_wall);
+                free(liric_parse);
+                free(liric_compile);
+                free(lli_parse);
+                free(lli_jit);
+                free(lli_lookup);
+                free(liric_internal);
+                free(lli_internal);
+                free(lli_internal_with_lookup);
+                continue;
+            }
+            work_dir = work_tpl;
 
             sprintf(ll_path, "%s.ll", ll_base);
             free(ll_base);
@@ -492,7 +536,7 @@ int main(int argc, char **argv) {
                 probe_argv[6] = ll_path;
                 probe_argv[7] = NULL;
 
-                rp = run_cmd(probe_argv, cfg.timeout_sec, NULL);
+                rp = run_cmd(probe_argv, cfg.timeout_sec, NULL, work_dir);
                 if (rp.rc < 0 || !parse_probe_timing(rp.stderr_text, &parse_ms, &compile_ms)) {
                     skipped = 1;
                     free_cmd_result(&rp);
@@ -511,7 +555,7 @@ int main(int argc, char **argv) {
                 lli_argv[4] = ll_path;
                 lli_argv[5] = NULL;
 
-                rl = run_cmd(lli_argv, cfg.timeout_sec, runtime_dir);
+                rl = run_cmd(lli_argv, cfg.timeout_sec, runtime_dir, work_dir);
                 if (rl.rc < 0) {
                     skipped = 1;
                     free_cmd_result(&rl);
@@ -533,7 +577,7 @@ int main(int argc, char **argv) {
                 ph_argv[10] = ll_path;
                 ph_argv[11] = NULL;
 
-                ri = run_cmd(ph_argv, cfg.timeout_sec, NULL);
+                ri = run_cmd(ph_argv, cfg.timeout_sec, NULL, work_dir);
                 if (ri.rc != 0 ||
                     !json_get_number(ri.stdout_text, "\"parse_ms\"", &lli_parse_ms) ||
                     !json_get_number(ri.stdout_text, "\"jit_ms\"", &lli_jit_ms) ||
