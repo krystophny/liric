@@ -182,27 +182,37 @@ lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
 }
 
 lr_operand_t lr_op_vreg(uint32_t vreg, lr_type_t *type) {
-    return (lr_operand_t){ .kind = LR_VAL_VREG, .vreg = vreg, .type = type };
+    return (lr_operand_t){
+        .kind = LR_VAL_VREG, .vreg = vreg, .type = type, .global_offset = 0
+    };
 }
 
 lr_operand_t lr_op_imm_i64(int64_t val, lr_type_t *type) {
-    return (lr_operand_t){ .kind = LR_VAL_IMM_I64, .imm_i64 = val, .type = type };
+    return (lr_operand_t){
+        .kind = LR_VAL_IMM_I64, .imm_i64 = val, .type = type, .global_offset = 0
+    };
 }
 
 lr_operand_t lr_op_imm_f64(double val, lr_type_t *type) {
-    return (lr_operand_t){ .kind = LR_VAL_IMM_F64, .imm_f64 = val, .type = type };
+    return (lr_operand_t){
+        .kind = LR_VAL_IMM_F64, .imm_f64 = val, .type = type, .global_offset = 0
+    };
 }
 
 lr_operand_t lr_op_block(uint32_t id) {
-    return (lr_operand_t){ .kind = LR_VAL_BLOCK, .block_id = id };
+    return (lr_operand_t){
+        .kind = LR_VAL_BLOCK, .block_id = id, .global_offset = 0
+    };
 }
 
 lr_operand_t lr_op_global(uint32_t id, lr_type_t *type) {
-    return (lr_operand_t){ .kind = LR_VAL_GLOBAL, .global_id = id, .type = type };
+    return (lr_operand_t){
+        .kind = LR_VAL_GLOBAL, .global_id = id, .type = type, .global_offset = 0
+    };
 }
 
 lr_operand_t lr_op_null(lr_type_t *type) {
-    return (lr_operand_t){ .kind = LR_VAL_NULL, .type = type };
+    return (lr_operand_t){ .kind = LR_VAL_NULL, .type = type, .global_offset = 0 };
 }
 
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name) {
@@ -368,6 +378,10 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         const char *name = lr_module_symbol_name(m, op->global_id);
         if (name) fprintf(out, "@%s", name);
         else fprintf(out, "@g%u", op->global_id);
+        if (op->global_offset > 0)
+            fprintf(out, "+%ld", (long)op->global_offset);
+        else if (op->global_offset < 0)
+            fprintf(out, "%ld", (long)op->global_offset);
         break;
     }
     case LR_VAL_NULL:    fprintf(out, "null"); break;

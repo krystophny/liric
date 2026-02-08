@@ -376,6 +376,28 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return addr;
 }
 
+static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->relocs)
+            continue;
+        uint8_t *base = lookup_symbol(j, g->name);
+        if (!base)
+            continue;
+        for (lr_reloc_t *r = g->relocs; r; r = r->next) {
+            void *target = lookup_symbol(j, r->symbol_name);
+            if (!target)
+                continue;
+            uintptr_t addr = (uintptr_t)((intptr_t)target + r->addend);
+            size_t global_size = lr_type_size(g->type);
+            if (global_size == 0)
+                global_size = sizeof(void *);
+            if (r->offset + sizeof(uintptr_t) <= global_size)
+                memcpy(base + r->offset, &addr, sizeof(addr));
+        }
+    }
+    return 0;
+}
+
 static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
     /* First pass: allocate space and copy raw init_data for all globals */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
@@ -412,27 +434,8 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
         lr_jit_add_symbol(j, g->name, dst);
     }
 
-    /* Second pass: apply pointer relocations now that all globals are placed */
-    for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (!g->relocs)
-            continue;
-        uint8_t *base = lookup_symbol(j, g->name);
-        if (!base)
-            continue;
-        for (lr_reloc_t *r = g->relocs; r; r = r->next) {
-            void *target = lookup_symbol(j, r->symbol_name);
-            if (!target)
-                continue;
-            uintptr_t addr = (uintptr_t)target;
-            size_t global_size = lr_type_size(g->type);
-            if (global_size == 0)
-                global_size = sizeof(void *);
-            if (r->offset + sizeof(uintptr_t) <= global_size)
-                memcpy(base + r->offset, &addr, sizeof(addr));
-
-        }
-    }
-    return 0;
+    /* Initial relocation pass may already resolve globals/external symbols. */
+    return apply_module_global_relocs(j, m);
 }
 
 static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
@@ -480,7 +483,8 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                 }
 
                 op->kind = LR_VAL_IMM_I64;
-                op->imm_i64 = (int64_t)(intptr_t)addr;
+                op->imm_i64 = (int64_t)(intptr_t)addr + op->global_offset;
+                op->global_offset = 0;
             }
         }
     }
@@ -505,6 +509,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
 
     if (nfuncs == 0) {
+        if (apply_module_global_relocs(j, m) != 0)
+            return -1;
         if (make_executable(j) != 0)
             return -1;
         return 0;
@@ -576,6 +582,11 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         }
     }
     JIT_PROF_END(compile_loop);
+
+    /* Re-apply relocations after module-defined function symbols exist.
+       This fixes globals (e.g. vtables) referencing internal functions. */
+    if (apply_module_global_relocs(j, m) != 0)
+        return -1;
 
     JIT_PROF_START(make_exec);
     if (make_executable(j) != 0)

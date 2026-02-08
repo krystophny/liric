@@ -315,6 +315,26 @@ static void emit_mov_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
     }
 }
 
+/* Emit: add/sub reg, imm32 (sign-extended) */
+static void emit_add_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
+    if (imm == 0)
+        return;
+    if (imm > INT32_MAX || imm < INT32_MIN) {
+        emit_mov_imm(ctx, X86_R11, imm);
+        encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x01, dst, X86_R11, 8);
+        return;
+    }
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, dst >= 8));
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x81);
+    if (imm >= 0) {
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 0, dst)); /* ADD */
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)(int32_t)imm);
+    } else {
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 5, dst)); /* SUB */
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)(int32_t)(-imm));
+    }
+}
+
 static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
     for (lr_func_t *f = mod->first_func; f; f = f->next) {
         if (f->first_block && strcmp(f->name, name) == 0)
@@ -427,6 +447,8 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
             lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
                               LR_RELOC_X86_64_GOTPCREL);
         }
+        if (op->global_offset != 0)
+            emit_add_imm(ctx, reg, op->global_offset);
     }
 }
 

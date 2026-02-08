@@ -331,6 +331,7 @@ static lr_type_t *resolve_type(lr_parser_t *p, const char *name) {
 
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
+static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx);
 
 static lr_type_t *call_result_type(lr_type_t *ty) {
     if (ty && ty->kind == LR_TYPE_FUNC)
@@ -505,21 +506,59 @@ static void skip_attrs(lr_parser_t *p) {
 
 static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty) {
     bool wrapped = false;
+    bool offset_ok = true;
+    int64_t byte_offset = 0;
     expect(p, LR_TOK_GETELEMENTPTR);
     skip_attrs(p);
     if (match(p, LR_TOK_LPAREN))
         wrapped = true;
-    (void)parse_type(p);
+    lr_type_t *source_ty = parse_type(p);
+    lr_type_t *cur_ty = source_ty;
+    uint32_t idx_pos = 0;
     expect(p, LR_TOK_COMMA);
 
     lr_operand_t base = parse_typed_operand(p);
-    while (match(p, LR_TOK_COMMA))
-        (void)parse_typed_operand(p);
+    while (match(p, LR_TOK_COMMA)) {
+        lr_operand_t idx_op = parse_typed_operand(p);
+        int64_t idx = 0;
+        if (offset_ok && idx_op.kind == LR_VAL_IMM_I64) {
+            idx = idx_op.imm_i64;
+        } else {
+            offset_ok = false;
+        }
+
+        if (!offset_ok)
+            continue;
+
+        if (idx_pos == 0) {
+            byte_offset += idx * (int64_t)lr_type_size(cur_ty);
+        } else if (cur_ty->kind == LR_TYPE_ARRAY) {
+            byte_offset += idx * (int64_t)lr_type_size(cur_ty->array.elem);
+            cur_ty = cur_ty->array.elem;
+        } else if (cur_ty->kind == LR_TYPE_STRUCT) {
+            if (idx < 0 || (uint64_t)idx >= cur_ty->struc.num_fields) {
+                offset_ok = false;
+            } else {
+                byte_offset += (int64_t)struct_field_offset(cur_ty, (uint32_t)idx);
+                cur_ty = cur_ty->struc.fields[(uint32_t)idx];
+            }
+        } else {
+            byte_offset += idx * (int64_t)lr_type_size(cur_ty);
+        }
+
+        idx_pos++;
+    }
     if (wrapped)
         expect(p, LR_TOK_RPAREN);
 
-    if (base.kind == LR_VAL_GLOBAL)
-        return lr_op_global(base.global_id, result_ty);
+    if (base.kind == LR_VAL_GLOBAL) {
+        lr_operand_t out = lr_op_global(base.global_id, result_ty);
+        if (offset_ok)
+            out.global_offset = base.global_offset + byte_offset;
+        else
+            out.global_offset = base.global_offset;
+        return out;
+    }
     if (base.kind == LR_VAL_VREG)
         return lr_op_vreg(base.vreg, result_ty);
     if (base.kind == LR_VAL_NULL)
@@ -1358,6 +1397,7 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
             if (ref) {
                 lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
                 r->offset = field_off;
+                r->addend = gep.global_offset;
                 r->symbol_name = lr_arena_strdup(p->arena, ref, strlen(ref));
                 r->next = g->relocs;
                 g->relocs = r;
@@ -1379,6 +1419,7 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
             if (ref) {
                 lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
                 r->offset = field_off;
+                r->addend = src.global_offset;
                 r->symbol_name = lr_arena_strdup(p->arena, ref, strlen(ref));
                 r->next = g->relocs;
                 g->relocs = r;
@@ -1414,6 +1455,7 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
         }
         lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
         r->offset = field_off;
+        r->addend = 0;
         r->symbol_name = lr_arena_strdup(p->arena, ref_name, strlen(ref_name));
         r->next = g->relocs;
         g->relocs = r;
@@ -1621,6 +1663,7 @@ static void parse_global(lr_parser_t *p) {
             if (ref) {
                 lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
                 r->offset = 0;
+                r->addend = gep.global_offset;
                 r->symbol_name = lr_arena_strdup(p->arena, ref, strlen(ref));
                 r->next = g->relocs;
                 g->relocs = r;
@@ -1643,6 +1686,7 @@ static void parse_global(lr_parser_t *p) {
         g->init_size = sz;
         lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
         r->offset = 0;
+        r->addend = 0;
         r->symbol_name = lr_arena_strdup(p->arena, ref_name, strlen(ref_name));
         r->next = g->relocs;
         g->relocs = r;
