@@ -36,6 +36,7 @@ typedef struct {
     size_t pos;
     uint32_t stack_size;
     int32_t *stack_slots;
+    uint32_t *stack_slot_sizes;
     uint32_t num_stack_slots;
     int32_t *static_alloca_offsets;
     uint32_t num_static_alloca_offsets;
@@ -46,6 +47,12 @@ typedef struct {
     lr_objfile_ctx_t *obj_ctx;
     lr_module_t *mod;
 } x86_compile_ctx_t;
+
+static size_t align_up(size_t value, size_t align) {
+    if (align <= 1)
+        return value;
+    return ((value + align - 1) / align) * align;
+}
 
 static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
     size_t off = 0;
@@ -63,26 +70,37 @@ static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
     return off;
 }
 
-/* Allocate a stack slot for a vreg, return rbp offset (negative) */
-static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t size) {
+/* Allocate a stack slot for a vreg, return rbp offset (negative). */
+static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg,
+                          size_t size, size_t align) {
     while (vreg >= ctx->num_stack_slots) {
         uint32_t old = ctx->num_stack_slots;
         uint32_t new_cap = old == 0 ? 64 : old * 2;
         int32_t *ns = lr_arena_array(ctx->arena, int32_t, new_cap);
+        uint32_t *ss = lr_arena_array(ctx->arena, uint32_t, new_cap);
         if (old > 0) memcpy(ns, ctx->stack_slots, old * sizeof(int32_t));
-        for (uint32_t i = old; i < new_cap; i++) ns[i] = 0;
+        if (old > 0) memcpy(ss, ctx->stack_slot_sizes, old * sizeof(uint32_t));
+        for (uint32_t i = old; i < new_cap; i++) {
+            ns[i] = 0;
+            ss[i] = 0;
+        }
         ctx->stack_slots = ns;
+        ctx->stack_slot_sizes = ss;
         ctx->num_stack_slots = new_cap;
     }
 
-    if (ctx->stack_slots[vreg] != 0)
+    if (ctx->stack_slots[vreg] != 0) {
+        /* Prescan reserves the maximum size for each vreg. */
         return ctx->stack_slots[vreg];
+    }
 
     if (size < 8) size = 8;
-    ctx->stack_size += size;
-    ctx->stack_size = (ctx->stack_size + size - 1) & ~(uint32_t)(size - 1);
+    if (align < 8) align = 8;
+    ctx->stack_size = (uint32_t)align_up(ctx->stack_size, align);
+    ctx->stack_size += (uint32_t)size;
     int32_t offset = -(int32_t)ctx->stack_size;
     ctx->stack_slots[vreg] = offset;
+    ctx->stack_slot_sizes[vreg] = (uint32_t)size;
     return offset;
 }
 
@@ -291,13 +309,13 @@ static void emit_fp_setcc(uint8_t *buf, size_t *pos, size_t len,
 
 /* Emit: mov reg, [rbp + offset] (load vreg from stack) */
 static void emit_load_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
-    int32_t off = alloc_slot(ctx, vreg, 8);
+    int32_t off = alloc_slot(ctx, vreg, 8, 8);
     encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x8B, reg, X86_RBP, off, 8);
 }
 
 /* Emit: mov [rbp + offset], reg (store reg to vreg stack slot) */
 static void emit_store_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
-    int32_t off = alloc_slot(ctx, vreg, 8);
+    int32_t off = alloc_slot(ctx, vreg, 8, 8);
     encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x89, reg, X86_RBP, off, 8);
 }
 
@@ -458,7 +476,7 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
 
 static void emit_load_fp_slot(x86_compile_ctx_t *ctx,
                                uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
-    int32_t off = alloc_slot(ctx, vreg, 8);
+    int32_t off = alloc_slot(ctx, vreg, 8, 8);
     uint8_t prefix = (fsize == 8) ? 0xF2 : 0xF3;
     encode_sse_mem(ctx->buf, &ctx->pos, ctx->buflen, prefix, 0x10, 0,
                    fpreg, X86_RBP, off);
@@ -466,7 +484,7 @@ static void emit_load_fp_slot(x86_compile_ctx_t *ctx,
 
 static void emit_store_fp_slot(x86_compile_ctx_t *ctx,
                                 uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
-    int32_t off = alloc_slot(ctx, vreg, 8);
+    int32_t off = alloc_slot(ctx, vreg, 8, 8);
     uint8_t prefix = (fsize == 8) ? 0xF2 : 0xF3;
     encode_sse_mem(ctx->buf, &ctx->pos, ctx->buflen, prefix, 0x11, 0,
                    fpreg, X86_RBP, off);
@@ -593,6 +611,67 @@ static void emit_movzx_mem(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t base,
     else if (mod == 2) emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)disp);
 }
 
+static void emit_mem_load_sized(x86_compile_ctx_t *ctx, uint8_t dst,
+                                uint8_t base, int32_t disp, uint8_t size) {
+    if (size < 4)
+        emit_movzx_mem(ctx, dst, base, disp, size);
+    else
+        encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x8B, dst, base, disp, size);
+}
+
+static void emit_mem_store_sized(x86_compile_ctx_t *ctx, uint8_t src,
+                                 uint8_t base, int32_t disp, uint8_t size) {
+    uint8_t opcode = (size == 1) ? 0x88 : 0x89;
+    encode_mem(ctx->buf, &ctx->pos, ctx->buflen, opcode, src, base, disp, size);
+}
+
+static void emit_mem_copy_base_to_base(x86_compile_ctx_t *ctx,
+                                       uint8_t dst_base, int32_t dst_disp,
+                                       uint8_t src_base, int32_t src_disp,
+                                       size_t bytes) {
+    const uint8_t scratch = X86_R11;
+    size_t off = 0;
+    while (bytes - off >= 8) {
+        emit_mem_load_sized(ctx, scratch, src_base, src_disp + (int32_t)off, 8);
+        emit_mem_store_sized(ctx, scratch, dst_base, dst_disp + (int32_t)off, 8);
+        off += 8;
+    }
+    if (bytes - off >= 4) {
+        emit_mem_load_sized(ctx, scratch, src_base, src_disp + (int32_t)off, 4);
+        emit_mem_store_sized(ctx, scratch, dst_base, dst_disp + (int32_t)off, 4);
+        off += 4;
+    }
+    if (bytes - off >= 2) {
+        emit_mem_load_sized(ctx, scratch, src_base, src_disp + (int32_t)off, 2);
+        emit_mem_store_sized(ctx, scratch, dst_base, dst_disp + (int32_t)off, 2);
+        off += 2;
+    }
+    if (bytes - off == 1) {
+        emit_mem_load_sized(ctx, scratch, src_base, src_disp + (int32_t)off, 1);
+        emit_mem_store_sized(ctx, scratch, dst_base, dst_disp + (int32_t)off, 1);
+    }
+}
+
+static void emit_mem_zero_base(x86_compile_ctx_t *ctx, uint8_t dst_base,
+                               int32_t dst_disp, size_t bytes) {
+    size_t off = 0;
+    emit_mov_imm(ctx, X86_RAX, 0);
+    while (bytes - off >= 8) {
+        emit_mem_store_sized(ctx, X86_RAX, dst_base, dst_disp + (int32_t)off, 8);
+        off += 8;
+    }
+    if (bytes - off >= 4) {
+        emit_mem_store_sized(ctx, X86_RAX, dst_base, dst_disp + (int32_t)off, 4);
+        off += 4;
+    }
+    if (bytes - off >= 2) {
+        emit_mem_store_sized(ctx, X86_RAX, dst_base, dst_disp + (int32_t)off, 2);
+        off += 2;
+    }
+    if (bytes - off == 1)
+        emit_mem_store_sized(ctx, X86_RAX, dst_base, dst_disp + (int32_t)off, 1);
+}
+
 static void emit_jmp(x86_compile_ctx_t *ctx, uint32_t target_block) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xE9);
     if (ctx->num_fixups < 4096) {
@@ -702,29 +781,43 @@ static void prescan_slots(x86_compile_ctx_t *ctx, lr_func_t *func) {
             switch (inst->op) {
             case LR_OP_ALLOCA: {
                 size_t elem_sz = lr_type_size(inst->type);
+                size_t elem_align = lr_type_align(inst->type);
                 if (elem_sz < 8) elem_sz = 8;
+                if (elem_align < 8) elem_align = 8;
                 bool use_static = (inst->num_operands == 0);
                 if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
                     inst->operands[0].imm_i64 == 1) {
                     use_static = true;
                 }
                 if (use_static) {
+                    ctx->stack_size = (uint32_t)align_up(ctx->stack_size, elem_align);
                     ctx->stack_size += (uint32_t)elem_sz;
-                    ctx->stack_size = (ctx->stack_size + 7) & ~7u;
                     set_static_alloca_offset(ctx, inst->dest, -(int32_t)ctx->stack_size);
                 }
-                alloc_slot(ctx, inst->dest, 8);
+                alloc_slot(ctx, inst->dest, 8, 8);
                 break;
             }
             case LR_OP_PHI:
-                alloc_slot(ctx, inst->dest, 8);
+                alloc_slot(ctx, inst->dest, 8, 8);
                 break;
             default:
                 if (inst->op != LR_OP_STORE && inst->op != LR_OP_BR &&
                     inst->op != LR_OP_CONDBR && inst->op != LR_OP_RET &&
                     inst->op != LR_OP_RET_VOID && inst->op != LR_OP_UNREACHABLE) {
-                    if (inst->type && inst->type->kind != LR_TYPE_VOID)
-                        alloc_slot(ctx, inst->dest, 8);
+                    if (inst->type && inst->type->kind != LR_TYPE_VOID) {
+                        size_t ty_sz = 8;
+                        size_t ty_align = 8;
+                        if (inst->op == LR_OP_LOAD) {
+                            size_t load_sz = lr_type_size(inst->type);
+                            size_t load_align = lr_type_align(inst->type);
+                            if (load_sz > 8) {
+                                ty_sz = load_sz;
+                                ty_align = load_align;
+                                if (ty_align < 8) ty_align = 8;
+                            }
+                        }
+                        alloc_slot(ctx, inst->dest, ty_sz, ty_align);
+                    }
                 }
                 break;
             }
@@ -732,7 +825,7 @@ static void prescan_slots(x86_compile_ctx_t *ctx, lr_func_t *func) {
     }
     /* Also ensure parameter vregs are allocated */
     for (uint32_t i = 0; i < func->num_params; i++)
-        alloc_slot(ctx, func->param_vregs[i], 8);
+        alloc_slot(ctx, func->param_vregs[i], 8, 8);
 }
 
 /*
@@ -775,6 +868,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .pos = 0,
         .stack_size = 0,
         .stack_slots = NULL,
+        .stack_slot_sizes = NULL,
         .num_stack_slots = 0,
         .static_alloca_offsets = NULL,
         .num_static_alloca_offsets = 0,
@@ -1003,46 +1097,57 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
             case LR_OP_LOAD: {
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
-                uint8_t sz = (uint8_t)lr_type_size(inst->type);
-                if (sz < 4) {
-                    emit_movzx_mem(&ctx, X86_RAX, X86_RAX, 0, sz);
+                size_t load_sz = lr_type_size(inst->type);
+                if (load_sz > 8) {
+                    size_t load_align = lr_type_align(inst->type);
+                    int32_t dst_off = alloc_slot(&ctx, inst->dest, load_sz, load_align);
+                    emit_mem_copy_base_to_base(&ctx, X86_RBP, dst_off, X86_RAX, 0, load_sz);
                 } else {
-                    encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8B, X86_RAX, X86_RAX, 0, sz);
+                    uint8_t sz = (uint8_t)load_sz;
+                    if (sz < 4) {
+                        emit_movzx_mem(&ctx, X86_RAX, X86_RAX, 0, sz);
+                    } else {
+                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8B, X86_RAX, X86_RAX, 0, sz);
+                    }
+                    emit_store_slot(&ctx, inst->dest, X86_RAX);
                 }
-                emit_store_slot(&ctx, inst->dest, X86_RAX);
                 break;
             }
             case LR_OP_STORE: {
                 emit_load_operand(&ctx, &inst->operands[1], X86_RCX);
                 size_t store_sz = lr_type_size(inst->operands[0].type);
+                if (store_sz == 0)
+                    store_sz = 8;
 
-                if (store_sz > 8 &&
-                    inst->operands[0].kind == LR_VAL_IMM_I64 &&
-                    inst->operands[0].imm_i64 == 0) {
-                    emit_mov_imm(&ctx, X86_RAX, 0);
-                    size_t rem = store_sz;
-                    int32_t off = 0;
-                    while (rem >= 8) {
-                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX, X86_RCX, off, 8);
-                        rem -= 8; off += 8;
+                if (store_sz > 8) {
+                    if (inst->operands[0].kind == LR_VAL_IMM_I64 &&
+                        inst->operands[0].imm_i64 == 0) {
+                        emit_mem_zero_base(&ctx, X86_RCX, 0, store_sz);
+                        break;
                     }
-                    if (rem >= 4) {
-                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX, X86_RCX, off, 4);
-                        rem -= 4; off += 4;
+
+                    if (inst->operands[0].kind == LR_VAL_VREG) {
+                        uint32_t vreg = inst->operands[0].vreg;
+                        size_t src_sz = 0;
+                        int32_t src_off = alloc_slot(&ctx, vreg, 8, 8);
+                        if (vreg < ctx.num_stack_slots)
+                            src_sz = ctx.stack_slot_sizes[vreg];
+                        if (src_sz > store_sz)
+                            src_sz = store_sz;
+                        if (src_sz > 0)
+                            emit_mem_copy_base_to_base(&ctx, X86_RCX, 0, X86_RBP, src_off, src_sz);
+                        if (src_sz < store_sz)
+                            emit_mem_zero_base(&ctx, X86_RCX, (int32_t)src_sz, store_sz - src_sz);
+                        break;
                     }
-                    if (rem >= 2) {
-                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX, X86_RCX, off, 2);
-                        rem -= 2; off += 2;
-                    }
-                    if (rem == 1) {
-                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x88, X86_RAX, X86_RCX, off, 1);
-                    }
+
+                    /* Conservative fallback for unsupported aggregate sources. */
+                    emit_mem_zero_base(&ctx, X86_RCX, 0, store_sz);
                     break;
                 }
 
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
-                uint8_t opcode = ((uint8_t)store_sz == 1) ? 0x88 : 0x89;
-                encode_mem(ctx.buf, &ctx.pos, ctx.buflen, opcode, X86_RAX, X86_RCX, 0, (uint8_t)store_sz);
+                emit_mem_store_sized(&ctx, X86_RAX, X86_RCX, 0, (uint8_t)store_sz);
                 break;
             }
             case LR_OP_GEP: {

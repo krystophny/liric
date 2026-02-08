@@ -876,6 +876,46 @@ int test_jit_global_struct_integer_init(void) {
     return 0;
 }
 
+int test_jit_aggregate_load_store_copy(void) {
+    /*
+     * Regression: aggregate values (>8 bytes) must not be truncated when
+     * loaded into a vreg and stored back.
+     */
+    const char *src =
+        "%pair = type <{ i64, i64 }>\n"
+        "@vals = private global %pair <{ i64 10, i64 32 }>, align 8\n"
+        "define i64 @copy_pair() {\n"
+        "entry:\n"
+        "  %v = load %pair, ptr @vals, align 1\n"
+        "  %tmp = alloca %pair, align 8\n"
+        "  store %pair %v, ptr %tmp, align 1\n"
+        "  %p0 = getelementptr %pair, ptr %tmp, i32 0, i32 0\n"
+        "  %a = load i64, ptr %p0, align 8\n"
+        "  %p1 = getelementptr %pair, ptr %tmp, i32 0, i32 1\n"
+        "  %b = load i64, ptr %p1, align 8\n"
+        "  %r = add i64 %a, %b\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "copy_pair");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "aggregate load/store copy preserves both fields");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 static int64_t sum8(int64_t a, int64_t b, int64_t c, int64_t d,
                     int64_t e, int64_t f, int64_t g, int64_t h) {
     return a + b + c + d + e + f + g + h;
