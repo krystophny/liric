@@ -11,31 +11,53 @@ void lr_lexer_init(lr_lexer_t *lex, const char *src, size_t len) {
     lex->col = 1;
 }
 
-static char peek(lr_lexer_t *lex) {
-    if (lex->pos >= lex->src_len) return '\0';
-    return lex->src[lex->pos];
+static inline bool is_digit_ascii(char c) {
+    unsigned char u = (unsigned char)c;
+    return (unsigned)(u - (unsigned char)'0') < 10u;
 }
 
-static char advance(lr_lexer_t *lex) {
-    if (lex->pos >= lex->src_len) return '\0';
-    char c = lex->src[lex->pos++];
-    if (c == '\n') { lex->line++; lex->col = 1; }
-    else lex->col++;
-    return c;
+static inline bool is_alpha_ascii(char c) {
+    unsigned char u = (unsigned char)c;
+    u = (unsigned char)(u | 32u);
+    return (unsigned)(u - (unsigned char)'a') < 26u;
+}
+
+static inline bool is_ident_char(char c) {
+    return is_alpha_ascii(c) || is_digit_ascii(c) || c == '_' || c == '.' || c == '$';
 }
 
 static void skip_whitespace_and_comments(lr_lexer_t *lex) {
-    while (lex->pos < lex->src_len) {
-        char c = peek(lex);
+    const char *src = lex->src;
+    size_t pos = lex->pos;
+    size_t n = lex->src_len;
+    uint32_t line = lex->line;
+    uint32_t col = lex->col;
+
+    while (pos < n) {
+        char c = src[pos];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-            advance(lex);
+            pos++;
+            if (c == '\n') {
+                line++;
+                col = 1;
+            } else {
+                col++;
+            }
         } else if (c == ';') {
-            while (lex->pos < lex->src_len && peek(lex) != '\n')
-                advance(lex);
+            pos++;
+            col++;
+            while (pos < n && src[pos] != '\n') {
+                pos++;
+                col++;
+            }
         } else {
             break;
         }
     }
+
+    lex->pos = pos;
+    lex->line = line;
+    lex->col = col;
 }
 
 typedef struct { const char *name; lr_tok_t tok; } keyword_t;
@@ -480,214 +502,273 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
     }
     return LR_TOK_EOF;
 }
-static lr_token_t make_token(lr_lexer_t *lex, lr_tok_t kind,
-                              const char *start, size_t len) {
+static lr_token_t make_token(lr_tok_t kind, const char *start, size_t len,
+                             uint32_t line, uint32_t col) {
     lr_token_t t = {0};
     t.kind = kind;
     t.start = start;
     t.len = len;
-    t.line = lex->line;
-    t.col = lex->col;
+    t.line = line;
+    t.col = col;
     return t;
-}
-
-static bool is_ident_char(char c) {
-    return isalnum((unsigned char)c) || c == '_' || c == '.' || c == '$';
 }
 
 lr_token_t lr_lexer_next(lr_lexer_t *lex) {
     skip_whitespace_and_comments(lex);
     if (lex->pos >= lex->src_len)
-        return make_token(lex, LR_TOK_EOF, lex->src + lex->pos, 0);
+        return make_token(LR_TOK_EOF, lex->src + lex->pos, 0, lex->line, lex->col);
 
-    const char *start = lex->src + lex->pos;
-    uint32_t start_line = lex->line;
-    uint32_t start_col = lex->col;
-    char c = advance(lex);
+    const char *src = lex->src;
+    size_t n = lex->src_len;
+    size_t pos = lex->pos;
+    uint32_t line = lex->line;
+    uint32_t col = lex->col;
+    size_t start_pos = pos;
+    const char *start = src + start_pos;
+    uint32_t start_line = line;
+    uint32_t start_col = col;
+    char c = src[pos++];
+    col++;
     lr_token_t tok = {0};
 
     switch (c) {
-    case '(': tok = make_token(lex, LR_TOK_LPAREN, start, 1); break;
-    case ')': tok = make_token(lex, LR_TOK_RPAREN, start, 1); break;
-    case '{': tok = make_token(lex, LR_TOK_LBRACE, start, 1); break;
-    case '}': tok = make_token(lex, LR_TOK_RBRACE, start, 1); break;
-    case '[': tok = make_token(lex, LR_TOK_LBRACKET, start, 1); break;
-    case ']': tok = make_token(lex, LR_TOK_RBRACKET, start, 1); break;
-    case ',': tok = make_token(lex, LR_TOK_COMMA, start, 1); break;
-    case '=': tok = make_token(lex, LR_TOK_EQUALS, start, 1); break;
-    case '*': tok = make_token(lex, LR_TOK_STAR, start, 1); break;
-    case ':': tok = make_token(lex, LR_TOK_COLON, start, 1); break;
-    case '<': tok = make_token(lex, LR_TOK_LANGLE, start, 1); break;
-    case '>': tok = make_token(lex, LR_TOK_RANGLE, start, 1); break;
+    case '(':
+        tok = make_token(LR_TOK_LPAREN, start, 1, start_line, start_col);
+        break;
+    case ')':
+        tok = make_token(LR_TOK_RPAREN, start, 1, start_line, start_col);
+        break;
+    case '{':
+        tok = make_token(LR_TOK_LBRACE, start, 1, start_line, start_col);
+        break;
+    case '}':
+        tok = make_token(LR_TOK_RBRACE, start, 1, start_line, start_col);
+        break;
+    case '[':
+        tok = make_token(LR_TOK_LBRACKET, start, 1, start_line, start_col);
+        break;
+    case ']':
+        tok = make_token(LR_TOK_RBRACKET, start, 1, start_line, start_col);
+        break;
+    case ',':
+        tok = make_token(LR_TOK_COMMA, start, 1, start_line, start_col);
+        break;
+    case '=':
+        tok = make_token(LR_TOK_EQUALS, start, 1, start_line, start_col);
+        break;
+    case '*':
+        tok = make_token(LR_TOK_STAR, start, 1, start_line, start_col);
+        break;
+    case ':':
+        tok = make_token(LR_TOK_COLON, start, 1, start_line, start_col);
+        break;
+    case '<':
+        tok = make_token(LR_TOK_LANGLE, start, 1, start_line, start_col);
+        break;
+    case '>':
+        tok = make_token(LR_TOK_RANGLE, start, 1, start_line, start_col);
+        break;
     case '.':
-        if (lex->pos + 1 < lex->src_len &&
-            lex->src[lex->pos] == '.' && lex->src[lex->pos + 1] == '.') {
-            advance(lex); advance(lex);
-            tok = make_token(lex, LR_TOK_DOTDOTDOT, start, 3);
-        } else if (is_ident_char(peek(lex))) {
-            while (lex->pos < lex->src_len && is_ident_char(peek(lex)))
-                advance(lex);
-            size_t len = (size_t)(lex->src + lex->pos - start);
-            tok = make_token(lex, LR_TOK_LOCAL_ID, start, len);
+        if (pos + 1 < n && src[pos] == '.' && src[pos + 1] == '.') {
+            pos += 2;
+            col += 2;
+            tok = make_token(LR_TOK_DOTDOTDOT, start, 3, start_line, start_col);
+        } else if (pos < n && is_ident_char(src[pos])) {
+            size_t run = pos;
+            while (run < n && is_ident_char(src[run])) run++;
+            col += (uint32_t)(run - pos);
+            pos = run;
+            tok = make_token(LR_TOK_LOCAL_ID, start, pos - start_pos, start_line, start_col);
         } else {
-            tok = make_token(lex, LR_TOK_ERROR, start, 1);
+            tok = make_token(LR_TOK_ERROR, start, 1, start_line, start_col);
         }
         break;
 
     case '!': {
-        while (lex->pos < lex->src_len && is_ident_char(peek(lex)))
-            advance(lex);
-        size_t len = (size_t)(lex->src + lex->pos - start);
-        tok = make_token(lex, LR_TOK_METADATA_ID, start, len);
+        size_t run = pos;
+        while (run < n && is_ident_char(src[run])) run++;
+        col += (uint32_t)(run - pos);
+        pos = run;
+        tok = make_token(LR_TOK_METADATA_ID, start, pos - start_pos, start_line, start_col);
         break;
     }
 
     case '#': {
-        while (lex->pos < lex->src_len && isdigit((unsigned char)peek(lex)))
-            advance(lex);
-        size_t len = (size_t)(lex->src + lex->pos - start);
-        tok = make_token(lex, LR_TOK_ATTR_GROUP, start, len);
+        size_t run = pos;
+        while (run < n && is_digit_ascii(src[run])) run++;
+        col += (uint32_t)(run - pos);
+        pos = run;
+        tok = make_token(LR_TOK_ATTR_GROUP, start, pos - start_pos, start_line, start_col);
         break;
     }
 
-    case '%': {
-        if (peek(lex) == '"') {
-            advance(lex);
-            while (lex->pos < lex->src_len && peek(lex) != '"')
-                advance(lex);
-            advance(lex);
-        } else {
-            while (lex->pos < lex->src_len && is_ident_char(peek(lex)))
-                advance(lex);
-        }
-        size_t len = (size_t)(lex->src + lex->pos - start);
-        tok = make_token(lex, LR_TOK_LOCAL_ID, start, len);
-        tok.start = start;
-        tok.len = len;
-        break;
-    }
-
+    case '%':
     case '@': {
-        if (peek(lex) == '"') {
-            advance(lex);
-            while (lex->pos < lex->src_len && peek(lex) != '"')
-                advance(lex);
-            advance(lex);
-        } else {
-            while (lex->pos < lex->src_len && is_ident_char(peek(lex)))
-                advance(lex);
-        }
-        size_t len = (size_t)(lex->src + lex->pos - start);
-        tok = make_token(lex, LR_TOK_GLOBAL_ID, start, len);
-        break;
-    }
-
-    case '"': {
-        while (lex->pos < lex->src_len && peek(lex) != '"') {
-            if (peek(lex) == '\\') advance(lex);
-            advance(lex);
-        }
-        if (lex->pos < lex->src_len) advance(lex);
-        size_t len = (size_t)(lex->src + lex->pos - start);
-        tok = make_token(lex, LR_TOK_STRING_LIT, start, len);
-        break;
-    }
-
-    case 'c':
-        if (peek(lex) == '"') {
-            advance(lex);
-            while (lex->pos < lex->src_len && peek(lex) != '"') {
-                if (peek(lex) == '\\') advance(lex);
-                advance(lex);
+        if (pos < n && src[pos] == '"') {
+            pos++;
+            col++;
+            while (pos < n && src[pos] != '"') {
+                if (src[pos] == '\\' && pos + 1 < n) {
+                    pos++;
+                    col++;
+                }
+                if (src[pos] == '\n') {
+                    pos++;
+                    line++;
+                    col = 1;
+                } else {
+                    pos++;
+                    col++;
+                }
             }
-            if (lex->pos < lex->src_len) advance(lex);
-            size_t len = (size_t)(lex->src + lex->pos - start);
-            tok = make_token(lex, LR_TOK_STRING_LIT, start, len);
-            break;
+            if (pos < n) {
+                pos++;
+                col++;
+            }
+        } else {
+            size_t run = pos;
+            while (run < n && is_ident_char(src[run])) run++;
+            col += (uint32_t)(run - pos);
+            pos = run;
         }
-        /* fall through to identifier handling */
-        goto ident;
+        tok = make_token(c == '%' ? LR_TOK_LOCAL_ID : LR_TOK_GLOBAL_ID,
+                         start, pos - start_pos, start_line, start_col);
+        break;
+    }
+
+    case '"':
+    case 'c': {
+        if (c == 'c' && !(pos < n && src[pos] == '"')) {
+            goto ident;
+        }
+        if (c == 'c') {
+            pos++;
+            col++;
+        }
+        while (pos < n && src[pos] != '"') {
+            if (src[pos] == '\\' && pos + 1 < n) {
+                pos++;
+                col++;
+            }
+            if (src[pos] == '\n') {
+                pos++;
+                line++;
+                col = 1;
+            } else {
+                pos++;
+                col++;
+            }
+        }
+        if (pos < n) {
+            pos++;
+            col++;
+        }
+        tok = make_token(LR_TOK_STRING_LIT, start, pos - start_pos, start_line, start_col);
+        break;
+    }
 
     default:
-        if (c == '-' || isdigit((unsigned char)c)) {
+        if (c == '-' || is_digit_ascii(c)) {
             bool is_neg = (c == '-');
-            if (is_neg && !isdigit((unsigned char)peek(lex))) {
-                tok = make_token(lex, LR_TOK_ERROR, start, 1);
+            if (is_neg && !(pos < n && is_digit_ascii(src[pos]))) {
+                tok = make_token(LR_TOK_ERROR, start, 1, start_line, start_col);
                 break;
             }
-            /* check for hex float: 0x... */
-            if (c == '0' && (peek(lex) == 'x' || peek(lex) == 'X')) {
-                advance(lex);
-                while (lex->pos < lex->src_len && isxdigit((unsigned char)peek(lex)))
-                    advance(lex);
-                size_t len = (size_t)(lex->src + lex->pos - start);
-                tok = make_token(lex, LR_TOK_FLOAT_LIT, start, len);
-                /* parse hex float as raw i64 bits */
-                char buf[32];
-                if (len - 2 < sizeof(buf)) {
-                    memcpy(buf, start + 2, len - 2);
-                    buf[len - 2] = '\0';
-                    uint64_t bits = strtoull(buf, NULL, 16);
-                    double d;
-                    memcpy(&d, &bits, sizeof(d));
-                    tok.float_val = d;
+
+            if (c == '0' && pos < n && (src[pos] == 'x' || src[pos] == 'X')) {
+                size_t run = pos + 1;
+                while (run < n && isxdigit((unsigned char)src[run])) run++;
+                col += (uint32_t)(run - pos);
+                pos = run;
+                tok = make_token(LR_TOK_FLOAT_LIT, start, pos - start_pos, start_line, start_col);
+                {
+                    size_t len = tok.len;
+                    char buf[32];
+                    if (len >= 2 && len - 2 < sizeof(buf)) {
+                        memcpy(buf, start + 2, len - 2);
+                        buf[len - 2] = '\0';
+                        uint64_t bits = strtoull(buf, NULL, 16);
+                        double d;
+                        memcpy(&d, &bits, sizeof(d));
+                        tok.float_val = d;
+                    }
                 }
                 break;
             }
-            while (lex->pos < lex->src_len && isdigit((unsigned char)peek(lex)))
-                advance(lex);
-            if (peek(lex) == '.' || peek(lex) == 'e' || peek(lex) == 'E') {
-                if (peek(lex) == '.') {
-                    advance(lex);
-                    while (lex->pos < lex->src_len && isdigit((unsigned char)peek(lex)))
-                        advance(lex);
+
+            {
+                size_t run = pos;
+                while (run < n && is_digit_ascii(src[run])) run++;
+                col += (uint32_t)(run - pos);
+                pos = run;
+            }
+
+            if (pos < n && (src[pos] == '.' || src[pos] == 'e' || src[pos] == 'E')) {
+                if (pos < n && src[pos] == '.') {
+                    pos++;
+                    col++;
+                    while (pos < n && is_digit_ascii(src[pos])) {
+                        pos++;
+                        col++;
+                    }
                 }
-                if (peek(lex) == 'e' || peek(lex) == 'E') {
-                    advance(lex);
-                    if (peek(lex) == '+' || peek(lex) == '-') advance(lex);
-                    while (lex->pos < lex->src_len && isdigit((unsigned char)peek(lex)))
-                        advance(lex);
+                if (pos < n && (src[pos] == 'e' || src[pos] == 'E')) {
+                    pos++;
+                    col++;
+                    if (pos < n && (src[pos] == '+' || src[pos] == '-')) {
+                        pos++;
+                        col++;
+                    }
+                    while (pos < n && is_digit_ascii(src[pos])) {
+                        pos++;
+                        col++;
+                    }
                 }
-                size_t len = (size_t)(lex->src + lex->pos - start);
-                tok = make_token(lex, LR_TOK_FLOAT_LIT, start, len);
-                char buf[64];
-                if (len < sizeof(buf)) {
-                    memcpy(buf, start, len);
-                    buf[len] = '\0';
-                    tok.float_val = strtod(buf, NULL);
+                tok = make_token(LR_TOK_FLOAT_LIT, start, pos - start_pos, start_line, start_col);
+                {
+                    size_t len = tok.len;
+                    char buf[64];
+                    if (len < sizeof(buf)) {
+                        memcpy(buf, start, len);
+                        buf[len] = '\0';
+                        tok.float_val = strtod(buf, NULL);
+                    }
                 }
             } else {
-                size_t len = (size_t)(lex->src + lex->pos - start);
-                tok = make_token(lex, LR_TOK_INT_LIT, start, len);
-                char buf[32];
-                if (len < sizeof(buf)) {
-                    memcpy(buf, start, len);
-                    buf[len] = '\0';
-                    tok.int_val = strtoll(buf, NULL, 10);
+                tok = make_token(LR_TOK_INT_LIT, start, pos - start_pos, start_line, start_col);
+                {
+                    size_t len = tok.len;
+                    char buf[32];
+                    if (len < sizeof(buf)) {
+                        memcpy(buf, start, len);
+                        buf[len] = '\0';
+                        tok.int_val = strtoll(buf, NULL, 10);
+                    }
                 }
             }
             break;
         }
-    ident:
-        if (isalpha((unsigned char)c) || c == '_') {
-            while (lex->pos < lex->src_len && is_ident_char(peek(lex)))
-                advance(lex);
-            size_t len = (size_t)(lex->src + lex->pos - start);
-            lr_tok_t kw = lookup_keyword(start, len);
-            if (kw != LR_TOK_EOF) {
-                tok = make_token(lex, kw, start, len);
-            } else {
-                /* treat unknown bare identifiers as local ids for now */
-                tok = make_token(lex, LR_TOK_LOCAL_ID, start, len);
+ident:
+        if (is_alpha_ascii(c) || c == '_') {
+            size_t run = pos;
+            while (run < n && is_ident_char(src[run])) run++;
+            col += (uint32_t)(run - pos);
+            pos = run;
+            {
+                size_t len = pos - start_pos;
+                lr_tok_t kw = lookup_keyword(start, len);
+                tok = make_token(kw != LR_TOK_EOF ? kw : LR_TOK_LOCAL_ID,
+                                 start, len, start_line, start_col);
             }
             break;
         }
-        tok = make_token(lex, LR_TOK_ERROR, start, 1);
+        tok = make_token(LR_TOK_ERROR, start, 1, start_line, start_col);
         break;
     }
 
-    tok.line = start_line;
-    tok.col = start_col;
+    lex->pos = pos;
+    lex->line = line;
+    lex->col = col;
     return tok;
 }
 

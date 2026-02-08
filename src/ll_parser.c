@@ -25,21 +25,21 @@ typedef struct lr_parser {
     bool had_error;
 
     /* vreg name -> id mapping for current function */
-    struct { char *name; uint32_t id; uint32_t hash; } vreg_map[VREG_MAP_CAP];
+    struct { char *name; size_t name_len; uint32_t id; uint32_t hash; } vreg_map[VREG_MAP_CAP];
     uint32_t vreg_map_count;
     int32_t vreg_index[VREG_INDEX_CAP];
     uint32_t vreg_used_slots[VREG_MAP_CAP];
     uint32_t vreg_used_slot_count;
 
     /* block name -> id mapping for current function */
-    struct { char *name; uint32_t id; lr_block_t *block; uint32_t hash; } block_map[BLOCK_MAP_CAP];
+    struct { char *name; size_t name_len; uint32_t id; lr_block_t *block; uint32_t hash; } block_map[BLOCK_MAP_CAP];
     uint32_t block_map_count;
     int32_t block_index[BLOCK_INDEX_CAP];
     uint32_t block_used_slots[BLOCK_MAP_CAP];
     uint32_t block_used_slot_count;
 
     /* global/function symbol name -> id mapping */
-    struct { char *name; uint32_t id; uint32_t hash; } global_map[GLOBAL_MAP_CAP];
+    struct { char *name; size_t name_len; uint32_t id; uint32_t hash; } global_map[GLOBAL_MAP_CAP];
     uint32_t global_map_count;
     int32_t global_index[GLOBAL_INDEX_CAP];
 
@@ -88,7 +88,12 @@ static void expect(lr_parser_t *p, lr_tok_t kind) {
 }
 
 /* Extract name from %name or @name token (skip the prefix character) */
-static char *tok_name(lr_parser_t *p, const lr_token_t *t) {
+typedef struct {
+    const char *s;
+    size_t len;
+} name_view_t;
+
+static name_view_t tok_name_view(const lr_token_t *t) {
     const char *s = t->start;
     size_t len = t->len;
     /* skip % or @ prefix */
@@ -101,16 +106,26 @@ static char *tok_name(lr_parser_t *p, const lr_token_t *t) {
         s++;
         len -= 2;
     }
-    return lr_arena_strdup(p->arena, s, len);
+    return (name_view_t){ s, len };
 }
 
-static uint32_t hash_name(const char *name) {
+/* Extract name from %name or @name token (skip the prefix character) */
+static char *tok_name(lr_parser_t *p, const lr_token_t *t) {
+    name_view_t nv = tok_name_view(t);
+    return lr_arena_strdup(p->arena, nv.s, nv.len);
+}
+
+static uint32_t hash_name_n(const char *name, size_t len) {
     uint32_t h = 2166136261u;
-    while (*name) {
-        h ^= (uint8_t)*name++;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)name[i];
         h *= 16777619u;
     }
     return h;
+}
+
+static uint32_t hash_name(const char *name) {
+    return hash_name_n(name, strlen(name));
 }
 
 static void clear_index(int32_t *index, size_t n) {
@@ -123,13 +138,15 @@ static void reset_used_index_slots(int32_t *index, const uint32_t *slots, uint32
         index[slots[i]] = -1;
 }
 
-static uint32_t index_find_vreg(const lr_parser_t *p, const char *name, uint32_t hash) {
+static uint32_t index_find_vreg_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
     uint32_t slot = hash & (VREG_INDEX_CAP - 1u);
     for (;;) {
         int32_t idx = p->vreg_index[slot];
         if (idx < 0)
             return UINT32_MAX;
-        if (p->vreg_map[idx].hash == hash && strcmp(p->vreg_map[idx].name, name) == 0)
+        if (p->vreg_map[idx].hash == hash &&
+                p->vreg_map[idx].name_len == name_len &&
+                memcmp(p->vreg_map[idx].name, name, name_len) == 0)
             return (uint32_t)idx;
         slot = (slot + 1u) & (VREG_INDEX_CAP - 1u);
     }
@@ -144,13 +161,15 @@ static void index_insert_vreg(lr_parser_t *p, uint32_t idx) {
         p->vreg_used_slots[p->vreg_used_slot_count++] = slot;
 }
 
-static uint32_t index_find_block(const lr_parser_t *p, const char *name, uint32_t hash) {
+static uint32_t index_find_block_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
     uint32_t slot = hash & (BLOCK_INDEX_CAP - 1u);
     for (;;) {
         int32_t idx = p->block_index[slot];
         if (idx < 0)
             return UINT32_MAX;
-        if (p->block_map[idx].hash == hash && strcmp(p->block_map[idx].name, name) == 0)
+        if (p->block_map[idx].hash == hash &&
+                p->block_map[idx].name_len == name_len &&
+                memcmp(p->block_map[idx].name, name, name_len) == 0)
             return (uint32_t)idx;
         slot = (slot + 1u) & (BLOCK_INDEX_CAP - 1u);
     }
@@ -165,13 +184,15 @@ static void index_insert_block(lr_parser_t *p, uint32_t idx) {
         p->block_used_slots[p->block_used_slot_count++] = slot;
 }
 
-static uint32_t index_find_global(const lr_parser_t *p, const char *name, uint32_t hash) {
+static uint32_t index_find_global_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
     uint32_t slot = hash & (GLOBAL_INDEX_CAP - 1u);
     for (;;) {
         int32_t idx = p->global_index[slot];
         if (idx < 0)
             return UINT32_MAX;
-        if (p->global_map[idx].hash == hash && strcmp(p->global_map[idx].name, name) == 0)
+        if (p->global_map[idx].hash == hash &&
+                p->global_map[idx].name_len == name_len &&
+                memcmp(p->global_map[idx].name, name, name_len) == 0)
             return (uint32_t)idx;
         slot = (slot + 1u) & (GLOBAL_INDEX_CAP - 1u);
     }
@@ -187,41 +208,46 @@ static void index_insert_global(lr_parser_t *p, uint32_t idx) {
 static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
     uint32_t hash;
     uint32_t idx;
+    size_t name_len;
 
     if (p->vreg_map_count >= VREG_MAP_CAP)
         return;
 
+    name_len = strlen(name);
     hash = hash_name(name);
     idx = p->vreg_map_count++;
     p->vreg_map[idx].name = name;
+    p->vreg_map[idx].name_len = name_len;
     p->vreg_map[idx].id = id;
     p->vreg_map[idx].hash = hash;
     index_insert_vreg(p, idx);
 }
 
-static uint32_t resolve_vreg(lr_parser_t *p, const char *name) {
-    uint32_t hash = hash_name(name);
-    uint32_t idx = index_find_vreg(p, name, hash);
+static uint32_t resolve_vreg_n(lr_parser_t *p, const char *name, size_t name_len) {
+    uint32_t hash = hash_name_n(name, name_len);
+    uint32_t idx = index_find_vreg_n(p, name, name_len, hash);
     if (idx != UINT32_MAX)
         return p->vreg_map[idx].id;
 
     /* auto-create */
     uint32_t id = lr_vreg_new(p->cur_func);
-    register_vreg_name(p, lr_arena_strdup(p->arena, name, strlen(name)), id);
+    register_vreg_name(p, lr_arena_strdup(p->arena, name, name_len), id);
     return id;
 }
 
-static uint32_t resolve_block(lr_parser_t *p, const char *name) {
-    uint32_t hash = hash_name(name);
-    uint32_t idx = index_find_block(p, name, hash);
+static uint32_t resolve_block_n(lr_parser_t *p, const char *name, size_t name_len) {
+    uint32_t hash = hash_name_n(name, name_len);
+    uint32_t idx = index_find_block_n(p, name, name_len, hash);
     if (idx != UINT32_MAX)
         return p->block_map[idx].id;
 
     /* forward reference: create block */
-    lr_block_t *b = lr_block_create(p->cur_func, p->arena, name);
+    char *owned_name = lr_arena_strdup(p->arena, name, name_len);
+    lr_block_t *b = lr_block_create(p->cur_func, p->arena, owned_name);
     if (p->block_map_count < BLOCK_MAP_CAP) {
         uint32_t ins = p->block_map_count++;
-        p->block_map[ins].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->block_map[ins].name = owned_name;
+        p->block_map[ins].name_len = name_len;
         p->block_map[ins].id = b->id;
         p->block_map[ins].block = b;
         p->block_map[ins].hash = hash;
@@ -230,16 +256,18 @@ static uint32_t resolve_block(lr_parser_t *p, const char *name) {
     return b->id;
 }
 
-static lr_block_t *resolve_block_ptr(lr_parser_t *p, const char *name) {
-    uint32_t hash = hash_name(name);
-    uint32_t idx = index_find_block(p, name, hash);
+static lr_block_t *resolve_block_ptr_n(lr_parser_t *p, const char *name, size_t name_len) {
+    uint32_t hash = hash_name_n(name, name_len);
+    uint32_t idx = index_find_block_n(p, name, name_len, hash);
     if (idx != UINT32_MAX)
         return p->block_map[idx].block;
 
-    lr_block_t *b = lr_block_create(p->cur_func, p->arena, name);
+    char *owned_name = lr_arena_strdup(p->arena, name, name_len);
+    lr_block_t *b = lr_block_create(p->cur_func, p->arena, owned_name);
     if (p->block_map_count < BLOCK_MAP_CAP) {
         uint32_t ins = p->block_map_count++;
-        p->block_map[ins].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->block_map[ins].name = owned_name;
+        p->block_map[ins].name_len = name_len;
         p->block_map[ins].id = b->id;
         p->block_map[ins].block = b;
         p->block_map[ins].hash = hash;
@@ -248,20 +276,33 @@ static lr_block_t *resolve_block_ptr(lr_parser_t *p, const char *name) {
     return b;
 }
 
-static uint32_t resolve_global(lr_parser_t *p, const char *name) {
-    uint32_t hash = hash_name(name);
-    uint32_t idx = index_find_global(p, name, hash);
+static lr_block_t *resolve_block_ptr(lr_parser_t *p, const char *name) {
+    return resolve_block_ptr_n(p, name, strlen(name));
+}
+
+static uint32_t resolve_global_n(lr_parser_t *p, const char *name, size_t name_len) {
+    uint32_t hash = hash_name_n(name, name_len);
+    uint32_t idx = index_find_global_n(p, name, name_len, hash);
     return idx == UINT32_MAX ? UINT32_MAX : p->global_map[idx].id;
 }
 
-static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
+static uint32_t resolve_global(lr_parser_t *p, const char *name) {
+    return resolve_global_n(p, name, strlen(name));
+}
+
+static void register_global_n(lr_parser_t *p, const char *name, size_t name_len, uint32_t id) {
     if (p->global_map_count < GLOBAL_MAP_CAP) {
         uint32_t idx = p->global_map_count++;
-        p->global_map[idx].name = lr_arena_strdup(p->arena, name, strlen(name));
+        p->global_map[idx].name = lr_arena_strdup(p->arena, name, name_len);
+        p->global_map[idx].name_len = name_len;
         p->global_map[idx].id = id;
-        p->global_map[idx].hash = hash_name(name);
+        p->global_map[idx].hash = hash_name_n(name, name_len);
         index_insert_global(p, idx);
     }
+}
+
+static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
+    register_global_n(p, name, strlen(name), id);
 }
 
 static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
@@ -532,18 +573,19 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         return lr_op_null(type);
     }
     if (check(p, LR_TOK_LOCAL_ID)) {
-        char *name = tok_name(p, &p->cur);
+        name_view_t name = tok_name_view(&p->cur);
         next(p);
-        uint32_t vreg = resolve_vreg(p, name);
+        uint32_t vreg = resolve_vreg_n(p, name.s, name.len);
         return lr_op_vreg(vreg, type);
     }
     if (check(p, LR_TOK_GLOBAL_ID)) {
-        char *name = tok_name(p, &p->cur);
+        name_view_t name = tok_name_view(&p->cur);
         next(p);
-        uint32_t gid = resolve_global(p, name);
+        uint32_t gid = resolve_global_n(p, name.s, name.len);
         if (gid == UINT32_MAX) {
-            gid = lr_module_intern_symbol(p->module, name);
-            register_global(p, name, gid);
+            char *owned = lr_arena_strdup(p->arena, name.s, name.len);
+            gid = lr_module_intern_symbol(p->module, owned);
+            register_global_n(p, owned, name.len, gid);
         }
         return lr_op_global(gid, type);
     }
@@ -666,8 +708,8 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
         if (check(p, LR_TOK_EQUALS)) {
             /* %x = instruction */
             next(p);
-            char *dest_name = tok_name(p, &saved);
-            uint32_t dest = resolve_vreg(p, dest_name);
+            name_view_t dest_name = tok_name_view(&saved);
+            uint32_t dest = resolve_vreg_n(p, dest_name.s, dest_name.len);
 
             lr_tok_t op_tok = p->cur.kind;
             next(p);
@@ -900,9 +942,9 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
                     expect(p, LR_TOK_COMMA);
                     /* block label */
                     if (check(p, LR_TOK_LOCAL_ID)) {
-                        char *bname = tok_name(p, &p->cur);
+                        name_view_t bname = tok_name_view(&p->cur);
                         next(p);
-                        uint32_t bid = resolve_block(p, bname);
+                        uint32_t bid = resolve_block_n(p, bname.s, bname.len);
                         ops[nops++] = lr_op_block(bid);
                     }
                     expect(p, LR_TOK_RBRACKET);
@@ -1029,14 +1071,14 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
             expect(p, LR_TOK_COMMA);
             expect(p, LR_TOK_LABEL);
             if (check(p, LR_TOK_LOCAL_ID)) {
-                char *tname = tok_name(p, &p->cur);
+                name_view_t tname = tok_name_view(&p->cur);
                 next(p);
-                uint32_t tid = resolve_block(p, tname);
+                uint32_t tid = resolve_block_n(p, tname.s, tname.len);
                 expect(p, LR_TOK_COMMA);
                 expect(p, LR_TOK_LABEL);
-                char *fname = tok_name(p, &p->cur);
+                name_view_t fname = tok_name_view(&p->cur);
                 next(p);
-                uint32_t fid = resolve_block(p, fname);
+                uint32_t fid = resolve_block_n(p, fname.s, fname.len);
                 lr_operand_t ops[3] = {cond, lr_op_block(tid), lr_op_block(fid)};
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CONDBR,
                     p->module->type_void, 0, ops, 3);
@@ -1046,9 +1088,9 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
             /* unconditional: br label %dest */
             expect(p, LR_TOK_LABEL);
             if (check(p, LR_TOK_LOCAL_ID)) {
-                char *dname = tok_name(p, &p->cur);
+                name_view_t dname = tok_name_view(&p->cur);
                 next(p);
-                uint32_t did = resolve_block(p, dname);
+                uint32_t did = resolve_block_n(p, dname.s, dname.len);
                 lr_operand_t ops[1] = {lr_op_block(did)};
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_BR,
                     p->module->type_void, 0, ops, 1);
@@ -1155,8 +1197,8 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             if (check(p, LR_TOK_COLON)) {
                 /* it is a label */
                 next(p);
-                char *bname = tok_name(p, &saved_tok);
-                cur_block = resolve_block_ptr(p, bname);
+                name_view_t bname = tok_name_view(&saved_tok);
+                cur_block = resolve_block_ptr_n(p, bname.s, bname.len);
                 continue;
             }
             /* not a label, restore and parse as instruction */

@@ -128,7 +128,9 @@ These do NOT depend on mass run results; they discover tests directly from CMake
    ```
    Reports two metrics:
    - WALL-CLOCK: subprocess `liric_probe_runner` vs subprocess `lli -O0`
-   - JIT-INTERNAL: in-process `liric` parse+compile vs in-process LLVM ORC parse+compile
+   - JIT-INTERNAL: in-process `liric` parse+compile vs in-process LLVM ORC parse+jit
+   Also writes split summary (`parse`, `compile/jit`, LLVM `lookup`) to
+   `/tmp/liric_bench/bench_ll_summary.json`.
 
 3. **Optional per-file LLVM in-process phase timing**:
    ```bash
@@ -146,3 +148,4 @@ All artifacts in `/tmp/liric_bench/`:
 - `compat_api.txt`: test names passing liric compat
 - `compat_ll.txt`: test names passing liric + lli compat
 - `bench_ll.jsonl`: LL-file benchmark timing data
+- `bench_ll_summary.json`: aggregate medians/sums including parser-vs-compile split

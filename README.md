@@ -79,32 +79,39 @@ Outputs are written to `/tmp/liric_bench/`:
 - `compat_api.txt`
 - `compat_ll.txt`
 - `bench_ll.jsonl`
+- `bench_ll_summary.json`
 
 Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`):
 
 - Compatibility sweep (`bench_compat_check`):
   - Processed: `2266`
   - `llvm_ok`: `2246` (99.1%)
-  - `liric_match`: `1027` (45.3%)
-  - `lli_match`: `2166` (95.6%)
-  - `both_match` (`compat_ll`): `1014` (44.7%)
+  - `liric_match`: `1025` (45.2%)
+  - `lli_match`: `2162` (95.4%)
+  - `both_match` (`compat_ll`): `1013` (44.7%)
 
 - LL benchmark (`bench_ll --iters 3`) on `compat_ll`:
-  - Benchmarked files: `989`
+  - Benchmarked files: `988`
 
 | Metric | liric wall | lli wall | Wall speedup |
 |--------|-----------:|---------:|-------------:|
-| Median | 10.065 ms | 20.121 ms | **2.00x** |
-| Aggregate | 10045 ms | 20855 ms | 2.08x |
+| Median | 10.064 ms | 20.120 ms | **2.00x** |
+| Aggregate | 10024 ms | 20606 ms | 2.06x |
 | P90 / P95 | - | - | 2.00x / 3.00x |
 
 | Metric | liric internal | lli internal | Internal speedup |
 |--------|---------------:|-------------:|-----------------:|
-| Median | 0.383600 ms | 0.226347 ms | **0.52x** |
-| Aggregate | 659.689 ms | 312.038 ms | 0.47x |
+| Median | 0.368150 ms | 0.223440 ms | **0.54x** |
+| Aggregate | 590.492 ms | 309.075 ms | 0.52x |
 | P90 / P95 | - | - | 0.66x / 0.70x |
 
-The internal metric is now fair (in-process parse+compile vs in-process parse+compile).
+| Internal Split (median) | liric | lli |
+|-------------------------|------:|----:|
+| parse | 0.315400 ms | 0.220214 ms |
+| compile/jit | 0.054450 ms | 0.003066 ms |
+| lookup/materialization | n/a | 3.331356 ms |
+
+The internal metric remains parse+compile parity (`liric`: parse+compile vs `LLVM`: parse+jit). `bench_ll_summary.json` additionally tracks `parse+jit+lookup` for LLVM materialization visibility.
 
 ## License
 
