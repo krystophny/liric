@@ -64,26 +64,30 @@ Benchmark flow is fully C-based:
 ./build/bench_compat_check --timeout 15
 ```
 
-2. Run LL benchmark on that compatibility set:
+2. Run LL benchmark (liric JIT vs lli):
 ```bash
 ./build/bench_ll --iters 3
 ```
 
-Both harnesses run executed test binaries in isolated temporary working
-directories under `/tmp/liric_bench/` to avoid polluting the repository root
-with runtime-generated files.
+3. Run API benchmark (lfortran LLVM native compile+link+run vs liric JIT):
+```bash
+./build/bench_api --iters 3
+```
 
-3. The fair in-process LLVM phase timer used by `bench_ll`:
+All harnesses run test binaries in isolated temporary working directories
+under `/tmp/liric_bench/` to avoid polluting the repository root.
+
+The fair in-process LLVM phase timer used by `bench_ll`:
 ```bash
 ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
 ```
 
 Outputs are written to `/tmp/liric_bench/`:
 - `compat_check.jsonl`
-- `compat_api.txt`
+- `compat_api.txt`, `compat_api_options.jsonl`
 - `compat_ll.txt`
-- `bench_ll.jsonl`
-- `bench_ll_summary.json`
+- `bench_ll.jsonl`, `bench_ll_summary.json`
+- `bench_api.jsonl`
 
 Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`):
 
@@ -118,6 +122,20 @@ Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`
 `bench_ll` now uses materialization-fair internal speedup as the primary metric:
 `liric` parse+compile+lookup vs `LLVM` parse+jit+lookup. The parse+compile vs
 parse+jit value is still emitted as a legacy metric for diagnostic use.
+
+- API benchmark (`bench_api --iters 3`) on `compat_api`:
+  - Benchmarked tests: `129` (of 131 compatible; 2 skipped: expected-abort tests)
+
+| Metric | liric JIT wall | lfortran LLVM wall | Wall speedup |
+|--------|--------------:|-----------------:|-------------:|
+| Median | 10.065 ms | 60.347 ms | **5.99x** |
+| Aggregate | 1298 ms | 7254 ms | 5.59x |
+| P90 / P95 | - | - | 6.00x / 6.00x |
+| Faster | 129/129 | - | 100.0% |
+
+The API benchmark compares the full lfortran pipeline (LLVM compile + link + run)
+against liric JIT (parse .ll + compile + run). liric avoids the object file emission,
+linking, and process startup costs of the native compile path.
 
 ## License
 
