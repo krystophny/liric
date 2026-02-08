@@ -125,6 +125,20 @@ typedef struct lr_inst {
     struct lr_inst *next;
 } lr_inst_t;
 
+typedef struct lr_phi_copy {
+    uint32_t dest_vreg;
+    lr_operand_t src_op;
+    struct lr_phi_copy *next;
+} lr_phi_copy_t;
+
+typedef struct lr_gep_step {
+    bool is_const;
+    int64_t const_byte_offset;
+    size_t runtime_elem_size;
+    uint8_t runtime_signext_bytes;
+    const lr_type_t *next_type;
+} lr_gep_step_t;
+
 typedef struct lr_block {
     char *name;
     uint32_t id;
@@ -222,6 +236,11 @@ const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
 
 size_t lr_type_size(const lr_type_t *t);
 size_t lr_type_align(const lr_type_t *t);
+size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx);
+lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func);
+uint8_t lr_gep_index_signext_bytes(const lr_operand_t *idx_op);
+bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
+                         const lr_operand_t *idx_op, lr_gep_step_t *out);
 
 void lr_module_dump(lr_module_t *m, FILE *out);
 

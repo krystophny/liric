@@ -22,13 +22,6 @@
 #define FP_SCRATCH0  X86_XMM0
 #define FP_SCRATCH1  X86_XMM1
 
-/* Per-block PHI copy list: copies to emit before the block terminator */
-typedef struct phi_copy {
-    uint32_t dest_vreg;
-    lr_operand_t src_op;
-    struct phi_copy *next;
-} phi_copy_t;
-
 /* Backend-local compile context replacing the old MIR linked-list state */
 typedef struct {
     uint8_t *buf;
@@ -52,22 +45,6 @@ static size_t align_up(size_t value, size_t align) {
     if (align <= 1)
         return value;
     return ((value + align - 1) / align) * align;
-}
-
-static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
-    size_t off = 0;
-    for (uint32_t i = 0; i < st->struc.num_fields && i < field_idx; i++) {
-        if (!st->struc.packed) {
-            size_t fa = lr_type_align(st->struc.fields[i]);
-            off = (off + fa - 1) & ~(fa - 1);
-        }
-        off += lr_type_size(st->struc.fields[i]);
-    }
-    if (field_idx < st->struc.num_fields && !st->struc.packed) {
-        size_t fa = lr_type_align(st->struc.fields[field_idx]);
-        off = (off + fa - 1) & ~(fa - 1);
-    }
-    return off;
 }
 
 /* Allocate a stack slot for a vreg, return rbp offset (negative). */
@@ -532,8 +509,8 @@ static void emit_epilogue(x86_compile_ctx_t *ctx) {
 }
 
 /* Emit PHI copies for the current block as predecessor */
-static void emit_phi_copies(x86_compile_ctx_t *ctx, phi_copy_t *copies) {
-    for (phi_copy_t *pc = copies; pc; pc = pc->next) {
+static void emit_phi_copies(x86_compile_ctx_t *ctx, lr_phi_copy_t *copies) {
+    for (lr_phi_copy_t *pc = copies; pc; pc = pc->next) {
         emit_load_operand(ctx, &pc->src_op, X86_RAX);
         emit_store_slot(ctx, pc->dest_vreg, X86_RAX);
     }
@@ -837,33 +814,6 @@ static void prescan_slots(x86_compile_ctx_t *ctx, lr_func_t *func) {
 }
 
 /*
- * Build per-block PHI copy lists.
- * For each PHI instruction: %dest = phi [val0, %bb0], [val1, %bb1], ...
- * Add a copy {dest_vreg, src_op} to block bb0's list, bb1's list, etc.
- */
-static phi_copy_t **build_phi_copies(x86_compile_ctx_t *ctx, lr_func_t *func) {
-    phi_copy_t **copies = lr_arena_array(ctx->arena, phi_copy_t *, func->num_blocks);
-    for (uint32_t i = 0; i < func->num_blocks; i++)
-        copies[i] = NULL;
-
-    for (lr_block_t *b = func->first_block; b; b = b->next) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (inst->op != LR_OP_PHI) continue;
-            for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
-                uint32_t pred_id = inst->operands[i + 1].block_id;
-                if (pred_id >= func->num_blocks) continue;
-                phi_copy_t *pc = lr_arena_new(ctx->arena, phi_copy_t);
-                pc->dest_vreg = inst->dest;
-                pc->src_op = inst->operands[i];
-                pc->next = copies[pred_id];
-                copies[pred_id] = pc;
-            }
-        }
-    }
-    return copies;
-}
-
-/*
  * x86_64_compile_func: single-pass ISel + encoding.
  * Replaces the old two-phase isel_func + encode_func approach.
  */
@@ -893,7 +843,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     ctx.stack_size = (ctx.stack_size + 15) & ~15u;
 
     /* Build PHI copy lists */
-    phi_copy_t **phi_copies = build_phi_copies(&ctx, func);
+    lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
 
     /* Emit prologue */
     emit_prologue(&ctx);
@@ -1163,70 +1113,30 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 const lr_type_t *cur_ty = inst->type;
                 for (uint32_t idx = 1; idx < inst->num_operands; idx++) {
                     const lr_operand_t *idx_op = &inst->operands[idx];
-                    int64_t byte_off = 0;
-                    bool is_const = (idx_op->kind == LR_VAL_IMM_I64);
-                    if (idx == 1) {
-                        size_t elem_size = lr_type_size(cur_ty);
-                        if (is_const) {
-                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
-                        } else {
-                            emit_load_operand(&ctx, idx_op, X86_RCX);
-                            if (idx_op->type &&
-                                (idx_op->type->kind == LR_TYPE_I1 ||
-                                 idx_op->type->kind == LR_TYPE_I8 ||
-                                 idx_op->type->kind == LR_TYPE_I16 ||
-                                 idx_op->type->kind == LR_TYPE_I32 ||
-                                 idx_op->type->kind == LR_TYPE_I64)) {
-                                size_t idx_sz = lr_type_size(idx_op->type);
-                                if (idx_sz == 1 || idx_sz == 2) {
-                                    emit_movsx_rr(&ctx, X86_RCX, X86_RCX, (uint8_t)idx_sz);
-                                } else if (idx_sz == 4) {
-                                    emit_movsxd(&ctx, X86_RCX, X86_RCX);
-                                }
-                            }
-                            if (elem_size != 1) {
-                                emit_mov_imm(&ctx, X86_R10, (int64_t)elem_size);
-                                emit_imul_rr(&ctx, X86_RCX, X86_R10, 8);
-                            }
-                            encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
-                        }
-                    } else if (cur_ty && cur_ty->kind == LR_TYPE_STRUCT) {
-                        uint32_t field = (uint32_t)idx_op->imm_i64;
-                        byte_off = (int64_t)struct_field_offset(cur_ty, field);
-                        if (field < cur_ty->struc.num_fields)
-                            cur_ty = cur_ty->struc.fields[field];
-                        is_const = true;
-                    } else if (cur_ty && cur_ty->kind == LR_TYPE_ARRAY) {
-                        size_t elem_size = lr_type_size(cur_ty->array.elem);
-                        if (is_const) {
-                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
-                        } else {
-                            emit_load_operand(&ctx, idx_op, X86_RCX);
-                            if (idx_op->type &&
-                                (idx_op->type->kind == LR_TYPE_I1 ||
-                                 idx_op->type->kind == LR_TYPE_I8 ||
-                                 idx_op->type->kind == LR_TYPE_I16 ||
-                                 idx_op->type->kind == LR_TYPE_I32 ||
-                                 idx_op->type->kind == LR_TYPE_I64)) {
-                                size_t idx_sz = lr_type_size(idx_op->type);
-                                if (idx_sz == 1 || idx_sz == 2) {
-                                    emit_movsx_rr(&ctx, X86_RCX, X86_RCX, (uint8_t)idx_sz);
-                                } else if (idx_sz == 4) {
-                                    emit_movsxd(&ctx, X86_RCX, X86_RCX);
-                                }
-                            }
-                            if (elem_size != 1) {
-                                emit_mov_imm(&ctx, X86_R10, (int64_t)elem_size);
-                                emit_imul_rr(&ctx, X86_RCX, X86_R10, 8);
-                            }
-                            encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
-                        }
-                        cur_ty = cur_ty->array.elem;
+                    lr_gep_step_t step;
+                    if (!lr_gep_analyze_step(cur_ty, idx == 1, idx_op, &step)) {
+                        continue;
                     }
-                    if (is_const && byte_off != 0) {
-                        emit_mov_imm(&ctx, X86_RCX, byte_off);
+                    cur_ty = step.next_type;
+                    if (step.is_const) {
+                        if (step.const_byte_offset == 0)
+                            continue;
+                        emit_mov_imm(&ctx, X86_RCX, step.const_byte_offset);
                         encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
+                        continue;
                     }
+
+                    emit_load_operand(&ctx, idx_op, X86_RCX);
+                    if (step.runtime_signext_bytes == 1 || step.runtime_signext_bytes == 2) {
+                        emit_movsx_rr(&ctx, X86_RCX, X86_RCX, step.runtime_signext_bytes);
+                    } else if (step.runtime_signext_bytes == 4) {
+                        emit_movsxd(&ctx, X86_RCX, X86_RCX);
+                    }
+                    if (step.runtime_elem_size != 1) {
+                        emit_mov_imm(&ctx, X86_R10, (int64_t)step.runtime_elem_size);
+                        emit_imul_rr(&ctx, X86_RCX, X86_R10, 8);
+                    }
+                    encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
                 }
                 emit_store_slot(&ctx, inst->dest, X86_RAX);
                 break;

@@ -377,7 +377,6 @@ static lr_type_t *resolve_or_create_forward_type(lr_parser_t *p, const char *nam
 
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
-static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx);
 
 static lr_type_t *call_result_type(lr_type_t *ty) {
     if (ty && ty->kind == LR_TYPE_FUNC)
@@ -585,7 +584,7 @@ static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty
             if (idx < 0 || (uint64_t)idx >= cur_ty->struc.num_fields) {
                 offset_ok = false;
             } else {
-                byte_offset += (int64_t)struct_field_offset(cur_ty, (uint32_t)idx);
+                byte_offset += (int64_t)lr_struct_field_offset(cur_ty, (uint32_t)idx);
                 cur_ty = cur_ty->struc.fields[(uint32_t)idx];
             }
         } else {
@@ -1400,25 +1399,6 @@ static void skip_line(lr_parser_t *p) {
     }
 }
 
-static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
-    size_t off = 0;
-    for (uint32_t i = 0; i < field_idx && i < st->struc.num_fields; i++) {
-        size_t fsz = lr_type_size(st->struc.fields[i]);
-        if (!st->struc.packed) {
-            size_t fa = lr_type_align(st->struc.fields[i]);
-            if (fa > 0)
-                off = (off + fa - 1) & ~(fa - 1);
-        }
-        off += fsz;
-    }
-    if (field_idx < st->struc.num_fields && !st->struc.packed) {
-        size_t fa = lr_type_align(st->struc.fields[field_idx]);
-        if (fa > 0)
-            off = (off + fa - 1) & ~(fa - 1);
-    }
-    return off;
-}
-
 static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
                                          uint8_t *buf, size_t buf_size,
                                          const lr_type_t *ty, size_t base_offset);
@@ -1566,7 +1546,7 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
             break;
         (void)parse_type(p);
         skip_attrs(p);
-        size_t field_off = base_offset + struct_field_offset(ty, fi);
+        size_t field_off = base_offset + lr_struct_field_offset(ty, fi);
         parse_init_field_value(p, g, buf, buf_size, ty->struc.fields[fi], field_off);
         if (!match(p, LR_TOK_COMMA))
             break;

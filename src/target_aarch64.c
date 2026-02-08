@@ -23,18 +23,13 @@
 #define FP_SCRATCH0  A64_D0
 #define FP_SCRATCH1  A64_D1
 
-typedef struct phi_copy {
-    uint32_t dest_vreg;
-    lr_operand_t src_op;
-    struct phi_copy *next;
-} phi_copy_t;
-
 typedef struct {
     uint8_t *buf;
     size_t buflen;
     size_t pos;
     uint32_t stack_size;
     int32_t *stack_slots;
+    uint32_t *stack_slot_sizes;
     uint32_t num_stack_slots;
     size_t block_offsets[1024];
     struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } fixups[4096];
@@ -44,31 +39,19 @@ typedef struct {
     lr_module_t *mod;
 } a64_compile_ctx_t;
 
-static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
-    size_t off = 0;
-    for (uint32_t i = 0; i < st->struc.num_fields && i < field_idx; i++) {
-        if (!st->struc.packed) {
-            size_t fa = lr_type_align(st->struc.fields[i]);
-            off = (off + fa - 1) & ~(fa - 1);
-        }
-        off += lr_type_size(st->struc.fields[i]);
-    }
-    if (field_idx < st->struc.num_fields && !st->struc.packed) {
-        size_t fa = lr_type_align(st->struc.fields[field_idx]);
-        off = (off + fa - 1) & ~(fa - 1);
-    }
-    return off;
-}
-
-static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t size) {
+static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, size_t size) {
     if (vreg > 100000) return -8;
     while (vreg >= ctx->num_stack_slots) {
         uint32_t old = ctx->num_stack_slots;
         uint32_t new_cap = old == 0 ? 64 : old * 2;
         int32_t *ns = lr_arena_array(ctx->arena, int32_t, new_cap);
+        uint32_t *ss = lr_arena_array(ctx->arena, uint32_t, new_cap);
         if (old > 0) memcpy(ns, ctx->stack_slots, old * sizeof(int32_t));
+        if (old > 0) memcpy(ss, ctx->stack_slot_sizes, old * sizeof(uint32_t));
         for (uint32_t i = old; i < new_cap; i++) ns[i] = 0;
+        for (uint32_t i = old; i < new_cap; i++) ss[i] = 0;
         ctx->stack_slots = ns;
+        ctx->stack_slot_sizes = ss;
         ctx->num_stack_slots = new_cap;
     }
 
@@ -76,10 +59,11 @@ static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t size) {
         return ctx->stack_slots[vreg];
 
     if (size < 8) size = 8;
-    ctx->stack_size += size;
-    ctx->stack_size = (ctx->stack_size + size - 1) & ~(uint32_t)(size - 1);
+    ctx->stack_size += (uint32_t)size;
+    ctx->stack_size = (ctx->stack_size + (uint32_t)size - 1) & ~(uint32_t)(size - 1);
     int32_t offset = -(int32_t)ctx->stack_size;
     ctx->stack_slots[vreg] = offset;
+    ctx->stack_slot_sizes[vreg] = (uint32_t)size;
     return offset;
 }
 
@@ -555,11 +539,82 @@ static void emit_jcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint32_t target_blo
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x54000000u);
 }
 
-static void emit_phi_copies(a64_compile_ctx_t *ctx, phi_copy_t *copies) {
-    for (phi_copy_t *pc = copies; pc; pc = pc->next) {
+static void emit_phi_copies(a64_compile_ctx_t *ctx, lr_phi_copy_t *copies) {
+    for (lr_phi_copy_t *pc = copies; pc; pc = pc->next) {
         emit_load_operand(ctx, &pc->src_op, A64_X9);
         emit_store_slot(ctx, pc->dest_vreg, A64_X9);
     }
+}
+
+static void emit_mem_copy_base_to_base(a64_compile_ctx_t *ctx,
+                                       uint8_t dst_base, int32_t dst_disp,
+                                       uint8_t src_base, int32_t src_disp,
+                                       size_t bytes) {
+    const uint8_t scratch = A64_X11;
+    size_t off = 0;
+    while (bytes - off >= 8) {
+        emit_load(ctx->buf, &ctx->pos, ctx->buflen, scratch, src_base,
+                  src_disp + (int32_t)off, 8);
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 8);
+        off += 8;
+    }
+    if (bytes - off >= 4) {
+        emit_load(ctx->buf, &ctx->pos, ctx->buflen, scratch, src_base,
+                  src_disp + (int32_t)off, 4);
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 4);
+        off += 4;
+    }
+    if (bytes - off >= 2) {
+        emit_load(ctx->buf, &ctx->pos, ctx->buflen, scratch, src_base,
+                  src_disp + (int32_t)off, 2);
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 2);
+        off += 2;
+    }
+    if (bytes - off == 1) {
+        emit_load(ctx->buf, &ctx->pos, ctx->buflen, scratch, src_base,
+                  src_disp + (int32_t)off, 1);
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 1);
+    }
+}
+
+static void emit_mem_zero_base(a64_compile_ctx_t *ctx, uint8_t dst_base,
+                               int32_t dst_disp, size_t bytes) {
+    const uint8_t scratch = A64_X11;
+    size_t off = 0;
+    emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, scratch, 0, true);
+    while (bytes - off >= 8) {
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 8);
+        off += 8;
+    }
+    if (bytes - off >= 4) {
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 4);
+        off += 4;
+    }
+    if (bytes - off >= 2) {
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 2);
+        off += 2;
+    }
+    if (bytes - off == 1) {
+        emit_store(ctx->buf, &ctx->pos, ctx->buflen, scratch, dst_base,
+                   dst_disp + (int32_t)off, 1);
+    }
+}
+
+static void emit_signext_index_reg(a64_compile_ctx_t *ctx, uint8_t reg,
+                                   uint8_t signext_bytes) {
+    uint32_t insn;
+    if (signext_bytes == 0 || signext_bytes >= 8)
+        return;
+    insn = 0x93400000u | ((uint32_t)((signext_bytes * 8u) - 1u) << 10)
+         | ((uint32_t)reg << 5) | (uint32_t)reg;
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, insn);
 }
 
 /*
@@ -593,8 +648,15 @@ static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
                 if (inst->op != LR_OP_STORE && inst->op != LR_OP_BR &&
                     inst->op != LR_OP_CONDBR && inst->op != LR_OP_RET &&
                     inst->op != LR_OP_RET_VOID && inst->op != LR_OP_UNREACHABLE) {
-                    if (inst->type && inst->type->kind != LR_TYPE_VOID)
-                        alloc_slot(ctx, inst->dest, 8);
+                    if (inst->type && inst->type->kind != LR_TYPE_VOID) {
+                        size_t ty_sz = 8;
+                        if (inst->op == LR_OP_LOAD) {
+                            size_t load_sz = lr_type_size(inst->type);
+                            if (load_sz > 8)
+                                ty_sz = load_sz;
+                        }
+                        alloc_slot(ctx, inst->dest, ty_sz);
+                    }
                 }
                 break;
             }
@@ -602,33 +664,6 @@ static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
     }
     for (uint32_t i = 0; i < func->num_params; i++)
         alloc_slot(ctx, func->param_vregs[i], 8);
-}
-
-/*
- * Build per-block PHI copy lists.
- * For each PHI instruction: %dest = phi [val0, %bb0], [val1, %bb1], ...
- * Add a copy {dest_vreg, src_op} to block bb0's list, bb1's list, etc.
- */
-static phi_copy_t **build_phi_copies(a64_compile_ctx_t *ctx, lr_func_t *func) {
-    phi_copy_t **copies = lr_arena_array(ctx->arena, phi_copy_t *, func->num_blocks);
-    for (uint32_t i = 0; i < func->num_blocks; i++)
-        copies[i] = NULL;
-
-    for (lr_block_t *b = func->first_block; b; b = b->next) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (inst->op != LR_OP_PHI) continue;
-            for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
-                uint32_t pred_id = inst->operands[i + 1].block_id;
-                if (pred_id >= func->num_blocks) continue;
-                phi_copy_t *pc = lr_arena_new(ctx->arena, phi_copy_t);
-                pc->dest_vreg = inst->dest;
-                pc->src_op = inst->operands[i];
-                pc->next = copies[pred_id];
-                copies[pred_id] = pc;
-            }
-        }
-    }
-    return copies;
 }
 
 /*
@@ -644,6 +679,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
         .pos = 0,
         .stack_size = 0,
         .stack_slots = NULL,
+        .stack_slot_sizes = NULL,
         .num_stack_slots = 0,
         .num_fixups = 0,
         .arena = arena,
@@ -655,7 +691,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     ctx.stack_size = (ctx.stack_size + 15) & ~15u;
 
-    phi_copy_t **phi_copies = build_phi_copies(&ctx, func);
+    lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
 
     /* Prologue: stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, N */
     emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
@@ -927,16 +963,50 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
             case LR_OP_LOAD: {
                 emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                uint8_t sz = (uint8_t)lr_type_size(inst->type);
-                emit_load(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X9, 0, sz);
-                emit_store_slot(&ctx, inst->dest, A64_X9);
+                size_t load_sz = lr_type_size(inst->type);
+                if (load_sz == 0)
+                    load_sz = 8;
+                if (load_sz > 8) {
+                    int32_t dst_off = alloc_slot(&ctx, inst->dest, load_sz);
+                    emit_mem_copy_base_to_base(&ctx, A64_FP, dst_off, A64_X9, 0, load_sz);
+                } else {
+                    emit_load(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X9, 0, (uint8_t)load_sz);
+                    emit_store_slot(&ctx, inst->dest, A64_X9);
+                }
                 break;
             }
             case LR_OP_STORE: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
                 emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                uint8_t sz = (uint8_t)lr_type_size(inst->operands[0].type);
-                emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X10, 0, sz);
+                size_t store_sz = lr_type_size(inst->operands[0].type);
+                if (store_sz == 0)
+                    store_sz = 8;
+                if (store_sz > 8) {
+                    if (inst->operands[0].kind == LR_VAL_IMM_I64 &&
+                        inst->operands[0].imm_i64 == 0) {
+                        emit_mem_zero_base(&ctx, A64_X10, 0, store_sz);
+                        break;
+                    }
+                    if (inst->operands[0].kind == LR_VAL_VREG &&
+                        inst->operands[0].vreg < ctx.num_stack_slots &&
+                        ctx.stack_slot_sizes[inst->operands[0].vreg] > 0) {
+                        uint32_t vreg = inst->operands[0].vreg;
+                        int32_t src_off = alloc_slot(&ctx, vreg, 8);
+                        size_t src_sz = ctx.stack_slot_sizes[vreg];
+                        if (src_sz > store_sz)
+                            src_sz = store_sz;
+                        if (src_sz > 0) {
+                            emit_mem_copy_base_to_base(&ctx, A64_X10, 0, A64_FP, src_off, src_sz);
+                        }
+                        if (src_sz < store_sz) {
+                            emit_mem_zero_base(&ctx, A64_X10, (int32_t)src_sz, store_sz - src_sz);
+                        }
+                        break;
+                    }
+                    emit_mem_zero_base(&ctx, A64_X10, 0, store_sz);
+                    break;
+                }
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X10, 0, (uint8_t)store_sz);
                 break;
             }
             case LR_OP_GEP: {
@@ -944,62 +1014,31 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 const lr_type_t *cur_ty = inst->type;
                 for (uint32_t idx = 1; idx < inst->num_operands; idx++) {
                     const lr_operand_t *idx_op = &inst->operands[idx];
-                    int64_t byte_off = 0;
-                    bool is_const = (idx_op->kind == LR_VAL_IMM_I64);
-                    if (idx == 1) {
-                        size_t elem_size = lr_type_size(cur_ty);
-                        if (is_const) {
-                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
-                        } else {
-                            emit_load_operand(&ctx, idx_op, A64_X10);
-                            if (idx_op->type && idx_op->type->kind == LR_TYPE_I32) {
-                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                         0x93407C00u |
-                                         ((uint32_t)A64_X10 << 5) | A64_X10); /* sxtw */
-                            }
-                            if (elem_size != 1) {
-                                emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
-                                              A64_X11, (int64_t)elem_size, true);
-                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                         enc_mul(true, A64_X10, A64_X10, A64_X11));
-                            }
-                            emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                     enc_add_reg(true, A64_X9, A64_X9, A64_X10));
-                        }
-                    } else if (cur_ty && cur_ty->kind == LR_TYPE_STRUCT) {
-                        uint32_t field = (uint32_t)idx_op->imm_i64;
-                        byte_off = (int64_t)struct_field_offset(cur_ty, field);
-                        if (field < cur_ty->struc.num_fields)
-                            cur_ty = cur_ty->struc.fields[field];
-                        is_const = true;
-                    } else if (cur_ty && cur_ty->kind == LR_TYPE_ARRAY) {
-                        size_t elem_size = lr_type_size(cur_ty->array.elem);
-                        if (is_const) {
-                            byte_off = idx_op->imm_i64 * (int64_t)elem_size;
-                        } else {
-                            emit_load_operand(&ctx, idx_op, A64_X10);
-                            if (idx_op->type && idx_op->type->kind == LR_TYPE_I32) {
-                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                         0x93407C00u |
-                                         ((uint32_t)A64_X10 << 5) | A64_X10); /* sxtw */
-                            }
-                            if (elem_size != 1) {
-                                emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
-                                              A64_X11, (int64_t)elem_size, true);
-                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                         enc_mul(true, A64_X10, A64_X10, A64_X11));
-                            }
-                            emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                     enc_add_reg(true, A64_X9, A64_X9, A64_X10));
-                        }
-                        cur_ty = cur_ty->array.elem;
+                    lr_gep_step_t step;
+                    if (!lr_gep_analyze_step(cur_ty, idx == 1, idx_op, &step)) {
+                        continue;
                     }
-                    if (is_const && byte_off != 0) {
+                    cur_ty = step.next_type;
+                    if (step.is_const) {
+                        if (step.const_byte_offset == 0)
+                            continue;
                         emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
-                                      A64_X10, byte_off, true);
+                                      A64_X10, step.const_byte_offset, true);
                         emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
                                  enc_add_reg(true, A64_X9, A64_X9, A64_X10));
+                        continue;
                     }
+
+                    emit_load_operand(&ctx, idx_op, A64_X10);
+                    emit_signext_index_reg(&ctx, A64_X10, step.runtime_signext_bytes);
+                    if (step.runtime_elem_size != 1) {
+                        emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
+                                      A64_X11, (int64_t)step.runtime_elem_size, true);
+                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                 enc_mul(true, A64_X10, A64_X10, A64_X11));
+                    }
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_add_reg(true, A64_X9, A64_X9, A64_X10));
                 }
                 emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
