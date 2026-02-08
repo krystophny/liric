@@ -216,6 +216,13 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env
             setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
             setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
         }
+        {
+            int devnull = open("/dev/null", O_RDONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
+        }
         if (dup2(out_fd, STDOUT_FILENO) < 0) _exit(127);
         if (dup2(err_fd, STDERR_FILENO) < 0) _exit(127);
         close(out_fd);
@@ -524,7 +531,11 @@ static cfg_t parse_args(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
-    char *compat_path = path_join2(cfg.bench_dir, "compat_api.txt");
+    char *compat_path;
+
+    setvbuf(stdout, NULL, _IOLBF, 0);
+
+    compat_path = path_join2(cfg.bench_dir, "compat_api.txt");
     char *opts_path = path_join2(cfg.bench_dir, "compat_api_options.jsonl");
     char *api_bin_dir = path_join2(cfg.bench_dir, "api_bin");
     char *jsonl_path = path_join2(cfg.bench_dir, "bench_api.jsonl");

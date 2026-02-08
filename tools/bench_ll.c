@@ -214,6 +214,13 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env
             setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
             setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
         }
+        {
+            int devnull = open("/dev/null", O_RDONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
+        }
         if (dup2(out_fd, STDOUT_FILENO) < 0) _exit(127);
         if (dup2(err_fd, STDERR_FILENO) < 0) _exit(127);
         close(out_fd);

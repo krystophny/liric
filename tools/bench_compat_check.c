@@ -341,6 +341,13 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *std
         }
         fderr = err_fd;
 
+        {
+            int devnull = open("/dev/null", O_RDONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDIN_FILENO);
+                close(devnull);
+            }
+        }
         if (dup2(fdout, STDOUT_FILENO) < 0) _exit(127);
         if (dup2(fderr, STDERR_FILENO) < 0) _exit(127);
 
