@@ -615,7 +615,80 @@ static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty
 
 static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type);
 
+static void pack_scalar_bits(uint8_t *buf, size_t offset, lr_type_t *ft,
+                             lr_operand_t *op) {
+    size_t fsz = lr_type_size(ft);
+    if (op->kind == LR_VAL_IMM_I64) {
+        int64_t v = op->imm_i64;
+        memcpy(buf + offset, &v, fsz < 8 ? fsz : 8);
+    } else if (op->kind == LR_VAL_IMM_F64) {
+        if (ft->kind == LR_TYPE_FLOAT) {
+            float f = (float)op->imm_f64;
+            memcpy(buf + offset, &f, 4);
+        } else {
+            double d = op->imm_f64;
+            memcpy(buf + offset, &d, 8);
+        }
+    } else {
+        memset(buf + offset, 0, fsz);
+    }
+}
+
+static lr_operand_t parse_struct_constant_fields(lr_parser_t *p,
+                                                 lr_type_t *type,
+                                                 lr_operand_t *field_ops,
+                                                 uint32_t *nfields_out) {
+    bool packed = check(p, LR_TOK_LANGLE);
+    if (packed)
+        next(p);
+    expect(p, LR_TOK_LBRACE);
+
+    uint32_t nf = 0;
+    bool have_type = type && type->kind == LR_TYPE_STRUCT;
+    uint32_t max_fields = have_type ? type->struc.num_fields : 0;
+
+    while (!check(p, LR_TOK_RBRACE) && !check(p, LR_TOK_EOF)) {
+        lr_operand_t fop = parse_typed_operand(p);
+        if (field_ops && nf < max_fields)
+            field_ops[nf] = fop;
+        nf++;
+        if (!match(p, LR_TOK_COMMA))
+            break;
+    }
+    expect(p, LR_TOK_RBRACE);
+    if (packed)
+        expect(p, LR_TOK_RANGLE);
+
+    if (nfields_out)
+        *nfields_out = nf;
+
+    if (!have_type || nf != max_fields) {
+        return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
+    }
+
+    size_t total = lr_type_size(type);
+    if (total <= 8) {
+        uint8_t buf[8] = {0};
+        for (uint32_t i = 0; i < nf; i++) {
+            size_t off = lr_struct_field_offset(type, i);
+            pack_scalar_bits(buf, off, type->struc.fields[i], &field_ops[i]);
+        }
+        int64_t packed_val = 0;
+        memcpy(&packed_val, buf, total);
+        return lr_op_imm_i64(packed_val, type);
+    }
+
+    return (lr_operand_t){ .kind = LR_VAL_UNDEF, .type = type };
+}
+
+#define AGG_FIELDS_MAX 16u
+
 static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *type) {
+    if (check(p, LR_TOK_LBRACE) && type && type->kind == LR_TYPE_STRUCT) {
+        lr_operand_t fields[AGG_FIELDS_MAX];
+        uint32_t nf = 0;
+        return parse_struct_constant_fields(p, type, fields, &nf);
+    }
     if (check(p, LR_TOK_LANGLE)) {
         next(p);
         skip_balanced_braces(p);
@@ -700,8 +773,12 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
     if (check(p, LR_TOK_LBRACE) || check(p, LR_TOK_LBRACKET))
         return parse_aggregate_constant_operand(p, type);
     if (check(p, LR_TOK_LANGLE)) {
-        /* packed struct literal: <{ ... }> */
-        next(p);  /* consume < */
+        if (type && type->kind == LR_TYPE_STRUCT) {
+            lr_operand_t fields[AGG_FIELDS_MAX];
+            uint32_t nf = 0;
+            return parse_struct_constant_fields(p, type, fields, &nf);
+        }
+        next(p);
         if (!check(p, LR_TOK_LBRACE)) {
             error(p, "expected '{' after '<' in packed struct literal");
             return lr_op_imm_i64(0, type);
@@ -1239,10 +1316,47 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
     if (op_tok == LR_TOK_STORE) {
         next(p);
-        lr_operand_t val = parse_typed_operand(p);
+        lr_type_t *val_ty = parse_type(p);
+        skip_attrs(p);
+
+        bool is_agg = val_ty && val_ty->kind == LR_TYPE_STRUCT &&
+                      lr_type_size(val_ty) > 8 &&
+                      (check(p, LR_TOK_LANGLE) || check(p, LR_TOK_LBRACE));
+        if (is_agg) {
+            lr_operand_t fields[AGG_FIELDS_MAX];
+            uint32_t nf = 0;
+            parse_struct_constant_fields(p, val_ty, fields, &nf);
+            expect(p, LR_TOK_COMMA);
+            lr_operand_t dst = parse_typed_operand(p);
+            if (match(p, LR_TOK_COMMA)) {
+                if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
+            }
+            uint32_t max_f = val_ty->struc.num_fields;
+            if (nf > max_f) nf = max_f;
+            for (uint32_t i = 0; i < nf; i++) {
+                uint32_t gep_dest = lr_vreg_new(func);
+                lr_operand_t gep_ops[3] = {
+                    dst,
+                    lr_op_imm_i64(0, p->module->type_i32),
+                    lr_op_imm_i64((int64_t)i, p->module->type_i32)
+                };
+                lr_inst_t *gep = lr_inst_create(p->arena, LR_OP_GEP,
+                    val_ty, gep_dest, gep_ops, 3);
+                lr_block_append(block, gep);
+                lr_operand_t st_ops[2] = {
+                    fields[i],
+                    lr_op_vreg(gep_dest, p->module->type_ptr)
+                };
+                lr_inst_t *st = lr_inst_create(p->arena, LR_OP_STORE,
+                    p->module->type_void, 0, st_ops, 2);
+                lr_block_append(block, st);
+            }
+            return;
+        }
+
+        lr_operand_t val = parse_operand(p, val_ty);
         expect(p, LR_TOK_COMMA);
         lr_operand_t dst = parse_typed_operand(p);
-        /* skip optional ", align N" */
         if (match(p, LR_TOK_COMMA)) {
             if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
         }

@@ -50,6 +50,8 @@ int test_parser_decl_with_modern_param_attrs(void);
 int test_parser_store_with_const_gep_operand(void);
 int test_parser_call_arg_with_align_attr(void);
 int test_parser_store_with_struct_constant(void);
+int test_parser_store_packed_struct_float_pair(void);
+int test_parser_store_packed_struct_double_pair(void);
 int test_parser_urem_instruction(void);
 int test_parser_canonical_phi_pairs(void);
 int test_parser_select_with_ptr_operands(void);
@@ -105,6 +107,8 @@ int test_jit_fptrunc_f64_f32(void);
 int test_jit_fcmp_oeq(void);
 int test_jit_fp_arithmetic_chain(void);
 int test_jit_insert_extractvalue_struct_fields(void);
+int test_jit_packed_struct_float_constant(void);
+int test_jit_packed_struct_double_constant(void);
 int test_e2e_ret_42(void);
 int test_e2e_add_i32(void);
 int test_e2e_branch(void);
@@ -163,6 +167,8 @@ int main(void) {
     RUN_TEST(test_parser_store_with_const_gep_operand);
     RUN_TEST(test_parser_call_arg_with_align_attr);
     RUN_TEST(test_parser_store_with_struct_constant);
+    RUN_TEST(test_parser_store_packed_struct_float_pair);
+    RUN_TEST(test_parser_store_packed_struct_double_pair);
     RUN_TEST(test_parser_urem_instruction);
     RUN_TEST(test_parser_canonical_phi_pairs);
     RUN_TEST(test_parser_select_with_ptr_operands);
@@ -224,6 +230,8 @@ int main(void) {
     RUN_TEST(test_jit_fcmp_oeq);
     RUN_TEST(test_jit_fp_arithmetic_chain);
     RUN_TEST(test_jit_insert_extractvalue_struct_fields);
+    RUN_TEST(test_jit_packed_struct_float_constant);
+    RUN_TEST(test_jit_packed_struct_double_constant);
 
     fprintf(stderr, "\nE2E tests:\n");
     RUN_TEST(test_e2e_ret_42);

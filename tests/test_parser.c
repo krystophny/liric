@@ -402,8 +402,87 @@ int test_parser_store_with_struct_constant(void) {
     lr_inst_t *store = b->first;
     TEST_ASSERT(store != NULL, "store exists");
     TEST_ASSERT_EQ(store->op, LR_OP_STORE, "store parsed");
-    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_UNDEF,
-                   "aggregate constant represented as undef placeholder");
+    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_IMM_I64,
+                   "struct constant packed into i64");
+    TEST_ASSERT_EQ(store->operands[0].imm_i64,
+                   (int64_t)1 | ((int64_t)2 << 32),
+                   "packed {i32 1, i32 2}");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_store_packed_struct_float_pair(void) {
+    const char *src =
+        "%complex_4 = type <{ float, float }>\n"
+        "define void @f(ptr %dst) {\n"
+        "entry:\n"
+        "  store %complex_4 <{ float 1.0, float 2.0 }>, ptr %dst, align 4\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *store = b->first;
+    TEST_ASSERT(store != NULL, "store exists");
+    TEST_ASSERT_EQ(store->op, LR_OP_STORE, "store parsed");
+    TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_IMM_I64,
+                   "packed float pair fits in i64");
+
+    uint32_t lo, hi;
+    float f1 = 1.0f, f2 = 2.0f;
+    memcpy(&lo, &f1, 4);
+    memcpy(&hi, &f2, 4);
+    int64_t expect = (int64_t)lo | ((int64_t)hi << 32);
+    TEST_ASSERT_EQ(store->operands[0].imm_i64, expect,
+                   "packed <{float 1.0, float 2.0}>");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_store_packed_struct_double_pair(void) {
+    const char *src =
+        "%complex_8 = type <{ double, double }>\n"
+        "define void @f(ptr %dst) {\n"
+        "entry:\n"
+        "  store %complex_8 <{ double 1.0, double 2.0 }>, ptr %dst, align 8\n"
+        "  ret void\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *inst = b->first;
+    TEST_ASSERT(inst != NULL, "first inst exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_GEP, "first field: gep");
+    inst = inst->next;
+    TEST_ASSERT(inst != NULL, "second inst exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_STORE, "first field: store");
+    TEST_ASSERT_EQ(inst->operands[0].kind, LR_VAL_IMM_F64,
+                   "field 0 is double imm");
+    inst = inst->next;
+    TEST_ASSERT(inst != NULL, "third inst exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_GEP, "second field: gep");
+    inst = inst->next;
+    TEST_ASSERT(inst != NULL, "fourth inst exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_STORE, "second field: store");
+    TEST_ASSERT_EQ(inst->operands[0].kind, LR_VAL_IMM_F64,
+                   "field 1 is double imm");
 
     lr_arena_destroy(arena);
     return 0;
