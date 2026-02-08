@@ -1,7 +1,6 @@
 # Liric
 
-Fast, minimal JIT for LLVM IR (`.ll`) and WebAssembly (`.wasm`).
-C11 core, no Python in the benchmark/test harness.
+JIT compiler for LLVM IR (`.ll`) and WebAssembly (`.wasm`). C11, zero dependencies.
 
 ```
 .ll / .wasm -> parse -> SSA IR -> instruction select -> machine code -> JIT
@@ -25,57 +24,51 @@ ctest --test-dir build --output-on-failure
 
 For programmatic IR construction, use the C API in `include/liric/liric.h`.
 
-## Benchmarks (C Harness)
+## Benchmarks
 
 ```bash
-# 1) Compatibility sweep (defines compat sets)
+# 1) Compatibility sweep (defines which tests both liric and lli get right)
 ./build/bench_compat_check --timeout 15
 
-# 2) LL path benchmark (liric vs lli)
+# 2) LL benchmark: liric JIT vs lli -O0
 ./build/bench_ll --iters 3
 
-# 3) LFortran backend benchmark (lfortran+liric vs lfortran+LLVM)
+# 3) LFortran backend benchmark: lfortran+liric vs lfortran+LLVM
 ./build/bench_api --iters 3
 ```
 
-Artifacts are written to `/tmp/liric_bench/`.
+Artifacts go to `/tmp/liric_bench/`.
 
-## Latest Metrics
+## Compatibility
 
-Environment: CachyOS x86_64, `lli -O0`, collected February 8, 2026 from the
-latest complete artifacts.
+2266 lfortran integration tests, compared against `lfortran --backend=llvm`.
 
-### Compatibility (`bench_compat_check`)
+| | Count | % |
+|---|---:|---:|
+| LLVM produces correct output | 2246 | 99.1 |
+| liric matches LLVM output | 2051 | 90.5 |
+| lli matches LLVM output | 2166 | 95.6 |
+| Both liric and lli match | 2006 | 88.5 |
 
-| Metric | Value |
-|---|---:|
-| Processed tests | 2266 |
-| `llvm_ok` | 2246 (99.1%) |
-| `liric_match` | 1616 (71.3%) |
-| `lli_match` | 2165 (95.5%) |
-| `both_match` (`compat_ll`) | 1583 (69.9%) |
-| liric SIGSEGV (`rc=-11`) | 170 |
+## LL Benchmark: liric vs lli
 
-### LL Benchmark (`bench_ll_summary.json`)
+2006 tests (the "both match" set), 3 iterations, CachyOS x86_64, February 2026.
 
-| Metric | liric | lli | Speedup |
+**Wall-clock** (full subprocess):
+
+| | Median | Aggregate | Faster |
 |---|---:|---:|---:|
-| Wall median | 10.065 ms | 20.120 ms | 2.00x |
-| Wall aggregate | 1288.246 ms | 2525.965 ms | 1.96x |
-| Materialized internal median | 0.325 ms | 3.060 ms | 9.54x |
-| Benchmarked tests | 128 | 128 | - |
+| liric | 10.1 ms | 20.5 s | 99.2% |
+| lli | 20.1 ms | 48.2 s | |
+| Speedup | 2.0x | 2.4x | |
 
-Fair internal metric is `parse+compile+lookup` (liric) vs
-`parse+jit+lookup` (lli), not parse/jit alone.
+**Compile time** (in-process: parse + compile + symbol resolve):
 
-### LFortran Backend Benchmark (`bench_api.jsonl`)
-
-| Metric | lfortran+liric | lfortran+LLVM | Speedup |
+| | Median | Aggregate | Faster |
 |---|---:|---:|---:|
-| Wall median | 40.244 ms | 50.303 ms | 1.25x |
-| Wall aggregate | 1368.055 ms | 1830.849 ms | 1.34x |
-| P90 / P95 speedup | - | - | 1.50x / 1.50x |
-| Faster cases | 34/34 | - | 100% |
+| liric | 0.82 ms | 2.6 s | 100% |
+| lli | 5.15 ms | 18.5 s | |
+| Speedup | 6.4x | 7.0x | |
 
 ## License
 
