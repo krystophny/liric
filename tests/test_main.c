@@ -44,6 +44,7 @@ int test_parser_typed_pointer_decl_params(void);
 int test_parser_add(void);
 int test_parser_typed_call_and_dot_label(void);
 int test_parser_named_type_operand(void);
+int test_parser_forward_named_type_by_value(void);
 int test_parser_decl_with_modern_param_attrs(void);
 int test_parser_store_with_const_gep_operand(void);
 int test_parser_call_arg_with_align_attr(void);
@@ -151,6 +152,7 @@ int main(void) {
     RUN_TEST(test_parser_add);
     RUN_TEST(test_parser_typed_call_and_dot_label);
     RUN_TEST(test_parser_named_type_operand);
+    RUN_TEST(test_parser_forward_named_type_by_value);
     RUN_TEST(test_parser_decl_with_modern_param_attrs);
     RUN_TEST(test_parser_store_with_const_gep_operand);
     RUN_TEST(test_parser_call_arg_with_align_attr);

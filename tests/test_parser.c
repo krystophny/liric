@@ -198,6 +198,51 @@ int test_parser_named_type_operand(void) {
     return 0;
 }
 
+int test_parser_forward_named_type_by_value(void) {
+    const char *src =
+        "%A = type { %B }\n"
+        "%B = type { i64, i64 }\n"
+        "define i32 @f() {\n"
+        ".entry:\n"
+        "  %a = alloca %A, align 8\n"
+        "  %b = getelementptr %A, %A* %a, i32 0, i32 0\n"
+        "  %x = getelementptr %B, %B* %b, i32 0, i32 1\n"
+        "  store i64 7, i64* %x, align 8\n"
+        "  ret i32 0\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *alloca_inst = b->first;
+    TEST_ASSERT(alloca_inst != NULL, "has alloca");
+    TEST_ASSERT_EQ(alloca_inst->op, LR_OP_ALLOCA, "first op is alloca");
+    TEST_ASSERT_EQ(alloca_inst->type->kind, LR_TYPE_STRUCT, "A resolves to struct");
+    TEST_ASSERT_EQ(lr_type_size(alloca_inst->type), 16, "A by-value size tracks forward B");
+
+    lr_inst_t *gep_b = alloca_inst->next;
+    TEST_ASSERT(gep_b != NULL, "first gep exists");
+    TEST_ASSERT_EQ(gep_b->op, LR_OP_GEP, "second op is gep");
+    TEST_ASSERT_EQ(gep_b->type->kind, LR_TYPE_STRUCT, "gep base type is struct A");
+    TEST_ASSERT_EQ(lr_type_size(gep_b->type), 16, "struct A size is correct");
+
+    lr_inst_t *gep_x = gep_b->next;
+    TEST_ASSERT(gep_x != NULL, "second gep exists");
+    TEST_ASSERT_EQ(gep_x->op, LR_OP_GEP, "third op is gep");
+    TEST_ASSERT_EQ(gep_x->type->kind, LR_TYPE_STRUCT, "gep base type is struct B");
+    TEST_ASSERT_EQ(lr_type_size(gep_x->type), 16, "struct B size is correct");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_decl_with_modern_param_attrs(void) {
     const char *src =
         "declare void @llvm.memcpy.p0.p0.i32("
