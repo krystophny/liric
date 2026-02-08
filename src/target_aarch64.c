@@ -730,8 +730,21 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
     /* Prologue: stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, N */
     emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
     emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x910003FDu); /* mov x29, sp */
-    if (ctx.stack_size > 0)
+    if (ctx.stack_size > 4096) {
+        uint32_t remaining = ctx.stack_size;
+        while (remaining > 4096) {
+            uint32_t chunk = remaining > 4095u ? 4095u : remaining;
+            emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                     enc_sub_imm(true, A64_SP, A64_SP, chunk));
+            /* str xzr, [sp] -- probe page */
+            emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xF90003FFu);
+            remaining -= chunk;
+        }
+        if (remaining > 0)
+            emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, remaining, true);
+    } else if (ctx.stack_size > 0) {
         emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, ctx.stack_size, true);
+    }
 
     /* Store parameters: first 8 from registers, rest from caller frame */
     static const uint8_t param_regs[] = {
