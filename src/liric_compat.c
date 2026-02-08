@@ -1190,7 +1190,7 @@ lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
     ops[0] = desc_to_op(bd);
     for (unsigned i = 0; i < num_indices; i++) {
         lr_operand_desc_t id = lc_value_to_desc(indices[i]);
-        ops[1 + i] = desc_to_op(id);
+        ops[1 + i] = lr_canonicalize_gep_index(m, b, f, desc_to_op(id));
     }
     lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_GEP,
                                       m->type_ptr, dest, ops, nops);
@@ -1678,4 +1678,3 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     fclose(f);
     return rc;
 }
-

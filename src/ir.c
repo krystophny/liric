@@ -413,7 +413,7 @@ bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
             out->runtime_elem_size = elem_size;
             out->runtime_signext_bytes = lr_gep_index_signext_bytes(idx_op);
         }
-        return true;
+        return idx_op;
     }
 
     if (cur_ty->kind == LR_TYPE_STRUCT) {
@@ -441,6 +441,44 @@ bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
     }
 
     return false;
+}
+
+lr_operand_t lr_canonicalize_gep_index(lr_module_t *m, lr_block_t *b,
+                                       lr_func_t *f, lr_operand_t idx_op) {
+    if (!m) {
+        return idx_op;
+    }
+
+    if (idx_op.kind == LR_VAL_IMM_I64 || idx_op.kind == LR_VAL_UNDEF) {
+        if (idx_op.type != m->type_i64) {
+            idx_op.type = m->type_i64;
+        }
+        return idx_op;
+    }
+
+    if (!idx_op.type || idx_op.type->kind == LR_TYPE_I64) {
+        return idx_op;
+    }
+
+    if (idx_op.kind != LR_VAL_VREG || !b || !f) {
+        return idx_op;
+    }
+
+    switch (idx_op.type->kind) {
+    case LR_TYPE_I1:
+    case LR_TYPE_I8:
+    case LR_TYPE_I16:
+    case LR_TYPE_I32: {
+        uint32_t cast_dest = lr_vreg_new(f);
+        lr_operand_t cast_ops[1] = { idx_op };
+        lr_inst_t *cast = lr_inst_create(m->arena, LR_OP_SEXT,
+                                         m->type_i64, cast_dest, cast_ops, 1);
+        lr_block_append(b, cast);
+        return lr_op_vreg(cast_dest, m->type_i64);
+    }
+    default:
+        return idx_op;
+    }
 }
 
 static const char *type_name(const lr_type_t *t) {
