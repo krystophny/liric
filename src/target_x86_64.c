@@ -588,6 +588,14 @@ static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
 }
 
+static void emit_movsx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size) {
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+              rex(true, dst >= 8, false, src >= 8));
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (size == 1) ? 0xBE : 0xBF);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
+}
+
 /* Emit a movzx mem load for sub-dword sizes: movzx reg, byte/word [base+disp] */
 static void emit_movzx_mem(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t base,
                             int32_t disp, uint8_t size) {
@@ -1163,6 +1171,19 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                             byte_off = idx_op->imm_i64 * (int64_t)elem_size;
                         } else {
                             emit_load_operand(&ctx, idx_op, X86_RCX);
+                            if (idx_op->type &&
+                                (idx_op->type->kind == LR_TYPE_I1 ||
+                                 idx_op->type->kind == LR_TYPE_I8 ||
+                                 idx_op->type->kind == LR_TYPE_I16 ||
+                                 idx_op->type->kind == LR_TYPE_I32 ||
+                                 idx_op->type->kind == LR_TYPE_I64)) {
+                                size_t idx_sz = lr_type_size(idx_op->type);
+                                if (idx_sz == 1 || idx_sz == 2) {
+                                    emit_movsx_rr(&ctx, X86_RCX, X86_RCX, (uint8_t)idx_sz);
+                                } else if (idx_sz == 4) {
+                                    emit_movsxd(&ctx, X86_RCX, X86_RCX);
+                                }
+                            }
                             if (elem_size != 1) {
                                 emit_mov_imm(&ctx, X86_R10, (int64_t)elem_size);
                                 emit_imul_rr(&ctx, X86_RCX, X86_R10, 8);
@@ -1181,6 +1202,19 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                             byte_off = idx_op->imm_i64 * (int64_t)elem_size;
                         } else {
                             emit_load_operand(&ctx, idx_op, X86_RCX);
+                            if (idx_op->type &&
+                                (idx_op->type->kind == LR_TYPE_I1 ||
+                                 idx_op->type->kind == LR_TYPE_I8 ||
+                                 idx_op->type->kind == LR_TYPE_I16 ||
+                                 idx_op->type->kind == LR_TYPE_I32 ||
+                                 idx_op->type->kind == LR_TYPE_I64)) {
+                                size_t idx_sz = lr_type_size(idx_op->type);
+                                if (idx_sz == 1 || idx_sz == 2) {
+                                    emit_movsx_rr(&ctx, X86_RCX, X86_RCX, (uint8_t)idx_sz);
+                                } else if (idx_sz == 4) {
+                                    emit_movsxd(&ctx, X86_RCX, X86_RCX);
+                                }
+                            }
                             if (elem_size != 1) {
                                 emit_mov_imm(&ctx, X86_R10, (int64_t)elem_size);
                                 emit_imul_rr(&ctx, X86_RCX, X86_R10, 8);
