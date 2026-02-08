@@ -122,7 +122,8 @@ int test_objfile_elf_symbols(void) {
 
     uint8_t *buf = malloc((size_t)fsize);
     TEST_ASSERT(buf != NULL, "alloc buffer");
-    fread(buf, 1, (size_t)fsize, fp);
+    size_t nread = fread(buf, 1, (size_t)fsize, fp);
+    TEST_ASSERT(nread == (size_t)fsize, "read full object buffer");
     fclose(fp);
 
     uint64_t e_shoff = 0;
@@ -199,7 +200,8 @@ int test_objfile_elf_call_relocation(void) {
 
     uint8_t *buf = malloc((size_t)fsize);
     TEST_ASSERT(buf != NULL, "alloc buffer");
-    fread(buf, 1, (size_t)fsize, fp);
+    size_t nread = fread(buf, 1, (size_t)fsize, fp);
+    TEST_ASSERT(nread == (size_t)fsize, "read full object buffer");
     fclose(fp);
 
     uint64_t e_shoff = 0;
