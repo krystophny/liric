@@ -587,6 +587,49 @@ int test_jit_varargs_printf_double_call(void) {
     return 0;
 }
 
+int test_jit_const_gep_vtable_function_ptr(void) {
+    const char *src =
+        "@vt = private unnamed_addr constant { [3 x ptr] } { [3 x ptr] [ptr null, ptr bitcast (i32 (ptr)* @f to ptr), ptr bitcast (i32 (ptr)* @g to ptr)] }, align 8\n"
+        "define i32 @f(ptr %this) {\n"
+        "entry:\n"
+        "  ret i32 7\n"
+        "}\n"
+        "define i32 @g(ptr %this) {\n"
+        "entry:\n"
+        "  ret i32 42\n"
+        "}\n"
+        "define i32 @call_vmethod() {\n"
+        "entry:\n"
+        "  %obj = alloca { ptr }, align 8\n"
+        "  %slot = getelementptr { ptr }, ptr %obj, i32 0, i32 0\n"
+        "  store ptr getelementptr inbounds ({ [3 x ptr] }, ptr @vt, i32 0, i32 0, i32 1), ptr %slot, align 8\n"
+        "  %vptr = load ptr, ptr %slot, align 8\n"
+        "  %meth_slot = getelementptr ptr, ptr %vptr, i32 1\n"
+        "  %meth = load ptr, ptr %meth_slot, align 8\n"
+        "  %r = call i32 %meth(ptr %obj)\n"
+        "  ret i32 %r\n"
+        "}\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_vmethod");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "const-gep vtable call resolves to g()");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_llvm_intrinsic_fabs_f32(void) {
     const char *src =
         "declare float @llvm.fabs.f32(float)\n"

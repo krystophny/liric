@@ -30,6 +30,7 @@ enum {
 
 static lr_operand_t desc_to_op(lr_operand_desc_t d) {
     lr_operand_t op;
+    memset(&op, 0, sizeof(op));
     op.kind = (lr_operand_kind_t)d.kind;
     op.type = d.type;
     switch (d.kind) {

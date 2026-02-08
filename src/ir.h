@@ -100,6 +100,7 @@ typedef enum lr_operand_kind {
 typedef struct lr_operand {
     lr_operand_kind_t kind;
     lr_type_t *type;
+    int64_t global_offset;
     union {
         uint32_t vreg;
         int64_t imm_i64;
@@ -150,6 +151,7 @@ typedef struct lr_func {
 
 typedef struct lr_reloc {
     size_t offset;
+    int64_t addend;
     char *symbol_name;
     struct lr_reloc *next;
 } lr_reloc_t;
