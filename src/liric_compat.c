@@ -497,11 +497,13 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
     lr_module_t *m = mod->mod;
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (strcmp(g->name, name) == 0) {
-            return lc_value_global(mod, g->id, m->type_ptr, g->name);
+            uint32_t sym_id = lr_module_intern_symbol(m, name);
+            return lc_value_global(mod, sym_id, m->type_ptr, g->name);
         }
     }
     lr_global_t *g = lr_global_create(m, name, type, false);
-    return lc_value_global(mod, g->id, m->type_ptr, g->name);
+    uint32_t sym_id = lr_module_intern_symbol(m, name);
+    return lc_value_global(mod, sym_id, m->type_ptr, g->name);
 }
 
 /* ---- Function ---- */
@@ -608,20 +610,29 @@ bool lc_block_has_terminator(lr_block_t *block) {
 lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
                               lr_type_t *type, bool is_const,
                               const void *init_data, size_t init_size) {
-    lr_global_t *g = lr_global_create(mod->mod, name, type, is_const);
+    const char *actual_name = name;
+    char auto_name[32];
+    if (!name || name[0] == '\0') {
+        snprintf(auto_name, sizeof(auto_name), ".str.%u",
+                 mod->mod->num_globals);
+        actual_name = auto_name;
+    }
+    lr_global_t *g = lr_global_create(mod->mod, actual_name, type, is_const);
     if (init_data && init_size > 0) {
         g->init_data = lr_arena_alloc(mod->mod->arena, init_size, 1);
         memcpy(g->init_data, init_data, init_size);
         g->init_size = init_size;
     }
-    return lc_value_global(mod, g->id, mod->mod->type_ptr, g->name);
+    uint32_t sym_id = lr_module_intern_symbol(mod->mod, g->name);
+    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
 }
 
 lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
                                lr_type_t *type) {
     lr_global_t *g = lr_global_create(mod->mod, name, type, false);
     g->is_external = true;
-    return lc_value_global(mod, g->id, mod->mod->type_ptr, g->name);
+    uint32_t sym_id = lr_module_intern_symbol(mod->mod, name);
+    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
 }
 
 lr_global_t *lc_value_get_global(lc_value_t *val) {

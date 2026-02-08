@@ -353,13 +353,19 @@ static void print_type(const lr_type_t *t, FILE *out) {
     }
 }
 
-static void print_operand(const lr_operand_t *op, FILE *out) {
+static void print_operand(const lr_operand_t *op, const lr_module_t *m,
+                          FILE *out) {
     switch (op->kind) {
     case LR_VAL_VREG:    fprintf(out, "%%v%u", op->vreg); break;
     case LR_VAL_IMM_I64: fprintf(out, "%ld", (long)op->imm_i64); break;
     case LR_VAL_IMM_F64: fprintf(out, "%g", op->imm_f64); break;
     case LR_VAL_BLOCK:   fprintf(out, "label %%bb%u", op->block_id); break;
-    case LR_VAL_GLOBAL:  fprintf(out, "@g%u", op->global_id); break;
+    case LR_VAL_GLOBAL: {
+        const char *name = lr_module_symbol_name(m, op->global_id);
+        if (name) fprintf(out, "@%s", name);
+        else fprintf(out, "@g%u", op->global_id);
+        break;
+    }
     case LR_VAL_NULL:    fprintf(out, "null"); break;
     case LR_VAL_UNDEF:   fprintf(out, "undef"); break;
     }
@@ -413,43 +419,227 @@ static const char *opcode_name(lr_opcode_t op) {
     return "?";
 }
 
+static const char *icmp_pred_name(int pred) {
+    switch (pred) {
+    case LR_ICMP_EQ:  return "eq";
+    case LR_ICMP_NE:  return "ne";
+    case LR_ICMP_SGT: return "sgt";
+    case LR_ICMP_SGE: return "sge";
+    case LR_ICMP_SLT: return "slt";
+    case LR_ICMP_SLE: return "sle";
+    case LR_ICMP_UGT: return "ugt";
+    case LR_ICMP_UGE: return "uge";
+    case LR_ICMP_ULT: return "ult";
+    case LR_ICMP_ULE: return "ule";
+    }
+    return "?";
+}
+
+static const char *fcmp_pred_name(int pred) {
+    switch (pred) {
+    case LR_FCMP_FALSE: return "false";
+    case LR_FCMP_OEQ:   return "oeq";
+    case LR_FCMP_OGT:   return "ogt";
+    case LR_FCMP_OGE:   return "oge";
+    case LR_FCMP_OLT:   return "olt";
+    case LR_FCMP_OLE:   return "ole";
+    case LR_FCMP_ONE:   return "one";
+    case LR_FCMP_ORD:   return "ord";
+    case LR_FCMP_UEQ:   return "ueq";
+    case LR_FCMP_UGT:   return "ugt";
+    case LR_FCMP_UGE:   return "uge";
+    case LR_FCMP_ULT:   return "ult";
+    case LR_FCMP_ULE:   return "ule";
+    case LR_FCMP_UNE:   return "une";
+    case LR_FCMP_UNO:   return "uno";
+    case LR_FCMP_TRUE:  return "true";
+    }
+    return "?";
+}
+
+static bool is_cast_op(lr_opcode_t op) {
+    return op == LR_OP_SEXT || op == LR_OP_ZEXT || op == LR_OP_TRUNC ||
+           op == LR_OP_BITCAST || op == LR_OP_PTRTOINT ||
+           op == LR_OP_INTTOPTR || op == LR_OP_SITOFP ||
+           op == LR_OP_FPTOSI || op == LR_OP_FPEXT || op == LR_OP_FPTRUNC;
+}
+
+static bool is_void_type(const lr_type_t *t) {
+    return t && t->kind == LR_TYPE_VOID;
+}
+
+static bool inst_has_dest(const lr_inst_t *inst) {
+    switch (inst->op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_STORE:
+    case LR_OP_UNREACHABLE:
+        return false;
+    case LR_OP_CALL:
+        return !is_void_type(inst->type);
+    default:
+        return true;
+    }
+}
+
+static void dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
+    fprintf(out, "  ");
+    if (inst_has_dest(inst))
+        fprintf(out, "%%v%u = ", inst->dest);
+    fprintf(out, "%s ", opcode_name(inst->op));
+
+    switch (inst->op) {
+    case LR_OP_RET_VOID:
+    case LR_OP_UNREACHABLE:
+        break;
+
+    case LR_OP_RET:
+        if (inst->num_operands > 0 && inst->operands[0].type)
+            print_type(inst->operands[0].type, out);
+        else if (inst->type)
+            print_type(inst->type, out);
+        fprintf(out, " ");
+        if (inst->num_operands > 0)
+            print_operand(&inst->operands[0], m, out);
+        break;
+
+    case LR_OP_BR:
+        if (inst->num_operands > 0)
+            print_operand(&inst->operands[0], m, out);
+        break;
+
+    case LR_OP_CONDBR:
+        if (inst->num_operands >= 3) {
+            fprintf(out, "i1 ");
+            print_operand(&inst->operands[0], m, out);
+            fprintf(out, ", ");
+            print_operand(&inst->operands[1], m, out);
+            fprintf(out, ", ");
+            print_operand(&inst->operands[2], m, out);
+        }
+        break;
+
+    case LR_OP_STORE:
+        if (inst->num_operands >= 2) {
+            if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            fprintf(out, " ");
+            print_operand(&inst->operands[0], m, out);
+            fprintf(out, ", ptr ");
+            print_operand(&inst->operands[1], m, out);
+        }
+        break;
+
+    case LR_OP_LOAD:
+        if (inst->type) print_type(inst->type, out);
+        if (inst->num_operands > 0) {
+            fprintf(out, ", ptr ");
+            print_operand(&inst->operands[0], m, out);
+        }
+        break;
+
+    case LR_OP_CALL:
+        print_type(inst->type, out);
+        fprintf(out, " ");
+        if (inst->num_operands > 0) {
+            print_operand(&inst->operands[0], m, out);
+            fprintf(out, "(");
+            for (uint32_t i = 1; i < inst->num_operands; i++) {
+                if (i > 1) fprintf(out, ", ");
+                if (inst->operands[i].type) {
+                    print_type(inst->operands[i].type, out);
+                    fprintf(out, " ");
+                }
+                print_operand(&inst->operands[i], m, out);
+            }
+            fprintf(out, ")");
+        }
+        break;
+
+    case LR_OP_ICMP:
+        fprintf(out, "%s ", icmp_pred_name(inst->icmp_pred));
+        if (inst->num_operands > 0 && inst->operands[0].type)
+            print_type(inst->operands[0].type, out);
+        fprintf(out, " ");
+        for (uint32_t i = 0; i < inst->num_operands; i++) {
+            if (i > 0) fprintf(out, ", ");
+            print_operand(&inst->operands[i], m, out);
+        }
+        break;
+
+    case LR_OP_FCMP:
+        fprintf(out, "%s ", fcmp_pred_name(inst->fcmp_pred));
+        if (inst->num_operands > 0 && inst->operands[0].type)
+            print_type(inst->operands[0].type, out);
+        fprintf(out, " ");
+        for (uint32_t i = 0; i < inst->num_operands; i++) {
+            if (i > 0) fprintf(out, ", ");
+            print_operand(&inst->operands[i], m, out);
+        }
+        break;
+
+    case LR_OP_GEP:
+        if (inst->type) print_type(inst->type, out);
+        for (uint32_t i = 0; i < inst->num_operands; i++) {
+            fprintf(out, ", ");
+            if (i == 0)
+                fprintf(out, "ptr ");
+            else if (inst->operands[i].type) {
+                print_type(inst->operands[i].type, out);
+                fprintf(out, " ");
+            }
+            print_operand(&inst->operands[i], m, out);
+        }
+        break;
+
+    default:
+        if (is_cast_op(inst->op)) {
+            if (inst->num_operands > 0 && inst->operands[0].type) {
+                print_type(inst->operands[0].type, out);
+                fprintf(out, " ");
+                print_operand(&inst->operands[0], m, out);
+            }
+            fprintf(out, " to ");
+            if (inst->type) print_type(inst->type, out);
+        } else {
+            if (inst->type) {
+                print_type(inst->type, out);
+                fprintf(out, " ");
+            }
+            for (uint32_t i = 0; i < inst->num_operands; i++) {
+                if (i > 0) fprintf(out, ", ");
+                print_operand(&inst->operands[i], m, out);
+            }
+        }
+        break;
+    }
+    fprintf(out, "\n");
+}
+
 void lr_module_dump(lr_module_t *m, FILE *out) {
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        fprintf(out, "%s ", f->is_decl ? "declare" : "define");
+        bool is_decl = f->is_decl || !f->first_block;
+        fprintf(out, "%s ", is_decl ? "declare" : "define");
         print_type(f->ret_type, out);
         fprintf(out, " @%s(", f->name);
         for (uint32_t i = 0; i < f->num_params; i++) {
             if (i > 0) fprintf(out, ", ");
             print_type(f->param_types[i], out);
-            if (!f->is_decl) fprintf(out, " %%v%u", f->param_vregs[i]);
+            if (!is_decl) fprintf(out, " %%v%u", f->param_vregs[i]);
         }
         if (f->vararg) {
             if (f->num_params > 0) fprintf(out, ", ");
             fprintf(out, "...");
         }
         fprintf(out, ")");
-        if (f->is_decl) { fprintf(out, "\n"); continue; }
+        if (is_decl) { fprintf(out, "\n\n"); continue; }
         fprintf(out, " {\n");
         for (lr_block_t *b = f->first_block; b; b = b->next) {
             fprintf(out, "%s:\n", b->name);
-            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-                fprintf(out, "  ");
-                if (inst->op != LR_OP_RET && inst->op != LR_OP_RET_VOID &&
-                    inst->op != LR_OP_BR && inst->op != LR_OP_CONDBR &&
-                    inst->op != LR_OP_STORE && inst->op != LR_OP_UNREACHABLE) {
-                    fprintf(out, "%%v%u = ", inst->dest);
-                }
-                fprintf(out, "%s ", opcode_name(inst->op));
-                if (inst->type && inst->op != LR_OP_RET_VOID) {
-                    print_type(inst->type, out);
-                    fprintf(out, " ");
-                }
-                for (uint32_t i = 0; i < inst->num_operands; i++) {
-                    if (i > 0) fprintf(out, ", ");
-                    print_operand(&inst->operands[i], out);
-                }
-                fprintf(out, "\n");
-            }
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next)
+                dump_inst(inst, m, out);
         }
         fprintf(out, "}\n");
     }
