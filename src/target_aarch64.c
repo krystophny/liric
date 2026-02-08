@@ -1,4 +1,5 @@
 #include "target_aarch64.h"
+#include "target_common.h"
 #include "objfile.h"
 #include <limits.h>
 #include <stdbool.h>
@@ -627,13 +628,8 @@ static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
             switch (inst->op) {
             case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_type_size(inst->type);
-                if (elem_sz < 8) elem_sz = 8;
-                bool use_static = (inst->num_operands == 0);
-                if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
-                    inst->operands[0].imm_i64 == 1) {
-                    use_static = true;
-                }
+                size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
+                bool use_static = lr_target_alloca_uses_static_storage(inst);
                 if (use_static) {
                     ctx->stack_size += (uint32_t)elem_sz;
                     ctx->stack_size = (ctx->stack_size + 7) & ~7u;
@@ -645,18 +641,9 @@ static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
                 alloc_slot(ctx, inst->dest, 8);
                 break;
             default:
-                if (inst->op != LR_OP_STORE && inst->op != LR_OP_BR &&
-                    inst->op != LR_OP_CONDBR && inst->op != LR_OP_RET &&
-                    inst->op != LR_OP_RET_VOID && inst->op != LR_OP_UNREACHABLE) {
-                    if (inst->type && inst->type->kind != LR_TYPE_VOID) {
-                        size_t ty_sz = 8;
-                        if (inst->op == LR_OP_LOAD) {
-                            size_t load_sz = lr_type_size(inst->type);
-                            if (load_sz > 8)
-                                ty_sz = load_sz;
-                        }
-                        alloc_slot(ctx, inst->dest, ty_sz);
-                    }
+                if (lr_target_inst_has_result_slot(inst)) {
+                    size_t ty_sz = lr_target_inst_result_slot_size(inst, 8);
+                    alloc_slot(ctx, inst->dest, ty_sz);
                 }
                 break;
             }
@@ -849,20 +836,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
                          enc_subs_reg(is64, A64_X9, A64_X10));
 
-                uint8_t cc;
-                switch (inst->icmp_pred) {
-                case LR_ICMP_EQ:  cc = LR_CC_EQ; break;
-                case LR_ICMP_NE:  cc = LR_CC_NE; break;
-                case LR_ICMP_SGT: cc = LR_CC_SGT; break;
-                case LR_ICMP_SGE: cc = LR_CC_SGE; break;
-                case LR_ICMP_SLT: cc = LR_CC_SLT; break;
-                case LR_ICMP_SLE: cc = LR_CC_SLE; break;
-                case LR_ICMP_UGT: cc = LR_CC_UGT; break;
-                case LR_ICMP_UGE: cc = LR_CC_UGE; break;
-                case LR_ICMP_ULT: cc = LR_CC_ULT; break;
-                case LR_ICMP_ULE: cc = LR_CC_ULE; break;
-                default: cc = LR_CC_EQ; break;
-                }
+                uint8_t cc = lr_target_cc_from_icmp(inst->icmp_pred);
 
                 emit_setcc_a64(&ctx, cc, A64_X9);
                 emit_store_slot(&ctx, inst->dest, A64_X9);
@@ -895,14 +869,9 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 break;
             }
             case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_type_size(inst->type);
-                if (elem_sz < 8) elem_sz = 8;
+                size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
 
-                bool use_static = (inst->num_operands == 0);
-                if (inst->num_operands > 0 && inst->operands[0].kind == LR_VAL_IMM_I64 &&
-                    inst->operands[0].imm_i64 == 1) {
-                    use_static = true;
-                }
+                bool use_static = lr_target_alloca_uses_static_storage(inst);
 
                 if (use_static) {
                     /* Re-walk prescan in order to find the FP offset for this
@@ -917,12 +886,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                             if (si->op != LR_OP_ALLOCA) continue;
                             size_t esz = lr_type_size(si->type);
                             if (esz < 8) esz = 8;
-                            bool si_static = (si->num_operands == 0);
-                            if (si->num_operands > 0 &&
-                                si->operands[0].kind == LR_VAL_IMM_I64 &&
-                                si->operands[0].imm_i64 == 1) {
-                                si_static = true;
-                            }
+                            bool si_static = lr_target_alloca_uses_static_storage(si);
                             if (!si_static) continue;
                             sim_ss += (uint32_t)esz;
                             sim_ss = (sim_ss + 7) & ~7u;
@@ -1066,24 +1030,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
                          enc_fcmp(fsize, FP_SCRATCH0, FP_SCRATCH1));
 
-                uint8_t cc;
-                switch (inst->fcmp_pred) {
-                case LR_FCMP_OEQ: cc = LR_CC_FP_OEQ; break;
-                case LR_FCMP_ONE: cc = LR_CC_FP_ONE; break;
-                case LR_FCMP_OGT: cc = LR_CC_FP_OGT; break;
-                case LR_FCMP_OGE: cc = LR_CC_FP_OGE; break;
-                case LR_FCMP_OLT: cc = LR_CC_FP_OLT; break;
-                case LR_FCMP_OLE: cc = LR_CC_FP_OLE; break;
-                case LR_FCMP_ORD: cc = LR_CC_FP_ORD; break;
-                case LR_FCMP_UNO: cc = LR_CC_FP_UNO; break;
-                case LR_FCMP_UEQ: cc = LR_CC_FP_UEQ; break;
-                case LR_FCMP_UNE: cc = LR_CC_FP_UNE; break;
-                case LR_FCMP_UGT: cc = LR_CC_FP_UGT; break;
-                case LR_FCMP_UGE: cc = LR_CC_FP_UGE; break;
-                case LR_FCMP_ULT: cc = LR_CC_FP_ULT; break;
-                case LR_FCMP_ULE: cc = LR_CC_FP_ULE; break;
-                default:          cc = LR_CC_FP_OEQ; break;
-                }
+                uint8_t cc = lr_target_cc_from_fcmp(inst->fcmp_pred);
 
                 emit_setcc_a64(&ctx, cc, A64_X9);
                 emit_store_slot(&ctx, inst->dest, A64_X9);

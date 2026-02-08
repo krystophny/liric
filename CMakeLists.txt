@@ -39,6 +39,7 @@ add_library(liric STATIC
     src/wasm_decode.c
     src/wasm_to_ir.c
     src/target_registry.c
+    src/target_common.c
     src/target_x86_64.c
     src/target_aarch64.c
     src/jit.c
