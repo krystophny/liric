@@ -391,11 +391,11 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        BasicBlock *InsertBefore) {
     (void)Context; (void)InsertBefore;
     Function *fn = Parent ? Parent : detail::current_function;
-    if (!fn) return nullptr;
+    if (!fn) return BasicBlock::wrap(nullptr);
     detail::current_function = fn;
     lc_module_compat_t *mod = fn->getCompatMod();
     lr_func_t *f = fn->getIRFunc();
-    if (!mod || !f) return nullptr;
+    if (!mod || !f) return BasicBlock::wrap(nullptr);
     lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
     return BasicBlock::wrap(bv);
 }

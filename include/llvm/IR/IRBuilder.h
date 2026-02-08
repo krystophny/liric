@@ -406,7 +406,7 @@ public:
         lc_alloca_inst_t *ai = lc_create_alloca(
             M(), B(), F(), Ty->impl(),
             ArraySize ? ArraySize->impl() : nullptr, Name.c_str());
-        if (!ai) return nullptr;
+        if (!ai) return static_cast<AllocaInst *>(Value::wrap(nullptr));
         lc_value_t *result = ai->result;
         free(ai);
         return AllocaInst::wrap(result);

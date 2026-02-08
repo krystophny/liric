@@ -28,10 +28,59 @@
 
 #define PLATFORM_MACOS 1u
 
+/* Remap LLVM intrinsic names to libc equivalents for linking */
+static const char *remap_intrinsic(const char *name) {
+    if (!name || strncmp(name, "llvm.", 5) != 0) return name;
+    if (strcmp(name, "llvm.pow.f32") == 0) return "powf";
+    if (strcmp(name, "llvm.pow.f64") == 0) return "pow";
+    if (strcmp(name, "llvm.sqrt.f32") == 0) return "sqrtf";
+    if (strcmp(name, "llvm.sqrt.f64") == 0) return "sqrt";
+    if (strcmp(name, "llvm.copysign.f32") == 0) return "copysignf";
+    if (strcmp(name, "llvm.copysign.f64") == 0) return "copysign";
+    if (strcmp(name, "llvm.powi.f32.i32") == 0) return "powf";
+    if (strcmp(name, "llvm.powi.f64.i32") == 0) return "pow";
+    if (strcmp(name, "llvm.fabs.f32") == 0) return "fabsf";
+    if (strcmp(name, "llvm.fabs.f64") == 0) return "fabs";
+    if (strcmp(name, "llvm.sin.f32") == 0) return "sinf";
+    if (strcmp(name, "llvm.sin.f64") == 0) return "sin";
+    if (strcmp(name, "llvm.cos.f32") == 0) return "cosf";
+    if (strcmp(name, "llvm.cos.f64") == 0) return "cos";
+    if (strcmp(name, "llvm.exp.f32") == 0) return "expf";
+    if (strcmp(name, "llvm.exp.f64") == 0) return "exp";
+    if (strcmp(name, "llvm.exp2.f32") == 0) return "exp2f";
+    if (strcmp(name, "llvm.exp2.f64") == 0) return "exp2";
+    if (strcmp(name, "llvm.log.f32") == 0) return "logf";
+    if (strcmp(name, "llvm.log.f64") == 0) return "log";
+    if (strcmp(name, "llvm.log2.f32") == 0) return "log2f";
+    if (strcmp(name, "llvm.log2.f64") == 0) return "log2";
+    if (strcmp(name, "llvm.log10.f32") == 0) return "log10f";
+    if (strcmp(name, "llvm.log10.f64") == 0) return "log10";
+    if (strcmp(name, "llvm.floor.f32") == 0) return "floorf";
+    if (strcmp(name, "llvm.floor.f64") == 0) return "floor";
+    if (strcmp(name, "llvm.ceil.f32") == 0) return "ceilf";
+    if (strcmp(name, "llvm.ceil.f64") == 0) return "ceil";
+    if (strcmp(name, "llvm.trunc.f32") == 0) return "truncf";
+    if (strcmp(name, "llvm.trunc.f64") == 0) return "trunc";
+    if (strcmp(name, "llvm.round.f32") == 0) return "roundf";
+    if (strcmp(name, "llvm.round.f64") == 0) return "round";
+    if (strcmp(name, "llvm.fma.f32") == 0) return "fmaf";
+    if (strcmp(name, "llvm.fma.f64") == 0) return "fma";
+    if (strcmp(name, "llvm.minnum.f32") == 0) return "fminf";
+    if (strcmp(name, "llvm.minnum.f64") == 0) return "fmin";
+    if (strcmp(name, "llvm.maxnum.f32") == 0) return "fmaxf";
+    if (strcmp(name, "llvm.maxnum.f64") == 0) return "fmax";
+    if (strcmp(name, "llvm.rint.f32") == 0) return "rintf";
+    if (strcmp(name, "llvm.rint.f64") == 0) return "rint";
+    if (strcmp(name, "llvm.nearbyint.f32") == 0) return "nearbyintf";
+    if (strcmp(name, "llvm.nearbyint.f64") == 0) return "nearbyint";
+    return name;
+}
+
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                bool is_defined, uint8_t section,
                                uint32_t offset) {
     if (!name) return UINT32_MAX;
+    name = remap_intrinsic(name);
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
         if (strcmp(oc->symbols[i].name, name) == 0) {
             if (is_defined && !oc->symbols[i].is_defined) {
@@ -207,8 +256,10 @@ static int write_macho_arm64(FILE *out,
     size_t text_file_off = section_data_off;
     size_t text_size = code_size;
 
-    size_t data_file_off = align_up(text_file_off + text_size, 8);
+    size_t data_align = 8;
+    size_t data_file_off = align_up(text_file_off + text_size, data_align);
     size_t data_pad = data_file_off - (text_file_off + text_size);
+    size_t data_vmaddr = has_data ? align_up(text_size, data_align) : 0;
 
     /* Relocations follow section data */
     size_t reloc_off = data_file_off + (has_data ? data_size : 0);
@@ -250,10 +301,12 @@ static int write_macho_arm64(FILE *out,
     w32(&p, LC_SEGMENT_64);
     w32(&p, (uint32_t)segment_cmd_size);
     wpad(&p, 16);
+    size_t seg_vmsize = has_data ? (data_vmaddr + data_size) : text_size;
+    size_t seg_filesize = text_size + (has_data ? (data_pad + data_size) : 0);
     w64(&p, 0);
-    w64(&p, text_size + (has_data ? align_up(data_size, 8) : 0));
+    w64(&p, seg_vmsize);
     w64(&p, text_file_off);
-    w64(&p, text_size + (has_data ? (data_pad + data_size) : 0));
+    w64(&p, seg_filesize);
     w32(&p, 7);
     w32(&p, 7);
     w32(&p, num_sections);
@@ -288,7 +341,7 @@ static int write_macho_arm64(FILE *out,
         memcpy(segname, "__DATA", 6);
         wbytes(&p, sectname, 16);
         wbytes(&p, segname, 16);
-        w64(&p, text_size);
+        w64(&p, data_vmaddr);
         w64(&p, data_size);
         w32(&p, (uint32_t)data_file_off);
         w32(&p, 3);
@@ -371,7 +424,7 @@ static int write_macho_arm64(FILE *out,
             if (sym->is_defined) {
                 uint64_t value = (uint64_t)sym->offset;
                 if (sym->section == 2)
-                    value += code_size;
+                    value += data_vmaddr;
                 w64(&sp, value);
             } else {
                 w64(&sp, 0);

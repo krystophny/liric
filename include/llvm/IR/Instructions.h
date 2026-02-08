@@ -10,7 +10,7 @@ namespace llvm {
 class AllocaInst : public UnaryInstruction {
 public:
     static AllocaInst *wrap(lc_value_t *v) {
-        return reinterpret_cast<AllocaInst *>(v);
+        return static_cast<AllocaInst *>(Value::wrap(v));
     }
 
     Type *getAllocatedType() const {
@@ -25,7 +25,7 @@ public:
 class PHINode : public Instruction {
 public:
     static PHINode *wrap(lc_value_t *v) {
-        return reinterpret_cast<PHINode *>(v);
+        return static_cast<PHINode *>(Value::wrap(v));
     }
 
     void addIncoming(Value *V, BasicBlock *BB) {

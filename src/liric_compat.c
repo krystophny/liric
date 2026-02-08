@@ -108,6 +108,9 @@ typedef struct lc_alloca_inst {
 
 /* ---- Internal desc_to_op (same as builder.c) ---- */
 
+/* Forward declaration for safe_undef */
+lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);
+
 static lr_operand_t desc_to_op(lr_operand_desc_t d) {
     lr_operand_t op;
     memset(&op, 0, sizeof(op));
@@ -160,6 +163,20 @@ static void value_pool_free(lc_module_compat_t *mod) {
         slab = next;
     }
     mod->value_pool = NULL;
+}
+
+/* ---- Safe fallback value (avoids NULL cascading into C++ crashes) ---- */
+
+static lr_type_t s_poison_type = { LR_TYPE_PTR, {{0}} };
+
+static lc_value_t *safe_undef(lc_module_compat_t *mod) {
+    if (!mod) {
+        static lc_value_t s_undef;
+        s_undef.kind = LC_VAL_CONST_UNDEF;
+        s_undef.type = &s_poison_type;
+        return &s_undef;
+    }
+    return lc_value_undef(mod, mod->mod->type_ptr);
 }
 
 static void func_cache_add(lc_module_compat_t *mod, lc_value_t *fv) {
@@ -554,7 +571,7 @@ bool lc_type_struct_has_name(lr_type_t *ty) {
 
 lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
                                         const char *name, lr_type_t *type) {
-    if (!mod || !name) return NULL;
+    if (!mod || !name) return safe_undef(mod);
     lr_module_t *m = mod->mod;
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (g->name && strcmp(g->name, name) == 0) {
@@ -581,23 +598,37 @@ static lc_value_t *create_func_value(lc_module_compat_t *mod,
 
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
                             lr_type_t *func_type) {
-    if (!mod || !func_type || func_type->kind != LR_TYPE_FUNC) return NULL;
-    lr_func_t *f = lr_func_create(mod->mod, name,
-                                   func_type->func.ret,
-                                   func_type->func.params,
-                                   func_type->func.num_params,
-                                   func_type->func.vararg);
+    if (!mod) return safe_undef(NULL);
+    lr_type_t *ret = mod->mod->type_void;
+    lr_type_t **params = NULL;
+    uint32_t num_params = 0;
+    bool vararg = false;
+    if (func_type && func_type->kind == LR_TYPE_FUNC) {
+        ret = func_type->func.ret ? func_type->func.ret : ret;
+        params = func_type->func.params;
+        num_params = func_type->func.num_params;
+        vararg = func_type->func.vararg;
+    }
+    lr_func_t *f = lr_func_create(mod->mod, name, ret,
+                                   params, num_params, vararg);
     return create_func_value(mod, f);
 }
 
 lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
                              lr_type_t *func_type) {
-    if (!mod || !func_type || func_type->kind != LR_TYPE_FUNC) return NULL;
-    lr_func_t *f = lr_func_declare(mod->mod, name,
-                                    func_type->func.ret,
-                                    func_type->func.params,
-                                    func_type->func.num_params,
-                                    func_type->func.vararg);
+    if (!mod) return safe_undef(NULL);
+    lr_type_t *ret = mod->mod->type_void;
+    lr_type_t **params = NULL;
+    uint32_t num_params = 0;
+    bool vararg = false;
+    if (func_type && func_type->kind == LR_TYPE_FUNC) {
+        ret = func_type->func.ret ? func_type->func.ret : ret;
+        params = func_type->func.params;
+        num_params = func_type->func.num_params;
+        vararg = func_type->func.vararg;
+    }
+    lr_func_t *f = lr_func_declare(mod->mod, name, ret,
+                                    params, num_params, vararg);
     return create_func_value(mod, f);
 }
 
@@ -615,12 +646,13 @@ static lr_func_t *find_func_by_name(lr_module_t *m, const char *name) {
 
 lc_value_t *lc_func_get_arg(lc_module_compat_t *mod, lc_value_t *func_val,
                              unsigned idx) {
-    if (!func_val || func_val->kind != LC_VAL_GLOBAL) return NULL;
+    if (!func_val || func_val->kind != LC_VAL_GLOBAL)
+        return safe_undef(mod);
     lr_func_t *f = func_val->global.func;
-    if (!f) {
+    if (!f && mod) {
         f = find_func_by_name(mod->mod, func_val->global.name);
     }
-    if (!f || idx >= f->num_params) return NULL;
+    if (!f || idx >= f->num_params) return safe_undef(mod);
     return lc_value_argument(mod, idx, f->param_types[idx], f);
 }
 
@@ -635,11 +667,11 @@ unsigned lc_func_arg_count(lc_value_t *func_val) {
 
 lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
                              const char *name) {
-    if (!mod || !func) return NULL;
+    if (!mod || !func) return safe_undef(mod);
     lr_block_t *b = lr_block_create(func, mod->mod->arena, name);
     lc_value_t *v = lc_value_block_ref(mod, b);
     if (v) v->block.func = func;
-    return v;
+    return v ? v : safe_undef(mod);
 }
 
 lr_block_t *lc_value_get_block(lc_value_t *val) {
@@ -702,18 +734,6 @@ lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
 lr_global_t *lc_value_get_global(lc_value_t *val) {
     (void)val;
     return NULL;
-}
-
-/* ---- Safe fallback value (avoids NULL cascading into C++ crashes) ---- */
-
-static lc_value_t *safe_undef(lc_module_compat_t *mod) {
-    if (!mod) {
-        static lc_value_t s_undef;
-        s_undef.kind = LC_VAL_CONST_UNDEF;
-        s_undef.type = NULL;
-        return &s_undef;
-    }
-    return lc_value_undef(mod, mod->mod->type_i64);
 }
 
 /* ---- Internal builder helpers ---- */
@@ -1097,7 +1117,13 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
                                     lc_value_t *array_size,
                                     const char *name) {
     (void)name;
-    if (!mod || !b || !f || !type) return NULL;
+    if (!mod || !b || !f || !type) {
+        lc_alloca_inst_t *ai = (lc_alloca_inst_t *)calloc(1, sizeof(*ai));
+        if (!ai) return NULL;
+        ai->result = safe_undef(mod);
+        ai->alloc_type = type;
+        return ai;
+    }
     lr_module_t *m = mod->mod;
     uint32_t dest = lr_vreg_new(f);
 

@@ -48,6 +48,10 @@ public:
     }
 
     static Type *wrap(lr_type_t *t) {
+        if (!t) {
+            static lr_type_t poison_ty = { LR_TYPE_PTR, {} };
+            return reinterpret_cast<Type *>(&poison_ty);
+        }
         return reinterpret_cast<Type *>(t);
     }
 
