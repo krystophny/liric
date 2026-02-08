@@ -952,6 +952,11 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                             byte_off = idx_op->imm_i64 * (int64_t)elem_size;
                         } else {
                             emit_load_operand(&ctx, idx_op, A64_X10);
+                            if (idx_op->type && idx_op->type->kind == LR_TYPE_I32) {
+                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                         0x93407C00u |
+                                         ((uint32_t)A64_X10 << 5) | A64_X10); /* sxtw */
+                            }
                             if (elem_size != 1) {
                                 emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
                                               A64_X11, (int64_t)elem_size, true);
@@ -973,6 +978,11 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                             byte_off = idx_op->imm_i64 * (int64_t)elem_size;
                         } else {
                             emit_load_operand(&ctx, idx_op, A64_X10);
+                            if (idx_op->type && idx_op->type->kind == LR_TYPE_I32) {
+                                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                                         0x93407C00u |
+                                         ((uint32_t)A64_X10 << 5) | A64_X10); /* sxtw */
+                            }
                             if (elem_size != 1) {
                                 emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen,
                                               A64_X11, (int64_t)elem_size, true);
