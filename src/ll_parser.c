@@ -5,13 +5,13 @@
 #include <stdlib.h>
 
 #define VREG_MAP_CAP 16384u
-#define BLOCK_MAP_CAP 1024u
+#define BLOCK_MAP_CAP 4096u
 #define GLOBAL_MAP_CAP 4096u
 #define FUNC_MAP_CAP 1024u
 #define TYPE_MAP_CAP 256u
 
 #define VREG_INDEX_CAP 32768u
-#define BLOCK_INDEX_CAP 2048u
+#define BLOCK_INDEX_CAP 8192u
 #define GLOBAL_INDEX_CAP 8192u
 
 typedef struct lr_parser {
