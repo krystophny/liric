@@ -551,6 +551,42 @@ int test_jit_varargs_printf_call(void) {
     return 0;
 }
 
+int test_jit_varargs_printf_double_call(void) {
+    const char *src =
+        "declare i32 @printf(ptr, ...)\n"
+        "define i32 @call_printf_double() {\n"
+        "entry:\n"
+        "  %r = call i32 (ptr, ...) @printf(ptr @fmtf, double 1.5)\n"
+        "  ret i32 %r\n"
+        "}\n";
+    static const char fmt[] = "vf=%f\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int (*printf_fn)(const char *, ...) = printf;
+    void *printf_addr = NULL;
+    memcpy(&printf_addr, &printf_fn, sizeof(printf_addr));
+    lr_jit_add_symbol(jit, "printf", printf_addr);
+    lr_jit_add_symbol(jit, "fmtf", (void *)fmt);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_printf_double");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT(fn() > 0, "printf-style double varargs call returns positive count");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_llvm_intrinsic_fabs_f32(void) {
     const char *src =
         "declare float @llvm.fabs.f32(float)\n"

@@ -37,6 +37,8 @@ typedef struct {
     uint32_t stack_size;
     int32_t *stack_slots;
     uint32_t num_stack_slots;
+    int32_t *static_alloca_offsets;
+    uint32_t num_static_alloca_offsets;
     size_t block_offsets[1024];
     struct { size_t pos; uint32_t target; } fixups[4096];
     uint32_t num_fixups;
@@ -82,6 +84,22 @@ static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t size) {
     int32_t offset = -(int32_t)ctx->stack_size;
     ctx->stack_slots[vreg] = offset;
     return offset;
+}
+
+static void set_static_alloca_offset(x86_compile_ctx_t *ctx, uint32_t vreg,
+                                      int32_t offset) {
+    while (vreg >= ctx->num_static_alloca_offsets) {
+        uint32_t old = ctx->num_static_alloca_offsets;
+        uint32_t new_cap = old == 0 ? 64 : old * 2;
+        int32_t *no = lr_arena_array(ctx->arena, int32_t, new_cap);
+        if (old > 0)
+            memcpy(no, ctx->static_alloca_offsets, old * sizeof(int32_t));
+        for (uint32_t i = old; i < new_cap; i++)
+            no[i] = 0;
+        ctx->static_alloca_offsets = no;
+        ctx->num_static_alloca_offsets = new_cap;
+    }
+    ctx->static_alloca_offsets[vreg] = offset;
 }
 
 /* ---- Encoding helpers (pure byte-writing, unchanged) ---- */
@@ -307,6 +325,51 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
             return true;
     }
     return false;
+}
+
+static bool is_fp_abi_type(const lr_type_t *type) {
+    return type &&
+           (type->kind == LR_TYPE_FLOAT || type->kind == LR_TYPE_DOUBLE);
+}
+
+static uint8_t fp_abi_size(const lr_type_t *type) {
+    return (type && type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+}
+
+static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
+    if (!mod || !name) return NULL;
+    for (lr_func_t *f = mod->first_func; f; f = f->next) {
+        if (strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static bool call_uses_external_sysv_abi(x86_compile_ctx_t *ctx,
+                                         const lr_inst_t *inst,
+                                         lr_func_t **callee_func_out) {
+    const lr_operand_t *callee = NULL;
+    const char *sym_name = NULL;
+    lr_func_t *callee_func = NULL;
+
+    if (callee_func_out) *callee_func_out = NULL;
+    if (!ctx || !ctx->mod || !inst || inst->num_operands == 0)
+        return false;
+
+    callee = &inst->operands[0];
+    if (callee->kind != LR_VAL_GLOBAL)
+        return false;
+
+    sym_name = lr_module_symbol_name(ctx->mod, callee->global_id);
+    if (!sym_name)
+        return false;
+
+    callee_func = find_module_function(ctx->mod, sym_name);
+    if (callee_func_out) *callee_func_out = callee_func;
+    if (callee_func)
+        return callee_func->first_block == NULL;
+
+    return !is_symbol_defined_in_module(ctx->mod, sym_name);
 }
 
 /* Load an operand value into a GPR */
@@ -626,6 +689,7 @@ static void prescan_slots(x86_compile_ctx_t *ctx, lr_func_t *func) {
                 if (use_static) {
                     ctx->stack_size += (uint32_t)elem_sz;
                     ctx->stack_size = (ctx->stack_size + 7) & ~7u;
+                    set_static_alloca_offset(ctx, inst->dest, -(int32_t)ctx->stack_size);
                 }
                 alloc_slot(ctx, inst->dest, 8);
                 break;
@@ -690,6 +754,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .stack_size = 0,
         .stack_slots = NULL,
         .num_stack_slots = 0,
+        .static_alloca_offsets = NULL,
+        .num_static_alloca_offsets = 0,
         .num_fixups = 0,
         .arena = arena,
         .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
@@ -886,36 +952,10 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 }
 
                 if (use_static) {
-                    /* Re-walk prescan in order to find the RBP offset for this
-                     * alloca's data region. We must replicate the exact same
-                     * stack_size bumps that prescan_slots performed, including
-                     * the alloc_slot calls for dest vregs, so that the alloca
-                     * data offsets land at the right positions. */
-                    uint32_t sim_ss = 0;
                     int32_t off = 0;
-                    for (lr_block_t *sb = func->first_block; sb; sb = sb->next) {
-                        for (lr_inst_t *si = sb->first; si; si = si->next) {
-                            if (si->op != LR_OP_ALLOCA) continue;
-                            size_t esz = lr_type_size(si->type);
-                            if (esz < 8) esz = 8;
-                            bool si_static = (si->num_operands == 0);
-                            if (si->num_operands > 0 && si->operands[0].kind == LR_VAL_IMM_I64 &&
-                                si->operands[0].imm_i64 == 1) {
-                                si_static = true;
-                            }
-                            if (!si_static) continue;
-                            sim_ss += (uint32_t)esz;
-                            sim_ss = (sim_ss + 7) & ~7u;
-                            if (si == inst) {
-                                off = -(int32_t)sim_ss;
-                                goto found_alloca;
-                            }
-                            /* Simulate the alloc_slot bump for dest vreg */
-                            sim_ss += 8;
-                            sim_ss = (sim_ss + 7) & ~7u;
-                        }
+                    if (inst->dest < ctx.num_static_alloca_offsets) {
+                        off = ctx.static_alloca_offsets[inst->dest];
                     }
-                    found_alloca:;
                     /* lea rax, [rbp + off] */
                     encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8D, X86_RAX, X86_RBP, off, 8);
                     emit_store_slot(&ctx, inst->dest, X86_RAX);
@@ -1116,27 +1156,79 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
             case LR_OP_CALL: {
                 static const uint8_t call_regs[] = { X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9 };
+                static const uint8_t call_fp_regs[] = {
+                    X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3,
+                    X86_XMM4, X86_XMM5, X86_XMM6, X86_XMM7
+                };
                 uint32_t nargs = inst->num_operands - 1;
-                uint32_t nstack = nargs > 6 ? nargs - 6 : 0;
-                uint32_t stack_bytes = ((nstack * 8 + 15) & ~15u);
+                uint32_t gp_used = 0;
+                uint32_t fp_used = 0;
+                uint32_t stack_args = 0;
+                uint32_t stack_bytes = 0;
+                uint32_t fp_used_for_call = 0;
+                lr_func_t *callee_func = NULL;
+                bool use_external_sysv_fp =
+                    call_uses_external_sysv_abi(&ctx, inst, &callee_func);
+                bool callee_vararg = callee_func && callee_func->vararg;
+
+                if (use_external_sysv_fp) {
+                    for (uint32_t i = 0; i < nargs; i++) {
+                        const lr_type_t *arg_type = inst->operands[i + 1].type;
+                        if (is_fp_abi_type(arg_type)) {
+                            if (fp_used < 8) fp_used++;
+                            else stack_args++;
+                        } else {
+                            if (gp_used < 6) gp_used++;
+                            else stack_args++;
+                        }
+                    }
+                } else {
+                    stack_args = nargs > 6 ? nargs - 6 : 0;
+                }
+
+                stack_bytes = ((stack_args * 8 + 15) & ~15u);
 
                 if (stack_bytes > 0)
                     emit_frame_alloc(&ctx, stack_bytes);
 
-                /* Store stack args in forward order to [RSP + offset] */
-                for (uint32_t i = 0; i < nstack; i++) {
-                    uint32_t arg_idx = 6 + i;
-                    emit_load_operand(&ctx, &inst->operands[arg_idx + 1], X86_RAX);
-                    encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX,
-                               X86_RSP, (int32_t)(i * 8), 8);
+                if (use_external_sysv_fp) {
+                    uint32_t stack_idx = 0;
+                    gp_used = 0;
+                    fp_used = 0;
+                    for (uint32_t i = 0; i < nargs; i++) {
+                        const lr_operand_t *arg = &inst->operands[i + 1];
+                        if (is_fp_abi_type(arg->type) && fp_used < 8) {
+                            emit_load_fp_operand(&ctx, arg, call_fp_regs[fp_used],
+                                                 fp_abi_size(arg->type));
+                            fp_used++;
+                            continue;
+                        }
+                        if (!is_fp_abi_type(arg->type) && gp_used < 6) {
+                            emit_load_operand(&ctx, arg, call_regs[gp_used]);
+                            gp_used++;
+                            continue;
+                        }
+                        emit_load_operand(&ctx, arg, X86_RAX);
+                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX,
+                                   X86_RSP, (int32_t)(stack_idx * 8), 8);
+                        stack_idx++;
+                    }
+                    fp_used_for_call = fp_used;
+                } else {
+                    /* Legacy internal-call convention: first 6 args in GPRs, rest on stack. */
+                    uint32_t nstack = nargs > 6 ? nargs - 6 : 0;
+                    for (uint32_t i = 0; i < nstack; i++) {
+                        uint32_t arg_idx = 6 + i;
+                        emit_load_operand(&ctx, &inst->operands[arg_idx + 1], X86_RAX);
+                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX,
+                                   X86_RSP, (int32_t)(i * 8), 8);
+                    }
+                    for (uint32_t i = 0; i < nargs && i < 6; i++)
+                        emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
                 }
 
-                /* Place first 6 args in System V registers */
-                for (uint32_t i = 0; i < nargs && i < 6; i++)
-                    emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
-
-                /* Clear %al for variadic call convention */
-                emit_mov_imm(&ctx, X86_RAX, 0);
+                if (callee_vararg)
+                    emit_mov_imm(&ctx, X86_RAX, (int64_t)fp_used_for_call);
 
                 if (ctx.obj_ctx &&
                     inst->operands[0].kind == LR_VAL_GLOBAL) {

@@ -80,6 +80,7 @@ int test_jit_internal_global_load_store(void);
 int test_jit_internal_global_address_relocation(void);
 int test_jit_external_call_abs(void);
 int test_jit_varargs_printf_call(void);
+int test_jit_varargs_printf_double_call(void);
 int test_jit_llvm_intrinsic_fabs_f32(void);
 int test_jit_llvm_intrinsic_memcpy_memset(void);
 int test_jit_gep_struct_field(void);
@@ -191,6 +192,7 @@ int main(void) {
     RUN_TEST(test_jit_internal_global_address_relocation);
     RUN_TEST(test_jit_external_call_abs);
     RUN_TEST(test_jit_varargs_printf_call);
+    RUN_TEST(test_jit_varargs_printf_double_call);
     RUN_TEST(test_jit_llvm_intrinsic_fabs_f32);
     RUN_TEST(test_jit_llvm_intrinsic_memcpy_memset);
     RUN_TEST(test_jit_gep_struct_field);

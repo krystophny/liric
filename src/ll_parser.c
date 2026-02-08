@@ -331,6 +331,12 @@ static lr_type_t *resolve_type(lr_parser_t *p, const char *name) {
 
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
+
+static lr_type_t *call_result_type(lr_type_t *ty) {
+    if (ty && ty->kind == LR_TYPE_FUNC)
+        return ty->func.ret;
+    return ty;
+}
 static void skip_balanced_parens(lr_parser_t *p);
 static void skip_balanced_braces(lr_parser_t *p);
 static void skip_balanced_brackets(lr_parser_t *p);
@@ -836,7 +842,7 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
             }
 
             case LR_TOK_CALL: {
-                lr_type_t *ret_ty = parse_type(p);
+                lr_type_t *ret_ty = call_result_type(parse_type(p));
                 skip_attrs(p);
                 skip_optional_callee_signature(p);
                 lr_operand_t callee = parse_operand(p, p->module->type_ptr);
@@ -1127,7 +1133,7 @@ static void parse_instruction(lr_parser_t *p, lr_block_t *block) {
     /* void call */
     if (op_tok == LR_TOK_CALL) {
         next(p);
-        lr_type_t *ret_ty = parse_type(p);
+        lr_type_t *ret_ty = call_result_type(parse_type(p));
         skip_attrs(p);
         skip_optional_callee_signature(p);
         lr_operand_t callee = parse_operand(p, p->module->type_ptr);
