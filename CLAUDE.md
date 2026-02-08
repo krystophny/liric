@@ -61,13 +61,14 @@ Fair LLVM internal phases are measured with:
 ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
 ```
 
-**Step 3: API benchmark** (lfortran LLVM native vs liric JIT):
+**Step 3: API benchmark** (lfortran LLVM native vs lfortran liric):
 ```bash
 ./build/bench_api --iters 3
 ```
 Compares the full lfortran pipeline through both backends:
-- WALL-CLOCK: `lfortran compile+link+run` vs `liric_probe_runner JIT+run`
-- INTERNAL: lfortran `LLVM opt + LLVM->BIN` (from `--time-report`) vs liric `parse+compile`
+- `lfortran` (LLVM backend): compile to object, link, run
+- `lfortran` (liric backend, built with `-DWITH_LIRIC=ON`): compile to object, link, run
+Both sides run identical steps; the only difference is the codegen backend.
 
 Uses `compat_api.txt` and `compat_api_options.jsonl` from Step 1.
 

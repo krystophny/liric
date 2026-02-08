@@ -134,9 +134,9 @@ parse+jit value is still emitted as a legacy metric for diagnostic use.
 | Faster | 34/34 | - | 100.0% |
 
 The API benchmark compares the full lfortran pipeline through both backends.
-Both sides run identical frontend+semantics+ASR passes, differing only in codegen:
-LLVM (compile+link+run) vs liric (compile+JIT+run). The 1.25x speedup reflects
-liric skipping object emission, linking, and loader startup.
+Both sides run identical steps: frontend, semantics, ASR passes, codegen to
+object file, link, and run. The only difference is the codegen backend (LLVM
+vs liric). The 1.25x speedup reflects liric's faster code generation.
 
 ## License
 
