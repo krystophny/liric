@@ -141,6 +141,7 @@ public:
         fn->setCompatMod(compat_);
         Function *ptr = fn.get();
         owned_functions_.push_back(std::move(fn));
+        detail::current_function = ptr;
         return ptr;
     }
 
@@ -389,12 +390,21 @@ inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Li
 inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        Function *Parent,
                                        BasicBlock *InsertBefore) {
-    (void)Context; (void)InsertBefore;
+    (void)Context;
     Function *fn = Parent ? Parent : detail::current_function;
-    if (!fn) return BasicBlock::wrap(nullptr);
-    detail::current_function = fn;
-    lc_module_compat_t *mod = fn->getCompatMod();
-    lr_func_t *f = fn->getIRFunc();
+    lc_module_compat_t *mod = nullptr;
+    lr_func_t *f = nullptr;
+    if (fn) {
+        detail::current_function = fn;
+        mod = fn->getCompatMod();
+        f = fn->getIRFunc();
+    }
+    if ((!mod || !f) && InsertBefore) {
+        f = lc_value_get_block_func(InsertBefore->impl());
+        if (!mod) {
+            mod = Module::getCurrentModule();
+        }
+    }
     if (!mod || !f) return BasicBlock::wrap(nullptr);
     lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
     return BasicBlock::wrap(bv);

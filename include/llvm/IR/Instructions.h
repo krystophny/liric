@@ -30,7 +30,7 @@ public:
 
     void addIncoming(Value *V, BasicBlock *BB) {
         lc_phi_node_t *phi = lc_value_get_phi_node(impl());
-        if (phi) {
+        if (phi && BB && BB->impl_block()) {
             lc_phi_add_incoming(phi, V->impl(), BB->impl_block());
         }
     }
