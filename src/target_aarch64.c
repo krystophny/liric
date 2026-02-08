@@ -626,6 +626,22 @@ static void emit_mem_zero_base(a64_compile_ctx_t *ctx, uint8_t dst_base,
     }
 }
 
+static bool aggregate_path_from_inst(const lr_inst_t *inst, const lr_type_t *agg_ty,
+                                     size_t *field_off_out,
+                                     const lr_type_t **field_ty_out) {
+    if (!inst || !agg_ty) {
+        return false;
+    }
+    return lr_aggregate_index_path(agg_ty, inst->indices, inst->num_indices,
+                                   field_off_out, field_ty_out);
+}
+
+static void emit_load_vreg_mem_sized(a64_compile_ctx_t *ctx, uint32_t src_vreg,
+                                     int32_t add_off, uint8_t reg, uint8_t size) {
+    int32_t src_off = alloc_slot(ctx, src_vreg, 8) + add_off;
+    emit_load(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, src_off, size);
+}
+
 static void emit_signext_index_reg(a64_compile_ctx_t *ctx, uint8_t reg,
                                    uint8_t signext_bytes) {
     uint32_t insn;
@@ -1067,13 +1083,146 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 break;
             }
             case LR_OP_EXTRACTVALUE: {
+                size_t field_off = 0;
+                const lr_type_t *field_ty = NULL;
+                size_t field_sz = 8;
+                bool have_path = false;
+
+                if (inst->num_operands > 0 && inst->operands[0].type) {
+                    have_path = aggregate_path_from_inst(inst, inst->operands[0].type,
+                                                         &field_off, &field_ty);
+                }
+                if (field_ty) {
+                    field_sz = lr_type_size(field_ty);
+                }
+                if (field_sz == 0) {
+                    field_sz = 8;
+                }
+
+                if (have_path && inst->num_operands > 0 &&
+                    inst->operands[0].kind == LR_VAL_VREG) {
+                    if (field_sz > 8) {
+                        int32_t dst_off = alloc_slot(&ctx, inst->dest, field_sz);
+                        int32_t src_off = alloc_slot(&ctx, inst->operands[0].vreg, 8) +
+                                          (int32_t)field_off;
+                        emit_mem_copy_base_to_base(&ctx, A64_FP, dst_off, A64_FP,
+                                                   src_off, field_sz);
+                    } else {
+                        emit_load_vreg_mem_sized(&ctx, inst->operands[0].vreg,
+                                                 (int32_t)field_off, A64_X9,
+                                                 (uint8_t)field_sz);
+                        emit_store_slot(&ctx, inst->dest, A64_X9);
+                    }
+                    break;
+                }
+
+                if (inst->num_operands > 0 &&
+                    (inst->operands[0].kind == LR_VAL_UNDEF ||
+                     inst->operands[0].kind == LR_VAL_NULL)) {
+                    if (field_sz > 8) {
+                        int32_t dst_off = alloc_slot(&ctx, inst->dest, field_sz);
+                        emit_mem_zero_base(&ctx, A64_FP, dst_off, field_sz);
+                    } else {
+                        emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, 0, true);
+                        emit_store_slot(&ctx, inst->dest, A64_X9);
+                    }
+                    break;
+                }
+
                 emit_load_operand(&ctx, &inst->operands[0], A64_X9);
                 emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
             }
             case LR_OP_INSERTVALUE: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_store_slot(&ctx, inst->dest, A64_X9);
+                size_t agg_sz = inst->type ? lr_type_size(inst->type) : 8;
+                size_t field_off = 0;
+                const lr_type_t *field_ty = NULL;
+                int32_t dst_off;
+
+                if (agg_sz < 8) {
+                    agg_sz = 8;
+                }
+                dst_off = alloc_slot(&ctx, inst->dest, agg_sz);
+
+                if (inst->num_operands > 0) {
+                    const lr_operand_t *agg = &inst->operands[0];
+                    if (agg->kind == LR_VAL_VREG) {
+                        size_t src_sz = 0;
+                        int32_t src_off = alloc_slot(&ctx, agg->vreg, 8);
+                        if (agg->vreg < ctx.num_stack_slots) {
+                            src_sz = ctx.stack_slot_sizes[agg->vreg];
+                        }
+                        if (src_sz > agg_sz) {
+                            src_sz = agg_sz;
+                        }
+                        if (src_sz > 0) {
+                            emit_mem_copy_base_to_base(&ctx, A64_FP, dst_off, A64_FP,
+                                                       src_off, src_sz);
+                        }
+                        if (src_sz < agg_sz) {
+                            emit_mem_zero_base(&ctx, A64_FP,
+                                               dst_off + (int32_t)src_sz,
+                                               agg_sz - src_sz);
+                        }
+                    } else if (agg->kind == LR_VAL_UNDEF || agg->kind == LR_VAL_NULL) {
+                        emit_mem_zero_base(&ctx, A64_FP, dst_off, agg_sz);
+                    } else if (agg_sz <= 8) {
+                        emit_load_operand(&ctx, agg, A64_X9);
+                        emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9,
+                                   A64_FP, dst_off, (uint8_t)agg_sz);
+                    } else {
+                        emit_mem_zero_base(&ctx, A64_FP, dst_off, agg_sz);
+                    }
+                }
+
+                if (inst->num_operands < 2 ||
+                    !aggregate_path_from_inst(inst, inst->type, &field_off, &field_ty) ||
+                    !field_ty) {
+                    break;
+                }
+
+                {
+                    size_t field_sz = lr_type_size(field_ty);
+                    const lr_operand_t *val = &inst->operands[1];
+                    if (field_sz == 0) {
+                        break;
+                    }
+                    if (field_sz > 8) {
+                        if (val->kind == LR_VAL_VREG) {
+                            size_t src_sz = 0;
+                            int32_t src_off = alloc_slot(&ctx, val->vreg, 8);
+                            if (val->vreg < ctx.num_stack_slots) {
+                                src_sz = ctx.stack_slot_sizes[val->vreg];
+                            }
+                            if (src_sz > field_sz) {
+                                src_sz = field_sz;
+                            }
+                            if (src_sz > 0) {
+                                emit_mem_copy_base_to_base(&ctx, A64_FP,
+                                                           dst_off + (int32_t)field_off,
+                                                           A64_FP, src_off, src_sz);
+                            }
+                            if (src_sz < field_sz) {
+                                emit_mem_zero_base(&ctx, A64_FP,
+                                                   dst_off + (int32_t)field_off +
+                                                   (int32_t)src_sz,
+                                                   field_sz - src_sz);
+                            }
+                        } else {
+                            emit_mem_zero_base(&ctx, A64_FP,
+                                               dst_off + (int32_t)field_off,
+                                               field_sz);
+                        }
+                    } else {
+                        if (val->kind == LR_VAL_UNDEF || val->kind == LR_VAL_NULL) {
+                            emit_move_imm(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, 0, true);
+                        } else {
+                            emit_load_operand(&ctx, val, A64_X9);
+                        }
+                        emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP,
+                                   dst_off + (int32_t)field_off, (uint8_t)field_sz);
+                    }
+                }
                 break;
             }
             case LR_OP_CALL: {

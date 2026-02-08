@@ -1333,3 +1333,34 @@ int test_jit_fp_arithmetic_chain(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_insert_extractvalue_struct_fields(void) {
+    const char *src =
+        "define i64 @ins_ext(i64 %x) {\n"
+        "entry:\n"
+        "  %ins0 = insertvalue { i64, i64 } undef, i64 11, 0\n"
+        "  %ins1 = insertvalue { i64, i64 } %ins0, i64 %x, 1\n"
+        "  %a = extractvalue { i64, i64 } %ins1, 0\n"
+        "  %b = extractvalue { i64, i64 } %ins1, 1\n"
+        "  %sum = add i64 %a, %b\n"
+        "  ret i64 %sum\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(int64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "ins_ext");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    TEST_ASSERT_EQ(fn(31), 42, "insert/extract keeps both fields");
+    TEST_ASSERT_EQ(fn(-11), 0, "insert/extract signed value");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
