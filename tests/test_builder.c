@@ -440,7 +440,8 @@ int test_builder_roundtrip(void) {
     TEST_ASSERT(len > 0, "dump produced output");
     fseek(tmp, 0, SEEK_SET);
     char *buf = malloc((size_t)len + 1);
-    fread(buf, 1, (size_t)len, tmp);
+    size_t nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read full dumped module");
     buf[len] = '\0';
     fclose(tmp);
 
