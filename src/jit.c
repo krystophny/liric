@@ -114,6 +114,17 @@ static uint64_t llvm_copysign_f32_bits(uint64_t x_bits, uint64_t y_bits) {
     return (uint64_t)out_bits;
 }
 
+static uint64_t llvm_pow_f32_bits(uint64_t x_bits, uint64_t y_bits) {
+    uint32_t in_x = (uint32_t)x_bits, in_y = (uint32_t)y_bits;
+    float x = 0.0f, y = 0.0f, out = 0.0f;
+    uint32_t out_bits = 0;
+    memcpy(&x, &in_x, sizeof(in_x));
+    memcpy(&y, &in_y, sizeof(in_y));
+    out = powf(x, y);
+    memcpy(&out_bits, &out, sizeof(out_bits));
+    return (uint64_t)out_bits;
+}
+
 static uint64_t llvm_sqrt_f64_bits(uint64_t x_bits) {
     double x = 0.0, out = 0.0;
     uint64_t out_bits = 0;
@@ -397,6 +408,7 @@ static void register_builtin_symbols(lr_jit_t *j) {
     lr_jit_add_symbol(j, "llvm.sqrt.f64", (void *)(uintptr_t)&llvm_sqrt_f64_bits);
     lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32_bits);
     lr_jit_add_symbol(j, "llvm.exp.f64", (void *)(uintptr_t)&llvm_exp_f64_bits);
+    lr_jit_add_symbol(j, "llvm.pow.f32", (void *)(uintptr_t)&llvm_pow_f32_bits);
     lr_jit_add_symbol(j, "llvm.pow.f64", (void *)(uintptr_t)&llvm_pow_f64_bits);
     lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32_bits);
     lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64_bits);
