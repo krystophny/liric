@@ -8,8 +8,10 @@ if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG" CACHE STRING "Release C flags" FORCE)
-set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG" CACHE STRING "RelWithDebInfo C flags" FORCE)
+set(CMAKE_C_FLAGS_RELEASE "-O2 -g -fno-omit-frame-pointer -DNDEBUG"
+    CACHE STRING "Release C flags" FORCE)
+set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g -fno-omit-frame-pointer -DNDEBUG"
+    CACHE STRING "RelWithDebInfo C flags" FORCE)
 
 option(LIRIC_ENABLE_LTO "Enable interprocedural optimization (LTO/IPO)" ON)
 if(LIRIC_ENABLE_LTO)
@@ -24,6 +26,10 @@ if(LIRIC_ENABLE_LTO)
 endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+
+if(UNIX AND NOT APPLE)
+    add_link_options("$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-rdynamic>")
+endif()
 
 add_library(liric STATIC
     src/arena.c
