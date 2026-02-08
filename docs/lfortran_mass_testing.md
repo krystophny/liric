@@ -106,3 +106,43 @@ If signature/ABI is unsupported by the runner, classify as `unsupported_abi`.
 - `integration_tests/CMakeLists.txt` entries are included only if `RUN(...)` has
   native `llvm` label.
 - `RUN(... FAIL ...)` integration tests are excluded by default.
+
+## Benchmarking
+
+Standalone benchmark scripts compare liric JIT performance against LLVM on integration tests.
+These do NOT depend on mass run results; they discover tests directly from CMakeLists.txt.
+
+### Workflow
+
+1. **Compatibility check** (required first):
+   ```bash
+   python3 -m tools.bench_compat_check --workers $(nproc)
+   ```
+   Runs each eligible integration test through lfortran LLVM native, liric JIT, and lli.
+   Only tests producing identical output are included in benchmarks.
+   Outputs: `/tmp/liric_bench/compat_api.txt`, `/tmp/liric_bench/compat_ll.txt`
+
+2. **API benchmark** (liric JIT vs lfortran LLVM native compile+run):
+   ```bash
+   python3 -m tools.bench_api --iters 3
+   ```
+   Times the full pipeline: `lfortran --show-llvm + liric_probe_runner` vs `lfortran -o binary && ./binary`.
+
+3. **LL-file benchmark** (liric JIT vs LLVM lli):
+   ```bash
+   python3 -m tools.bench_ll --iters 3
+   ```
+   Times JIT execution on pre-generated .ll files: `liric_probe_runner` vs `lli -O0`.
+
+### Test Selection for Benchmarks
+- Integration tests with `llvm` label from CMakeLists.txt
+- Excluded: FAIL tests, EXTRAFILES, llvm_omp, llvm2, llvm_rtlib labels
+- Included with mapped flags: llvmImplicit, llvmStackArray, llvm_integer_8, llvm_nopragma
+
+### Benchmark Outputs
+All artifacts in `/tmp/liric_bench/`:
+- `compat_check.jsonl`: per-test compatibility results
+- `compat_api.txt`: test names passing liric compat
+- `compat_ll.txt`: test names passing liric + lli compat
+- `bench_api.jsonl`: API benchmark timing data
+- `bench_ll.jsonl`: LL-file benchmark timing data

@@ -46,14 +46,6 @@ add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
 
-add_executable(bench_parse_vs_jit tools/bench_parse_vs_jit.c)
-target_link_libraries(bench_parse_vs_jit PRIVATE liric ${LIRIC_PLATFORM_LIBS})
-target_include_directories(bench_parse_vs_jit PRIVATE src)
-
-add_executable(bench_jit_phases tools/bench_jit_phases.c)
-target_link_libraries(bench_jit_phases PRIVATE liric ${LIRIC_PLATFORM_LIBS})
-target_include_directories(bench_jit_phases PRIVATE src)
-
 enable_testing()
 add_executable(test_liric
     tests/test_main.c

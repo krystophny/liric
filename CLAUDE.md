@@ -67,6 +67,34 @@ print(seg)
 PY
 ```
 
+## Benchmarking
+
+Three benchmark scripts compare liric against LLVM on lfortran integration tests.
+All benchmarks use -O0 and only measure tests where both compilers produce matching output.
+
+**Step 1: Correctness check** (must run first):
+```bash
+python3 -m tools.bench_compat_check --workers $(nproc) --timeout 15
+```
+Discovers integration tests with `llvm` label, runs each through lfortran LLVM native,
+liric JIT, and lli. Writes compatibility lists:
+- `/tmp/liric_bench/compat_api.txt` (tests where liric matches LLVM)
+- `/tmp/liric_bench/compat_ll.txt` (tests where liric AND lli match LLVM)
+
+**Step 2a: API benchmark** (liric JIT vs lfortran LLVM native):
+```bash
+python3 -m tools.bench_api --iters 3
+```
+Compares the full pipeline: `lfortran --show-llvm + liric_probe_runner` vs `lfortran compile+run`.
+
+**Step 2b: LL-file benchmark** (liric JIT vs lli):
+```bash
+python3 -m tools.bench_ll --iters 3
+```
+Compares JIT execution on pre-generated .ll files: `liric_probe_runner` vs `lli -O0`.
+
+All outputs go to `/tmp/liric_bench/` (JSONL results + summary tables).
+
 ## Pipeline
 
 ```
