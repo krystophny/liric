@@ -21,14 +21,14 @@ class Constant : public Value {
 public:
     static Constant *getNullValue(Type *Ty) {
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
         return static_cast<Constant *>(Value::wrap(
             lc_value_const_null(mod, Ty->impl())));
     }
 
     static Constant *getAllOnesValue(Type *Ty) {
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
         if (Ty->isIntegerTy()) {
             return static_cast<Constant *>(Value::wrap(
                 lc_value_const_int(mod, Ty->impl(), -1,
@@ -67,7 +67,7 @@ public:
     static ConstantInt *get(Type *Ty, uint64_t V, bool isSigned = false) {
         (void)isSigned;
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
         return static_cast<ConstantInt *>(Value::wrap(
             lc_value_const_int(mod, Ty->impl(),
                                static_cast<int64_t>(V),
@@ -95,6 +95,7 @@ public:
     }
 
     static ConstantInt *getSigned(Type *Ty, int64_t V) {
+        if (!Ty || !Ty->impl()) return nullptr;
         return get(Ty, static_cast<uint64_t>(V), true);
     }
 
@@ -141,17 +142,19 @@ class ConstantFP : public Constant {
 public:
     static ConstantFP *get(Type *Ty, double V) {
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
         bool is_double = Ty->isDoubleTy();
         return static_cast<ConstantFP *>(Value::wrap(
             lc_value_const_fp(mod, Ty->impl(), V, is_double)));
     }
 
     static ConstantFP *get(Type *Ty, const APFloat &V) {
+        if (!Ty || !Ty->impl()) return nullptr;
         return get(Ty, V.convertToDouble());
     }
 
     static ConstantFP *get(Type *Ty, StringRef Str) {
+        if (!Ty || !Ty->impl()) return nullptr;
         double v = 0.0;
         try { v = std::stod(Str.str()); } catch (...) {}
         return get(Ty, v);
@@ -185,7 +188,7 @@ class ConstantPointerNull : public Constant {
 public:
     static ConstantPointerNull *get(PointerType *T) {
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !T || !T->impl()) return nullptr;
         return static_cast<ConstantPointerNull *>(Value::wrap(
             lc_value_const_null(mod, T->impl())));
     }
@@ -195,7 +198,7 @@ class UndefValue : public Constant {
 public:
     static UndefValue *get(Type *Ty) {
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
         return static_cast<UndefValue *>(Value::wrap(
             lc_value_undef(mod, Ty->impl())));
     }
@@ -205,7 +208,7 @@ class PoisonValue : public Constant {
 public:
     static PoisonValue *get(Type *Ty) {
         lc_module_compat_t *mod = liric_get_current_module();
-        if (!mod) return nullptr;
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
         return static_cast<PoisonValue *>(Value::wrap(
             lc_value_undef(mod, Ty->impl())));
     }

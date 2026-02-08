@@ -49,7 +49,9 @@ public:
     Module &operator=(const Module &) = delete;
 
     static lc_module_compat_t *getCurrentModule() {
-        return current_ ? current_ : detail::fallback_module;
+        if (current_) return current_;
+        if (detail::fallback_module) return detail::fallback_module;
+        return LLVMContext::getGlobal().getDefaultModule();
     }
     static void setCurrentModule(lc_module_compat_t *m) { current_ = m; }
 
