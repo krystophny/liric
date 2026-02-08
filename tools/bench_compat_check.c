@@ -859,6 +859,23 @@ int main(int argc, char **argv) {
     printf("Found %zu eligible integration tests\n", eligible);
     printf("timeout: %ds\n", cfg.timeout_sec);
 
+#define UPDATE_STATS_AND_PROGRESS() \
+    do { \
+        processed++; \
+        if (llvm_ok) llvm_ok_count++; \
+        if (liric_match) liric_match_count++; \
+        if (lli_match) lli_match_count++; \
+        if (liric_match && lli_match) both_match_count++; \
+        if (processed % 50 == 0) { \
+            printf("  progress %zu/%zu: llvm_ok=%zu liric_match=%zu (%.1f%%) lli_match=%zu both=%zu\n", \
+                   processed, eligible, \
+                   llvm_ok_count, \
+                   liric_match_count, processed ? (100.0 * (double)liric_match_count / (double)processed) : 0.0, \
+                   lli_match_count, \
+                   both_match_count); \
+        } \
+    } while (0)
+
     jsonl = fopen(jsonl_path, "w");
     if (!jsonl) die("failed to open %s", jsonl_path);
 
@@ -913,6 +930,7 @@ int main(int argc, char **argv) {
             write_json_row(jsonl, t->name, t->source, t->options_joined,
                            llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
                            llvm_rc, liric_rc, lli_rc, error);
+            UPDATE_STATS_AND_PROGRESS();
             free_cmd_result(&emit_r);
             free(emit_argv);
             free(ll_path);
@@ -940,6 +958,7 @@ int main(int argc, char **argv) {
             write_json_row(jsonl, t->name, t->source, t->options_joined,
                            llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
                            llvm_rc, liric_rc, lli_rc, error);
+            UPDATE_STATS_AND_PROGRESS();
             free_cmd_result(&compile_r);
             free(ll_path);
             free(bin_path);
@@ -1004,11 +1023,7 @@ int main(int argc, char **argv) {
         write_json_row(jsonl, t->name, t->source, t->options_joined,
                        llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
                        llvm_rc, liric_rc, lli_rc, error);
-        processed++;
-        if (llvm_ok) llvm_ok_count++;
-        if (liric_match) liric_match_count++;
-        if (lli_match) lli_match_count++;
-        if (liric_match && lli_match) both_match_count++;
+        UPDATE_STATS_AND_PROGRESS();
 
         if (liric_match) {
             if (compat_api_n == compat_api_cap) {
@@ -1052,15 +1067,6 @@ int main(int argc, char **argv) {
             opts_ll[opts_ll_n].name = xstrdup(t->name);
             opts_ll[opts_ll_n].options = xstrdup(t->options_joined ? t->options_joined : "");
             opts_ll_n++;
-        }
-
-        if (processed % 50 == 0) {
-            printf("  progress %zu/%zu: llvm_ok=%zu liric_match=%zu (%.1f%%) lli_match=%zu both=%zu\n",
-                   processed, eligible,
-                   llvm_ok_count,
-                   liric_match_count, processed ? (100.0 * (double)liric_match_count / (double)processed) : 0.0,
-                   lli_match_count,
-                   both_match_count);
         }
 
         free_cmd_result(&run_r);
@@ -1122,6 +1128,8 @@ int main(int argc, char **argv) {
     printf("both_match: %zu (%.1f%%)\n", both_match_count, processed ? (100.0 * (double)both_match_count / (double)processed) : 0.0);
     printf("compat_api: %zu tests -> %s\n", compat_api_n, compat_api_path);
     printf("compat_ll:  %zu tests -> %s\n", compat_ll_n, compat_ll_path);
+
+#undef UPDATE_STATS_AND_PROGRESS
 
     for (i = 0; i < compat_api_n; i++) free(compat_api[i]);
     for (i = 0; i < compat_ll_n; i++) free(compat_ll[i]);

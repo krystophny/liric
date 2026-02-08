@@ -80,6 +80,32 @@ Outputs are written to `/tmp/liric_bench/`:
 - `compat_ll.txt`
 - `bench_ll.jsonl`
 
+Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`):
+
+- Compatibility sweep (`bench_compat_check`):
+  - Processed: `2266`
+  - `llvm_ok`: `2246` (99.1%)
+  - `liric_match`: `1027` (45.3%)
+  - `lli_match`: `2166` (95.6%)
+  - `both_match` (`compat_ll`): `1014` (44.7%)
+
+- LL benchmark (`bench_ll --iters 3`) on `compat_ll`:
+  - Benchmarked files: `989`
+
+| Metric | liric wall | lli wall | Wall speedup |
+|--------|-----------:|---------:|-------------:|
+| Median | 10.065 ms | 20.121 ms | **2.00x** |
+| Aggregate | 10045 ms | 20855 ms | 2.08x |
+| P90 / P95 | - | - | 2.00x / 3.00x |
+
+| Metric | liric internal | lli internal | Internal speedup |
+|--------|---------------:|-------------:|-----------------:|
+| Median | 0.383600 ms | 0.226347 ms | **0.52x** |
+| Aggregate | 659.689 ms | 312.038 ms | 0.47x |
+| P90 / P95 | - | - | 0.66x / 0.70x |
+
+The internal metric is now fair (in-process parse+compile vs in-process parse+compile).
+
 ## License
 
 MIT
