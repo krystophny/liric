@@ -45,7 +45,7 @@ size_t lr_target_inst_result_slot_size(const lr_inst_t *inst, size_t min_size) {
     if (!lr_target_inst_has_result_slot(inst)) {
         return 0;
     }
-    if (inst->op == LR_OP_ALLOCA) {
+    if (inst->op == LR_OP_ALLOCA || inst->op == LR_OP_GEP) {
         return slot_size;
     }
     if (inst->type) {
