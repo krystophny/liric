@@ -32,6 +32,8 @@ typedef struct {
     int32_t *stack_slots;
     uint32_t *stack_slot_sizes;
     uint32_t num_stack_slots;
+    int32_t *static_alloca_offsets;
+    uint32_t num_static_alloca_offsets;
     size_t block_offsets[1024];
     struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } fixups[4096];
     uint32_t num_fixups;
@@ -39,6 +41,22 @@ typedef struct {
     lr_objfile_ctx_t *obj_ctx;
     lr_module_t *mod;
 } a64_compile_ctx_t;
+
+static void set_static_alloca_offset(a64_compile_ctx_t *ctx, uint32_t vreg,
+                                     int32_t offset) {
+    while (vreg >= ctx->num_static_alloca_offsets) {
+        uint32_t old = ctx->num_static_alloca_offsets;
+        uint32_t new_cap = old == 0 ? 64 : old * 2;
+        int32_t *no = lr_arena_array(ctx->arena, int32_t, new_cap);
+        if (old > 0)
+            memcpy(no, ctx->static_alloca_offsets, old * sizeof(int32_t));
+        for (uint32_t i = old; i < new_cap; i++)
+            no[i] = 0;
+        ctx->static_alloca_offsets = no;
+        ctx->num_static_alloca_offsets = new_cap;
+    }
+    ctx->static_alloca_offsets[vreg] = offset;
+}
 
 static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, size_t size) {
     if (vreg > 100000) return -8;
@@ -633,6 +651,7 @@ static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
                 if (use_static) {
                     ctx->stack_size += (uint32_t)elem_sz;
                     ctx->stack_size = (ctx->stack_size + 7) & ~7u;
+                    set_static_alloca_offset(ctx, inst->dest, -(int32_t)ctx->stack_size);
                 }
                 alloc_slot(ctx, inst->dest, 8);
                 break;
@@ -668,6 +687,8 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
         .stack_slots = NULL,
         .stack_slot_sizes = NULL,
         .num_stack_slots = 0,
+        .static_alloca_offsets = NULL,
+        .num_static_alloca_offsets = 0,
         .num_fixups = 0,
         .arena = arena,
         .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
@@ -874,32 +895,10 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 bool use_static = lr_target_alloca_uses_static_storage(inst);
 
                 if (use_static) {
-                    /* Re-walk prescan in order to find the FP offset for this
-                     * alloca's data region. We must replicate the exact same
-                     * stack_size bumps that prescan_slots performed, including
-                     * the alloc_slot calls for dest vregs, so that the alloca
-                     * data offsets land at the right positions. */
-                    uint32_t sim_ss = 0;
                     int32_t off = 0;
-                    for (lr_block_t *sb = func->first_block; sb; sb = sb->next) {
-                        for (lr_inst_t *si = sb->first; si; si = si->next) {
-                            if (si->op != LR_OP_ALLOCA) continue;
-                            size_t esz = lr_type_size(si->type);
-                            if (esz < 8) esz = 8;
-                            bool si_static = lr_target_alloca_uses_static_storage(si);
-                            if (!si_static) continue;
-                            sim_ss += (uint32_t)esz;
-                            sim_ss = (sim_ss + 7) & ~7u;
-                            if (si == inst) {
-                                off = -(int32_t)sim_ss;
-                                goto found_alloca;
-                            }
-                            /* Simulate the alloc_slot bump for dest vreg */
-                            sim_ss += 8;
-                            sim_ss = (sim_ss + 7) & ~7u;
-                        }
+                    if (inst->dest < ctx.num_static_alloca_offsets) {
+                        off = ctx.static_alloca_offsets[inst->dest];
                     }
-                    found_alloca:;
                     emit_addr(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP, off);
                     emit_store_slot(&ctx, inst->dest, A64_X9);
                 } else {
