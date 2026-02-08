@@ -39,6 +39,16 @@ typedef struct lc_value {
 /* Context (lightweight - tracks the module for arena allocation) */
 typedef struct lc_context {
     lr_module_t *mod;
+    lr_type_t *type_void;
+    lr_type_t *type_i1;
+    lr_type_t *type_i8;
+    lr_type_t *type_i16;
+    lr_type_t *type_i32;
+    lr_type_t *type_i64;
+    lr_type_t *type_float;
+    lr_type_t *type_double;
+    lr_type_t *type_ptr;
+    lr_arena_t *type_arena;
 } lc_context_t;
 
 /* Module wrapper */

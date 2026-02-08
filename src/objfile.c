@@ -31,6 +31,7 @@
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                bool is_defined, uint8_t section,
                                uint32_t offset) {
+    if (!name) return UINT32_MAX;
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
         if (strcmp(oc->symbols[i].name, name) == 0) {
             if (is_defined && !oc->symbols[i].is_defined) {
@@ -333,7 +334,8 @@ static int write_macho_arm64(FILE *out,
             uint32_t r_pcrel = 0;
             uint32_t r_type = r->type;
             if (r_type == LR_RELOC_ARM64_BRANCH26 ||
-                r_type == LR_RELOC_ARM64_PAGE21) {
+                r_type == LR_RELOC_ARM64_PAGE21 ||
+                r_type == LR_RELOC_ARM64_GOT_LOAD_PAGE21) {
                 r_pcrel = 1;
             }
 
@@ -366,7 +368,14 @@ static int write_macho_arm64(FILE *out,
             }
 
             w16(&sp, 0);
-            w64(&sp, sym->is_defined ? (uint64_t)sym->offset : 0);
+            if (sym->is_defined) {
+                uint64_t value = (uint64_t)sym->offset;
+                if (sym->section == 2)
+                    value += code_size;
+                w64(&sp, value);
+            } else {
+                w64(&sp, 0);
+            }
         }
     }
 
@@ -413,14 +422,16 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
     size_t data_pos = 0;
     bool has_data = false;
 
-    /* Compile each defined function */
+    /* Compile each defined function (has blocks = is a definition) */
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (f->is_decl)
+        if (f->is_decl || !f->first_block)
             continue;
 
         uint32_t sym_idx = lr_obj_ensure_symbol(&ctx, f->name, true, 1,
                                                  (uint32_t)code_pos);
         (void)sym_idx;
+
+        uint32_t reloc_base = ctx.num_relocs;
 
         size_t func_len = 0;
         int rc = target->compile_func(f, m,
@@ -435,12 +446,15 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
             return -1;
         }
 
+        for (uint32_t ri = reloc_base; ri < ctx.num_relocs; ri++)
+            ctx.relocs[ri].offset += (uint32_t)code_pos;
+
         code_pos += func_len;
     }
 
     /* Add declared (external) functions as undefined symbols */
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (!f->is_decl)
+        if (!f->is_decl && f->first_block)
             continue;
         lr_obj_ensure_symbol(&ctx, f->name, false, 0, 0);
     }

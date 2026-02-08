@@ -35,10 +35,13 @@ public:
         : ctx_(ctx), name_(name.str()) {
         compat_ = lc_module_create(ctx.impl(), name.data());
         current_ = compat_;
+        detail::fallback_module = compat_;
     }
 
     ~Module() {
         if (current_ == compat_) current_ = nullptr;
+        if (detail::fallback_module == compat_)
+            detail::fallback_module = ctx_.getDefaultModule();
         lc_module_destroy(compat_);
     }
 
@@ -366,9 +369,15 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
 
 inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
                                     const Twine &Name, Module &M) {
-    bool is_decl = (Linkage == GlobalValue::ExternalLinkage &&
-                    Ty->getReturnType() == nullptr);
-    return M.createFunction(Name.c_str(), Ty, is_decl);
+    /* In real LLVM, a function starts as a declaration and becomes a
+       definition when basic blocks are added.  We mirror that: always
+       create as a declaration here.  createFunction(is_decl=true) calls
+       lc_func_declare which sets is_decl=true.  When the caller later
+       adds a BasicBlock the block list becomes non-empty, and
+       lr_emit_object uses (!f->is_decl && f->first_block) to decide
+       what to compile vs. leave as an undefined symbol. */
+    (void)Linkage;
+    return M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
 }
 
 inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,

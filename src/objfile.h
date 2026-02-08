@@ -8,9 +8,11 @@
 
 /* Mach-O arm64 relocation types */
 enum {
-    LR_RELOC_ARM64_BRANCH26  = 2,
-    LR_RELOC_ARM64_PAGE21    = 3,
-    LR_RELOC_ARM64_PAGEOFF12 = 4,
+    LR_RELOC_ARM64_BRANCH26         = 2,
+    LR_RELOC_ARM64_PAGE21           = 3,
+    LR_RELOC_ARM64_PAGEOFF12        = 4,
+    LR_RELOC_ARM64_GOT_LOAD_PAGE21  = 5,
+    LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12 = 6,
 };
 
 typedef struct lr_obj_reloc {

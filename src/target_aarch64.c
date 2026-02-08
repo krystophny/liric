@@ -61,6 +61,7 @@ static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
 }
 
 static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t size) {
+    if (vreg > 100000) return -8;
     while (vreg >= ctx->num_stack_slots) {
         uint32_t old = ctx->num_stack_slots;
         uint32_t new_cap = old == 0 ? 64 : old * 2;
@@ -403,6 +404,18 @@ static void emit_store_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) 
     emit_store(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, off, 8);
 }
 
+static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
+    for (lr_func_t *f = mod->first_func; f; f = f->next) {
+        if (f->first_block && strcmp(f->name, name) == 0)
+            return true;
+    }
+    for (lr_global_t *g = mod->first_global; g; g = g->next) {
+        if (!g->is_external && g->name && strcmp(g->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 static void emit_load_operand(a64_compile_ctx_t *ctx,
                                const lr_operand_t *op, uint8_t reg) {
     if (op->kind == LR_VAL_IMM_I64) {
@@ -422,23 +435,39 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
             imm_bits = (int64_t)bits;
         }
         emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, imm_bits, true);
-    } else if (op->kind == LR_VAL_NULL) {
+    } else if (op->kind == LR_VAL_NULL || op->kind == LR_VAL_UNDEF) {
         emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, 0, true);
     } else if (op->kind == LR_VAL_GLOBAL && ctx->obj_ctx) {
         const char *sym_name = lr_module_symbol_name(ctx->mod,
                                                       op->global_id);
+        if (!sym_name) {
+            emit_move_imm(ctx->buf, &ctx->pos, ctx->buflen, reg, 0, true);
+            return;
+        }
+        bool defined = is_symbol_defined_in_module(ctx->mod, sym_name);
         uint32_t sym_idx = lr_obj_ensure_symbol(ctx->obj_ctx, sym_name,
                                                  false, 0, 0);
         size_t adrp_off = ctx->pos;
         emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
                  0x90000000u | (uint32_t)reg);
-        lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)adrp_off, sym_idx,
-                          LR_RELOC_ARM64_PAGE21);
-        size_t add_off = ctx->pos;
-        emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
-                 0x91000000u | ((uint32_t)reg << 5) | (uint32_t)reg);
-        lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)add_off, sym_idx,
-                          LR_RELOC_ARM64_PAGEOFF12);
+        if (defined) {
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)adrp_off, sym_idx,
+                              LR_RELOC_ARM64_PAGE21);
+            size_t add_off = ctx->pos;
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     0x91000000u | ((uint32_t)reg << 5) | (uint32_t)reg);
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)add_off, sym_idx,
+                              LR_RELOC_ARM64_PAGEOFF12);
+        } else {
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)adrp_off, sym_idx,
+                              LR_RELOC_ARM64_GOT_LOAD_PAGE21);
+            size_t ldr_off = ctx->pos;
+            /* LDR Xreg, [Xreg, #0] — load pointer from GOT entry */
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     0xF9400000u | ((uint32_t)reg << 5) | (uint32_t)reg);
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)ldr_off, sym_idx,
+                              LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12);
+        }
     }
 }
 
@@ -1077,12 +1106,16 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                     inst->operands[0].kind == LR_VAL_GLOBAL) {
                     const char *sym_name = lr_module_symbol_name(
                         ctx.mod, inst->operands[0].global_id);
-                    uint32_t sym_idx = lr_obj_ensure_symbol(
-                        ctx.obj_ctx, sym_name, false, 0, 0);
-                    size_t bl_off = ctx.pos;
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x94000000u);
-                    lr_obj_add_reloc(ctx.obj_ctx, (uint32_t)bl_off,
-                                      sym_idx, LR_RELOC_ARM64_BRANCH26);
+                    if (sym_name) {
+                        uint32_t sym_idx = lr_obj_ensure_symbol(
+                            ctx.obj_ctx, sym_name, false, 0, 0);
+                        size_t bl_off = ctx.pos;
+                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x94000000u);
+                        lr_obj_add_reloc(ctx.obj_ctx, (uint32_t)bl_off,
+                                          sym_idx, LR_RELOC_ARM64_BRANCH26);
+                    } else {
+                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xD503201Fu);
+                    }
                 } else {
                     emit_load_operand(&ctx, &inst->operands[0], A64_X16);
                     emit_u32(ctx.buf, &ctx.pos, ctx.buflen,

@@ -135,8 +135,10 @@ lr_block_t *lr_block_create(lr_func_t *f, lr_arena_t *a, const char *name) {
     lr_block_t *b = lr_arena_new(a, lr_block_t);
     b->name = lr_arena_strdup(a, name, strlen(name));
     b->id = f->num_blocks++;
-    if (!f->first_block) f->first_block = b;
-    else f->last_block->next = b;
+    if (!f->first_block) {
+        f->first_block = b;
+        f->is_decl = false;
+    } else f->last_block->next = b;
     f->last_block = b;
     return b;
 }
@@ -262,6 +264,7 @@ const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id) {
 }
 
 size_t lr_type_size(const lr_type_t *t) {
+    if (!t) return 0;
     switch (t->kind) {
     case LR_TYPE_VOID:   return 0;
     case LR_TYPE_I1:     return 1;
@@ -295,6 +298,7 @@ size_t lr_type_size(const lr_type_t *t) {
 }
 
 size_t lr_type_align(const lr_type_t *t) {
+    if (!t) return 1;
     switch (t->kind) {
     case LR_TYPE_VOID:   return 1;
     case LR_TYPE_I1:     return 1;
