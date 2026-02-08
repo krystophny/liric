@@ -48,7 +48,7 @@ typedef struct lr_parser {
     uint32_t func_map_count;
 
     /* named type alias mapping (e.g. %string_descriptor -> struct type) */
-    struct { char *name; lr_type_t *type; } type_map[TYPE_MAP_CAP];
+    struct { char *name; lr_type_t *type; bool placeholder; } type_map[TYPE_MAP_CAP];
     uint32_t type_map_count;
 
     lr_func_t *cur_func;
@@ -313,20 +313,66 @@ static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
     }
 }
 
+static int32_t find_type_index_n(lr_parser_t *p, const char *name, size_t name_len) {
+    for (uint32_t i = 0; i < p->type_map_count; i++) {
+        if (strlen(p->type_map[i].name) == name_len &&
+                memcmp(p->type_map[i].name, name, name_len) == 0) {
+            return (int32_t)i;
+        }
+    }
+    return -1;
+}
+
 static void register_type(lr_parser_t *p, const char *name, lr_type_t *ty) {
+    int32_t idx = find_type_index_n(p, name, strlen(name));
+    if (idx >= 0) {
+        if (p->type_map[idx].placeholder) {
+            lr_type_t *placeholder = p->type_map[idx].type;
+            *placeholder = *ty;
+            if (placeholder->kind == LR_TYPE_STRUCT && !placeholder->struc.name)
+                placeholder->struc.name = p->type_map[idx].name;
+            p->type_map[idx].type = placeholder;
+            p->type_map[idx].placeholder = false;
+        } else {
+            p->type_map[idx].type = ty;
+        }
+        return;
+    }
+
     if (p->type_map_count < TYPE_MAP_CAP) {
         p->type_map[p->type_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
         p->type_map[p->type_map_count].type = ty;
+        p->type_map[p->type_map_count].placeholder = false;
         p->type_map_count++;
     }
 }
 
 static lr_type_t *resolve_type(lr_parser_t *p, const char *name) {
-    for (uint32_t i = 0; i < p->type_map_count; i++) {
-        if (strcmp(p->type_map[i].name, name) == 0)
-            return p->type_map[i].type;
+    int32_t idx = find_type_index_n(p, name, strlen(name));
+    return idx >= 0 ? p->type_map[idx].type : NULL;
+}
+
+static lr_type_t *resolve_or_create_forward_type(lr_parser_t *p, const char *name) {
+    int32_t idx = find_type_index_n(p, name, strlen(name));
+    if (idx >= 0)
+        return p->type_map[idx].type;
+
+    lr_type_t *placeholder = lr_arena_new(p->arena, lr_type_t);
+    placeholder->kind = LR_TYPE_STRUCT;
+    placeholder->struc.fields = NULL;
+    placeholder->struc.num_fields = 0;
+    placeholder->struc.packed = false;
+    placeholder->struc.name = lr_arena_strdup(p->arena, name, strlen(name));
+
+    if (p->type_map_count < TYPE_MAP_CAP) {
+        p->type_map[p->type_map_count].name =
+            lr_arena_strdup(p->arena, name, strlen(name));
+        p->type_map[p->type_map_count].type = placeholder;
+        p->type_map[p->type_map_count].placeholder = true;
+        p->type_map_count++;
     }
-    return NULL;
+
+    return placeholder;
 }
 
 static lr_type_t *parse_type(lr_parser_t *p);
@@ -359,7 +405,7 @@ static lr_type_t *parse_type(lr_parser_t *p) {
         char *tname = tok_name(p, &p->cur);
         next(p);
         lr_type_t *resolved = resolve_type(p, tname);
-        ty = resolved ? resolved : p->module->type_ptr;
+        ty = resolved ? resolved : resolve_or_create_forward_type(p, tname);
         break;
     }
     case LR_TOK_LBRACKET: {
