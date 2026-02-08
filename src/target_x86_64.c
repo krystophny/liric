@@ -1,4 +1,5 @@
 #include "target_x86_64.h"
+#include "objfile.h"
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -40,6 +41,8 @@ typedef struct {
     struct { size_t pos; uint32_t target; } fixups[4096];
     uint32_t num_fixups;
     lr_arena_t *arena;
+    lr_objfile_ctx_t *obj_ctx;
+    lr_module_t *mod;
 } x86_compile_ctx_t;
 
 static size_t struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
@@ -294,6 +297,18 @@ static void emit_mov_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
     }
 }
 
+static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
+    for (lr_func_t *f = mod->first_func; f; f = f->next) {
+        if (f->first_block && strcmp(f->name, name) == 0)
+            return true;
+    }
+    for (lr_global_t *g = mod->first_global; g; g = g->next) {
+        if (!g->is_external && g->name && strcmp(g->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 /* Load an operand value into a GPR */
 static void emit_load_operand(x86_compile_ctx_t *ctx,
                                const lr_operand_t *op, uint8_t reg) {
@@ -316,6 +331,39 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
         emit_mov_imm(ctx, reg, imm_bits);
     } else if (op->kind == LR_VAL_NULL) {
         emit_mov_imm(ctx, reg, 0);
+    } else if (op->kind == LR_VAL_GLOBAL && ctx->obj_ctx) {
+        const char *sym_name = lr_module_symbol_name(ctx->mod,
+                                                      op->global_id);
+        if (!sym_name) {
+            emit_mov_imm(ctx, reg, 0);
+            return;
+        }
+        bool defined = is_symbol_defined_in_module(ctx->mod, sym_name);
+        uint32_t sym_idx = lr_obj_ensure_symbol(ctx->obj_ctx, sym_name,
+                                                 false, 0, 0);
+        if (defined) {
+            /* LEA reg, [RIP + disp32] for defined symbols */
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                      rex(true, reg >= 8, false, false));
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8D);
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                      modrm(0, reg, 5)); /* mod=00, rm=5 = RIP-relative */
+            size_t disp_off = ctx->pos;
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
+                              LR_RELOC_X86_64_PC32);
+        } else {
+            /* MOV reg, [RIP + disp32] for GOT entry (external symbols) */
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                      rex(true, reg >= 8, false, false));
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8B);
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                      modrm(0, reg, 5));
+            size_t disp_off = ctx->pos;
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
+                              LR_RELOC_X86_64_GOTPCREL);
+        }
     }
 }
 
@@ -635,8 +683,6 @@ static phi_copy_t **build_phi_copies(x86_compile_ctx_t *ctx, lr_func_t *func) {
 static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                                 uint8_t *buf, size_t buflen, size_t *out_len,
                                 lr_arena_t *arena) {
-    (void)mod;
-
     x86_compile_ctx_t ctx = {
         .buf = buf,
         .buflen = buflen,
@@ -646,6 +692,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .num_stack_slots = 0,
         .num_fixups = 0,
         .arena = arena,
+        .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
+        .mod = mod,
     };
 
     /* Pre-scan to allocate all slots and compute static alloca sizes */
@@ -1090,9 +1138,30 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 /* Clear %al for variadic call convention */
                 emit_mov_imm(&ctx, X86_RAX, 0);
 
-                /* Load callee into r10 and call */
-                emit_load_operand(&ctx, &inst->operands[0], X86_R10);
-                emit_call_r10(&ctx);
+                if (ctx.obj_ctx &&
+                    inst->operands[0].kind == LR_VAL_GLOBAL) {
+                    const char *sym_name = lr_module_symbol_name(
+                        ctx.mod, inst->operands[0].global_id);
+                    if (sym_name) {
+                        uint32_t sym_idx = lr_obj_ensure_symbol(
+                            ctx.obj_ctx, sym_name, false, 0, 0);
+                        emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0xE8);
+                        size_t disp_off = ctx.pos;
+                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0);
+                        lr_obj_add_reloc(ctx.obj_ctx, (uint32_t)disp_off,
+                                          sym_idx, LR_RELOC_X86_64_PLT32);
+                    } else {
+                        /* Fallback: NOP (5 bytes to match call encoding) */
+                        emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x0F);
+                        emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x1F);
+                        emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x44);
+                        emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x00);
+                        emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x00);
+                    }
+                } else {
+                    emit_load_operand(&ctx, &inst->operands[0], X86_R10);
+                    emit_call_r10(&ctx);
+                }
 
                 if (stack_bytes > 0)
                     emit_frame_free(&ctx, stack_bytes);

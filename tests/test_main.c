@@ -124,6 +124,14 @@ int test_builder_alloca_load_store(void);
 int test_builder_call(void);
 int test_builder_select(void);
 int test_builder_roundtrip(void);
+#if !defined(__APPLE__)
+int test_objfile_elf_header(void);
+int test_objfile_elf_symbols(void);
+int test_objfile_elf_call_relocation(void);
+int test_objfile_elf_readelf_validates(void);
+#else
+int test_objfile_macho_header(void);
+#endif
 
 int main(void) {
     fprintf(stderr, "liric test suite\n");
@@ -239,6 +247,16 @@ int main(void) {
     RUN_TEST(test_builder_call);
     RUN_TEST(test_builder_select);
     RUN_TEST(test_builder_roundtrip);
+
+    fprintf(stderr, "\nObject file tests:\n");
+#if !defined(__APPLE__)
+    RUN_TEST(test_objfile_elf_header);
+    RUN_TEST(test_objfile_elf_symbols);
+    RUN_TEST(test_objfile_elf_call_relocation);
+    RUN_TEST(test_objfile_elf_readelf_validates);
+#else
+    RUN_TEST(test_objfile_macho_header);
+#endif
 
     fprintf(stderr, "\n================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",

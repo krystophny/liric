@@ -25,6 +25,8 @@ add_library(liric STATIC
     src/builder.c
     src/liric_compat.c
     src/objfile.c
+    src/objfile_macho.c
+    src/objfile_elf.c
     src/llvm_stubs.c
 )
 target_include_directories(liric PUBLIC include)
@@ -103,6 +105,7 @@ add_executable(test_liric
     tests/test_e2e.c
     tests/test_wasm.c
     tests/test_builder.c
+    tests/test_objfile.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
