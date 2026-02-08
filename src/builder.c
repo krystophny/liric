@@ -332,8 +332,10 @@ uint32_t lr_build_gep(lr_module_t *m, lr_block_t *b, lr_func_t *f,
     uint32_t nops = 1 + num_indices;
     lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
     ops[0] = desc_to_op(base_ptr);
-    for (uint32_t i = 0; i < num_indices; i++)
-        ops[1 + i] = desc_to_op(indices[i]);
+    for (uint32_t i = 0; i < num_indices; i++) {
+        lr_operand_t idx = desc_to_op(indices[i]);
+        ops[1 + i] = lr_canonicalize_gep_index(m, b, f, idx);
+    }
     lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_GEP,
                                       m->type_ptr, dest, ops, nops);
     inst->type = base_type;

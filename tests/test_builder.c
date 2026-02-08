@@ -346,6 +346,48 @@ int test_builder_alloca_load_store(void) {
     return 0;
 }
 
+/* Builder should canonicalize runtime GEP index operands to i64 at construction. */
+int test_builder_gep_runtime_index_canonicalized_i64(void) {
+    lr_module_t *m = lr_module_create_new();
+    lr_type_t *vty = lr_type_void_get(m);
+    lr_type_t *i32 = lr_type_i32_get(m);
+    lr_type_t *ptr = lr_type_ptr_get(m);
+    lr_type_t *params[] = { ptr, i32 };
+    lr_func_t *f = lr_func_define(m, "g", vty, params, 2, false);
+    TEST_ASSERT(f != NULL, "func define");
+
+    uint32_t base = lr_func_param_vreg(f, 0);
+    uint32_t idx = lr_func_param_vreg(f, 1);
+    lr_block_t *entry = lr_block_new(f, m, "entry");
+    lr_operand_desc_t indices[] = { LR_VREG(idx, i32) };
+
+    (void)lr_build_gep(m, entry, f, i32, LR_VREG(base, ptr), indices, 1);
+    lr_build_ret_void(m, entry);
+
+    FILE *tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile");
+    lr_module_dump_to(m, tmp);
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    TEST_ASSERT(len > 0, "dump produced output");
+    fseek(tmp, 0, SEEK_SET);
+    char *buf = malloc((size_t)len + 1);
+    TEST_ASSERT(buf != NULL, "alloc dump buffer");
+    size_t nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read full dump");
+    buf[len] = '\0';
+    fclose(tmp);
+
+    TEST_ASSERT(strstr(buf, "sext i32 %v1 to i64") != NULL,
+                "builder inserts sext i32->i64 for runtime gep index");
+    TEST_ASSERT(strstr(buf, "getelementptr i32, ptr %v0, i64 %v2") != NULL,
+                "gep uses canonical i64 runtime index");
+    free(buf);
+
+    lr_module_free(m);
+    return 0;
+}
+
 /* Build a function that calls another (forward typed call) */
 int test_builder_call(void) {
     lr_module_t *m = lr_module_create_new();
