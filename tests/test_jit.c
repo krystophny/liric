@@ -950,6 +950,80 @@ int test_jit_aggregate_load_store_copy(void) {
     return 0;
 }
 
+int test_jit_packed_struct_float_constant(void) {
+    const char *src =
+        "%complex_4 = type <{ float, float }>\n"
+        "define i64 @test_complex() {\n"
+        "entry:\n"
+        "  %c = alloca %complex_4, align 4\n"
+        "  store %complex_4 <{ float 3.0, float 4.0 }>, ptr %c, align 4\n"
+        "  %p0 = getelementptr %complex_4, ptr %c, i32 0, i32 0\n"
+        "  %re = load float, ptr %p0, align 4\n"
+        "  %p1 = getelementptr %complex_4, ptr %c, i32 0, i32 1\n"
+        "  %im = load float, ptr %p1, align 4\n"
+        "  %re2 = fmul float %re, %re\n"
+        "  %im2 = fmul float %im, %im\n"
+        "  %sum = fadd float %re2, %im2\n"
+        "  %res = fptosi float %sum to i64\n"
+        "  ret i64 %res\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "test_complex");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 25, "3*3 + 4*4 = 25");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_packed_struct_double_constant(void) {
+    const char *src =
+        "%complex_8 = type <{ double, double }>\n"
+        "define i64 @test_complex_d() {\n"
+        "entry:\n"
+        "  %c = alloca %complex_8, align 8\n"
+        "  store %complex_8 <{ double 3.0, double 4.0 }>, ptr %c, align 8\n"
+        "  %p0 = getelementptr %complex_8, ptr %c, i32 0, i32 0\n"
+        "  %re = load double, ptr %p0, align 8\n"
+        "  %p1 = getelementptr %complex_8, ptr %c, i32 0, i32 1\n"
+        "  %im = load double, ptr %p1, align 8\n"
+        "  %re2 = fmul double %re, %re\n"
+        "  %im2 = fmul double %im, %im\n"
+        "  %sum = fadd double %re2, %im2\n"
+        "  %res = fptosi double %sum to i64\n"
+        "  ret i64 %res\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "test_complex_d");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 25, "3*3 + 4*4 = 25 (double)");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 static int64_t sum8(int64_t a, int64_t b, int64_t c, int64_t d,
                     int64_t e, int64_t f, int64_t g, int64_t h) {
     return a + b + c + d + e + f + g + h;
