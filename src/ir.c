@@ -334,6 +334,115 @@ size_t lr_type_align(const lr_type_t *t) {
     return 1;
 }
 
+size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
+    size_t off = 0;
+    if (!st || st->kind != LR_TYPE_STRUCT)
+        return 0;
+    for (uint32_t i = 0; i < st->struc.num_fields && i < field_idx; i++) {
+        if (!st->struc.packed) {
+            size_t fa = lr_type_align(st->struc.fields[i]);
+            off = (off + fa - 1) & ~(fa - 1);
+        }
+        off += lr_type_size(st->struc.fields[i]);
+    }
+    if (field_idx < st->struc.num_fields && !st->struc.packed) {
+        size_t fa = lr_type_align(st->struc.fields[field_idx]);
+        off = (off + fa - 1) & ~(fa - 1);
+    }
+    return off;
+}
+
+lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
+    lr_phi_copy_t **copies = lr_arena_array(arena, lr_phi_copy_t *, func->num_blocks);
+    for (uint32_t i = 0; i < func->num_blocks; i++)
+        copies[i] = NULL;
+
+    for (lr_block_t *b = func->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op != LR_OP_PHI)
+                continue;
+            for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+                uint32_t pred_id = inst->operands[i + 1].block_id;
+                if (pred_id >= func->num_blocks)
+                    continue;
+                lr_phi_copy_t *pc = lr_arena_new(arena, lr_phi_copy_t);
+                pc->dest_vreg = inst->dest;
+                pc->src_op = inst->operands[i];
+                pc->next = copies[pred_id];
+                copies[pred_id] = pc;
+            }
+        }
+    }
+    return copies;
+}
+
+uint8_t lr_gep_index_signext_bytes(const lr_operand_t *idx_op) {
+    if (!idx_op || !idx_op->type)
+        return 0;
+    switch (idx_op->type->kind) {
+    case LR_TYPE_I1:
+    case LR_TYPE_I8:
+        return 1;
+    case LR_TYPE_I16:
+        return 2;
+    case LR_TYPE_I32:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
+                         const lr_operand_t *idx_op, lr_gep_step_t *out) {
+    if (!cur_ty || !idx_op || !out)
+        return false;
+
+    out->is_const = false;
+    out->const_byte_offset = 0;
+    out->runtime_elem_size = 0;
+    out->runtime_signext_bytes = 0;
+    out->next_type = cur_ty;
+
+    if (first_index) {
+        size_t elem_size = lr_type_size(cur_ty);
+        out->next_type = cur_ty;
+        if (idx_op->kind == LR_VAL_IMM_I64) {
+            out->is_const = true;
+            out->const_byte_offset = idx_op->imm_i64 * (int64_t)elem_size;
+        } else {
+            out->runtime_elem_size = elem_size;
+            out->runtime_signext_bytes = lr_gep_index_signext_bytes(idx_op);
+        }
+        return true;
+    }
+
+    if (cur_ty->kind == LR_TYPE_STRUCT) {
+        uint32_t field = (idx_op->kind == LR_VAL_IMM_I64)
+                             ? (uint32_t)idx_op->imm_i64
+                             : (uint32_t)idx_op->vreg;
+        out->is_const = true;
+        out->const_byte_offset = (int64_t)lr_struct_field_offset(cur_ty, field);
+        if (field < cur_ty->struc.num_fields)
+            out->next_type = cur_ty->struc.fields[field];
+        return true;
+    }
+
+    if (cur_ty->kind == LR_TYPE_ARRAY) {
+        size_t elem_size = lr_type_size(cur_ty->array.elem);
+        out->next_type = cur_ty->array.elem;
+        if (idx_op->kind == LR_VAL_IMM_I64) {
+            out->is_const = true;
+            out->const_byte_offset = idx_op->imm_i64 * (int64_t)elem_size;
+        } else {
+            out->runtime_elem_size = elem_size;
+            out->runtime_signext_bytes = lr_gep_index_signext_bytes(idx_op);
+        }
+        return true;
+    }
+
+    return false;
+}
+
 static const char *type_name(const lr_type_t *t) {
     switch (t->kind) {
     case LR_TYPE_VOID:   return "void";
