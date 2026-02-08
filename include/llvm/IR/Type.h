@@ -43,6 +43,7 @@ public:
     };
 
     lr_type_t *impl() const {
+        if (!this) return nullptr;
         return const_cast<lr_type_t *>(
             reinterpret_cast<const lr_type_t *>(this));
     }
@@ -56,7 +57,9 @@ public:
     }
 
     TypeID getTypeID() const {
-        switch (impl()->kind) {
+        lr_type_t *t = impl();
+        if (!t) return VoidTyID;
+        switch (t->kind) {
         case LR_TYPE_VOID:   return VoidTyID;
         case LR_TYPE_I1:
         case LR_TYPE_I8:
@@ -73,24 +76,57 @@ public:
         return VoidTyID;
     }
 
-    bool isVoidTy() const { return impl()->kind == LR_TYPE_VOID; }
-    bool isIntegerTy() const { return lc_type_is_integer(impl()); }
-    bool isIntegerTy(unsigned w) const {
-        return isIntegerTy() && lc_type_int_width(impl()) == w;
+    bool isVoidTy() const {
+        lr_type_t *t = impl();
+        return t && t->kind == LR_TYPE_VOID;
     }
-    bool isFloatingPointTy() const { return lc_type_is_floating(impl()); }
-    bool isFloatTy() const { return impl()->kind == LR_TYPE_FLOAT; }
-    bool isDoubleTy() const { return impl()->kind == LR_TYPE_DOUBLE; }
-    bool isPointerTy() const { return lc_type_is_pointer(impl()); }
-    bool isStructTy() const { return impl()->kind == LR_TYPE_STRUCT; }
-    bool isArrayTy() const { return impl()->kind == LR_TYPE_ARRAY; }
-    bool isFunctionTy() const { return impl()->kind == LR_TYPE_FUNC; }
+    bool isIntegerTy() const {
+        lr_type_t *t = impl();
+        return t && lc_type_is_integer(t);
+    }
+    bool isIntegerTy(unsigned w) const {
+        lr_type_t *t = impl();
+        return t && lc_type_is_integer(t) && lc_type_int_width(t) == w;
+    }
+    bool isFloatingPointTy() const {
+        lr_type_t *t = impl();
+        return t && lc_type_is_floating(t);
+    }
+    bool isFloatTy() const {
+        lr_type_t *t = impl();
+        return t && t->kind == LR_TYPE_FLOAT;
+    }
+    bool isDoubleTy() const {
+        lr_type_t *t = impl();
+        return t && t->kind == LR_TYPE_DOUBLE;
+    }
+    bool isPointerTy() const {
+        lr_type_t *t = impl();
+        return t && lc_type_is_pointer(t);
+    }
+    bool isStructTy() const {
+        lr_type_t *t = impl();
+        return t && t->kind == LR_TYPE_STRUCT;
+    }
+    bool isArrayTy() const {
+        lr_type_t *t = impl();
+        return t && t->kind == LR_TYPE_ARRAY;
+    }
+    bool isFunctionTy() const {
+        lr_type_t *t = impl();
+        return t && t->kind == LR_TYPE_FUNC;
+    }
     bool isVectorTy() const { return false; }
 
-    unsigned getIntegerBitWidth() const { return lc_type_int_width(impl()); }
+    unsigned getIntegerBitWidth() const {
+        lr_type_t *t = impl();
+        return t ? lc_type_int_width(t) : 0;
+    }
 
     unsigned getScalarSizeInBits() const {
-        if (isIntegerTy()) return lc_type_int_width(impl());
+        lr_type_t *t = impl();
+        if (!t) return 0;
+        if (lc_type_is_integer(t)) return lc_type_int_width(t);
         if (isFloatTy()) return 32;
         if (isDoubleTy()) return 64;
         if (isPointerTy()) return 64;
@@ -98,7 +134,8 @@ public:
     }
 
     unsigned getPrimitiveSizeInBits() const {
-        return lc_type_primitive_size_bits(impl());
+        lr_type_t *t = impl();
+        return t ? lc_type_primitive_size_bits(t) : 0;
     }
 
     Type *getScalarType() { return this; }
@@ -106,15 +143,20 @@ public:
     Type *getPointerElementType() const;
 
     Type *getContainedType(unsigned i) const {
-        return Type::wrap(lc_type_contained(impl(), i));
+        lr_type_t *t = impl();
+        if (!t) return nullptr;
+        return Type::wrap(lc_type_contained(t, i));
     }
 
     Type *getStructElementType(unsigned i) const {
-        return Type::wrap(lc_type_struct_field(impl(), i));
+        lr_type_t *t = impl();
+        if (!t) return nullptr;
+        return Type::wrap(lc_type_struct_field(t, i));
     }
 
     unsigned getStructNumElements() const {
-        return lc_type_struct_num_fields(impl());
+        lr_type_t *t = impl();
+        return t ? lc_type_struct_num_fields(t) : 0;
     }
 
     void print(raw_ostream &OS, bool IsForDebug = false) const;
