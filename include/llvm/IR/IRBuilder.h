@@ -63,10 +63,14 @@ public:
     void SetModule(Module *mod) { mod_ = mod ? mod->getCompat() : nullptr; }
 
     void SetInsertPoint(BasicBlock *BB) {
-        if (!BB) return;
+        if (!BB) {
+            block_ = nullptr;
+            func_ = nullptr;
+            return;
+        }
         block_ = BB->impl_block();
         lr_func_t *f = lc_value_get_block_func(BB->impl());
-        if (f) func_ = f;
+        func_ = f ? f : nullptr;
     }
 
     void SetInsertPoint(BasicBlock *BB, BasicBlock::iterator) {
@@ -88,8 +92,11 @@ public:
     void SetFunction(lr_func_t *f) { func_ = f; }
 
     void SetInsertPointForFunction(Function *fn) {
+        if (!fn) return;
         mod_ = fn->getCompatMod();
         func_ = fn->getIRFunc();
+        block_ = nullptr;
+        detail::current_function = fn;
     }
 
     void ClearInsertionPoint() { block_ = nullptr; }
@@ -503,12 +510,22 @@ public:
     }
 
     BranchInst *CreateBr(BasicBlock *Dest) {
+        if (!B()) return nullptr;
+        if (!Dest || !Dest->impl_block()) {
+            lc_create_unreachable(M(), B());
+            return nullptr;
+        }
         lc_create_br(M(), B(), Dest->impl_block());
         return nullptr;
     }
 
     BranchInst *CreateCondBr(Value *Cond, BasicBlock *True,
                              BasicBlock *False) {
+        if (!B()) return nullptr;
+        if (!Cond || !True || !False || !True->impl_block() || !False->impl_block()) {
+            lc_create_unreachable(M(), B());
+            return nullptr;
+        }
         lc_create_cond_br(M(), B(), Cond->impl(),
                           True->impl_block(), False->impl_block());
         return nullptr;
