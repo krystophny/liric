@@ -123,19 +123,20 @@ Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`
 `liric` parse+compile+lookup vs `LLVM` parse+jit+lookup. The parse+compile vs
 parse+jit value is still emitted as a legacy metric for diagnostic use.
 
-- API benchmark (`bench_api --iters 3`) on `compat_api`:
-  - Benchmarked tests: `129` (of 131 compatible; 2 skipped: expected-abort tests)
+- API benchmark (`bench_api --iters 3`) — `lfortran+LLVM` vs `lfortran+liric`:
+  - Benchmarked tests: `34` (of 131 compatible; 97 skipped: liric backend coverage gap)
 
-| Metric | liric JIT wall | lfortran LLVM wall | Wall speedup |
+| Metric | lfortran+liric wall | lfortran+LLVM wall | Wall speedup |
 |--------|--------------:|-----------------:|-------------:|
-| Median | 10.065 ms | 60.347 ms | **5.99x** |
-| Aggregate | 1298 ms | 7254 ms | 5.59x |
-| P90 / P95 | - | - | 6.00x / 6.00x |
-| Faster | 129/129 | - | 100.0% |
+| Median | 40.244 ms | 50.303 ms | **1.25x** |
+| Aggregate | 1368 ms | 1831 ms | 1.34x |
+| P90 / P95 | - | - | 1.50x / 1.50x |
+| Faster | 34/34 | - | 100.0% |
 
-The API benchmark compares the full lfortran pipeline (LLVM compile + link + run)
-against liric JIT (parse .ll + compile + run). liric avoids the object file emission,
-linking, and process startup costs of the native compile path.
+The API benchmark compares the full lfortran pipeline through both backends.
+Both sides run identical frontend+semantics+ASR passes, differing only in codegen:
+LLVM (compile+link+run) vs liric (compile+JIT+run). The 1.25x speedup reflects
+liric skipping object emission, linking, and loader startup.
 
 ## License
 
