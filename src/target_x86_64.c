@@ -23,6 +23,8 @@
 #define FP_SCRATCH0  X86_XMM0
 #define FP_SCRATCH1  X86_XMM1
 
+typedef struct { size_t pos; uint32_t target; } x86_fixup_t;
+
 /* Backend-local compile context replacing the old MIR linked-list state */
 typedef struct {
     uint8_t *buf;
@@ -34,9 +36,11 @@ typedef struct {
     uint32_t num_stack_slots;
     int32_t *static_alloca_offsets;
     uint32_t num_static_alloca_offsets;
-    size_t block_offsets[1024];
-    struct { size_t pos; uint32_t target; } fixups[4096];
+    size_t *block_offsets;
+    uint32_t num_block_offsets;
+    x86_fixup_t *fixups;
     uint32_t num_fixups;
+    uint32_t fixup_cap;
     lr_arena_t *arena;
     lr_objfile_ctx_t *obj_ctx;
     lr_module_t *mod;
@@ -676,7 +680,7 @@ static void emit_load_vreg_mem_sized(x86_compile_ctx_t *ctx, uint32_t src_vreg,
 
 static void emit_jmp(x86_compile_ctx_t *ctx, uint32_t target_block) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xE9);
-    if (ctx->num_fixups < 4096) {
+    if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].pos = ctx->pos;
         ctx->fixups[ctx->num_fixups].target = target_block;
         ctx->num_fixups++;
@@ -688,7 +692,7 @@ static void emit_jcc(x86_compile_ctx_t *ctx, uint8_t cc, uint32_t target_block) 
     uint8_t x86cc = lr_cc_to_x86(cc);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(0x80 + x86cc));
-    if (ctx->num_fixups < 4096) {
+    if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].pos = ctx->pos;
         ctx->fixups[ctx->num_fixups].target = target_block;
         ctx->num_fixups++;
@@ -826,6 +830,8 @@ static void prescan_slots(x86_compile_ctx_t *ctx, lr_func_t *func) {
 static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                                 uint8_t *buf, size_t buflen, size_t *out_len,
                                 lr_arena_t *arena) {
+    uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
+    uint32_t fc = nb * 2;
     x86_compile_ctx_t ctx = {
         .buf = buf,
         .buflen = buflen,
@@ -836,7 +842,11 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .num_stack_slots = 0,
         .static_alloca_offsets = NULL,
         .num_static_alloca_offsets = 0,
+        .block_offsets = lr_arena_array(arena, size_t, nb),
+        .num_block_offsets = nb,
+        .fixups = lr_arena_array(arena, x86_fixup_t, fc),
         .num_fixups = 0,
+        .fixup_cap = fc,
         .arena = arena,
         .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
         .mod = mod,

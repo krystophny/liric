@@ -24,6 +24,8 @@
 #define FP_SCRATCH0  A64_D0
 #define FP_SCRATCH1  A64_D1
 
+typedef struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } a64_fixup_t;
+
 typedef struct {
     uint8_t *buf;
     size_t buflen;
@@ -34,9 +36,11 @@ typedef struct {
     uint32_t num_stack_slots;
     int32_t *static_alloca_offsets;
     uint32_t num_static_alloca_offsets;
-    size_t block_offsets[1024];
-    struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } fixups[4096];
+    size_t *block_offsets;
+    uint32_t num_block_offsets;
+    a64_fixup_t *fixups;
     uint32_t num_fixups;
+    uint32_t fixup_cap;
     lr_arena_t *arena;
     lr_objfile_ctx_t *obj_ctx;
     lr_module_t *mod;
@@ -536,7 +540,7 @@ static void emit_epilogue_a64(a64_compile_ctx_t *ctx) {
 }
 
 static void emit_jmp_a64(a64_compile_ctx_t *ctx, uint32_t target_block) {
-    if (ctx->num_fixups < 4096) {
+    if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].insn_pos = ctx->pos;
         ctx->fixups[ctx->num_fixups].target = target_block;
         ctx->fixups[ctx->num_fixups].kind = 0;
@@ -548,7 +552,7 @@ static void emit_jmp_a64(a64_compile_ctx_t *ctx, uint32_t target_block) {
 
 static void emit_jcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint32_t target_block) {
     uint8_t cond = lr_cc_to_a64(cc);
-    if (ctx->num_fixups < 4096) {
+    if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].insn_pos = ctx->pos;
         ctx->fixups[ctx->num_fixups].target = target_block;
         ctx->fixups[ctx->num_fixups].kind = 1;
@@ -695,6 +699,8 @@ static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
 static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                                  uint8_t *buf, size_t buflen, size_t *out_len,
                                  lr_arena_t *arena) {
+    uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
+    uint32_t fc = nb * 2;
     a64_compile_ctx_t ctx = {
         .buf = buf,
         .buflen = buflen,
@@ -705,7 +711,11 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
         .num_stack_slots = 0,
         .static_alloca_offsets = NULL,
         .num_static_alloca_offsets = 0,
+        .block_offsets = lr_arena_array(arena, size_t, nb),
+        .num_block_offsets = nb,
+        .fixups = lr_arena_array(arena, a64_fixup_t, fc),
         .num_fixups = 0,
+        .fixup_cap = fc,
         .arena = arena,
         .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
         .mod = mod,
