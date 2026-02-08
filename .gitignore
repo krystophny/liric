@@ -14,3 +14,12 @@ _lfortran_generated_file_*
 file_*_data.txt
 file_common_block_*.mod
 SESSION_STATE.md
+
+# Sourcetrail
+*.srctrlprj
+*.srctrldb
+*.srctrlbm
+
+# cscope
+cscope.out*
+cscope.files
