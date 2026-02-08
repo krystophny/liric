@@ -55,63 +55,56 @@ printf("%d\n", fn(10, 32));  // 42
 Full API: `include/liric/liric.h` — types, functions, blocks, 40+ instruction
 builders, globals, PHI, GEP, calls, type conversions, JIT lifecycle.
 
-## Speed: liric vs LLVM ORC JIT
+## Benchmarking (C Harness)
 
-514 LFortran-generated `.ll` files, in-process measurement, macOS arm64,
-LLVM 21.1.7, 100 iterations per file. Both compilers load the same runtime
-library. Only files passing both compilers are counted.
+Benchmark flow is fully C-based:
 
-| Metric | liric | LLVM ORC | Speedup |
-|--------|------:|---------:|--------:|
-| Median | 0.067 ms | 1.382 ms | **23.3x** |
-| Mean | 0.117 ms | 2.363 ms | **26.2x** |
-| P90 | 0.242 ms | 4.556 ms | **42.5x** |
-| P95 | 0.316 ms | 5.716 ms | 50.7x |
-
-Aggregate: 60 ms (liric) vs 1214 ms (LLVM). 99.8% of tests faster.
-
-JIT compile only (no text parsing): **75.4x** median speedup.
-
+1. Discover compatibility set (`lfortran` native vs `liric` vs `lli`):
 ```bash
-python3 -m tools.bench_h2h --workers $(nproc)   # reproduce
+./build/bench_compat_check --timeout 15
 ```
 
-## End-to-End: LFortran + liric vs LFortran + LLVM
-
-493 Fortran tests passing both backends, macOS arm64, 3 iterations each.
-Measures total wall-clock time from Fortran source to program output.
-
-- **liric path:** `lfortran --show-llvm` → `liric_probe_runner` (JIT)
-- **LLVM path:** `lfortran` (compile + link + run natively)
-
-| Metric | liric path | LLVM native | Speedup |
-|--------|----------:|-----------:|--------:|
-| Median | 156 ms | 3093 ms | **19.8x** |
-| Mean | 162 ms | 3065 ms | **18.9x** |
-| P90 | 161 ms | 3162 ms | **20.4x** |
-
-100% of tests faster. liric JIT takes 3.6 ms median; the rest is
-`lfortran --show-llvm` IR emission (153 ms).
-
+2. Run LL benchmark on that compatibility set:
 ```bash
-python3 -m tools.bench_lfortran_e2e --workers $(nproc)   # reproduce
+./build/bench_ll --iters 3
 ```
 
-## LFortran Test Suite
-
+3. The fair in-process LLVM phase timer used by `bench_ll`:
 ```bash
-python3 -m tools.lfortran_mass.run_mass --workers $(nproc)
+./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
 ```
 
-Latest snapshot (February 7, 2026):
+Outputs are written to `/tmp/liric_bench/`:
+- `compat_check.jsonl`
+- `compat_api.txt`
+- `compat_ll.txt`
+- `bench_ll.jsonl`
 
-| Classification | Count | % |
-|---------------|------:|--:|
-| **Pass** | 520 | 21.7% |
-| JIT fail | 932 | 38.8% |
-| Unsupported feature | 478 | 19.9% |
-| Mismatch | 318 | 13.3% |
-| Unsupported ABI | 151 | 6.3% |
+Latest run (February 8, 2026, CachyOS x86_64, `lfortran` LLVM backend, `lli -O0`):
+
+- Compatibility sweep (`bench_compat_check`):
+  - Processed: `2266`
+  - `llvm_ok`: `2246` (99.1%)
+  - `liric_match`: `1027` (45.3%)
+  - `lli_match`: `2166` (95.6%)
+  - `both_match` (`compat_ll`): `1014` (44.7%)
+
+- LL benchmark (`bench_ll --iters 3`) on `compat_ll`:
+  - Benchmarked files: `989`
+
+| Metric | liric wall | lli wall | Wall speedup |
+|--------|-----------:|---------:|-------------:|
+| Median | 10.065 ms | 20.121 ms | **2.00x** |
+| Aggregate | 10045 ms | 20855 ms | 2.08x |
+| P90 / P95 | - | - | 2.00x / 3.00x |
+
+| Metric | liric internal | lli internal | Internal speedup |
+|--------|---------------:|-------------:|-----------------:|
+| Median | 0.383600 ms | 0.226347 ms | **0.52x** |
+| Aggregate | 659.689 ms | 312.038 ms | 0.47x |
+| P90 / P95 | - | - | 0.66x / 0.70x |
+
+The internal metric is now fair (in-process parse+compile vs in-process parse+compile).
 
 ## License
 

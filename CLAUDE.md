@@ -29,71 +29,39 @@ ctest --test-dir build --output-on-failure
 
 Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake (plus a C++17 compiler when `WITH_LLVM_COMPAT=ON`).
 
-For LFortran mass runs, prefer:
+## Language Policy
 
-```bash
-python3 -m tools.lfortran_mass.run_mass --workers $(nproc)
-```
-
-For a full refresh (ignore cache) with optional diagnostics:
-
-```bash
-python3 -m tools.lfortran_mass.run_mass --workers $(nproc) --force
-python3 -m tools.lfortran_mass.run_mass --workers $(nproc) --force \
-  --diag-fail-logs --diag-jit-coredump
-```
-
-Diagnostics flags are opt-in and write into `cache/<case_id>/diag/`:
-- `--diag-fail-logs`: saves stage stdout/stderr/meta for failing stages.
-- `--diag-jit-coredump`: on JIT signal failures (`jit_rc < 0`), captures
-  `coredumpctl info` and `eu-stack` output when available.
-
-Useful outputs from each run:
-- `/tmp/liric_lfortran_mass/summary.md`
-- `/tmp/liric_lfortran_mass/results.jsonl`
-- `/tmp/liric_lfortran_mass/failures.csv`
-
-Quick SIGSEGV count (`jit_rc = -11`) from canonical results:
-
-```bash
-python3 - <<'PY'
-import json
-seg = 0
-for line in open('/tmp/liric_lfortran_mass/results.jsonl'):
-    r = json.loads(line)
-    if r.get('classification') == 'liric_jit_fail' and r.get('jit_rc') == -11:
-        seg += 1
-print(seg)
-PY
-```
+- Use C for compiler code, test harnesses, and benchmark infrastructure.
+- Do not add new Python-based testing/benchmark infrastructure.
+- Exception: the thin C++ compatibility layer that exposes a drop-in LLVM API replacement (`include/llvm/**`, `tests/test_llvm_compat.cpp`, and minimal glue needed for it).
 
 ## Benchmarking
 
-Three benchmark scripts compare liric against LLVM on lfortran integration tests.
-All benchmarks use -O0 and only measure tests where both compilers produce matching output.
+Benchmarking is C-based and uses fair comparisons for both metrics.
 
 **Step 1: Correctness check** (must run first):
 ```bash
-python3 -m tools.bench_compat_check --workers $(nproc) --timeout 15
+./build/bench_compat_check --timeout 15
 ```
 Discovers integration tests with `llvm` label, runs each through lfortran LLVM native,
 liric JIT, and lli. Writes compatibility lists:
 - `/tmp/liric_bench/compat_api.txt` (tests where liric matches LLVM)
 - `/tmp/liric_bench/compat_ll.txt` (tests where liric AND lli match LLVM)
 
-**Step 2a: API benchmark** (liric JIT vs lfortran LLVM native):
+**Step 2: LL benchmark** (liric JIT vs lli):
 ```bash
-python3 -m tools.bench_api --iters 3
+./build/bench_ll --iters 3
 ```
-Compares the full pipeline: `lfortran --show-llvm + liric_probe_runner` vs `lfortran compile+run`.
+Compares:
+- WALL-CLOCK: subprocess `liric_probe_runner` vs subprocess `lli`
+- JIT-INTERNAL: in-process `liric` parse+compile vs in-process `LLVM ORC` parse+compile
 
-**Step 2b: LL-file benchmark** (liric JIT vs lli):
+Fair LLVM internal phases are measured with:
 ```bash
-python3 -m tools.bench_ll --iters 3
+./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
 ```
-Compares JIT execution on pre-generated .ll files: `liric_probe_runner` vs `lli -O0`.
 
-All outputs go to `/tmp/liric_bench/` (JSONL results + summary tables).
+All outputs go to `/tmp/liric_bench/`.
 
 ## Pipeline
 
