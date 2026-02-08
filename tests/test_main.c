@@ -104,6 +104,7 @@ int test_jit_fpext_f32_f64(void);
 int test_jit_fptrunc_f64_f32(void);
 int test_jit_fcmp_oeq(void);
 int test_jit_fp_arithmetic_chain(void);
+int test_jit_insert_extractvalue_struct_fields(void);
 int test_e2e_ret_42(void);
 int test_e2e_add_i32(void);
 int test_e2e_branch(void);
@@ -222,6 +223,7 @@ int main(void) {
     RUN_TEST(test_jit_fptrunc_f64_f32);
     RUN_TEST(test_jit_fcmp_oeq);
     RUN_TEST(test_jit_fp_arithmetic_chain);
+    RUN_TEST(test_jit_insert_extractvalue_struct_fields);
 
     fprintf(stderr, "\nE2E tests:\n");
     RUN_TEST(test_e2e_ret_42);

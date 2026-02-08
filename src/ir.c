@@ -352,6 +352,55 @@ size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
     return off;
 }
 
+bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
+                             uint32_t num_indices, size_t *byte_offset_out,
+                             const lr_type_t **leaf_type_out) {
+    size_t off = 0;
+    const lr_type_t *cur = base;
+
+    if (!base) {
+        return false;
+    }
+    if (num_indices > 0 && !indices) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < num_indices; i++) {
+        uint32_t idx = indices[i];
+        if (!cur) {
+            return false;
+        }
+
+        if (cur->kind == LR_TYPE_STRUCT) {
+            if (idx >= cur->struc.num_fields) {
+                return false;
+            }
+            off += lr_struct_field_offset(cur, idx);
+            cur = cur->struc.fields[idx];
+            continue;
+        }
+
+        if (cur->kind == LR_TYPE_ARRAY) {
+            if (idx >= cur->array.count) {
+                return false;
+            }
+            off += (size_t)idx * lr_type_size(cur->array.elem);
+            cur = cur->array.elem;
+            continue;
+        }
+
+        return false;
+    }
+
+    if (byte_offset_out) {
+        *byte_offset_out = off;
+    }
+    if (leaf_type_out) {
+        *leaf_type_out = cur;
+    }
+    return true;
+}
+
 lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
     lr_phi_copy_t **copies = lr_arena_array(arena, lr_phi_copy_t *, func->num_blocks);
     for (uint32_t i = 0; i < func->num_blocks; i++)

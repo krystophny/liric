@@ -4,13 +4,13 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define VREG_MAP_CAP 4096u
+#define VREG_MAP_CAP 16384u
 #define BLOCK_MAP_CAP 1024u
 #define GLOBAL_MAP_CAP 4096u
 #define FUNC_MAP_CAP 1024u
 #define TYPE_MAP_CAP 256u
 
-#define VREG_INDEX_CAP 8192u
+#define VREG_INDEX_CAP 32768u
 #define BLOCK_INDEX_CAP 2048u
 #define GLOBAL_INDEX_CAP 8192u
 
@@ -210,8 +210,10 @@ static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
     uint32_t idx;
     size_t name_len;
 
-    if (p->vreg_map_count >= VREG_MAP_CAP)
+    if (p->vreg_map_count >= VREG_MAP_CAP) {
+        error(p, "too many vregs in function (capacity %u)", VREG_MAP_CAP);
         return;
+    }
 
     name_len = strlen(name);
     hash = hash_name(name);
@@ -1086,13 +1088,21 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 lr_operand_t src = parse_typed_operand(p);
                 uint32_t indices[16];
                 uint32_t nidx = 0;
+                lr_type_t *result_ty = p->module->type_i64;
                 while (match(p, LR_TOK_COMMA)) {
                     indices[nidx++] = (uint32_t)p->cur.int_val;
                     expect(p, LR_TOK_INT_LIT);
                 }
+                if (src.type) {
+                    const lr_type_t *leaf_ty = NULL;
+                    if (lr_aggregate_index_path(src.type, indices, nidx, NULL, &leaf_ty) &&
+                        leaf_ty) {
+                        result_ty = (lr_type_t *)leaf_ty;
+                    }
+                }
                 lr_operand_t ops[1] = {src};
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_EXTRACTVALUE,
-                    p->module->type_i64, dest, ops, 1);
+                    result_ty, dest, ops, 1);
                 inst->indices = lr_arena_array(p->arena, uint32_t, nidx);
                 memcpy(inst->indices, indices, sizeof(uint32_t) * nidx);
                 inst->num_indices = nidx;
