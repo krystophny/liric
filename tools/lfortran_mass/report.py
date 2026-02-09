@@ -32,6 +32,14 @@ def write_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
             f.write("\n")
 
 
+def write_summary_json(path: Path, summary: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(summary, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def summarize(
     manifest_total: int,
     processed: List[Dict[str, Any]],
@@ -70,6 +78,23 @@ def summarize(
     diff_attempted = sum(1 for row in processed if row.get("differential_attempted"))
     diff_ok = sum(1 for row in processed if row.get("differential_ok"))
     diff_match = sum(1 for row in processed if row.get("differential_match") is True)
+    diff_mismatch_buckets: Dict[str, int] = {}
+    for row in processed:
+        if row.get("differential_match") is not False:
+            continue
+        if not row.get("differential_ok"):
+            key = "unknown"
+        else:
+            parts: List[str] = []
+            if not row.get("differential_rc_match"):
+                parts.append("rc")
+            if not row.get("differential_stdout_match"):
+                parts.append("stdout")
+            if not row.get("differential_stderr_match"):
+                parts.append("stderr")
+            key = "_".join(parts) if parts else "unknown"
+        diff_mismatch_buckets[key] = diff_mismatch_buckets.get(key, 0) + 1
+    diff_mismatch_total = sum(diff_mismatch_buckets.values())
 
     unsupported_histogram = {
         classify.UNSUPPORTED_FEATURE: counts.get(classify.UNSUPPORTED_FEATURE, 0),
@@ -111,6 +136,8 @@ def summarize(
         "differential_attempted": diff_attempted,
         "differential_ok": diff_ok,
         "differential_match": diff_match,
+        "differential_mismatch_total": diff_mismatch_total,
+        "differential_mismatch_buckets": diff_mismatch_buckets,
         "classification_counts": counts,
         "corpus_counts": corpus_counts,
         "selected_by_corpus": selected_by_corpus,
@@ -144,6 +171,7 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     lines.append(f"- Differential attempted: {summary['differential_attempted']}")
     lines.append(f"- Differential completed: {summary['differential_ok']}")
     lines.append(f"- Differential exact matches: {summary['differential_match']}")
+    lines.append(f"- Differential mismatches: {summary['differential_mismatch_total']}")
     lines.append(f"- Supported processed: {summary['supported_total']}")
     lines.append(f"- Supported passed: {summary['supported_pass']}")
     lines.append(f"- Mismatches: {summary['mismatch_count']}")
@@ -190,6 +218,13 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     counts: Dict[str, int] = summary.get("classification_counts", {})
     for key in sorted(counts.keys()):
         lines.append(f"- {key}: {counts[key]}")
+
+    lines.append("")
+    lines.append("## Differential Mismatch Buckets")
+    lines.append("")
+    mismatch_buckets: Dict[str, int] = summary.get("differential_mismatch_buckets", {})
+    for key in sorted(mismatch_buckets.keys()):
+        lines.append(f"- {key}: {mismatch_buckets[key]}")
 
     lines.append("")
     lines.append("## Unsupported Histogram")

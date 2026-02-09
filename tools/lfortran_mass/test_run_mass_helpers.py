@@ -198,6 +198,32 @@ class RunMassHelperTests(unittest.TestCase):
         got = run_mass.signature_kind("i32", "i32 noundef %argc, ptr noundef %argv")
         self.assertEqual(got, "i32_argc_argv")
 
+    def test_load_name_list_dedupes_and_skips_comments(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "compat.txt"
+            path.write_text(
+                "\n".join(["", "# comment", "foo", "bar", "foo", "  baz  "]) + "\n",
+                encoding="utf-8",
+            )
+            got = run_mass.load_name_list(path)
+            self.assertEqual(got, ["foo", "bar", "baz"])
+
+    def test_select_entry_for_compat_api(self) -> None:
+        integration = SimpleNamespace(corpus="integration_cmake", name="foo")
+        tests_toml = SimpleNamespace(corpus="tests_toml", name="")
+
+        include, reason = run_mass.select_entry_for_compat_api(integration, {"foo"})
+        self.assertTrue(include)
+        self.assertEqual(reason, "included")
+
+        include, reason = run_mass.select_entry_for_compat_api(integration, {"bar"})
+        self.assertFalse(include)
+        self.assertEqual(reason, "not_in_compat_api_list")
+
+        include, reason = run_mass.select_entry_for_compat_api(tests_toml, {"foo"})
+        self.assertFalse(include)
+        self.assertEqual(reason, "compat_api_list_mode")
+
 
 if __name__ == "__main__":
     unittest.main()
