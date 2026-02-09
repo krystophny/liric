@@ -878,6 +878,40 @@ int test_jit_llvm_intrinsic_memcpy_memset(void) {
     return 0;
 }
 
+int test_jit_llvm_intrinsic_memmove(void) {
+    const char *src =
+        "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"
+        "declare void @llvm.memmove.p0i8.p0i8.i32(ptr, ptr, i32, i1)\n"
+        "define i32 @move_fill() {\n"
+        "entry:\n"
+        "  %dst = alloca i32, align 4\n"
+        "  %src = alloca i32, align 4\n"
+        "  call void @llvm.memset.p0i8.i32(ptr %src, i8 90, i32 4, i1 false)\n"
+        "  call void @llvm.memmove.p0i8.p0i8.i32(ptr %dst, ptr %src, i32 4, i1 false)\n"
+        "  %v = load i8, ptr %dst\n"
+        "  %z = zext i8 %v to i32\n"
+        "  ret i32 %z\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "move_fill");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 90, "memmove wrapper copies byte value");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_gep_struct_field(void) {
     const char *src =
         "%my_struct = type <{ i32, i64 }>\n"

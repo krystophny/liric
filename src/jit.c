@@ -110,6 +110,20 @@ static void llvm_memcpy_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, u
     memcpy(dst, src, (size_t)len);
 }
 
+static void llvm_memmove_p0i8_p0i8_i32(void *dst, const void *src, int32_t len, uint64_t is_volatile) {
+    (void)is_volatile;
+    if (!dst || !src || len <= 0)
+        return;
+    memmove(dst, src, (size_t)len);
+}
+
+static void llvm_memmove_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, uint64_t is_volatile) {
+    (void)is_volatile;
+    if (!dst || !src || len <= 0)
+        return;
+    memmove(dst, src, (size_t)len);
+}
+
 static size_t align_up(size_t value, size_t align) {
     if (align == 0)
         return value;
@@ -316,6 +330,8 @@ static void register_builtin_symbols(lr_jit_t *j) {
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
+    lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i64);
 }
 
 int lr_jit_load_library(lr_jit_t *j, const char *path) {
