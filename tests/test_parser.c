@@ -801,6 +801,82 @@ int test_parser_named_params_no_collision(void) {
     return 0;
 }
 
+int test_parser_unnamed_params_numeric_alias(void) {
+    const char *src =
+        "define i32 @sum(i32, i32) {\n"
+        "entry:\n"
+        "  %2 = add i32 %0, %1\n"
+        "  ret i32 %2\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT_EQ(f->num_params, 2, "2 params");
+
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *add = b->first;
+    TEST_ASSERT(add != NULL, "add exists");
+    TEST_ASSERT_EQ(add->op, LR_OP_ADD, "first instruction is add");
+    TEST_ASSERT_EQ(add->operands[0].kind, LR_VAL_VREG, "lhs is vreg");
+    TEST_ASSERT_EQ(add->operands[1].kind, LR_VAL_VREG, "rhs is vreg");
+    TEST_ASSERT_EQ(add->operands[0].vreg, f->param_vregs[0], "lhs uses first param alias %0");
+    TEST_ASSERT_EQ(add->operands[1].vreg, f->param_vregs[1], "rhs uses second param alias %1");
+
+    lr_inst_t *ret = add->next;
+    TEST_ASSERT(ret != NULL, "ret exists");
+    TEST_ASSERT_EQ(ret->op, LR_OP_RET, "second instruction is ret");
+    TEST_ASSERT_EQ(ret->operands[0].kind, LR_VAL_VREG, "ret operand is vreg");
+    TEST_ASSERT_EQ(ret->operands[0].vreg, add->dest, "ret returns add result");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_high_numeric_vregs(void) {
+    const char *src =
+        "define i32 @f() {\n"
+        "entry:\n"
+        "  %20000 = add i32 1, 2\n"
+        "  %20001 = add i32 %20000, 3\n"
+        "  ret i32 %20001\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+
+    lr_inst_t *add0 = b->first;
+    TEST_ASSERT(add0 != NULL, "first add exists");
+    TEST_ASSERT_EQ(add0->op, LR_OP_ADD, "first instruction is add");
+    lr_inst_t *add1 = add0->next;
+    TEST_ASSERT(add1 != NULL, "second add exists");
+    TEST_ASSERT_EQ(add1->op, LR_OP_ADD, "second instruction is add");
+    TEST_ASSERT_EQ(add1->operands[0].kind, LR_VAL_VREG, "second add lhs is vreg");
+    TEST_ASSERT_EQ(add1->operands[0].vreg, add0->dest, "high-numbered vreg reference resolved");
+
+    lr_inst_t *ret = add1->next;
+    TEST_ASSERT(ret != NULL, "ret exists");
+    TEST_ASSERT_EQ(ret->op, LR_OP_RET, "third instruction is ret");
+    TEST_ASSERT_EQ(ret->operands[0].kind, LR_VAL_VREG, "ret operand is vreg");
+    TEST_ASSERT_EQ(ret->operands[0].vreg, add1->dest, "ret references second add result");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_cast_expr_in_aggregate_init(void) {
     const char *src =
         "%tt_class = type { i8*, i8* }\n"
