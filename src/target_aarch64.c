@@ -714,6 +714,10 @@ static void patch_prologue_stack_adjust(a64_compile_ctx_t *ctx, size_t imm_pos,
 static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                                  uint8_t *buf, size_t buflen, size_t *out_len,
                                  lr_arena_t *arena) {
+    lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
+    if (lr_func_finalize(func, layout_arena) != 0)
+        return -1;
+
     uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
     uint32_t fc = nb * 2;
     a64_compile_ctx_t ctx = {
@@ -741,8 +745,10 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
     attach_obj_symbol_defined_cache(&ctx);
 
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
+    if (!phi_copies)
+        return -1;
     reserve_phi_dest_slots(&ctx, phi_copies, nb);
-    lr_target_prescan_static_alloca_offsets(func, &ctx,
+    lr_target_prescan_static_alloca_offsets(func, layout_arena, &ctx,
                                             ensure_static_alloca_offset_cb);
 
     size_t prologue_stack_patch_pos = emit_prologue_a64(&ctx);
@@ -760,11 +766,12 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
     }
 
     /* Walk IR blocks and instructions, emitting code directly */
-    uint32_t bi = 0;
-    for (lr_block_t *b = func->first_block; b; b = b->next, bi++) {
+    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+        lr_block_t *b = func->block_array[bi];
         ctx.block_offsets[bi] = ctx.pos;
 
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+            lr_inst_t *inst = b->inst_array[ii];
             switch (inst->op) {
             case LR_OP_RET: {
                 emit_phi_copies(&ctx, phi_copies[bi]);
@@ -1377,7 +1384,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     /* Fix up branch targets */
     for (uint32_t i = 0; i < ctx.num_fixups; i++) {
-        if (ctx.fixups[i].target >= bi) continue;
+        if (ctx.fixups[i].target >= func->num_blocks) continue;
 
         int64_t target_pos = (int64_t)ctx.block_offsets[ctx.fixups[i].target];
         int64_t here = (int64_t)ctx.fixups[i].insn_pos;

@@ -70,6 +70,7 @@ int test_non_host_target_fails(void);
 int test_load_missing_runtime_library_fails(void);
 int test_target_shared_static_alloca_table(void);
 int test_target_shared_prescan_filters_dynamic_alloca(void);
+int test_ir_finalize_builds_dense_arrays(void);
 int test_jit_ret_42(void);
 int test_jit_add_args(void);
 int test_jit_arithmetic(void);
@@ -201,6 +202,7 @@ int main(void) {
     RUN_TEST(test_load_missing_runtime_library_fails);
     RUN_TEST(test_target_shared_static_alloca_table);
     RUN_TEST(test_target_shared_prescan_filters_dynamic_alloca);
+    RUN_TEST(test_ir_finalize_builds_dense_arrays);
 
     fprintf(stderr, "\nJIT tests:\n");
     RUN_TEST(test_jit_ret_42);

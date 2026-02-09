@@ -510,10 +510,15 @@ static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfunc
     if (!indegree || !outgoing)
         return -1;
 
+    lr_arena_t *layout_arena = m->arena ? m->arena : arena;
     for (uint32_t caller_idx = 0; caller_idx < nfuncs; caller_idx++) {
         lr_func_t *f = funcs[caller_idx];
-        for (lr_block_t *b = f->first_block; b; b = b->next) {
-            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+        if (lr_func_finalize(f, layout_arena) != 0)
+            return -1;
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            lr_block_t *b = f->block_array[bi];
+            for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+                lr_inst_t *inst = b->inst_array[ii];
                 for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
                     lr_operand_t *op = &inst->operands[oi];
                     if (op->kind != LR_VAL_GLOBAL)
@@ -572,8 +577,14 @@ static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfunc
  */
 static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                                    void *self_addr, const char **missing_symbol) {
-    for (lr_block_t *b = f->first_block; b; b = b->next) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+    lr_arena_t *layout_arena = (m && m->arena) ? m->arena : j->arena;
+    if (lr_func_finalize(f, layout_arena) != 0)
+        return -1;
+
+    for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+        lr_block_t *b = f->block_array[bi];
+        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+            lr_inst_t *inst = b->inst_array[ii];
             for (uint32_t i = 0; i < inst->num_operands; i++) {
                 lr_operand_t *op = &inst->operands[i];
                 if (op->kind != LR_VAL_GLOBAL)

@@ -44,15 +44,22 @@ void lr_target_set_static_alloca_offset(lr_arena_t *arena,
     *num_offsets = cap;
 }
 
-void lr_target_prescan_static_alloca_offsets(const lr_func_t *func,
+void lr_target_prescan_static_alloca_offsets(lr_func_t *func,
+                                             lr_arena_t *arena,
                                              void *ctx,
                                              lr_target_static_alloca_ensure_fn ensure) {
-    if (!func || !ensure) {
+    if (!func || !arena || !ensure) {
         return;
     }
 
-    for (const lr_block_t *b = func->first_block; b; b = b->next) {
-        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+    if (lr_func_finalize(func, arena) != 0) {
+        return;
+    }
+
+    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+        const lr_block_t *b = func->block_array[bi];
+        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+            const lr_inst_t *inst = b->inst_array[ii];
             if (inst->op != LR_OP_ALLOCA) {
                 continue;
             }

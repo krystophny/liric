@@ -135,6 +135,7 @@ lr_block_t *lr_block_create(lr_func_t *f, lr_arena_t *a, const char *name) {
     lr_block_t *b = lr_arena_new(a, lr_block_t);
     b->name = lr_arena_strdup(a, name, strlen(name));
     b->id = f->num_blocks++;
+    f->block_array = NULL;
     if (!f->first_block) {
         f->first_block = b;
         f->is_decl = false;
@@ -165,6 +166,58 @@ void lr_block_append(lr_block_t *b, lr_inst_t *inst) {
     if (!b->first) b->first = inst;
     else b->last->next = inst;
     b->last = inst;
+    b->inst_array = NULL;
+    b->num_insts = 0;
+}
+
+int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
+    if (!f || !a)
+        return -1;
+
+    if (f->num_blocks == 0)
+        return 0;
+
+    if (!f->block_array) {
+        uint32_t seen = 0;
+        f->block_array = lr_arena_array(a, lr_block_t *, f->num_blocks);
+        if (!f->block_array)
+            return -1;
+        for (lr_block_t *b = f->first_block; b; b = b->next) {
+            if (b->id >= f->num_blocks)
+                return -1;
+            f->block_array[b->id] = b;
+            seen++;
+        }
+        if (seen != f->num_blocks)
+            return -1;
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            if (!f->block_array[bi])
+                return -1;
+        }
+    }
+
+    for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+        lr_block_t *b = f->block_array[bi];
+        uint32_t n = 0, j = 0;
+        if (!b)
+            return -1;
+        if (b->inst_array)
+            continue;
+
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next)
+            n++;
+        b->num_insts = n;
+        if (n == 0)
+            continue;
+
+        b->inst_array = lr_arena_array(a, lr_inst_t *, n);
+        if (!b->inst_array)
+            return -1;
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next)
+            b->inst_array[j++] = inst;
+    }
+
+    return 0;
 }
 
 lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
@@ -405,6 +458,28 @@ lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
     lr_phi_copy_t **copies = lr_arena_array(arena, lr_phi_copy_t *, func->num_blocks);
     for (uint32_t i = 0; i < func->num_blocks; i++)
         copies[i] = NULL;
+
+    if (func->block_array) {
+        for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+            lr_block_t *b = func->block_array[bi];
+            for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+                lr_inst_t *inst = b->inst_array[ii];
+                if (inst->op != LR_OP_PHI)
+                    continue;
+                for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+                    uint32_t pred_id = inst->operands[i + 1].block_id;
+                    if (pred_id >= func->num_blocks)
+                        continue;
+                    lr_phi_copy_t *pc = lr_arena_new(arena, lr_phi_copy_t);
+                    pc->dest_vreg = inst->dest;
+                    pc->src_op = inst->operands[i];
+                    pc->next = copies[pred_id];
+                    copies[pred_id] = pc;
+                }
+            }
+        }
+        return copies;
+    }
 
     for (lr_block_t *b = func->first_block; b; b = b->next) {
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
