@@ -684,6 +684,18 @@ static int32_t ensure_static_alloca_offset(a64_compile_ctx_t *ctx, const lr_inst
     }
 }
 
+static void prescan_static_alloca_offsets(a64_compile_ctx_t *ctx, const lr_func_t *func) {
+    for (const lr_block_t *b = func->first_block; b; b = b->next) {
+        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op != LR_OP_ALLOCA)
+                continue;
+            if (!lr_target_alloca_uses_static_storage(inst))
+                continue;
+            (void)ensure_static_alloca_offset(ctx, inst);
+        }
+    }
+}
+
 static void reserve_phi_dest_slots(a64_compile_ctx_t *ctx, lr_phi_copy_t **phi_copies,
                                    uint32_t num_blocks) {
     for (uint32_t bi = 0; bi < num_blocks; bi++) {
@@ -747,6 +759,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
     reserve_phi_dest_slots(&ctx, phi_copies, nb);
+    prescan_static_alloca_offsets(&ctx, func);
 
     size_t prologue_stack_patch_pos = emit_prologue_a64(&ctx);
 

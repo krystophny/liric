@@ -6,6 +6,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -28,6 +29,24 @@ static lr_module_t *parse(const char *src, lr_arena_t *arena) {
     lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
     if (!m) fprintf(stderr, "  parse error: %s\n", err);
     return m;
+}
+
+static int append_ir(char *buf, size_t cap, size_t *pos, const char *fmt, ...) {
+    if (*pos >= cap)
+        return -1;
+
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *pos, cap - *pos, fmt, ap);
+    va_end(ap);
+
+    if (n < 0)
+        return -1;
+    if ((size_t)n >= cap - *pos)
+        return -1;
+
+    *pos += (size_t)n;
+    return 0;
 }
 
 int test_jit_ret_42(void) {
@@ -242,6 +261,53 @@ int test_jit_alloca_load_store(void) {
     TEST_ASSERT(fn != NULL, "function lookup");
 
     TEST_ASSERT_EQ(fn(10, 20), 30, "swap_add(10,20) == 30");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_alloca_many_static_slots(void) {
+    enum { NUM_ALLOCA = 256 };
+    char src[65536];
+    size_t pos = 0;
+
+    TEST_ASSERT(append_ir(src, sizeof(src), &pos,
+                          "define i32 @many_static_alloca() {\n"
+                          "entry:\n") == 0, "emit test header");
+
+    for (int i = 0; i < NUM_ALLOCA; i++) {
+        TEST_ASSERT(append_ir(src, sizeof(src), &pos,
+                              "  %%p%d = alloca i32\n", i) == 0, "emit alloca");
+    }
+
+    for (int i = 0; i < NUM_ALLOCA; i++) {
+        TEST_ASSERT(append_ir(src, sizeof(src), &pos,
+                              "  store i32 %d, ptr %%p%d\n", i, i) == 0, "emit store");
+    }
+
+    TEST_ASSERT(append_ir(src, sizeof(src), &pos,
+                          "  %%v0 = load i32, ptr %%p0\n"
+                          "  %%v1 = load i32, ptr %%p127\n"
+                          "  %%v2 = load i32, ptr %%p255\n"
+                          "  %%sum01 = add i32 %%v0, %%v1\n"
+                          "  %%sum = add i32 %%sum01, %%v2\n"
+                          "  ret i32 %%sum\n"
+                          "}\n") == 0, "emit test body");
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "many_static_alloca");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 382, "many static allocas keep distinct slots");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
