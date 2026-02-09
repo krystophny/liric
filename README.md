@@ -60,32 +60,11 @@ Strict-mode artifacts:
 | lli matches LLVM output | 2165 | 95.5 |
 | Both liric and lli match | 2004 | 88.4 |
 
-## Performance Metrics (API First)
+## Performance (LL and API Modes)
 
-Primary KPIs for API-heavy workloads:
+Snapshot date: `2026-02-09`
 
-1. API wall-clock (`lfortran+liric` vs `lfortran+LLVM`)
-2. Compile phase time (`compile+link` vs `compile+JIT`)
-3. Run phase time (first execution)
-
-`bench_api` now uses blocking `waitpid` + `SIGALRM` timeout handling (no 10ms polling quantization).
-
-### 100-case API Mode Snapshot (2026-02-09)
-
-Command:
-
-```bash
-./build/bench_api --iters 3 --bench-dir /tmp/liric_bench_100_api --min-completed 100
-```
-
-Attempted 100 tests, completed 15 on this machine (others skipped due runtime errors).
-Medians on completed tests:
-
-- Wall: `liric 28.270 ms` vs `llvm 38.655 ms` -> **1.36x faster**
-- Compile: `liric 27.770 ms` vs `llvm 38.066 ms` -> **1.36x faster**
-- Run: `liric 0.537 ms` vs `llvm 0.597 ms` -> **1.09x faster**
-
-### 100-case LL Mode Snapshot (2026-02-09)
+### LL Mode (`bench_ll`)
 
 Command:
 
@@ -93,43 +72,43 @@ Command:
 ./build/bench_ll --iters 3 --bench-dir /tmp/liric_bench_100_ll
 ```
 
-Attempted 100 tests, completed 94.
-Medians:
+Coverage: `94` completed tests (`compat_ll.txt`), `3` iterations each.
 
-- Wall (`liric_probe_runner` vs `lli`): `liric 10.065 ms` vs `lli 20.120 ms` -> **2.00x faster**
-- Internal materialization (fair split): `liric 0.486 ms` vs `lli 4.819 ms` -> **10.10x faster**
-- Liric split: parse `0.439 ms`, compile `0.051 ms`, lookup `0.0001 ms`
+| Metric (median) | liric | Reference | Speedup |
+|---|---:|---:|---:|
+| Wall clock (`liric_probe_runner` vs `lli -O0`) | `10.065 ms` | `20.120 ms` | **2.00x** |
+| Internal materialization (`parse+compile+lookup` vs `parse+jit+lookup`) | `0.486 ms` | `4.819 ms` | **10.10x** |
 
-### Secondary Diagnostics (Lexer/Parser)
+Phase split medians:
 
-Keep these separate from primary API KPIs:
+- liric: parse `0.439 ms`, compile `0.051 ms`, lookup `0.0001 ms`
+- lli: parse `0.302 ms`, jit `0.003 ms`, lookup `4.466 ms`
 
-- LL parse median (`bench_ll`, 100-case): `0.439 ms`
-- Corpus parse share (`bench_corpus`): `~84%` of JIT time
-- Lexer hotspot share (callgrind): `lr_lexer_next ~46%`
-- Parser hotspots (callgrind): `parse_function_def ~4%`, `parse_type ~3%`
+### API Mode (`bench_api`)
 
-### Next Major Speedup: Direct API JIT (No Object Files)
+Command:
 
-Current API flow still pays object/link overhead. The next first-class path should remove file/object creation:
+```bash
+./build/bench_api --iters 3 --bench-dir /tmp/liric_bench_100_api \
+  --compat-list /tmp/liric_bench_100_api/compat_api.txt \
+  --options-jsonl /tmp/liric_bench_100_api/compat_api_options.jsonl
+```
 
-1. LFortran emits module IR directly to liric C API (in-memory).
-2. Liric JIT materializes code directly (`lr_jit_add_module`), no `.o` and no system linker.
-3. Runtime symbols come from one of:
-   - preloaded runtime shared library (`dlsym` path), or
-   - runtime LLVM IR/bitcode module compiled once and registered in the same JIT instance.
+Coverage: `100` attempted, `15` completed, `85` skipped.
 
-Primary KPIs for this path:
+| Metric (median, completed tests only) | lfortran+liric | lfortran+LLVM | Speedup |
+|---|---:|---:|---:|
+| Wall clock | `28.270 ms` | `38.655 ms` | **1.36x** |
+| Compile phase | `27.770 ms` | `38.066 ms` | **1.36x** |
+| Run phase | `0.537 ms` | `0.597 ms` | **1.09x** |
 
-- API build time (frontend -> liric IR)
-- JIT materialization time (no object/link phases)
-- Time-to-first-result
+Faster-case counts on completed tests:
 
-Validation target:
+- Wall: `15/15`
+- Compile: `15/15`
+- Run: `14/15`
 
-- Add a dedicated API fast-path benchmark mode against LFortran API workloads.
-- Keep LL-file benchmark and lexer/parser metrics as separate diagnostics.
-- Tracking: issues `#156` (direct API JIT path) and `#157` (stable 100-case API corpus).
+API-mode medians are directional until completion rises above `15/100`.
 
 ## License
 
