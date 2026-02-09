@@ -14,7 +14,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from . import classify
 from . import integration_tests_cmake
@@ -98,6 +98,37 @@ def normalize_output(text: str) -> str:
     while stripped and stripped[-1] == "":
         stripped.pop()
     return "\n".join(stripped)
+
+
+def load_name_list(path: Path) -> List[str]:
+    names: List[str] = []
+    seen: Set[str] = set()
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        name = raw.strip()
+        if not name or name.startswith("#"):
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def select_entry_for_compat_api(
+    entry: Any,
+    compat_api_names: Optional[Set[str]],
+) -> Tuple[bool, str]:
+    if compat_api_names is None:
+        return True, "included"
+    if str(getattr(entry, "corpus", "unknown")) != "integration_cmake":
+        return False, "compat_api_list_mode"
+
+    name = str(getattr(entry, "name", "")).strip()
+    if not name:
+        return False, "compat_api_missing_name"
+    if name not in compat_api_names:
+        return False, "not_in_compat_api_list"
+    return True, "included"
 
 
 def run_cmd(cmd: List[str], cwd: Path, timeout_sec: int) -> CommandResult:
@@ -825,6 +856,15 @@ def parse_args() -> argparse.Namespace:
             "(when available) into cache/<case_id>/diag/"
         ),
     )
+    parser.add_argument(
+        "--compat-api-list",
+        default=None,
+        help=(
+            "Path to compat_api*.txt list from bench_compat_check. "
+            "When set, only listed integration tests are selected in list order "
+            "and missing entries fail the run."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -976,6 +1016,11 @@ def main() -> int:
         if args.lfortran_bin
         else resolve_default_lfortran_bin(lfortran_root)
     )
+    compat_api_list_path = (
+        Path(args.compat_api_list).resolve() if args.compat_api_list else None
+    )
+    compat_api_name_order: Optional[List[str]] = None
+    compat_api_names: Optional[Set[str]] = None
 
     liric_bin = Path(args.liric_bin).resolve()
     probe_runner = Path(args.probe_runner).resolve()
@@ -988,6 +1033,12 @@ def main() -> int:
     if not args.skip_integration_cmake:
         ensure_exists(integration_cmake, "integration CMakeLists")
     ensure_exists(lfortran_bin, "lfortran binary")
+    if compat_api_list_path is not None:
+        ensure_exists(compat_api_list_path, "compat API list")
+        compat_api_name_order = load_name_list(compat_api_list_path)
+        if not compat_api_name_order:
+            raise ValueError(f"compat API list is empty: {compat_api_list_path}")
+        compat_api_names = set(compat_api_name_order)
     ensure_exists(liric_bin, "liric binary")
     ensure_exists(probe_runner, "liric_probe_runner binary")
 
@@ -1039,6 +1090,10 @@ def main() -> int:
                     selection_row(entry, "skipped", "expected_failure")
                 )
                 continue
+            select_ok, select_reason = select_entry_for_compat_api(entry, compat_api_names)
+            if not select_ok:
+                selection_rows.append(selection_row(entry, "skipped", select_reason))
+                continue
             entries.append(entry)
 
     if not args.skip_integration_cmake:
@@ -1054,6 +1109,10 @@ def main() -> int:
                 selection_rows.append(
                     selection_row(entry, "skipped", "expected_failure")
                 )
+                continue
+            select_ok, select_reason = select_entry_for_compat_api(entry, compat_api_names)
+            if not select_ok:
+                selection_rows.append(selection_row(entry, "skipped", select_reason))
                 continue
             entries.append(entry)
 
@@ -1075,6 +1134,22 @@ def main() -> int:
             continue
         seen_keys.add(key)
         deduped_entries.append(entry)
+
+    if compat_api_name_order is not None:
+        by_name: Dict[str, Any] = {}
+        for entry in deduped_entries:
+            name = str(getattr(entry, "name", "")).strip()
+            if name and name not in by_name:
+                by_name[name] = entry
+
+        missing_names = [name for name in compat_api_name_order if name not in by_name]
+        if missing_names:
+            preview = ", ".join(missing_names[:20])
+            raise ValueError(
+                f"compat API list contains {len(missing_names)} names not selected: {preview}"
+            )
+
+        deduped_entries = [by_name[name] for name in compat_api_name_order]
 
     selected_before_limit = deduped_entries
     entries = selected_before_limit
@@ -1139,6 +1214,7 @@ def main() -> int:
     processed_rows.sort(key=lambda row: int(row.get("index", 0)))
 
     results_path = output_root / "results.jsonl"
+    summary_json_path = output_root / "summary.json"
     summary_path = output_root / "summary.md"
     failures_path = output_root / "failures.csv"
 
@@ -1157,6 +1233,7 @@ def main() -> int:
         baseline=baseline_rows,
         selection_rows=selection_rows,
     )
+    report.write_summary_json(summary_json_path, summary)
     report.write_summary_md(summary_path, summary)
     report.write_failures_csv(failures_path, processed_rows)
 
@@ -1166,10 +1243,14 @@ def main() -> int:
     print(f"manifest: {manifest_path}")
     print(f"selection: {selection_path}")
     print(f"results: {results_path}")
+    print(f"summary_json: {summary_json_path}")
     print(f"summary: {summary_path}")
     print(f"failures: {failures_path}")
     print(f"filtered_non_llvm: {skipped_non_llvm}")
     print(f"filtered_expected_fail: {skipped_expected_fail}")
+    if compat_api_list_path is not None and compat_api_name_order is not None:
+        print(f"compat_api_list: {compat_api_list_path}")
+        print(f"compat_api_requested: {len(compat_api_name_order)}")
     print(f"auto_runtime_lib: {auto_runtime_lib_str}")
     print(f"auto_openmp_lib: {auto_openmp_lib_str}")
     print(f"deduped_cases: {deduped_count}")

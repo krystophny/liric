@@ -38,6 +38,48 @@ class ReportSelectionSummaryTests(unittest.TestCase):
         self.assertEqual(summary["skipped_reason_counts"]["duplicate_case"], 1)
         self.assertEqual(summary["skipped_by_corpus_reason"]["tests_toml:expected_failure"], 1)
 
+    def test_differential_mismatch_buckets(self) -> None:
+        processed = [
+            {
+                "case_id": "a",
+                "classification": "mismatch",
+                "corpus": "integration_cmake",
+                "differential_ok": True,
+                "differential_match": False,
+                "differential_rc_match": False,
+                "differential_stdout_match": True,
+                "differential_stderr_match": True,
+            },
+            {
+                "case_id": "b",
+                "classification": "mismatch",
+                "corpus": "integration_cmake",
+                "differential_ok": True,
+                "differential_match": False,
+                "differential_rc_match": True,
+                "differential_stdout_match": False,
+                "differential_stderr_match": False,
+            },
+            {
+                "case_id": "c",
+                "classification": "mismatch",
+                "corpus": "integration_cmake",
+                "differential_ok": False,
+                "differential_match": False,
+            },
+        ]
+        summary = report.summarize(
+            manifest_total=3,
+            processed=processed,
+            baseline=[],
+            selection_rows=[],
+        )
+
+        self.assertEqual(summary["differential_mismatch_total"], 3)
+        self.assertEqual(summary["differential_mismatch_buckets"]["rc"], 1)
+        self.assertEqual(summary["differential_mismatch_buckets"]["stdout_stderr"], 1)
+        self.assertEqual(summary["differential_mismatch_buckets"]["unknown"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
