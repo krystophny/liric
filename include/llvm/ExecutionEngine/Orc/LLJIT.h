@@ -2,6 +2,7 @@
 #define LLVM_EXECUTIONENGINE_ORC_LLJIT_H
 
 #include <liric/liric.h>
+#include <liric/liric_compat.h>
 #include "llvm/ADT/StringRef.h"
 
 namespace llvm {
@@ -48,8 +49,7 @@ public:
 #include "llvm/IR/Module.h"
 
 inline int llvm::orc::LLJIT::addModule(llvm::Module &M) {
-    lc_module_finalize_phis(M.getCompat());
-    return lr_jit_add_module(jit_, M.getIR());
+    return lc_module_add_to_jit(M.getCompat(), jit_);
 }
 
 #endif

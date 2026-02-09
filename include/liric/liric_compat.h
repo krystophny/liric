@@ -3,6 +3,7 @@
 
 #include <liric/liric.h>
 #include <liric/liric_types.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -406,6 +407,9 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *val, lc_value_t *size);
 void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                        lc_value_t *dst, lc_value_t *src, lc_value_t *size);
+
+/* ---- Direct JIT materialization ---- */
+int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit);
 
 /* ---- Object file emission ---- */
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);

@@ -1,4 +1,5 @@
 #include <liric/liric.h>
+#include <liric/liric_compat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -507,5 +508,58 @@ int test_builder_roundtrip(void) {
     lr_module_free(m2);
     lr_module_free(m);
     free(buf);
+    return 0;
+}
+
+int test_builder_compat_add_to_jit(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_jit");
+    TEST_ASSERT(mod != NULL, "compat module create");
+
+    lr_module_t *ir = lc_module_get_ir(mod);
+    TEST_ASSERT(ir != NULL, "compat module ir");
+
+    lr_type_t *i32 = lc_get_int_type(mod, 32);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    lr_func_t *f = lr_func_define(ir, "compat_ret42", i32, NULL, 0, false);
+    TEST_ASSERT(f != NULL, "function define");
+    lr_block_t *entry = lr_block_new(f, ir, "entry");
+    TEST_ASSERT(entry != NULL, "entry block");
+    lr_build_ret(ir, entry, LR_IMM(42, i32));
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lc_module_add_to_jit(mod, jit);
+    TEST_ASSERT_EQ(rc, 0, "lc_module_add_to_jit");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    GET_FN(fn, jit, "compat_ret42");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "compat_ret42() == 42");
+
+    lr_jit_destroy(jit);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
+int test_builder_compat_add_to_jit_null_args(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_null_args");
+    TEST_ASSERT(mod != NULL, "compat module create");
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    TEST_ASSERT_EQ(lc_module_add_to_jit(NULL, jit), -1, "null module rejected");
+    TEST_ASSERT_EQ(lc_module_add_to_jit(mod, NULL), -1, "null jit rejected");
+
+    lr_jit_destroy(jit);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
     return 0;
 }

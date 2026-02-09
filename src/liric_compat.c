@@ -1,5 +1,6 @@
 #include "ir.h"
 #include "arena.h"
+#include "jit.h"
 #include "objfile.h"
 #include <stdlib.h>
 #include <string.h>
@@ -1809,6 +1810,12 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                                        m->type_ptr, lr_vreg_new(f),
                                        ops, nops);
     lr_block_append(b, inst2);
+}
+
+int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
+    if (!mod || !jit) return -1;
+    lc_module_finalize_phis(mod);
+    return lr_jit_add_module(jit, mod->mod);
 }
 
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {

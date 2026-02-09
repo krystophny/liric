@@ -49,9 +49,8 @@ inline llvm::Error llvm::orc::IRCompileLayer::add(
     (void)JD;
     Module *M = TSM.getModuleUnlocked();
     if (!M) return make_error("Null module");
-    lc_module_finalize_phis(M->getCompat());
-    int rc = lr_jit_add_module(ES.getJIT(), M->getIR());
-    if (rc != 0) return make_error("lr_jit_add_module failed");
+    int rc = lc_module_add_to_jit(M->getCompat(), ES.getJIT());
+    if (rc != 0) return make_error("lc_module_add_to_jit failed");
     return Error::success();
 }
 
