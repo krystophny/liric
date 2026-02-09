@@ -499,8 +499,9 @@ static void emit_prologue(x86_compile_ctx_t *ctx) {
     if (ctx->stack_size > 4096) {
         uint32_t pages = ctx->stack_size / 4096;
         uint32_t remainder = ctx->stack_size % 4096;
-        /* mov ecx, pages */
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xB9);
+        /* mov r11d, pages (REX.B + mov r/m32, imm32) */
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x41);
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xBB);
         emit_u32(ctx->buf, &ctx->pos, ctx->buflen, pages);
         /* loop: sub rsp, 4096 (7 bytes) */
         size_t loop_top = ctx->pos;
@@ -512,10 +513,10 @@ static void emit_prologue(x86_compile_ctx_t *ctx) {
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x85);
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x04);
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x24);
-        /* dec rcx (3 bytes: 48 FF C9) */
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, false));
+        /* dec r11 (3 bytes: 49 FF CB) */
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, true));
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xFF);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 1, X86_RCX));
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 1, X86_R11 & 7));
         /* jnz loop_top (2 bytes) */
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x75);
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
