@@ -50,6 +50,11 @@ typedef struct {
     uint32_t sym_count;
     uint32_t rax_holds_vreg;
     uint32_t rcx_holds_vreg;
+    uint32_t *vreg_use_counts;
+    uint32_t num_vreg_use_counts;
+    lr_block_t *current_block;
+    lr_inst_t *current_inst;
+    uint32_t current_inst_index;
 } x86_compile_ctx_t;
 
 static void invalidate_cached_reg(x86_compile_ctx_t *ctx, uint8_t reg) {
@@ -75,6 +80,117 @@ static void set_cached_reg_vreg(x86_compile_ctx_t *ctx, uint8_t reg, uint32_t vr
     if (!ctx) return;
     if (reg == X86_RAX) ctx->rax_holds_vreg = vreg;
     if (reg == X86_RCX) ctx->rcx_holds_vreg = vreg;
+}
+
+static void count_vreg_use(uint32_t *counts, uint32_t num_counts,
+                           const lr_operand_t *op) {
+    if (!counts || !op || op->kind != LR_VAL_VREG)
+        return;
+    if (op->vreg < num_counts)
+        counts[op->vreg]++;
+}
+
+static uint32_t *build_vreg_use_counts(lr_arena_t *arena, lr_func_t *func,
+                                       lr_phi_copy_t **phi_copies) {
+    if (!arena || !func || func->next_vreg == 0)
+        return NULL;
+
+    uint32_t *counts = lr_arena_array(arena, uint32_t, func->next_vreg);
+    for (uint32_t i = 0; i < func->next_vreg; i++)
+        counts[i] = 0;
+
+    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+        lr_block_t *b = func->block_array[bi];
+        if (!b)
+            continue;
+        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+            lr_inst_t *inst = b->inst_array[ii];
+            for (uint32_t oi = 0; oi < inst->num_operands; oi++)
+                count_vreg_use(counts, func->next_vreg, &inst->operands[oi]);
+        }
+    }
+
+    if (phi_copies) {
+        for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+            for (lr_phi_copy_t *pc = phi_copies[bi]; pc; pc = pc->next)
+                count_vreg_use(counts, func->next_vreg, &pc->src_op);
+        }
+    }
+
+    return counts;
+}
+
+static bool inst_produces_elidable_rax_value(const lr_inst_t *inst) {
+    if (!inst)
+        return false;
+    switch (inst->op) {
+    case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
+    case LR_OP_OR: case LR_OP_XOR:
+    case LR_OP_MUL:
+    case LR_OP_SDIV:
+    case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR:
+    case LR_OP_ICMP:
+    case LR_OP_SELECT:
+    case LR_OP_ALLOCA:
+    case LR_OP_LOAD:
+    case LR_OP_GEP:
+    case LR_OP_SEXT:
+    case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
+    case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
+    case LR_OP_FCMP:
+    case LR_OP_FPTOSI:
+    case LR_OP_EXTRACTVALUE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool inst_consumes_operand0_in_rax(const lr_inst_t *inst) {
+    if (!inst || inst->num_operands == 0)
+        return false;
+    switch (inst->op) {
+    case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
+    case LR_OP_OR: case LR_OP_XOR:
+    case LR_OP_MUL:
+    case LR_OP_SDIV: case LR_OP_SREM:
+    case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR:
+    case LR_OP_ICMP:
+    case LR_OP_SELECT:
+    case LR_OP_ALLOCA:
+    case LR_OP_LOAD:
+    case LR_OP_GEP:
+    case LR_OP_SEXT:
+    case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
+    case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
+    case LR_OP_SITOFP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool should_elide_store_slot(const x86_compile_ctx_t *ctx,
+                                    uint32_t vreg, uint8_t reg) {
+    if (!ctx || reg != X86_RAX || !ctx->current_block || !ctx->current_inst)
+        return false;
+    if (!inst_produces_elidable_rax_value(ctx->current_inst))
+        return false;
+    if (ctx->current_inst->dest != vreg)
+        return false;
+    if (!ctx->vreg_use_counts || vreg >= ctx->num_vreg_use_counts)
+        return false;
+    if (ctx->vreg_use_counts[vreg] != 1)
+        return false;
+    if (ctx->current_inst_index + 1 >= ctx->current_block->num_insts)
+        return false;
+
+    lr_inst_t *next = ctx->current_block->inst_array[ctx->current_inst_index + 1];
+    if (!inst_consumes_operand0_in_rax(next))
+        return false;
+    if (next->operands[0].kind != LR_VAL_VREG || next->operands[0].vreg != vreg)
+        return false;
+    return true;
 }
 
 static size_t align_up(size_t value, size_t align) {
@@ -321,6 +437,10 @@ static void emit_load_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
 
 /* Emit: mov [rbp + offset], reg (store reg to vreg stack slot) */
 static void emit_store_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
+    if (should_elide_store_slot(ctx, vreg, reg)) {
+        set_cached_reg_vreg(ctx, reg, vreg);
+        return;
+    }
     int32_t off = alloc_slot(ctx, vreg, 8, 8);
     encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x89, reg, X86_RBP, off, 8);
     set_cached_reg_vreg(ctx, reg, vreg);
@@ -909,6 +1029,11 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .sym_count = 0,
         .rax_holds_vreg = UINT32_MAX,
         .rcx_holds_vreg = UINT32_MAX,
+        .vreg_use_counts = NULL,
+        .num_vreg_use_counts = 0,
+        .current_block = NULL,
+        .current_inst = NULL,
+        .current_inst_index = 0,
     };
 
     attach_obj_symbol_meta_cache(&ctx);
@@ -917,6 +1042,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
     if (!phi_copies)
         return -1;
+    ctx.vreg_use_counts = build_vreg_use_counts(ctx.arena, func, phi_copies);
+    ctx.num_vreg_use_counts = func->next_vreg;
     reserve_phi_dest_slots(&ctx, phi_copies, nb);
     lr_target_prescan_static_alloca_offsets(func, layout_arena, &ctx,
                                             ensure_static_alloca_offset_cb);
@@ -942,6 +1069,9 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
 
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
+            ctx.current_block = b;
+            ctx.current_inst = inst;
+            ctx.current_inst_index = ii;
             switch (inst->op) {
             case LR_OP_RET: {
                 emit_phi_copies(&ctx, phi_copies[bi]);
