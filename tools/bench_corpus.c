@@ -185,8 +185,10 @@ static void find_paths(const char **probe_runner, const char **runtime_lib,
     for (int i = 0; rt_candidates[i]; i++) {
         struct stat st;
         if (stat(rt_candidates[i], &st) == 0) {
-            realpath(rt_candidates[i], rt_buf);
-            *runtime_lib = rt_buf;
+            if (realpath(rt_candidates[i], rt_buf))
+                *runtime_lib = rt_buf;
+            else
+                *runtime_lib = rt_candidates[i];
             break;
         }
     }
