@@ -34,6 +34,10 @@ Defaults are:
 - Runtime library preload: auto-detected when available:
   - `<detected-lfortran-bin>/../runtime/liblfortran_runtime.so`
   - env override: `$LFORTRAN_RUNTIME_LIBRARY_DIR/liblfortran_runtime.so`
+- OpenMP runtime preload: auto-detected when selected tests use OpenMP
+  (`--openmp` / `llvm_omp`), searching common `libgomp`/`libomp` locations
+  - env override (explicit file): `$LFORTRAN_OPENMP_LIBRARY`
+  - env override (directory): `$LFORTRAN_OPENMP_LIBRARY_DIR`
 
 ## Build Prerequisites
 ```bash
@@ -62,6 +66,7 @@ Useful options:
 - `--include-expected-fail`: include expected-failure/error-handling tests
 - `--load-lib <path>`: preload runtime libraries into liric JIT (repeatable)
 - `--no-auto-runtime-lib`: disable automatic preload of `liblfortran_runtime`
+- `--no-auto-openmp-lib`: disable automatic preload of OpenMP runtime (`libgomp`/`libomp`)
 - `--diag-fail-logs`: write failing-stage stdout/stderr/meta under `cache/<case_id>/diag/`
 - `--diag-jit-coredump`: on JIT signal failures, capture `coredumpctl info` and `eu-stack` output when available
 

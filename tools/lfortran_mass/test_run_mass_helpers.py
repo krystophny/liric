@@ -6,6 +6,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools.lfortran_mass import run_mass
@@ -116,6 +117,50 @@ class RunMassHelperTests(unittest.TestCase):
             with patch.dict("os.environ", {"LFORTRAN_RUNTIME_LIBRARY_DIR": str(runtime_dir)}, clear=False):
                 got = run_mass.resolve_default_runtime_lib(root, lfortran_bin)
             self.assertEqual(got, runtime_lib.resolve())
+
+    def test_entry_needs_openmp_runtime_from_option(self) -> None:
+        entry = SimpleNamespace(options="--openmp -O0", labels=[])
+        self.assertTrue(run_mass.entry_needs_openmp_runtime(entry))
+
+    def test_entry_needs_openmp_runtime_from_label(self) -> None:
+        entry = SimpleNamespace(options="", labels=["llvm", "llvm_omp"])
+        self.assertTrue(run_mass.entry_needs_openmp_runtime(entry))
+
+    def test_resolve_default_openmp_lib_prefers_explicit_env_file(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "build" / "src" / "bin"
+            omp_dir = root / "custom_omp"
+            bin_dir.mkdir(parents=True)
+            omp_dir.mkdir(parents=True)
+            lfortran_bin = bin_dir / "lfortran"
+            openmp_lib = omp_dir / "libgomp_custom.so"
+            lfortran_bin.write_text("", encoding="utf-8")
+            openmp_lib.write_text("", encoding="utf-8")
+
+            env = {"LFORTRAN_OPENMP_LIBRARY": str(openmp_lib)}
+            with patch.dict("os.environ", env, clear=False):
+                with patch.object(run_mass, "DEFAULT_OPENMP_LIB_DIRS", ()):
+                    got = run_mass.resolve_default_openmp_lib(root, lfortran_bin)
+            self.assertEqual(got, openmp_lib.resolve())
+
+    def test_resolve_default_openmp_lib_prefers_env_dir(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "build" / "src" / "bin"
+            omp_dir = root / "omp_runtime"
+            bin_dir.mkdir(parents=True)
+            omp_dir.mkdir(parents=True)
+            lfortran_bin = bin_dir / "lfortran"
+            openmp_lib = omp_dir / "libgomp.so"
+            lfortran_bin.write_text("", encoding="utf-8")
+            openmp_lib.write_text("", encoding="utf-8")
+
+            env = {"LFORTRAN_OPENMP_LIBRARY_DIR": str(omp_dir)}
+            with patch.dict("os.environ", env, clear=False):
+                with patch.object(run_mass, "DEFAULT_OPENMP_LIB_DIRS", ()):
+                    got = run_mass.resolve_default_openmp_lib(root, lfortran_bin)
+            self.assertEqual(got, openmp_lib.resolve())
 
     def test_choose_entrypoint_non_run_prefers_callable_signature(self) -> None:
         ir_text = (
