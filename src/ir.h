@@ -130,8 +130,12 @@ typedef struct lr_inst {
 typedef struct lr_phi_copy {
     uint32_t dest_vreg;
     lr_operand_t src_op;
-    struct lr_phi_copy *next;
 } lr_phi_copy_t;
+
+typedef struct lr_block_phi_copies {
+    lr_phi_copy_t *copies;
+    uint32_t count;
+} lr_block_phi_copies_t;
 
 typedef struct lr_gep_step {
     bool is_const;
@@ -246,7 +250,7 @@ size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx);
 bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
                              uint32_t num_indices, size_t *byte_offset_out,
                              const lr_type_t **leaf_type_out);
-lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func);
+lr_block_phi_copies_t *lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func);
 uint8_t lr_gep_index_signext_bytes(const lr_operand_t *idx_op);
 bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
                          const lr_operand_t *idx_op, lr_gep_step_t *out);
