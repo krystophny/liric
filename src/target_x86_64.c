@@ -447,9 +447,18 @@ static void emit_store_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) 
     set_cached_reg_vreg(ctx, reg, vreg);
 }
 
-/* Emit: mov_imm reg, imm64 */
-static void emit_mov_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
-    if (imm >= INT32_MIN && imm <= INT32_MAX) {
+/* Emit an immediate into a GPR. For zero immediates we can use xor reg, reg
+ * when flags are not live to reduce code size. */
+static void emit_mov_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm,
+                         bool preserve_flags) {
+    if (imm == 0 && !preserve_flags) {
+        if (dst >= 8) {
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                      rex(false, true, false, true));
+        }
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x31);
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, dst));
+    } else if (imm >= INT32_MIN && imm <= INT32_MAX) {
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, dst >= 8));
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xC7);
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 0, dst));
@@ -467,7 +476,7 @@ static void emit_add_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
     if (imm == 0)
         return;
     if (imm > INT32_MAX || imm < INT32_MIN) {
-        emit_mov_imm(ctx, X86_R11, imm);
+        emit_mov_imm(ctx, X86_R11, imm, false);
         encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x01, dst, X86_R11, 8);
         invalidate_cached_reg(ctx, dst);
         return;
@@ -557,8 +566,10 @@ static bool call_uses_external_sysv_abi(x86_compile_ctx_t *ctx,
 /* Load an operand value into a GPR */
 static void emit_load_operand(x86_compile_ctx_t *ctx,
                                const lr_operand_t *op, uint8_t reg) {
+    bool preserve_flags = ctx && ctx->current_inst &&
+                          ctx->current_inst->op == LR_OP_SELECT;
     if (op->kind == LR_VAL_IMM_I64) {
-        emit_mov_imm(ctx, reg, op->imm_i64);
+        emit_mov_imm(ctx, reg, op->imm_i64, preserve_flags);
     } else if (op->kind == LR_VAL_VREG) {
         if (cached_reg_holds_vreg(ctx, reg, op->vreg))
             return;
@@ -575,14 +586,14 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
             memcpy(&bits, &op->imm_f64, sizeof(bits));
             imm_bits = (int64_t)bits;
         }
-        emit_mov_imm(ctx, reg, imm_bits);
+        emit_mov_imm(ctx, reg, imm_bits, preserve_flags);
     } else if (op->kind == LR_VAL_NULL || op->kind == LR_VAL_UNDEF) {
-        emit_mov_imm(ctx, reg, 0);
+        emit_mov_imm(ctx, reg, 0, preserve_flags);
     } else if (op->kind == LR_VAL_GLOBAL && ctx->obj_ctx) {
         const char *sym_name = lr_module_symbol_name(ctx->mod,
                                                       op->global_id);
         if (!sym_name) {
-            emit_mov_imm(ctx, reg, 0);
+            emit_mov_imm(ctx, reg, 0, preserve_flags);
             return;
         }
         bool defined = false;
@@ -824,7 +835,7 @@ static void emit_mem_copy_base_to_base(x86_compile_ctx_t *ctx,
 static void emit_mem_zero_base(x86_compile_ctx_t *ctx, uint8_t dst_base,
                                int32_t dst_disp, size_t bytes) {
     size_t off = 0;
-    emit_mov_imm(ctx, X86_RAX, 0);
+    emit_mov_imm(ctx, X86_RAX, 0, false);
     while (bytes - off >= 8) {
         emit_mem_store_sized(ctx, X86_RAX, dst_base, dst_disp + (int32_t)off, 8);
         off += 8;
@@ -1225,13 +1236,13 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                     /* Dynamic alloca */
                     emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
                     if (elem_sz != 1) {
-                        emit_mov_imm(&ctx, X86_RCX, (int64_t)elem_sz);
+                        emit_mov_imm(&ctx, X86_RCX, (int64_t)elem_sz, false);
                         emit_imul_rr(&ctx, X86_RAX, X86_RCX, 8);
                     }
                     /* Align to 16: rax = (rax + 15) & ~15 */
-                    emit_mov_imm(&ctx, X86_RCX, 15);
+                    emit_mov_imm(&ctx, X86_RCX, 15, false);
                     encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
-                    emit_mov_imm(&ctx, X86_RCX, ~15LL);
+                    emit_mov_imm(&ctx, X86_RCX, ~15LL, false);
                     encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x21, X86_RAX, X86_RCX, 8);
                     /* sub rsp, rax */
                     encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x29, X86_RSP, X86_RAX, 8);
@@ -1309,7 +1320,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                     if (step.is_const) {
                         if (step.const_byte_offset == 0)
                             continue;
-                        emit_mov_imm(&ctx, X86_RCX, step.const_byte_offset);
+                        emit_mov_imm(&ctx, X86_RCX, step.const_byte_offset, false);
                         encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
                         continue;
                     }
@@ -1321,7 +1332,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                         emit_movsxd(&ctx, X86_RCX, X86_RCX);
                     }
                     if (step.runtime_elem_size != 1) {
-                        emit_mov_imm(&ctx, X86_R10, (int64_t)step.runtime_elem_size);
+                        emit_mov_imm(&ctx, X86_R10, (int64_t)step.runtime_elem_size, false);
                         emit_imul_rr(&ctx, X86_RCX, X86_R10, 8);
                     }
                     encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x01, X86_RAX, X86_RCX, 8);
@@ -1440,7 +1451,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                         int32_t dst_off = alloc_slot(&ctx, inst->dest, field_sz, dst_align);
                         emit_mem_zero_base(&ctx, X86_RBP, dst_off, field_sz);
                     } else {
-                        emit_mov_imm(&ctx, X86_RAX, 0);
+                        emit_mov_imm(&ctx, X86_RAX, 0, false);
                         emit_store_slot(&ctx, inst->dest, X86_RAX);
                     }
                     break;
@@ -1536,7 +1547,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                         }
                     } else {
                         if (val->kind == LR_VAL_UNDEF || val->kind == LR_VAL_NULL) {
-                            emit_mov_imm(&ctx, X86_RAX, 0);
+                            emit_mov_imm(&ctx, X86_RAX, 0, false);
                         } else {
                             emit_load_operand(&ctx, val, X86_RAX);
                         }
@@ -1629,7 +1640,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 }
 
                 if (callee_vararg)
-                    emit_mov_imm(&ctx, X86_RAX, (int64_t)fp_used_for_call);
+                    emit_mov_imm(&ctx, X86_RAX, (int64_t)fp_used_for_call, false);
 
                 if (ctx.obj_ctx &&
                     inst->operands[0].kind == LR_VAL_GLOBAL) {
