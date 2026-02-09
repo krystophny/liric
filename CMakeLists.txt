@@ -36,6 +36,7 @@ add_library(liric STATIC
     src/ir.c
     src/ll_lexer.c
     src/ll_parser.c
+    src/frontend_registry.c
     src/wasm_decode.c
     src/wasm_to_ir.c
     src/target_registry.c

@@ -24,6 +24,17 @@ typedef struct lr_sym_miss_entry {
     struct lr_sym_miss_entry *bucket_next;
 } lr_sym_miss_entry_t;
 
+struct lr_jit;
+typedef void *(*lr_symbol_provider_resolve_fn)(struct lr_jit *jit, const char *name);
+
+typedef struct lr_symbol_provider {
+    const char *name;
+    lr_symbol_provider_resolve_fn resolve;
+    bool skip_when_miss_cached;
+    bool cache_result;
+    struct lr_symbol_provider *next;
+} lr_symbol_provider_t;
+
 typedef struct lr_jit {
     const lr_target_t *target;
     bool map_jit_enabled;
@@ -42,6 +53,8 @@ typedef struct lr_jit {
     lr_sym_miss_entry_t **miss_buckets;
     uint32_t miss_bucket_count;
     lr_lib_entry_t *libs;
+    lr_symbol_provider_t *symbol_providers;
+    lr_symbol_provider_t *symbol_providers_tail;
     lr_arena_t *arena;
 } lr_jit_t;
 
