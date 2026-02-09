@@ -1,0 +1,138 @@
+name: Nightly Mass Campaign
+
+on:
+  schedule:
+    - cron: "20 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nightly-mass-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  mass-nightly:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    env:
+      LFORTRAN_ROOT: ${{ github.workspace }}/lfortran
+      LFORTRAN_BUILD: ${{ github.workspace }}/lfortran/build
+      LIRIC_BUILD: ${{ github.workspace }}/build
+      MASS_OUT: ${{ runner.temp }}/liric_lfortran_mass
+      BASELINE_DIR: ${{ runner.temp }}/liric_lfortran_mass_baseline/${{ matrix.os }}
+
+    steps:
+      - name: Checkout liric
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout lfortran
+        uses: actions/checkout@v4
+        with:
+          repository: lfortran/lfortran
+          path: lfortran
+          fetch-depth: 0
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake bison re2c zstd jq
+
+      - name: Install macOS deps
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja bison re2c zstd jq
+
+      - name: Restore baseline cache
+        id: baseline_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BASELINE_DIR }}
+          key: nightly-mass-${{ matrix.os }}-${{ github.run_id }}
+          restore-keys: |
+            nightly-mass-${{ matrix.os }}-
+
+      - name: Build lfortran
+        run: |
+          cmake -S "${LFORTRAN_ROOT}" -B "${LFORTRAN_BUILD}" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "${LFORTRAN_BUILD}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Build liric
+        run: |
+          cmake -S . -B "${LIRIC_BUILD}" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "${LIRIC_BUILD}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Run full mass campaign with regression gate
+        run: |
+          set -euo pipefail
+          mkdir -p "${BASELINE_DIR}" "${MASS_OUT}"
+          BASELINE_ARGS=()
+          if [[ -f "${BASELINE_DIR}/baseline.jsonl" ]]; then
+            BASELINE_ARGS=(--baseline "${BASELINE_DIR}/baseline.jsonl")
+          fi
+          python3 -m tools.lfortran_mass.run_mass \
+            --lfortran-root "${LFORTRAN_ROOT}" \
+            --lfortran-bin "${LFORTRAN_BUILD}/src/bin/lfortran" \
+            --liric-bin "${LIRIC_BUILD}/liric" \
+            --probe-runner "${LIRIC_BUILD}/liric_probe_runner" \
+            --output-root "${MASS_OUT}" \
+            --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
+            --diag-fail-logs \
+            "${BASELINE_ARGS[@]}"
+
+      - name: Publish trend summary
+        run: |
+          set -euo pipefail
+          CURRENT_SUMMARY="${MASS_OUT}/summary.json"
+          PREV_SUMMARY="${BASELINE_DIR}/summary.json"
+          echo "## Nightly Mass Summary (${RUNNER_OS})" >> "${GITHUB_STEP_SUMMARY}"
+          echo "" >> "${GITHUB_STEP_SUMMARY}"
+          if [[ -f "${PREV_SUMMARY}" ]]; then
+            echo "| Metric | Previous | Current | Delta |" >> "${GITHUB_STEP_SUMMARY}"
+            echo "|---|---:|---:|---:|" >> "${GITHUB_STEP_SUMMARY}"
+            for key in manifest_total emit_ok parse_ok jit_ok differential_match mismatch_count new_supported_regressions; do
+              prev=$(jq -r ".${key} // 0" "${PREV_SUMMARY}")
+              cur=$(jq -r ".${key} // 0" "${CURRENT_SUMMARY}")
+              delta=$((cur - prev))
+              echo "| ${key} | ${prev} | ${cur} | ${delta} |" >> "${GITHUB_STEP_SUMMARY}"
+            done
+          else
+            echo "No previous baseline cache found for this OS; trend deltas start on next run." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Update baseline cache payload
+        run: |
+          set -euo pipefail
+          mkdir -p "${BASELINE_DIR}"
+          cp "${MASS_OUT}/results.jsonl" "${BASELINE_DIR}/baseline.jsonl"
+          cp "${MASS_OUT}/summary.json" "${BASELINE_DIR}/summary.json"
+          cp "${MASS_OUT}/summary.md" "${BASELINE_DIR}/summary.md"
+
+      - name: Save baseline cache
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BASELINE_DIR }}
+          key: nightly-mass-${{ matrix.os }}-${{ github.run_id }}
+
+      - name: Upload mass artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-mass-${{ matrix.os }}
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            ${{ env.MASS_OUT }}/manifest_tests_toml.jsonl
+            ${{ env.MASS_OUT }}/selection_decisions.jsonl
+            ${{ env.MASS_OUT }}/results.jsonl
+            ${{ env.MASS_OUT }}/summary.json
+            ${{ env.MASS_OUT }}/summary.md
+            ${{ env.MASS_OUT }}/failures.csv

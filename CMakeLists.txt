@@ -188,6 +188,13 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_strict_mode.cmake
 )
 
+add_test(
+    NAME nightly_mass_workflow_contract
+    COMMAND ${CMAKE_COMMAND}
+        -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/nightly_mass.yml
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_workflow.cmake
+)
+
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
