@@ -80,6 +80,54 @@ class ReportSelectionSummaryTests(unittest.TestCase):
         self.assertEqual(summary["differential_mismatch_buckets"]["stdout_stderr"], 1)
         self.assertEqual(summary["differential_mismatch_buckets"]["unknown"], 1)
 
+    def test_taxonomy_histograms_are_reported(self) -> None:
+        processed = [
+            {
+                "case_id": "mismatch_stdout",
+                "classification": "mismatch",
+                "stage": "differential",
+                "differential_ok": True,
+                "differential_match": False,
+                "differential_rc_match": True,
+                "differential_stdout_match": False,
+                "differential_stderr_match": True,
+            },
+            {
+                "case_id": "unsupported_runtime",
+                "classification": "unsupported_abi",
+                "stage": "jit",
+                "reason": "unresolved symbol: _lfortran_abort",
+            },
+            {
+                "case_id": "pass_case",
+                "classification": "pass",
+                "stage": "differential",
+            },
+        ]
+        summary = report.summarize(
+            manifest_total=3,
+            processed=processed,
+            baseline=[],
+            selection_rows=[],
+        )
+
+        self.assertEqual(
+            summary["taxonomy_counts"]["output-format|wrong-stdout|general"], 1
+        )
+        self.assertEqual(
+            summary["taxonomy_counts"]["jit-link|unresolved-symbol|runtime-api"], 1
+        )
+        self.assertEqual(len(summary["taxonomy_counts"]), 2)
+        self.assertEqual(
+            summary["mismatch_taxonomy_counts"]["output-format|wrong-stdout|general"], 1
+        )
+        self.assertEqual(
+            summary["unsupported_taxonomy_counts"][
+                "jit-link|unresolved-symbol|runtime-api"
+            ],
+            1,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
