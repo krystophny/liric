@@ -79,10 +79,9 @@ jobs:
           if [[ -f "${BASELINE_DIR}/baseline.jsonl" ]]; then
             BASELINE_ARGS=(--baseline "${BASELINE_DIR}/baseline.jsonl")
           fi
-          python3 -m tools.lfortran_mass.run_mass \
+          ./tools/lfortran_mass/nightly_mass.sh \
             --lfortran-root "${LFORTRAN_ROOT}" \
             --lfortran-bin "${LFORTRAN_BUILD}/src/bin/lfortran" \
-            --liric-bin "${LIRIC_BUILD}/liric" \
             --probe-runner "${LIRIC_BUILD}/liric_probe_runner" \
             --output-root "${MASS_OUT}" \
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \

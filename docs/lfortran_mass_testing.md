@@ -1,10 +1,12 @@
 # LFortran Mass Testing for Liric
 
 ## Goal
-Use LFortran's declared test corpus from `../lfortran/tests/tests.toml` as the only
-source of unit test cases, plus integration metadata from
-`../lfortran/integration_tests/CMakeLists.txt`, generate LLVM IR with LFortran, and
-evaluate compatibility in liric parse/JIT/runtime lanes.
+Run nightly compatibility gating without a required Python path by using
+integration metadata from `../lfortran/integration_tests/CMakeLists.txt` and
+the C benchmark tools (`bench_compat_check` + shell post-processing).
+
+The Python mass harness remains available for offline deep-dive analysis, but is
+no longer required for the active nightly workflow path.
 
 Roadmap and scorecard are tracked in `docs/lfortran_mass_tracker.md`.
 Stable mismatch/unsupported root-cause taxonomy is defined in
@@ -28,7 +30,6 @@ Stable mismatch/unsupported root-cause taxonomy is defined in
 
 Defaults are:
 - LFortran root: `../lfortran`
-- tests.toml: `../lfortran/tests/tests.toml`
 - integration CMake: `../lfortran/integration_tests/CMakeLists.txt`
 - LFortran binary: auto-detected:
   - `../lfortran/build/src/bin/lfortran` (preferred)
@@ -54,33 +55,27 @@ The mass harness expects these binaries:
 
 ## Run Mass Campaign
 ```bash
-python3 -m tools.lfortran_mass.run_mass
+./tools/lfortran_mass/nightly_mass.sh \
+  --lfortran-root ../lfortran \
+  --lfortran-bin ../lfortran/build/src/bin/lfortran \
+  --probe-runner ./build/liric_probe_runner
 ```
 
 Useful options:
-- `--limit N`: process first N tests only
-- `--workers N`: control parallelism (use `--workers $(nproc)` for all cores)
-- `--force`: ignore case cache and rerun
+- `--workers N`: forwarded to compatibility check tooling
 - `--baseline <path>`: compare against previous results
-- `--update-baseline`: write current run as baseline snapshot
-- `--skip-tests-toml`: run only integration corpus
-- `--skip-integration-cmake`: run only unit corpus
-- `--include-expected-fail`: include expected-failure/error-handling tests
-- `--load-lib <path>`: preload runtime libraries into liric JIT (repeatable)
-- `--no-auto-runtime-lib`: disable automatic preload of `liblfortran_runtime`
-- `--no-auto-openmp-lib`: disable automatic preload of OpenMP runtime (`libgomp`/`libomp`)
-- `--diag-fail-logs`: write failing-stage stdout/stderr/meta under `cache/<case_id>/diag/`
-- `--diag-jit-coredump`: on JIT signal failures, capture `coredumpctl info` and `eu-stack` output when available
+- `--runtime-lib <path>`: explicit `liblfortran_runtime` location (otherwise auto-detected)
+- `--diag-fail-logs`: accepted for compatibility (no-op in shell runner)
+- `--compat-jsonl <path>`: generate artifacts from an existing compat JSONL file
 
 ## Outputs
 All artifacts are written under `/tmp/liric_lfortran_mass/`:
-- `manifest_tests_toml.jsonl`: canonical list from `tests.toml`
-- `manifest_tests_toml.jsonl` includes both selected corpora with a `corpus` field
+- `manifest_tests_toml.jsonl`: selected manifest rows with `corpus` metadata
 - `selection_decisions.jsonl`: per-case selection decision and skip reason
 - `results.jsonl`: per-case outcomes
 - `summary.md`: aggregate metrics
 - `failures.csv`: non-pass rows for triage
-- `cache/<case_id>/`: case-level cache and raw LLVM output
+- `bench/compat_check.jsonl`: compatibility rows from `bench_compat_check`
 
 ## Statistics in Summary
 `summary.md` reports:
@@ -98,19 +93,7 @@ All artifacts are written under `/tmp/liric_lfortran_mass/`:
 - New supported regressions vs baseline
 - Gate decision
 
-## Differential Lane
-For tests with `run = true` or `run_with_dbg = true`:
-1. Execute reference run via LFortran.
-2. Execute same emitted LLVM with `liric_probe_runner`.
-3. Compare normalized stdout/stderr and return code.
-
-If signature/ABI is unsupported by the runner, classify as `unsupported_abi`.
-
 ## Selection Rules
-- `tests.toml` entries are included only if LLVM-intended:
-  `pass_with_llvm`, `asr_implicit_interface_and_typing_with_llvm`,
-  `run`, `run_with_dbg`, `obj`, or `bin`.
-- `tests.toml` expected-failure unit tests are excluded when path is under `errors/`.
 - `integration_tests/CMakeLists.txt` entries are included only if `RUN(...)` has
   native `llvm` label.
 - `RUN(... FAIL ...)` integration tests are excluded by default.
