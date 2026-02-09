@@ -10,6 +10,86 @@
 #define OBJ_INITIAL_RELOC_CAP 256
 #define OBJ_INITIAL_SYMBOL_CAP 128
 
+static uint32_t obj_symbol_hash(const char *name) {
+    uint32_t h = 2166136261u;
+    while (*name) {
+        h ^= (uint8_t)*name++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static int obj_symbol_index_rebuild(lr_objfile_ctx_t *oc, uint32_t min_symbols) {
+    uint32_t cap = 1;
+    while (cap < (min_symbols << 1))
+        cap <<= 1;
+
+    uint32_t *new_index = (uint32_t *)calloc(cap, sizeof(uint32_t));
+    if (!new_index)
+        return -1;
+
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        uint32_t slot = oc->symbols[i].hash & (cap - 1u);
+        while (new_index[slot] != 0)
+            slot = (slot + 1u) & (cap - 1u);
+        new_index[slot] = i + 1u;
+    }
+
+    free(oc->symbol_index);
+    oc->symbol_index = new_index;
+    oc->symbol_index_cap = cap;
+    return 0;
+}
+
+static int obj_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
+    if (!oc || !m)
+        return -1;
+
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && f->name[0])
+            lr_module_intern_symbol(m, f->name);
+    }
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && g->name[0])
+            lr_module_intern_symbol(m, g->name);
+    }
+
+    oc->module_sym_count = m->num_symbols;
+    if (oc->module_sym_count == 0)
+        return 0;
+
+    oc->module_sym_defined = (uint8_t *)calloc(oc->module_sym_count, sizeof(uint8_t));
+    oc->module_sym_funcs = (lr_func_t **)calloc(oc->module_sym_count,
+                                                sizeof(lr_func_t *));
+    if (!oc->module_sym_defined || !oc->module_sym_funcs) {
+        free(oc->module_sym_defined);
+        free(oc->module_sym_funcs);
+        oc->module_sym_defined = NULL;
+        oc->module_sym_funcs = NULL;
+        oc->module_sym_count = 0;
+        return -1;
+    }
+
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0])
+            continue;
+        uint32_t sym_id = lr_module_intern_symbol(m, f->name);
+        if (sym_id >= oc->module_sym_count)
+            continue;
+        oc->module_sym_funcs[sym_id] = f;
+        if (f->first_block)
+            oc->module_sym_defined[sym_id] = 1;
+    }
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->name || !g->name[0] || g->is_external)
+            continue;
+        uint32_t sym_id = lr_module_intern_symbol(m, g->name);
+        if (sym_id < oc->module_sym_count)
+            oc->module_sym_defined[sym_id] = 1;
+    }
+    return 0;
+}
+
 static const char *remap_intrinsic(const char *name) {
     if (!name || strncmp(name, "llvm.", 5) != 0) return name;
     if (strcmp(name, "llvm.pow.f32") == 0) return "powf";
@@ -62,8 +142,21 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                uint32_t offset) {
     if (!name) return UINT32_MAX;
     name = remap_intrinsic(name);
-    for (uint32_t i = 0; i < oc->num_symbols; i++) {
-        if (strcmp(oc->symbols[i].name, name) == 0) {
+    uint32_t hash = obj_symbol_hash(name);
+
+    if (oc->symbol_index_cap == 0) {
+        if (obj_symbol_index_rebuild(oc, 1) != 0)
+            return UINT32_MAX;
+    }
+
+    uint32_t slot = hash & (oc->symbol_index_cap - 1u);
+    while (1) {
+        uint32_t stored = oc->symbol_index[slot];
+        if (stored == 0)
+            break;
+        uint32_t i = stored - 1u;
+        if (oc->symbols[i].hash == hash &&
+            strcmp(oc->symbols[i].name, name) == 0) {
             if (is_defined && !oc->symbols[i].is_defined) {
                 oc->symbols[i].is_defined = true;
                 oc->symbols[i].section = section;
@@ -71,6 +164,7 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
             }
             return i;
         }
+        slot = (slot + 1u) & (oc->symbol_index_cap - 1u);
     }
 
     if (oc->num_symbols == oc->symbol_cap) {
@@ -84,11 +178,22 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
         oc->symbol_cap = new_cap;
     }
 
+    if ((oc->num_symbols + 1u) * 2u > oc->symbol_index_cap) {
+        if (obj_symbol_index_rebuild(oc, oc->num_symbols + 1u) != 0)
+            return UINT32_MAX;
+    }
+
     uint32_t idx = oc->num_symbols++;
     oc->symbols[idx].name = name;
+    oc->symbols[idx].hash = hash;
     oc->symbols[idx].offset = offset;
     oc->symbols[idx].section = section;
     oc->symbols[idx].is_defined = is_defined;
+
+    slot = hash & (oc->symbol_index_cap - 1u);
+    while (oc->symbol_index[slot] != 0)
+        slot = (slot + 1u) & (oc->symbol_index_cap - 1u);
+    oc->symbol_index[slot] = idx + 1u;
     return idx;
 }
 
@@ -134,6 +239,15 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
     memset(&ctx, 0, sizeof(ctx));
 
     m->obj_ctx = &ctx;
+    if (obj_build_module_symbol_cache(&ctx, m) != 0) {
+        m->obj_ctx = NULL;
+        free(ctx.module_sym_defined);
+        free(ctx.module_sym_funcs);
+        lr_arena_destroy(arena);
+        free(code_buf);
+        free(data_buf);
+        return -1;
+    }
 
     size_t code_pos = 0;
     size_t data_pos = 0;
@@ -156,6 +270,8 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
                                        &func_len, arena);
         if (rc != 0) {
             m->obj_ctx = NULL;
+            free(ctx.module_sym_defined);
+            free(ctx.module_sym_funcs);
             lr_arena_destroy(arena);
             free(code_buf);
             free(data_buf);
@@ -192,6 +308,8 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
 
         if (data_pos + gsize > OBJ_DATA_BUF_SIZE) {
             m->obj_ctx = NULL;
+            free(ctx.module_sym_defined);
+            free(ctx.module_sym_funcs);
             lr_arena_destroy(arena);
             free(code_buf);
             free(data_buf);
@@ -238,6 +356,9 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
 
     free(ctx.relocs);
     free(ctx.symbols);
+    free(ctx.symbol_index);
+    free(ctx.module_sym_defined);
+    free(ctx.module_sym_funcs);
     lr_arena_destroy(arena);
     free(code_buf);
     free(data_buf);

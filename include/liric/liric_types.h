@@ -112,6 +112,7 @@ struct lr_arena;
 typedef struct lr_arena lr_arena_t;
 
 void *lr_arena_alloc(lr_arena_t *a, size_t size, size_t align);
+void *lr_arena_alloc_uninit(lr_arena_t *a, size_t size, size_t align);
 char *lr_arena_strdup(lr_arena_t *a, const char *s, size_t len);
 
 struct lr_module {

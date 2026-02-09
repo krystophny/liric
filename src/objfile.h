@@ -32,6 +32,7 @@ typedef struct lr_obj_reloc {
 
 typedef struct lr_obj_symbol {
     const char *name;
+    uint32_t hash;
     uint32_t offset;
     uint8_t section;
     bool is_defined;
@@ -44,6 +45,11 @@ typedef struct lr_objfile_ctx {
     lr_obj_symbol_t *symbols;
     uint32_t num_symbols;
     uint32_t symbol_cap;
+    uint32_t *symbol_index;
+    uint32_t symbol_index_cap;
+    uint8_t *module_sym_defined;
+    lr_func_t **module_sym_funcs;
+    uint32_t module_sym_count;
 } lr_objfile_ctx_t;
 
 /* Mapped relocation info returned by format-specific reloc mappers */

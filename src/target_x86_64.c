@@ -44,6 +44,9 @@ typedef struct {
     lr_arena_t *arena;
     lr_objfile_ctx_t *obj_ctx;
     lr_module_t *mod;
+    uint8_t *sym_defined;
+    lr_func_t **sym_funcs;
+    uint32_t sym_count;
 } x86_compile_ctx_t;
 
 static size_t align_up(size_t value, size_t align) {
@@ -58,8 +61,8 @@ static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg,
     while (vreg >= ctx->num_stack_slots) {
         uint32_t old = ctx->num_stack_slots;
         uint32_t new_cap = old == 0 ? 64 : old * 2;
-        int32_t *ns = lr_arena_array(ctx->arena, int32_t, new_cap);
-        uint32_t *ss = lr_arena_array(ctx->arena, uint32_t, new_cap);
+        int32_t *ns = lr_arena_array_uninit(ctx->arena, int32_t, new_cap);
+        uint32_t *ss = lr_arena_array_uninit(ctx->arena, uint32_t, new_cap);
         if (old > 0) memcpy(ns, ctx->stack_slots, old * sizeof(int32_t));
         if (old > 0) memcpy(ss, ctx->stack_slot_sizes, old * sizeof(uint32_t));
         for (uint32_t i = old; i < new_cap; i++) {
@@ -91,7 +94,7 @@ static void set_static_alloca_offset(x86_compile_ctx_t *ctx, uint32_t vreg,
     while (vreg >= ctx->num_static_alloca_offsets) {
         uint32_t old = ctx->num_static_alloca_offsets;
         uint32_t new_cap = old == 0 ? 64 : old * 2;
-        int32_t *no = lr_arena_array(ctx->arena, int32_t, new_cap);
+        int32_t *no = lr_arena_array_uninit(ctx->arena, int32_t, new_cap);
         if (old > 0)
             memcpy(no, ctx->static_alloca_offsets, old * sizeof(int32_t));
         for (uint32_t i = old; i < new_cap; i++)
@@ -347,6 +350,14 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
     return false;
 }
 
+static void attach_obj_symbol_meta_cache(x86_compile_ctx_t *ctx) {
+    if (!ctx || !ctx->obj_ctx)
+        return;
+    ctx->sym_defined = ctx->obj_ctx->module_sym_defined;
+    ctx->sym_funcs = ctx->obj_ctx->module_sym_funcs;
+    ctx->sym_count = ctx->obj_ctx->module_sym_count;
+}
+
 static bool is_fp_abi_type(const lr_type_t *type) {
     return type &&
            (type->kind == LR_TYPE_FLOAT || type->kind == LR_TYPE_DOUBLE);
@@ -369,7 +380,6 @@ static bool call_uses_external_sysv_abi(x86_compile_ctx_t *ctx,
                                          const lr_inst_t *inst,
                                          lr_func_t **callee_func_out) {
     const lr_operand_t *callee = NULL;
-    const char *sym_name = NULL;
     lr_func_t *callee_func = NULL;
 
     if (callee_func_out) *callee_func_out = NULL;
@@ -380,15 +390,21 @@ static bool call_uses_external_sysv_abi(x86_compile_ctx_t *ctx,
     if (callee->kind != LR_VAL_GLOBAL)
         return false;
 
-    sym_name = lr_module_symbol_name(ctx->mod, callee->global_id);
+    if (callee->global_id < ctx->sym_count) {
+        callee_func = ctx->sym_funcs[callee->global_id];
+        if (callee_func_out) *callee_func_out = callee_func;
+        if (callee_func)
+            return callee_func->first_block == NULL;
+        return ctx->sym_defined[callee->global_id] == 0;
+    }
+
+    const char *sym_name = lr_module_symbol_name(ctx->mod, callee->global_id);
     if (!sym_name)
         return false;
-
     callee_func = find_module_function(ctx->mod, sym_name);
     if (callee_func_out) *callee_func_out = callee_func;
     if (callee_func)
         return callee_func->first_block == NULL;
-
     return !is_symbol_defined_in_module(ctx->mod, sym_name);
 }
 
@@ -421,7 +437,11 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
             emit_mov_imm(ctx, reg, 0);
             return;
         }
-        bool defined = is_symbol_defined_in_module(ctx->mod, sym_name);
+        bool defined = false;
+        if (op->global_id < ctx->sym_count)
+            defined = ctx->sym_defined[op->global_id] != 0;
+        else
+            defined = is_symbol_defined_in_module(ctx->mod, sym_name);
         uint32_t sym_idx = lr_obj_ensure_symbol(ctx->obj_ctx, sym_name,
                                                  false, 0, 0);
         if (defined) {
@@ -873,15 +893,20 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .num_stack_slots = 0,
         .static_alloca_offsets = NULL,
         .num_static_alloca_offsets = 0,
-        .block_offsets = lr_arena_array(arena, size_t, nb),
+        .block_offsets = lr_arena_array_uninit(arena, size_t, nb),
         .num_block_offsets = nb,
-        .fixups = lr_arena_array(arena, x86_fixup_t, fc),
+        .fixups = lr_arena_array_uninit(arena, x86_fixup_t, fc),
         .num_fixups = 0,
         .fixup_cap = fc,
         .arena = arena,
         .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
         .mod = mod,
+        .sym_defined = NULL,
+        .sym_funcs = NULL,
+        .sym_count = 0,
     };
+
+    attach_obj_symbol_meta_cache(&ctx);
 
     /* Pre-scan to allocate all slots and compute static alloca sizes */
     prescan_slots(&ctx, func);
