@@ -58,10 +58,12 @@ static void error(lr_parser_t *p, const char *fmt, ...) {
     if (p->had_error) return;
     p->had_error = true;
     if (p->err && p->errlen > 0) {
+        uint32_t line, col;
+        lr_lexer_compute_loc(&p->lex, p->cur.start, &line, &col);
         va_list ap;
         va_start(ap, fmt);
         int n = snprintf(p->err, p->errlen, "line %u col %u: ",
-                         p->cur.line, p->cur.col);
+                         line, col);
         if (n > 0 && (size_t)n < p->errlen)
             vsnprintf(p->err + n, p->errlen - n, fmt, ap);
         va_end(ap);
@@ -1441,8 +1443,6 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             /* peek: is next token a colon? */
             lr_token_t saved_tok = p->cur;
             size_t saved_pos = p->lex.pos;
-            uint32_t saved_line = p->lex.line;
-            uint32_t saved_col = p->lex.col;
 
             next(p);
             if (check(p, LR_TOK_COLON)) {
@@ -1455,8 +1455,6 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             /* not a label, restore and parse as instruction */
             p->cur = saved_tok;
             p->lex.pos = saved_pos;
-            p->lex.line = saved_line;
-            p->lex.col = saved_col;
         }
 
         /* Check for bare keyword label (e.g. "entry:" without %) */
@@ -1551,7 +1549,8 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
 static void skip_line(lr_parser_t *p) {
     /* Skip tokens until we hit something that looks like a new top-level construct */
     while (!check(p, LR_TOK_EOF)) {
-        bool at_toplevel_col = (p->cur.col == 1);
+        bool at_toplevel_col = (p->cur.start == p->lex.src ||
+                                p->cur.start[-1] == '\n');
         if (at_toplevel_col && (check(p, LR_TOK_DEFINE) || check(p, LR_TOK_DECLARE)))
             return;
         if (at_toplevel_col && (check(p, LR_TOK_GLOBAL_ID) || check(p, LR_TOK_LOCAL_ID)))

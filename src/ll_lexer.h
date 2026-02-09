@@ -157,20 +157,18 @@ typedef struct lr_token {
     size_t len;
     int64_t int_val;
     double float_val;
-    uint32_t line;
-    uint32_t col;
 } lr_token_t;
 
 typedef struct lr_lexer {
     const char *src;
     size_t src_len;
     size_t pos;
-    uint32_t line;
-    uint32_t col;
 } lr_lexer_t;
 
 void lr_lexer_init(lr_lexer_t *lex, const char *src, size_t len);
 lr_token_t lr_lexer_next(lr_lexer_t *lex);
 const char *lr_tok_name(lr_tok_t kind);
+void lr_lexer_compute_loc(const lr_lexer_t *lex, const char *pos,
+                          uint32_t *out_line, uint32_t *out_col);
 
 #endif
