@@ -187,6 +187,14 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_workflow.cmake
 )
 
+add_test(
+    NAME nightly_mass_shell_runner
+    COMMAND ${CMAKE_COMMAND}
+        -DRUNNER=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/nightly_mass.sh
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_shell_runner.cmake
+)
+
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
