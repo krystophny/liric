@@ -27,9 +27,12 @@ typedef struct lr_sym_miss_entry {
 typedef struct lr_jit {
     const lr_target_t *target;
     bool map_jit_enabled;
+    bool update_active;
+    bool update_dirty;
     uint8_t *code_buf;
     size_t code_size;
     size_t code_cap;
+    size_t update_begin_code_size;
     uint8_t *data_buf;
     size_t data_size;
     size_t data_cap;
@@ -48,7 +51,9 @@ const char *lr_jit_host_target_name(void);
 const char *lr_jit_target_name(const lr_jit_t *j);
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr);
 int lr_jit_load_library(lr_jit_t *j, const char *path);
+void lr_jit_begin_update(lr_jit_t *j);
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
+void lr_jit_end_update(lr_jit_t *j);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);
 void lr_jit_destroy(lr_jit_t *j);
 
