@@ -506,8 +506,29 @@ int main(int argc, char **argv) {
             double *lli_parse_jit_lookup = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             int skipped = 0;
-            char work_tpl[] = "/tmp/liric_bench/work_ll_XXXXXX";
+            char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
+
+            {
+                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_ll_XXXXXX");
+                if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
+                    printf("  [%zu/%zu] %s: skipped (work dir template too long)\n", i + 1, tests.n, tests.items[i]);
+                    free(ll_path);
+                    free(liric_wall);
+                    free(lli_wall);
+                    free(liric_parse);
+                    free(liric_compile);
+                    free(liric_lookup);
+                    free(lli_parse);
+                    free(lli_jit);
+                    free(lli_lookup);
+                    free(liric_parse_compile);
+                    free(liric_parse_compile_lookup);
+                    free(lli_parse_jit);
+                    free(lli_parse_jit_lookup);
+                    continue;
+                }
+            }
 
             if (!mkdtemp(work_tpl)) {
                 printf("  [%zu/%zu] %s: skipped (failed to create temp work dir)\n", i + 1, tests.n, tests.items[i]);

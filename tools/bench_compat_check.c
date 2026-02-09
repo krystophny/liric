@@ -958,7 +958,7 @@ int main(int argc, char **argv) {
         int llvm_rc = -1, liric_rc = -1, lli_rc = -1;
         char *error = xstrdup("");
         char *n_llvm_out = NULL, *n_liric_out = NULL, *n_lli_out = NULL;
-        char work_tpl[] = "/tmp/liric_bench/work_compat_XXXXXX";
+        char work_tpl[PATH_MAX];
         const char *work_dir = NULL;
         size_t j;
 
@@ -972,6 +972,19 @@ int main(int argc, char **argv) {
 
         if (cfg.limit > 0 && (int)processed >= cfg.limit) break;
 
+        {
+            int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_compat_XXXXXX");
+            if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
+                free(error);
+                error = xstrdup("work dir template too long");
+                write_json_row(jsonl, t->name, t->source, t->options_joined,
+                               llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                               llvm_rc, liric_rc, lli_rc, error);
+                UPDATE_STATS_AND_PROGRESS();
+                free(error);
+                continue;
+            }
+        }
         if (!mkdtemp(work_tpl)) {
             free(error);
             error = xstrdup("failed to create temp work dir");

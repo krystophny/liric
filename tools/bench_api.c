@@ -785,10 +785,17 @@ int main(int argc, char **argv) {
             double *llvm_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             const char *skip_reason = NULL;
-            char work_tpl[] = "/tmp/liric_bench/work_api_XXXXXX";
+            char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
 
             strlist_init(&opt_toks);
+            {
+                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_XXXXXX");
+                if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
+                    skip_reason = "workdir_template_too_long";
+                    goto skip_test;
+                }
+            }
             if (!mkdtemp(work_tpl)) {
                 skip_reason = "workdir_create_failed";
                 goto skip_test;
