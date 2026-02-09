@@ -87,14 +87,7 @@ int main(int argc, char **argv) {
     }
 
     char err[512] = {0};
-    lr_module_t *m;
-    /* Auto-detect WASM binary format by magic bytes: \0asm */
-    if (src_len >= 4 && (uint8_t)src[0] == 0x00 && src[1] == 'a'
-            && src[2] == 's' && src[3] == 'm') {
-        m = lr_parse_wasm((const uint8_t *)src, src_len, err, sizeof(err));
-    } else {
-        m = lr_parse_ll(src, src_len, err, sizeof(err));
-    }
+    lr_module_t *m = lr_parse_auto((const uint8_t *)src, src_len, err, sizeof(err));
     if (!m) {
         fprintf(stderr, "parse error: %s\n", err);
         free(src);

@@ -46,6 +46,10 @@ static double lr_jit_now_us(void) {
 #define MISS_BUCKET_COUNT 4096u
 
 static void register_builtin_symbols(lr_jit_t *j);
+static int register_default_symbol_providers(lr_jit_t *j);
+static void *resolve_symbol_from_jit_table(lr_jit_t *j, const char *name);
+static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name);
+static void *resolve_symbol_from_process(lr_jit_t *j, const char *name);
 static const char *resolve_global_name(lr_module_t *m, uint32_t global_id);
 
 typedef struct lr_func_name_entry {
@@ -254,6 +258,16 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
         return NULL;
     }
 
+    if (register_default_symbol_providers(j) != 0) {
+        munmap(j->data_buf, j->data_cap);
+        munmap(j->code_buf, j->code_cap);
+        free(j->miss_buckets);
+        free(j->sym_buckets);
+        lr_arena_destroy(j->arena);
+        free(j);
+        return NULL;
+    }
+
     register_builtin_symbols(j);
 
     return j;
@@ -295,6 +309,46 @@ static void miss_cache_add(lr_jit_t *j, const char *name, uint32_t hash) {
     m->hash = hash;
     m->bucket_next = j->miss_buckets[bucket];
     j->miss_buckets[bucket] = m;
+}
+
+static int register_symbol_provider(lr_jit_t *j, const char *name,
+                                    lr_symbol_provider_resolve_fn resolve,
+                                    bool skip_when_miss_cached,
+                                    bool cache_result) {
+    if (!j || !name || !name[0] || !resolve)
+        return -1;
+
+    lr_symbol_provider_t *provider = lr_arena_new(j->arena, lr_symbol_provider_t);
+    if (!provider)
+        return -1;
+
+    provider->name = name;
+    provider->resolve = resolve;
+    provider->skip_when_miss_cached = skip_when_miss_cached;
+    provider->cache_result = cache_result;
+    provider->next = NULL;
+
+    if (!j->symbol_providers) {
+        j->symbol_providers = provider;
+        j->symbol_providers_tail = provider;
+    } else {
+        j->symbol_providers_tail->next = provider;
+        j->symbol_providers_tail = provider;
+    }
+    return 0;
+}
+
+static int register_default_symbol_providers(lr_jit_t *j) {
+    if (register_symbol_provider(j, "jit-table", resolve_symbol_from_jit_table,
+                                 false, false) != 0)
+        return -1;
+    if (register_symbol_provider(j, "loaded-libraries", resolve_symbol_from_loaded_libraries,
+                                 true, true) != 0)
+        return -1;
+    if (register_symbol_provider(j, "process", resolve_symbol_from_process,
+                                 true, true) != 0)
+        return -1;
+    return 0;
 }
 
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
@@ -359,29 +413,56 @@ int lr_jit_load_library(lr_jit_t *j, const char *path) {
     return 0;
 }
 
-static void *lookup_symbol(lr_jit_t *j, const char *name) {
-    uint32_t hash = symbol_hash(name);
-    lr_sym_entry_t *local = find_symbol_entry(j, name, hash);
-    if (local)
-        return local->addr;
-
-    if (miss_cache_contains(j, name, hash))
+static void *resolve_symbol_from_jit_table(lr_jit_t *j, const char *name) {
+    if (!j || !name || !name[0])
         return NULL;
+    uint32_t hash = symbol_hash(name);
+    lr_sym_entry_t *entry = find_symbol_entry(j, name, hash);
+    return entry ? entry->addr : NULL;
+}
 
+static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name) {
+    if (!j || !name || !name[0])
+        return NULL;
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
         void *addr = dlsym(l->handle, name);
-        if (addr) {
-            lr_jit_add_symbol(j, name, addr);
+        if (addr)
             return addr;
-        }
     }
-    void *addr = dlsym(RTLD_DEFAULT, name);
-    if (addr) {
-        lr_jit_add_symbol(j, name, addr);
+    return NULL;
+}
+
+static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
+    (void)j;
+    if (!name || !name[0])
+        return NULL;
+    return dlsym(RTLD_DEFAULT, name);
+}
+
+static void *lookup_symbol(lr_jit_t *j, const char *name) {
+    if (!j || !name || !name[0])
+        return NULL;
+
+    uint32_t hash = symbol_hash(name);
+    bool miss_known = miss_cache_contains(j, name, hash);
+
+    for (lr_symbol_provider_t *provider = j->symbol_providers;
+         provider; provider = provider->next) {
+        if (miss_known && provider->skip_when_miss_cached)
+            continue;
+
+        void *addr = provider->resolve(j, name);
+        if (!addr)
+            continue;
+
+        if (provider->cache_result)
+            lr_jit_add_symbol(j, name, addr);
         return addr;
     }
-    miss_cache_add(j, name, hash);
-    return addr;
+
+    if (!miss_known)
+        miss_cache_add(j, name, hash);
+    return NULL;
 }
 
 static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
