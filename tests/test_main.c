@@ -84,6 +84,7 @@ int test_jit_alloca_load_store(void);
 int test_jit_alloca_many_static_slots(void);
 int test_jit_forward_typed_call(void);
 int test_jit_forward_call_chain(void);
+int test_jit_batched_module_updates(void);
 int test_jit_self_recursive_call(void);
 int test_jit_self_recursive_call_ignores_prebound_symbol(void);
 int test_jit_fadd_double_bits(void);
@@ -221,6 +222,7 @@ int main(void) {
     RUN_TEST(test_jit_alloca_many_static_slots);
     RUN_TEST(test_jit_forward_typed_call);
     RUN_TEST(test_jit_forward_call_chain);
+    RUN_TEST(test_jit_batched_module_updates);
     RUN_TEST(test_jit_self_recursive_call);
     RUN_TEST(test_jit_self_recursive_call_ignores_prebound_symbol);
     RUN_TEST(test_jit_fadd_double_bits);

@@ -143,8 +143,13 @@ static int make_writable(lr_jit_t *j) {
     return mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_WRITE);
 }
 
-static int make_executable(lr_jit_t *j) {
-    __builtin___clear_cache((char *)j->code_buf, (char *)(j->code_buf + j->code_size));
+static int make_executable_from(lr_jit_t *j, size_t clear_from) {
+    if (clear_from > j->code_size)
+        clear_from = j->code_size;
+    if (clear_from < j->code_size) {
+        __builtin___clear_cache((char *)(j->code_buf + clear_from),
+                                (char *)(j->code_buf + j->code_size));
+    }
 
     if (j->map_jit_enabled) {
 #if LR_CAN_USE_MAP_JIT
@@ -155,6 +160,10 @@ static int make_executable(lr_jit_t *j) {
 #endif
     }
     return mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_EXEC);
+}
+
+static int make_executable(lr_jit_t *j) {
+    return make_executable_from(j, 0);
 }
 
 const char *lr_jit_host_target_name(void) {
@@ -664,12 +673,18 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
 
-    JIT_PROF_START(make_writable);
-    if (make_writable(j) != 0) return -1;
-    JIT_PROF_END(make_writable);
+    bool own_wx_transition = !j->update_active;
+    int rc = -1;
+    size_t code_size_before = j->code_size;
+
+    if (own_wx_transition) {
+        JIT_PROF_START(make_writable);
+        if (make_writable(j) != 0) return -1;
+        JIT_PROF_END(make_writable);
+    }
 
     JIT_PROF_START(globals);
-    if (materialize_module_globals(j, m) != 0) return -1;
+    if (materialize_module_globals(j, m) != 0) goto done;
     JIT_PROF_END(globals);
 
     uint32_t nfuncs = 0;
@@ -680,10 +695,9 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
 
     if (nfuncs == 0) {
         if (apply_module_global_relocs(j, m) != 0)
-            return -1;
-        if (make_executable(j) != 0)
-            return -1;
-        return 0;
+            goto done;
+        rc = 0;
+        goto done;
     }
 
     /* Pre-populate miss cache for all module-defined function names.
@@ -719,19 +733,21 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     uint32_t *compile_order = lr_arena_array(j->arena, uint32_t, nfuncs);
     uint32_t topo_count = 0;
     if (!compiled || !compile_order)
-        return -1;
+        goto done;
     if (build_compile_order(m, funcs, nfuncs, j->arena, compile_order, &topo_count) != 0)
-        return -1;
+        goto done;
 
     uint32_t remaining = nfuncs;
     const char *last_missing = NULL;
     for (uint32_t oi = 0; oi < topo_count; oi++) {
         uint32_t idx = compile_order[oi];
-        int rc = compile_one_function(j, m, funcs[idx], &last_missing);
-        if (rc == 1)
+        int func_rc = compile_one_function(j, m, funcs[idx], &last_missing);
+        if (func_rc == 1)
             continue;
-        if (rc != 0)
-            return rc;
+        if (func_rc != 0) {
+            rc = func_rc;
+            goto done;
+        }
         compiled[idx] = true;
         remaining--;
     }
@@ -744,11 +760,13 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             if (compiled[i])
                 continue;
 
-            int rc = compile_one_function(j, m, funcs[i], &last_missing);
-            if (rc == 1)
+            int func_rc = compile_one_function(j, m, funcs[i], &last_missing);
+            if (func_rc == 1)
                 continue;
-            if (rc != 0)
-                return rc;
+            if (func_rc != 0) {
+                rc = func_rc;
+                goto done;
+            }
             compiled[i] = true;
             remaining--;
             progress = true;
@@ -757,7 +775,7 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         if (!progress) {
             if (last_missing)
                 fprintf(stderr, "unresolved symbol: %s\n", last_missing);
-            return -1;
+            goto done;
         }
     }
     JIT_PROF_END(compile_loop);
@@ -765,14 +783,40 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     /* Re-apply relocations after module-defined function symbols exist.
        This fixes globals (e.g. vtables) referencing internal functions. */
     if (apply_module_global_relocs(j, m) != 0)
-        return -1;
+        goto done;
 
-    JIT_PROF_START(make_exec);
-    if (make_executable(j) != 0)
-        return -1;
-    JIT_PROF_END(make_exec);
+    rc = 0;
 
-    return 0;
+done:
+    if (j->update_active && j->code_size > code_size_before)
+        j->update_dirty = true;
+    if (own_wx_transition) {
+        JIT_PROF_START(make_exec);
+        if (make_executable(j) != 0)
+            rc = -1;
+        JIT_PROF_END(make_exec);
+    }
+    return rc;
+}
+
+void lr_jit_begin_update(lr_jit_t *j) {
+    if (!j || j->update_active)
+        return;
+    if (make_writable(j) != 0)
+        return;
+    j->update_active = true;
+    j->update_dirty = false;
+    j->update_begin_code_size = j->code_size;
+}
+
+void lr_jit_end_update(lr_jit_t *j) {
+    if (!j || !j->update_active)
+        return;
+    size_t clear_from = j->update_dirty ? j->update_begin_code_size : j->code_size;
+    (void)make_executable_from(j, clear_from);
+    j->update_active = false;
+    j->update_dirty = false;
+    j->update_begin_code_size = j->code_size;
 }
 
 void *lr_jit_get_function(lr_jit_t *j, const char *name) {

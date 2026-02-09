@@ -388,6 +388,57 @@ int test_jit_forward_call_chain(void) {
     return 0;
 }
 
+int test_jit_batched_module_updates(void) {
+    const char *decl_src = "declare i32 @inc(i32)\n";
+    const char *inc_src =
+        "define i32 @inc(i32 %x) {\n"
+        "entry:\n"
+        "  %y = add i32 %x, 1\n"
+        "  ret i32 %y\n"
+        "}\n";
+    const char *use_src =
+        "declare i32 @inc(i32)\n"
+        "define i32 @use_inc(i32 %x) {\n"
+        "entry:\n"
+        "  %a = call i32 @inc(i32 %x)\n"
+        "  %b = call i32 @inc(i32 %a)\n"
+        "  ret i32 %b\n"
+        "}\n";
+
+    lr_arena_t *decl_arena = lr_arena_create(0);
+    lr_arena_t *inc_arena = lr_arena_create(0);
+    lr_arena_t *use_arena = lr_arena_create(0);
+    lr_module_t *decl_mod = parse(decl_src, decl_arena);
+    lr_module_t *inc_mod = parse(inc_src, inc_arena);
+    lr_module_t *use_mod = parse(use_src, use_arena);
+    TEST_ASSERT(decl_mod != NULL, "parse declaration-only module");
+    TEST_ASSERT(inc_mod != NULL, "parse definition module");
+    TEST_ASSERT(use_mod != NULL, "parse use module");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    lr_jit_begin_update(jit);
+    int rc = lr_jit_add_module(jit, decl_mod);
+    TEST_ASSERT_EQ(rc, 0, "add declaration-only module in batch");
+    rc = lr_jit_add_module(jit, inc_mod);
+    TEST_ASSERT_EQ(rc, 0, "add definition module in batch");
+    rc = lr_jit_add_module(jit, use_mod);
+    TEST_ASSERT_EQ(rc, 0, "add use module in batch");
+    lr_jit_end_update(jit);
+
+    typedef int (*fn_t)(int);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "use_inc");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(40), 42, "batched module updates resolve cross-module calls");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(use_arena);
+    lr_arena_destroy(inc_arena);
+    lr_arena_destroy(decl_arena);
+    return 0;
+}
+
 int test_jit_self_recursive_call(void) {
     const char *src =
         "define i32 @sum_to_n(i32 %n) {\n"
