@@ -1,5 +1,8 @@
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+
+#include <liric/liric_compat.h>
 
 #include <llvm/Config/llvm-config.h>
 #include <llvm/IR/LLVMContext.h>
@@ -222,6 +225,86 @@ static int test_function_creation() {
     llvm::Function *decl = mod.createFunction("ext_func", ft, true);
     TEST_ASSERT(decl != nullptr, "declaration created");
 
+    return 0;
+}
+
+static int test_block_parent_tracking_across_decls() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("parent_tracking", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *params[] = {i32};
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, params, false);
+
+    llvm::Function *main_fn = mod.createFunction("main_fn", ft, false);
+    llvm::Function *ext_decl = mod.createFunction("ext_decl", ft, true);
+    TEST_ASSERT(ext_decl != nullptr, "decl created");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", nullptr);
+    TEST_ASSERT(entry->impl_block() != nullptr, "implicit parent block created");
+    TEST_ASSERT(entry->getParent() == main_fn, "decl must not clobber current function");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(main_fn);
+    builder.SetInsertPoint(entry);
+
+    llvm::BasicBlock *insert_block = builder.GetInsertBlock();
+    TEST_ASSERT(insert_block != nullptr, "insert block");
+    TEST_ASSERT(insert_block->getParent() == main_fn, "insert block parent");
+
+    llvm::Function *other_fn = mod.createFunction("other_fn", ft, false);
+    TEST_ASSERT(other_fn != nullptr, "other function");
+    builder.SetInsertPointForFunction(other_fn);
+
+    llvm::Function *late_decl = mod.createFunction("late_decl", ft, true);
+    TEST_ASSERT(late_decl != nullptr, "late decl");
+
+    builder.SetInsertPoint(entry);
+    llvm::BasicBlock *insert_before = llvm::BasicBlock::Create(ctx, "before", nullptr, entry);
+    TEST_ASSERT(insert_before->impl_block() != nullptr, "insert-before block created");
+    TEST_ASSERT(insert_before->getParent() == main_fn, "insert-before parent");
+
+    return 0;
+}
+
+static int test_builder_syncs_module_from_insert_block() {
+    llvm::LLVMContext ctx;
+    llvm::IRBuilder<> builder(ctx);
+    llvm::Module mod("builder_sync", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *i8p = llvm::Type::getInt8PtrTy(ctx);
+
+    llvm::Type *foo_params[] = {i8p};
+    llvm::FunctionType *foo_ty = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(ctx), foo_params, false);
+    llvm::Function *foo = llvm::Function::Create(
+        foo_ty, llvm::GlobalValue::ExternalLinkage, "foo", mod);
+    TEST_ASSERT(foo != nullptr, "foo decl");
+
+    llvm::FunctionType *main_ty = llvm::FunctionType::get(i32, false);
+    llvm::Function *main_fn = llvm::Function::Create(
+        main_ty, llvm::GlobalValue::ExternalLinkage, "main", mod);
+    TEST_ASSERT(main_fn != nullptr, "main function");
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
+    TEST_ASSERT(entry->impl_block() != nullptr, "entry block");
+
+    builder.SetInsertPoint(entry);
+    llvm::Constant *str = builder.CreateGlobalStringPtr("I4", "serialization_info");
+    TEST_ASSERT(str != nullptr, "global string");
+    llvm::Value *foo_args[] = {str};
+    builder.CreateCall(foo, llvm::ArrayRef<llvm::Value *>(foo_args, 1));
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+
+    size_t ir_len = 0;
+    char *ir = lc_module_sprint(mod.getCompat(), &ir_len);
+    TEST_ASSERT(ir != nullptr, "module sprint");
+    TEST_ASSERT(std::strstr(ir, "@serialization_info") != nullptr,
+                "string global symbol present");
+    TEST_ASSERT(std::strstr(ir, "call void @foo(ptr @serialization_info)") != nullptr,
+                "call uses string symbol");
+    free(ir);
     return 0;
 }
 
@@ -846,6 +929,8 @@ int main() {
 
     fprintf(stderr, "\nFunction tests:\n");
     RUN_TEST(test_function_creation);
+    RUN_TEST(test_block_parent_tracking_across_decls);
+    RUN_TEST(test_builder_syncs_module_from_insert_block);
 
     fprintf(stderr, "\nIRBuilder tests:\n");
     RUN_TEST(test_irbuilder_arithmetic);

@@ -13,6 +13,9 @@ class raw_ostream;
 class Value {
 public:
     lc_value_t *impl() const {
+        if (lc_value_t *wrapped = detail::lookup_value_wrapper(this)) {
+            return wrapped;
+        }
         return const_cast<lc_value_t *>(
             reinterpret_cast<const lc_value_t *>(this));
     }

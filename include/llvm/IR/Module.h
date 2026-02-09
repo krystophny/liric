@@ -39,6 +39,16 @@ public:
     }
 
     ~Module() {
+        for (auto &og : owned_globals_) {
+            detail::unregister_value_wrapper(og.get());
+        }
+        for (auto &of : owned_functions_) {
+            Function *fn = of.get();
+            if (detail::current_function == fn) detail::current_function = nullptr;
+            detail::unregister_blocks_for_function(fn);
+            detail::unregister_value_wrapper(fn);
+            detail::unregister_function_wrapper(fn->getIRFunc());
+        }
         if (current_ == compat_) current_ = nullptr;
         if (detail::fallback_module == compat_)
             detail::fallback_module = ctx_.getDefaultModule();
@@ -142,8 +152,10 @@ public:
         fn->setFuncVal(fv);
         fn->setCompatMod(compat_);
         Function *ptr = fn.get();
+        detail::register_value_wrapper(ptr, fv);
         owned_functions_.push_back(std::move(fn));
-        detail::current_function = ptr;
+        detail::register_function_wrapper(ptr->getIRFunc(), ptr);
+        if (!is_decl) detail::current_function = ptr;
         return ptr;
     }
 
@@ -163,6 +175,7 @@ public:
         auto g = std::make_unique<GlobalVariable>();
         (void)gv;
         GlobalVariable *ptr = g.get();
+        detail::register_value_wrapper(ptr, gv);
         owned_globals_.push_back(std::move(g));
         return ptr;
     }
@@ -367,7 +380,12 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
                                        unsigned AddressSpace) {
     (void)InsertBefore; (void)TLMode; (void)AddressSpace;
     (void)Initializer;
-    M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
+    GlobalVariable *created =
+        M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
+    if (created) {
+        detail::register_value_wrapper(this,
+            detail::lookup_value_wrapper(created));
+    }
 }
 
 inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
@@ -393,7 +411,13 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        Function *Parent,
                                        BasicBlock *InsertBefore) {
     (void)Context;
-    Function *fn = Parent ? Parent : detail::current_function;
+    Function *fn = Parent;
+    if (!fn && InsertBefore) {
+        fn = InsertBefore->getParent();
+    }
+    if (!fn) {
+        fn = detail::current_function;
+    }
     lc_module_compat_t *mod = nullptr;
     lr_func_t *f = nullptr;
     if (fn) {
@@ -403,12 +427,19 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     }
     if ((!mod || !f) && InsertBefore) {
         f = lc_value_get_block_func(InsertBefore->impl());
+        if (!fn && f) {
+            fn = detail::lookup_function_wrapper(f);
+            if (fn) detail::current_function = fn;
+        }
         if (!mod) {
             mod = Module::getCurrentModule();
         }
     }
     if (!mod || !f) return BasicBlock::wrap(nullptr);
     lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
+    if (fn) {
+        detail::register_block_parent(lc_value_get_block(bv), fn);
+    }
     return BasicBlock::wrap(bv);
 }
 

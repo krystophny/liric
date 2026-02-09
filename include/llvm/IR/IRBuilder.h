@@ -20,6 +20,7 @@
 #include "llvm/ADT/Twine.h"
 #include <vector>
 #include <cstring>
+#include <string>
 
 namespace llvm {
 
@@ -70,7 +71,23 @@ public:
         }
         block_ = BB->impl_block();
         lr_func_t *f = lc_value_get_block_func(BB->impl());
+        if (!f) {
+            Function *parent = detail::lookup_block_parent(block_);
+            if (parent) {
+                f = parent->getIRFunc();
+                mod_ = parent->getCompatMod();
+                detail::current_function = parent;
+            }
+        }
         func_ = f ? f : nullptr;
+        if (func_) {
+            Function *fn = detail::lookup_function_wrapper(func_);
+            if (fn) {
+                mod_ = fn->getCompatMod();
+                detail::current_function = fn;
+                detail::register_block_parent(block_, fn);
+            }
+        }
     }
 
     void SetInsertPoint(BasicBlock *BB, BasicBlock::iterator) {
@@ -83,13 +100,24 @@ public:
 
     BasicBlock *GetInsertBlock() const {
         if (!block_) return nullptr;
-        lc_module_compat_t *mod = Module::getCurrentModule();
+        lc_module_compat_t *mod = mod_ ? mod_ : Module::getCurrentModule();
         if (!mod) return nullptr;
         lc_value_t *bv = lc_value_block_ref(mod, block_);
+        if (func_) {
+            Function *fn = detail::lookup_function_wrapper(func_);
+            if (fn) detail::register_block_parent(block_, fn);
+        }
         return BasicBlock::wrap(bv);
     }
 
-    void SetFunction(lr_func_t *f) { func_ = f; }
+    void SetFunction(lr_func_t *f) {
+        func_ = f;
+        Function *fn = detail::lookup_function_wrapper(func_);
+        if (fn) {
+            mod_ = fn->getCompatMod();
+            detail::current_function = fn;
+        }
+    }
 
     void SetInsertPointForFunction(Function *fn) {
         if (!fn) return;
@@ -812,11 +840,25 @@ public:
     Constant *CreateGlobalStringPtr(StringRef Str, const Twine &Name = "",
                                     unsigned AddressSpace = 0) {
         (void)AddressSpace;
-        size_t len = Str.size() + 1;
+        lc_module_compat_t *mod = M();
+        if (!mod) return nullptr;
+        std::string data(Str.data(), Str.size());
+        data.push_back('\0');
+        lr_type_t *elem_ty = lc_get_int_type(mod, 8);
+        lr_type_t *arr_ty = lr_type_array_new(lc_module_get_ir(mod), elem_ty,
+                                              data.size());
+        std::string generated_name;
+        const char *name = nullptr;
+        std::string explicit_name = Name.str();
+        if (!explicit_name.empty()) {
+            name = explicit_name.c_str();
+        } else {
+            static thread_local unsigned long long str_id = 0;
+            generated_name = ".str." + std::to_string(str_id++);
+            name = generated_name.c_str();
+        }
         lc_value_t *gv = lc_global_create(
-            M(), Name.c_str(),
-            lc_get_int_type(M(), 8),
-            true, Str.data(), len);
+            mod, name, arr_ty, true, data.data(), data.size());
         return static_cast<Constant *>(Value::wrap(gv));
     }
 

@@ -43,7 +43,6 @@ public:
     };
 
     lr_type_t *impl() const {
-        if (!this) return nullptr;
         return const_cast<lr_type_t *>(
             reinterpret_cast<const lr_type_t *>(this));
     }

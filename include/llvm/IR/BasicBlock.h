@@ -1,6 +1,7 @@
 #ifndef LLVM_IR_BASICBLOCK_H
 #define LLVM_IR_BASICBLOCK_H
 
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Value.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
@@ -33,7 +34,9 @@ public:
                               Function *Parent = nullptr,
                               BasicBlock *InsertBefore = nullptr);
 
-    Function *getParent() const { return detail::current_function; }
+    Function *getParent() const {
+        return detail::lookup_block_parent(impl_block());
+    }
     Module *getModule() const { return nullptr; }
 
     bool empty() const {
