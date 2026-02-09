@@ -35,6 +35,53 @@ class ClassifyTests(unittest.TestCase):
         got = classify.classify_jit_failure("jit failed\n", ir)
         self.assertEqual(got, classify.UNSUPPORTED_FEATURE)
 
+    def test_taxonomy_unresolved_symbol_maps_to_jit_link_runtime_api(self) -> None:
+        row = {
+            "classification": classify.UNSUPPORTED_ABI,
+            "stage": "jit",
+            "reason": "unresolved symbol: _lfortran_pow_i4",
+        }
+        node = classify.taxonomy_node(row)
+        self.assertEqual(node["stage"], "jit-link")
+        self.assertEqual(node["symptom"], "unresolved-symbol")
+        self.assertEqual(node["feature_family"], "runtime-api")
+
+    def test_taxonomy_mismatch_maps_to_output_format_symptom(self) -> None:
+        row = {
+            "classification": classify.MISMATCH,
+            "stage": "differential",
+            "differential_ok": True,
+            "differential_match": False,
+            "differential_rc_match": True,
+            "differential_stdout_match": False,
+            "differential_stderr_match": True,
+        }
+        node = classify.taxonomy_node(row)
+        self.assertEqual(node["stage"], "output-format")
+        self.assertEqual(node["symptom"], "wrong-stdout")
+        self.assertEqual(node["feature_family"], "general")
+
+    def test_taxonomy_counts_support_class_filter(self) -> None:
+        rows = [
+            {
+                "classification": classify.PASS,
+                "stage": "differential",
+            },
+            {
+                "classification": classify.UNSUPPORTED_FEATURE,
+                "stage": "parse",
+                "reason": "unsupported instruction: fneg",
+            },
+        ]
+        counts = classify.taxonomy_counts(
+            rows,
+            include_classifications={classify.UNSUPPORTED_FEATURE},
+        )
+        self.assertEqual(len(counts), 1)
+        key = next(iter(counts.keys()))
+        self.assertEqual(key, "parse|unsupported-feature|general")
+        self.assertEqual(counts[key], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

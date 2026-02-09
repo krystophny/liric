@@ -47,6 +47,14 @@ def summarize(
     selection_rows: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     counts = classify.counts(processed)
+    taxonomy_counts = classify.taxonomy_counts(processed, exclude_pass=True)
+    mismatch_taxonomy_counts = classify.taxonomy_counts(
+        processed, include_classifications={classify.MISMATCH}
+    )
+    unsupported_taxonomy_counts = classify.taxonomy_counts(
+        processed,
+        include_classifications={classify.UNSUPPORTED_FEATURE, classify.UNSUPPORTED_ABI},
+    )
     mismatch_count = counts.get(classify.MISMATCH, 0)
     corpus_counts: Dict[str, int] = {}
     for row in processed:
@@ -139,6 +147,9 @@ def summarize(
         "differential_mismatch_total": diff_mismatch_total,
         "differential_mismatch_buckets": diff_mismatch_buckets,
         "classification_counts": counts,
+        "taxonomy_counts": taxonomy_counts,
+        "mismatch_taxonomy_counts": mismatch_taxonomy_counts,
+        "unsupported_taxonomy_counts": unsupported_taxonomy_counts,
         "corpus_counts": corpus_counts,
         "selected_by_corpus": selected_by_corpus,
         "skipped_by_corpus": skipped_by_corpus,
@@ -218,6 +229,27 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     counts: Dict[str, int] = summary.get("classification_counts", {})
     for key in sorted(counts.keys()):
         lines.append(f"- {key}: {counts[key]}")
+
+    lines.append("")
+    lines.append("## Taxonomy Counts")
+    lines.append("")
+    tax_counts: Dict[str, int] = summary.get("taxonomy_counts", {})
+    for key in sorted(tax_counts.keys()):
+        lines.append(f"- {key}: {tax_counts[key]}")
+
+    lines.append("")
+    lines.append("## Taxonomy Counts (Mismatch)")
+    lines.append("")
+    mismatch_tax: Dict[str, int] = summary.get("mismatch_taxonomy_counts", {})
+    for key in sorted(mismatch_tax.keys()):
+        lines.append(f"- {key}: {mismatch_tax[key]}")
+
+    lines.append("")
+    lines.append("## Taxonomy Counts (Unsupported)")
+    lines.append("")
+    unsupported_tax: Dict[str, int] = summary.get("unsupported_taxonomy_counts", {})
+    for key in sorted(unsupported_tax.keys()):
+        lines.append(f"- {key}: {unsupported_tax[key]}")
 
     lines.append("")
     lines.append("## Differential Mismatch Buckets")

@@ -7,6 +7,8 @@ source of unit test cases, plus integration metadata from
 evaluate compatibility in liric parse/JIT/runtime lanes.
 
 Roadmap and scorecard are tracked in `docs/lfortran_mass_tracker.md`.
+Stable mismatch/unsupported root-cause taxonomy is defined in
+`docs/lfortran_failure_taxonomy.md`.
 
 ## Design Principles
 - Reuse LFortran test configuration directly from `tests.toml`.
@@ -91,6 +93,7 @@ All artifacts are written under `/tmp/liric_lfortran_mass/`:
 - Skip reason histogram and skip reasons by corpus
 - Supported processed/passed counts
 - Unsupported histogram
+- Taxonomy counts per root-cause node (`stage|symptom|feature_family`)
 - Mismatch count
 - New supported regressions vs baseline
 - Gate decision
