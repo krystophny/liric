@@ -36,18 +36,21 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 # 2) LL benchmark: liric JIT vs lli -O0
 ./build/bench_ll --iters 3
 
-# 3) LFortran backend benchmark: lfortran+liric vs lfortran+LLVM
-# Uses frozen compat_api_100.* artifacts when present.
-./build/bench_api --iters 3 --min-completed 100
+# 3) API JIT benchmark (primary): liric JIT vs LLVM JIT on identical emitted IR
+./build/bench_api_jit --iters 3 --min-completed 1
+
+# 4) API object-mode benchmark (legacy): lfortran+liric binary vs lfortran+LLVM binary
+./build/bench_api --iters 3 --min-completed 1
 ```
 
 Artifacts go to `/tmp/liric_bench/`.
 
-Strict-mode artifacts:
+Primary artifacts:
 
 - `compat_api_100.txt` + `compat_api_100_options.jsonl` (frozen corpus from step 1)
-- `bench_api.jsonl` (per-test status, including machine-readable skip reasons)
-- `bench_api_summary.json` (attempted/completed/skipped + skip reason buckets)
+- `bench_ll.jsonl` + `bench_ll_summary.json`
+- `bench_api_jit.jsonl` + `bench_api_jit_summary.json`
+- `bench_api.jsonl` + `bench_api_summary.json` (legacy object-mode)
 
 ## Compatibility
 
@@ -60,55 +63,75 @@ Strict-mode artifacts:
 | lli matches LLVM output | 2165 | 95.5 |
 | Both liric and lli match | 2004 | 88.4 |
 
-## Performance (LL and API Modes)
+## Performance
 
-Snapshot date: `2026-02-09`
+Snapshot date: `2026-02-09` (local run)
 
 ### LL Mode (`bench_ll`)
 
 Command:
 
 ```bash
-./build/bench_ll --iters 3 --bench-dir /tmp/liric_bench_100_ll
+./build/bench_ll --iters 3 --timeout 20 --bench-dir /tmp/liric_bench
 ```
 
-Coverage: `94` completed tests (`compat_ll.txt`), `3` iterations each.
+Coverage: `270` completed tests, `3` iterations each.
 
-| Metric (median) | liric | Reference | Speedup |
+| Metric | liric | lli | Speedup |
 |---|---:|---:|---:|
-| Wall clock (`liric_probe_runner` vs `lli -O0`) | `10.065 ms` | `20.120 ms` | **2.00x** |
-| Internal materialization (`parse+compile+lookup` vs `parse+jit+lookup`) | `0.486 ms` | `4.819 ms` | **10.10x** |
+| Wall median | `10.064 ms` | `20.119 ms` | **2.00x** |
+| Wall aggregate | `2777.65 ms` | `6936.12 ms` | **2.50x** |
+| Materialization median (`parse+compile+lookup` vs `parse+jit+lookup`) | `0.518 ms` | `4.365 ms` | **8.43x** |
+| Materialization aggregate | `215.79 ms` | `2873.72 ms` | **13.32x** |
 
 Phase split medians:
+- liric: parse `0.476 ms`, compile `0.045 ms`, lookup `0.0001 ms`
+- lli: parse `0.252 ms`, jit `0.0029 ms`, lookup `4.070 ms`
 
-- liric: parse `0.439 ms`, compile `0.051 ms`, lookup `0.0001 ms`
-- lli: parse `0.302 ms`, jit `0.003 ms`, lookup `4.466 ms`
+Faster-case counts:
+- wall: `267/270`
+- materialization: `270/270`
 
-### API Mode (`bench_api`)
+### API JIT Mode (Primary, `bench_api_jit`)
 
 Command:
 
 ```bash
-./build/bench_api --iters 3 --bench-dir /tmp/liric_bench_100_api \
-  --compat-list /tmp/liric_bench_100_api/compat_api.txt \
-  --options-jsonl /tmp/liric_bench_100_api/compat_api_options.jsonl
+./build/bench_api_jit --iters 3 --bench-dir /tmp/liric_bench --min-completed 1
 ```
 
-Coverage: `100` attempted, `15` completed, `85` skipped.
+Coverage: `100` attempted, `100` completed, `0` skipped.
 
-| Metric (median, completed tests only) | lfortran+liric | lfortran+LLVM | Speedup |
+| Metric | liric | LLVM baseline | Speedup |
 |---|---:|---:|---:|
-| Wall clock | `28.270 ms` | `38.655 ms` | **1.36x** |
-| Compile phase | `27.770 ms` | `38.066 ms` | **1.36x** |
-| Run phase | `0.537 ms` | `0.597 ms` | **1.09x** |
+| Frontend median (shared LFortran emit) | `11.148 ms` | `11.148 ms` | `1.00x` |
+| Wall median (frontend + materialization + first call) | `11.864 ms` | `17.595 ms` | **1.48x** |
+| Wall aggregate | `1556.97 ms` | `2777.17 ms` | **1.78x** |
+| JIT materialization median | `0.584 ms` | `6.392 ms` | **10.95x** |
+| JIT materialization aggregate | `86.41 ms` | `1330.53 ms` | **15.40x** |
+| Execution median (entry call only) | `0.017 ms` | `0.020 ms` | **1.19x** |
 
-Faster-case counts on completed tests:
+Faster-case counts:
+- wall: `99/100`
+- materialization: `100/100`
+- execution: `78/100`
 
-- Wall: `15/15`
-- Compile: `15/15`
-- Run: `14/15`
+### API Object Mode (Legacy, `bench_api`)
 
-API-mode medians are directional until completion rises above `15/100`.
+The object/link/run benchmark is still available, but it is currently blocked by runtime hangs in `lfortran` `WITH_LIRIC` binaries.
+
+Smoke command:
+
+```bash
+./build/bench_api --iters 1 --timeout 5 --bench-dir /tmp/liric_bench \
+  --compat-list /tmp/liric_bench/compat_api_smoke10.txt \
+  --options-jsonl /tmp/liric_bench/compat_api_smoke10_options.jsonl \
+  --min-completed 0
+```
+
+Result: `10` attempted, `0` completed, `10` skipped (`liric_run_timeout`).
+
+Interpretation: object-mode numbers are not used for current API performance KPIs; API performance tracking is based on `bench_api_jit`.
 
 ## License
 
