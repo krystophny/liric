@@ -563,6 +563,26 @@ static bool call_uses_external_sysv_abi(x86_compile_ctx_t *ctx,
     return !is_symbol_defined_in_module(ctx->mod, sym_name);
 }
 
+static bool emit_copy_from_cached_scratch(x86_compile_ctx_t *ctx,
+                                          uint32_t vreg, uint8_t dst_reg) {
+    uint8_t src_reg;
+
+    if (!ctx)
+        return false;
+    if (dst_reg == X86_RAX && cached_reg_holds_vreg(ctx, X86_RCX, vreg)) {
+        src_reg = X86_RCX;
+    } else if (dst_reg == X86_RCX &&
+               cached_reg_holds_vreg(ctx, X86_RAX, vreg)) {
+        src_reg = X86_RAX;
+    } else {
+        return false;
+    }
+
+    encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x89, dst_reg, src_reg, 8);
+    set_cached_reg_vreg(ctx, dst_reg, vreg);
+    return true;
+}
+
 /* Load an operand value into a GPR */
 static void emit_load_operand(x86_compile_ctx_t *ctx,
                                const lr_operand_t *op, uint8_t reg) {
@@ -572,6 +592,8 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
         emit_mov_imm(ctx, reg, op->imm_i64, preserve_flags);
     } else if (op->kind == LR_VAL_VREG) {
         if (cached_reg_holds_vreg(ctx, reg, op->vreg))
+            return;
+        if (emit_copy_from_cached_scratch(ctx, op->vreg, reg))
             return;
         emit_load_slot(ctx, op->vreg, reg);
     } else if (op->kind == LR_VAL_IMM_F64) {

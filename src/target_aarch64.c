@@ -573,12 +573,34 @@ static void attach_obj_symbol_defined_cache(a64_compile_ctx_t *ctx) {
     ctx->sym_count = ctx->obj_ctx->module_sym_count;
 }
 
+static bool emit_copy_from_cached_scratch_a64(a64_compile_ctx_t *ctx,
+                                              uint32_t vreg, uint8_t dst_reg) {
+    uint8_t src_reg;
+
+    if (!ctx)
+        return false;
+    if (dst_reg == A64_X9 && cached_reg_holds_vreg_a64(ctx, A64_X10, vreg)) {
+        src_reg = A64_X10;
+    } else if (dst_reg == A64_X10 &&
+               cached_reg_holds_vreg_a64(ctx, A64_X9, vreg)) {
+        src_reg = A64_X9;
+    } else {
+        return false;
+    }
+
+    emit_mov_reg(ctx->buf, &ctx->pos, ctx->buflen, dst_reg, src_reg, true);
+    set_cached_reg_vreg_a64(ctx, dst_reg, vreg);
+    return true;
+}
+
 static void emit_load_operand(a64_compile_ctx_t *ctx,
                                const lr_operand_t *op, uint8_t reg) {
     if (op->kind == LR_VAL_IMM_I64) {
         emit_move_imm_ctx(ctx, reg, op->imm_i64, true);
     } else if (op->kind == LR_VAL_VREG) {
         if (cached_reg_holds_vreg_a64(ctx, reg, op->vreg))
+            return;
+        if (emit_copy_from_cached_scratch_a64(ctx, op->vreg, reg))
             return;
         emit_load_slot(ctx, op->vreg, reg);
     } else if (op->kind == LR_VAL_IMM_F64) {
