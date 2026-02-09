@@ -99,15 +99,10 @@ static uint32_t *build_vreg_use_counts(lr_arena_t *arena, lr_func_t *func,
     for (uint32_t i = 0; i < func->next_vreg; i++)
         counts[i] = 0;
 
-    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-        lr_block_t *b = func->block_array[bi];
-        if (!b)
-            continue;
-        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
-            lr_inst_t *inst = b->inst_array[ii];
-            for (uint32_t oi = 0; oi < inst->num_operands; oi++)
-                count_vreg_use(counts, func->next_vreg, &inst->operands[oi]);
-        }
+    for (uint32_t ii = 0; ii < func->num_linear_insts; ii++) {
+        lr_inst_t *inst = func->linear_inst_array[ii];
+        for (uint32_t oi = 0; oi < inst->num_operands; oi++)
+            count_vreg_use(counts, func->next_vreg, &inst->operands[oi]);
     }
 
     if (phi_copies) {

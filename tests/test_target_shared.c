@@ -120,6 +120,8 @@ int test_ir_finalize_builds_dense_arrays(void) {
     lr_inst_t *ret_inst = lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_ops, 1);
 
     TEST_ASSERT(func->block_array == NULL, "block array starts null");
+    TEST_ASSERT(func->linear_inst_array == NULL, "linear inst array starts null");
+    TEST_ASSERT(func->block_inst_offsets == NULL, "block offsets start null");
     TEST_ASSERT(entry->inst_array == NULL, "inst array starts null");
 
     lr_block_append(entry, add_inst);
@@ -135,22 +137,43 @@ int test_ir_finalize_builds_dense_arrays(void) {
     TEST_ASSERT(entry->inst_array[1] == br_inst, "entry[1] points to second inst");
     TEST_ASSERT_EQ(exit->num_insts, 1, "exit has one instruction");
     TEST_ASSERT(exit->inst_array[0] == ret_inst, "exit[0] points to ret inst");
+    TEST_ASSERT(func->linear_inst_array != NULL, "linear inst array populated");
+    TEST_ASSERT(func->block_inst_offsets != NULL, "block offsets populated");
+    TEST_ASSERT_EQ(func->num_linear_insts, 3, "linear inst array has three entries");
+    TEST_ASSERT(func->linear_inst_array[0] == add_inst, "linear[0] points to add");
+    TEST_ASSERT(func->linear_inst_array[1] == br_inst, "linear[1] points to br");
+    TEST_ASSERT(func->linear_inst_array[2] == ret_inst, "linear[2] points to ret");
+    TEST_ASSERT_EQ(func->block_inst_offsets[entry->id], 0, "entry starts at linear index 0");
+    TEST_ASSERT_EQ(func->block_inst_offsets[exit->id], 2, "exit starts at linear index 2");
+    TEST_ASSERT_EQ(func->block_inst_offsets[func->num_blocks], 3, "linear sentinel matches count");
 
     lr_operand_t tail_ops[1] = { lr_op_imm_i64(0, mod->type_i32) };
     lr_inst_t *tail_ret = lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, tail_ops, 1);
     lr_block_append(exit, tail_ret);
     TEST_ASSERT(exit->inst_array == NULL, "append invalidates inst array");
     TEST_ASSERT_EQ(exit->num_insts, 0, "append resets cached inst count");
+    TEST_ASSERT(func->linear_inst_array == NULL, "append invalidates linear inst array");
+    TEST_ASSERT(func->block_inst_offsets == NULL, "append invalidates block offsets");
+    TEST_ASSERT_EQ(func->num_linear_insts, 0, "append resets linear inst count");
 
     TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "re-finalize succeeds");
     TEST_ASSERT_EQ(exit->num_insts, 2, "re-finalize updates instruction count");
     TEST_ASSERT(exit->inst_array[1] == tail_ret, "new instruction appears in rebuilt cache");
+    TEST_ASSERT_EQ(func->num_linear_insts, 4, "re-finalize updates linear inst count");
+    TEST_ASSERT(func->linear_inst_array[3] == tail_ret, "new instruction appears in linear cache");
+    TEST_ASSERT_EQ(func->block_inst_offsets[func->num_blocks], 4, "linear sentinel updates");
 
-    (void)lr_block_create(func, arena, "tail");
+    lr_block_t *tail = lr_block_create(func, arena, "tail");
+    TEST_ASSERT(tail != NULL, "tail block is created");
     TEST_ASSERT(func->block_array == NULL, "new block invalidates block array");
+    TEST_ASSERT(func->linear_inst_array == NULL, "new block invalidates linear inst array");
+    TEST_ASSERT(func->block_inst_offsets == NULL, "new block invalidates block offsets");
     TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize rebuilds block array");
     TEST_ASSERT(func->block_array != NULL, "rebuilt block array is present");
     TEST_ASSERT_EQ(func->num_blocks, 3, "function now has three blocks");
+    TEST_ASSERT_EQ(func->num_linear_insts, 4, "empty block does not change linear inst count");
+    TEST_ASSERT_EQ(func->block_inst_offsets[tail->id], 4, "empty block starts at final linear index");
+    TEST_ASSERT_EQ(func->block_inst_offsets[func->num_blocks], 4, "linear sentinel stays unchanged");
 
     lr_arena_destroy(arena);
     return 0;
@@ -226,10 +249,12 @@ int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
     lr_operand_t ret_ops[1] = { lr_op_vreg(phi1_dest, mod->type_i32) };
     lr_block_append(merge, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_ops, 1));
 
-    TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize succeeds");
+    TEST_ASSERT(func->block_array == NULL, "phi copy build works without pre-finalize");
 
     lr_block_phi_copies_t *copies = lr_build_phi_copies(arena, func);
     TEST_ASSERT(copies != NULL, "phi copies built");
+    TEST_ASSERT(func->block_array != NULL, "phi copy build finalizes block array");
+    TEST_ASSERT(func->linear_inst_array != NULL, "phi copy build finalizes linear inst array");
     TEST_ASSERT_EQ(copies[entry->id].count, 0, "entry has no incoming phi copies");
     TEST_ASSERT_EQ(copies[merge->id].count, 0, "merge has no outgoing phi copies");
     TEST_ASSERT_EQ(copies[left->id].count, 2, "left predecessor has two phi copies");
@@ -260,6 +285,25 @@ int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
                    "right first src value preserved");
     TEST_ASSERT_EQ(copies[right->id].copies[1].src_op.imm_i64, 21,
                    "right second src value preserved");
+
+    {
+        uint32_t phi2_dest = lr_vreg_new(func);
+        lr_operand_t phi2_ops[4] = {
+            lr_op_imm_i64(13, mod->type_i32), lr_op_block(left->id),
+            lr_op_imm_i64(23, mod->type_i32), lr_op_block(right->id),
+        };
+        lr_block_append(merge, lr_inst_create(arena, LR_OP_PHI, mod->type_i32, phi2_dest, phi2_ops, 4));
+        TEST_ASSERT(func->linear_inst_array == NULL, "append invalidates linear cache before phi rebuild");
+
+        lr_block_phi_copies_t *copies2 = lr_build_phi_copies(arena, func);
+        TEST_ASSERT(copies2 != NULL, "phi copies rebuild after mutation");
+        TEST_ASSERT_EQ(copies2[left->id].count, 3, "left predecessor count updates after mutation");
+        TEST_ASSERT_EQ(copies2[right->id].count, 3, "right predecessor count updates after mutation");
+        TEST_ASSERT_EQ(copies2[left->id].copies[0].dest_vreg, phi2_dest,
+                       "new left phi copy appears first after rebuild");
+        TEST_ASSERT_EQ(copies2[right->id].copies[0].dest_vreg, phi2_dest,
+                       "new right phi copy appears first after rebuild");
+    }
 
     lr_arena_destroy(arena);
     return 0;
