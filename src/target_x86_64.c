@@ -48,7 +48,34 @@ typedef struct {
     uint8_t *sym_defined;
     lr_func_t **sym_funcs;
     uint32_t sym_count;
+    uint32_t rax_holds_vreg;
+    uint32_t rcx_holds_vreg;
 } x86_compile_ctx_t;
+
+static void invalidate_cached_reg(x86_compile_ctx_t *ctx, uint8_t reg) {
+    if (!ctx) return;
+    if (reg == X86_RAX) ctx->rax_holds_vreg = UINT32_MAX;
+    if (reg == X86_RCX) ctx->rcx_holds_vreg = UINT32_MAX;
+}
+
+static void invalidate_cached_gprs(x86_compile_ctx_t *ctx) {
+    if (!ctx) return;
+    ctx->rax_holds_vreg = UINT32_MAX;
+    ctx->rcx_holds_vreg = UINT32_MAX;
+}
+
+static bool cached_reg_holds_vreg(const x86_compile_ctx_t *ctx, uint8_t reg, uint32_t vreg) {
+    if (!ctx) return false;
+    if (reg == X86_RAX) return ctx->rax_holds_vreg == vreg;
+    if (reg == X86_RCX) return ctx->rcx_holds_vreg == vreg;
+    return false;
+}
+
+static void set_cached_reg_vreg(x86_compile_ctx_t *ctx, uint8_t reg, uint32_t vreg) {
+    if (!ctx) return;
+    if (reg == X86_RAX) ctx->rax_holds_vreg = vreg;
+    if (reg == X86_RCX) ctx->rcx_holds_vreg = vreg;
+}
 
 static size_t align_up(size_t value, size_t align) {
     if (align <= 1)
@@ -289,12 +316,14 @@ static void emit_fp_setcc(uint8_t *buf, size_t *pos, size_t len,
 static void emit_load_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
     int32_t off = alloc_slot(ctx, vreg, 8, 8);
     encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x8B, reg, X86_RBP, off, 8);
+    set_cached_reg_vreg(ctx, reg, vreg);
 }
 
 /* Emit: mov [rbp + offset], reg (store reg to vreg stack slot) */
 static void emit_store_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
     int32_t off = alloc_slot(ctx, vreg, 8, 8);
     encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x89, reg, X86_RBP, off, 8);
+    set_cached_reg_vreg(ctx, reg, vreg);
 }
 
 /* Emit: mov_imm reg, imm64 */
@@ -309,6 +338,7 @@ static void emit_mov_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(0xB8 + (dst & 7)));
         emit_u64(ctx->buf, &ctx->pos, ctx->buflen, (uint64_t)imm);
     }
+    invalidate_cached_reg(ctx, dst);
 }
 
 /* Emit: add/sub reg, imm32 (sign-extended) */
@@ -318,6 +348,7 @@ static void emit_add_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
     if (imm > INT32_MAX || imm < INT32_MIN) {
         emit_mov_imm(ctx, X86_R11, imm);
         encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x01, dst, X86_R11, 8);
+        invalidate_cached_reg(ctx, dst);
         return;
     }
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, dst >= 8));
@@ -329,6 +360,7 @@ static void emit_add_imm(x86_compile_ctx_t *ctx, uint8_t dst, int64_t imm) {
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 5, dst)); /* SUB */
         emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)(int32_t)(-imm));
     }
+    invalidate_cached_reg(ctx, dst);
 }
 
 static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
@@ -407,6 +439,8 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
     if (op->kind == LR_VAL_IMM_I64) {
         emit_mov_imm(ctx, reg, op->imm_i64);
     } else if (op->kind == LR_VAL_VREG) {
+        if (cached_reg_holds_vreg(ctx, reg, op->vreg))
+            return;
         emit_load_slot(ctx, op->vreg, reg);
     } else if (op->kind == LR_VAL_IMM_F64) {
         int64_t imm_bits = 0;
@@ -462,6 +496,7 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
         }
         if (op->global_offset != 0)
             emit_add_imm(ctx, reg, op->global_offset);
+        invalidate_cached_reg(ctx, reg);
     }
 }
 
@@ -546,6 +581,7 @@ static void emit_imul_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xAF);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
+    invalidate_cached_reg(ctx, dst);
 }
 
 static void emit_idiv_r(x86_compile_ctx_t *ctx, uint8_t src, uint8_t size) {
@@ -555,6 +591,7 @@ static void emit_idiv_r(x86_compile_ctx_t *ctx, uint8_t src, uint8_t size) {
                   rex(size == 8, false, false, src >= 8));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xF7);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 7, src));
+    invalidate_cached_gprs(ctx);
 }
 
 static void emit_shift(x86_compile_ctx_t *ctx, uint8_t ext, uint8_t dst, uint8_t size) {
@@ -564,15 +601,18 @@ static void emit_shift(x86_compile_ctx_t *ctx, uint8_t ext, uint8_t dst, uint8_t
                   rex(size == 8, false, false, dst >= 8));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xD3);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, ext, dst));
+    invalidate_cached_reg(ctx, dst);
 }
 
 static void emit_setcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
     if (cc >= LR_CC_FP_OEQ) {
         emit_fp_setcc(ctx->buf, &ctx->pos, ctx->buflen, cc, dst);
+        invalidate_cached_reg(ctx, X86_RCX);
     } else {
         uint8_t x86cc = lr_cc_to_x86(cc);
         emit_setcc_byte(ctx->buf, &ctx->pos, ctx->buflen, x86cc, dst);
     }
+    invalidate_cached_reg(ctx, dst);
 }
 
 static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size) {
@@ -583,6 +623,7 @@ static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (size == 1) ? 0xB6 : 0xB7);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
+    invalidate_cached_reg(ctx, dst);
 }
 
 static void emit_movsx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size) {
@@ -591,6 +632,7 @@ static void emit_movsx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (size == 1) ? 0xBE : 0xBF);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
+    invalidate_cached_reg(ctx, dst);
 }
 
 /* Emit a movzx mem load for sub-dword sizes: movzx reg, byte/word [base+disp] */
@@ -614,6 +656,7 @@ static void emit_movzx_mem(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t base,
     if ((base & 7) == 4) emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x24);
     if (mod == 1) emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(int8_t)disp);
     else if (mod == 2) emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)disp);
+    invalidate_cached_reg(ctx, dst);
 }
 
 static void emit_mem_load_sized(x86_compile_ctx_t *ctx, uint8_t dst,
@@ -771,12 +814,14 @@ static void emit_cvtfp2si(x86_compile_ctx_t *ctx, uint8_t gpr, uint8_t fpreg, ui
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x2C);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, gpr, fpreg));
+    invalidate_cached_reg(ctx, gpr);
 }
 
 static void emit_movsxd(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, dst >= 8, false, src >= 8));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x63);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
+    invalidate_cached_reg(ctx, dst);
 }
 
 static void emit_cmovcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst,
@@ -789,6 +834,7 @@ static void emit_cmovcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst,
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(0x40 + x86cc));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
+    invalidate_cached_reg(ctx, dst);
 }
 
 static int32_t ensure_static_alloca_offset(x86_compile_ctx_t *ctx, const lr_inst_t *inst) {
@@ -861,6 +907,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .sym_defined = NULL,
         .sym_funcs = NULL,
         .sym_count = 0,
+        .rax_holds_vreg = UINT32_MAX,
+        .rcx_holds_vreg = UINT32_MAX,
     };
 
     attach_obj_symbol_meta_cache(&ctx);
@@ -890,6 +938,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
         ctx.block_offsets[bi] = ctx.pos;
+        invalidate_cached_gprs(&ctx);
 
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
@@ -1479,6 +1528,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 if (stack_bytes > 0)
                     emit_frame_free(&ctx, stack_bytes);
 
+                invalidate_cached_gprs(&ctx);
                 if (inst->type && inst->type->kind != LR_TYPE_VOID) {
                     if (use_external_sysv_fp && is_fp_abi_type(inst->type))
                         emit_store_fp_slot(&ctx, inst->dest, X86_XMM0,
