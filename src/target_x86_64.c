@@ -1,5 +1,6 @@
 #include "target_x86_64.h"
 #include "target_common.h"
+#include "target_shared.h"
 #include "objfile.h"
 #include <stdbool.h>
 #include <string.h>
@@ -86,22 +87,6 @@ static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg,
     ctx->stack_slots[vreg] = offset;
     ctx->stack_slot_sizes[vreg] = (uint32_t)size;
     return offset;
-}
-
-static void set_static_alloca_offset(x86_compile_ctx_t *ctx, uint32_t vreg,
-                                      int32_t offset) {
-    while (vreg >= ctx->num_static_alloca_offsets) {
-        uint32_t old = ctx->num_static_alloca_offsets;
-        uint32_t new_cap = old == 0 ? 64 : old * 2;
-        int32_t *no = lr_arena_array_uninit(ctx->arena, int32_t, new_cap);
-        if (old > 0)
-            memcpy(no, ctx->static_alloca_offsets, old * sizeof(int32_t));
-        for (uint32_t i = old; i < new_cap; i++)
-            no[i] = 0;
-        ctx->static_alloca_offsets = no;
-        ctx->num_static_alloca_offsets = new_cap;
-    }
-    ctx->static_alloca_offsets[vreg] = offset;
 }
 
 /* ---- Encoding helpers (pure byte-writing, unchanged) ---- */
@@ -807,11 +792,11 @@ static void emit_cmovcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst,
 }
 
 static int32_t ensure_static_alloca_offset(x86_compile_ctx_t *ctx, const lr_inst_t *inst) {
-    if (inst->dest < ctx->num_static_alloca_offsets) {
-        int32_t off = ctx->static_alloca_offsets[inst->dest];
-        if (off != 0)
-            return off;
-    }
+    int32_t off = lr_target_lookup_static_alloca_offset(ctx->static_alloca_offsets,
+                                                        ctx->num_static_alloca_offsets,
+                                                        inst->dest);
+    if (off != 0)
+        return off;
 
     size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
     size_t elem_align = lr_type_align(inst->type);
@@ -820,22 +805,18 @@ static int32_t ensure_static_alloca_offset(x86_compile_ctx_t *ctx, const lr_inst
     ctx->stack_size = (uint32_t)align_up(ctx->stack_size, elem_align);
     ctx->stack_size += (uint32_t)elem_sz;
     {
-        int32_t off = -(int32_t)ctx->stack_size;
-        set_static_alloca_offset(ctx, inst->dest, off);
-        return off;
+        int32_t new_off = -(int32_t)ctx->stack_size;
+        lr_target_set_static_alloca_offset(ctx->arena,
+                                           &ctx->static_alloca_offsets,
+                                           &ctx->num_static_alloca_offsets,
+                                           inst->dest,
+                                           new_off);
+        return new_off;
     }
 }
 
-static void prescan_static_alloca_offsets(x86_compile_ctx_t *ctx, const lr_func_t *func) {
-    for (const lr_block_t *b = func->first_block; b; b = b->next) {
-        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (inst->op != LR_OP_ALLOCA)
-                continue;
-            if (!lr_target_alloca_uses_static_storage(inst))
-                continue;
-            (void)ensure_static_alloca_offset(ctx, inst);
-        }
-    }
+static int32_t ensure_static_alloca_offset_cb(void *ctx, const lr_inst_t *inst) {
+    return ensure_static_alloca_offset((x86_compile_ctx_t *)ctx, inst);
 }
 
 static void reserve_phi_dest_slots(x86_compile_ctx_t *ctx, lr_phi_copy_t **phi_copies,
@@ -883,7 +864,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     /* Build PHI copy lists */
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
     reserve_phi_dest_slots(&ctx, phi_copies, nb);
-    prescan_static_alloca_offsets(&ctx, func);
+    lr_target_prescan_static_alloca_offsets(func, &ctx,
+                                            ensure_static_alloca_offset_cb);
 
     /* Emit prologue and patch stack size once frame growth is complete. */
     size_t prologue_stack_patch_pos = emit_prologue(&ctx);
