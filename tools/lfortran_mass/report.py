@@ -83,9 +83,31 @@ def summarize(
     parse_ok = sum(1 for row in processed if row.get("parse_ok"))
     jit_attempted = sum(1 for row in processed if row.get("jit_attempted"))
     jit_ok = sum(1 for row in processed if row.get("jit_ok"))
+    runnable_selected = sum(1 for row in processed if row.get("run_requested"))
+    runnable_selected_executable = sum(
+        1 for row in processed if row.get("run_requested") and row.get("jit_ok")
+    )
     diff_attempted = sum(1 for row in processed if row.get("differential_attempted"))
+    diff_attempted_executable = sum(
+        1
+        for row in processed
+        if row.get("run_requested") and row.get("jit_ok") and row.get("differential_attempted")
+    )
     diff_ok = sum(1 for row in processed if row.get("differential_ok"))
     diff_match = sum(1 for row in processed if row.get("differential_match") is True)
+    diff_missing_case_ids: List[str] = []
+    for row in processed:
+        if not row.get("run_requested"):
+            continue
+        if not row.get("jit_ok"):
+            continue
+        if row.get("differential_attempted"):
+            continue
+        diff_missing_case_ids.append(str(row.get("case_id", "")))
+    diff_missing_attempts = len(diff_missing_case_ids)
+    differential_parity_ok = diff_missing_attempts == 0 and (
+        diff_attempted_executable == runnable_selected_executable
+    )
     diff_mismatch_buckets: Dict[str, int] = {}
     for row in processed:
         if row.get("differential_match") is not False:
@@ -141,9 +163,15 @@ def summarize(
         "parse_ok": parse_ok,
         "jit_attempted": jit_attempted,
         "jit_ok": jit_ok,
+        "runnable_selected": runnable_selected,
+        "runnable_selected_executable": runnable_selected_executable,
         "differential_attempted": diff_attempted,
+        "differential_attempted_executable": diff_attempted_executable,
         "differential_ok": diff_ok,
         "differential_match": diff_match,
+        "differential_missing_attempts": diff_missing_attempts,
+        "differential_missing_case_ids": diff_missing_case_ids,
+        "differential_parity_ok": differential_parity_ok,
         "differential_mismatch_total": diff_mismatch_total,
         "differential_mismatch_buckets": diff_mismatch_buckets,
         "classification_counts": counts,
@@ -161,7 +189,11 @@ def summarize(
         "mismatch_count": mismatch_count,
         "new_supported_regressions": new_supported_regressions,
         "regressed_case_ids": regressed_cases,
-        "gate_fail": mismatch_count > 0 or new_supported_regressions > 0,
+        "gate_fail": (
+            mismatch_count > 0
+            or new_supported_regressions > 0
+            or (not differential_parity_ok)
+        ),
     }
     return summary
 
@@ -179,10 +211,21 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     lines.append(f"- Liric parse passed: {summary['parse_ok']}")
     lines.append(f"- Liric JIT attempted: {summary['jit_attempted']}")
     lines.append(f"- Liric JIT passed: {summary['jit_ok']}")
+    lines.append(f"- Runnable selected: {summary['runnable_selected']}")
+    lines.append(
+        f"- Runnable selected executable: {summary['runnable_selected_executable']}"
+    )
     lines.append(f"- Differential attempted: {summary['differential_attempted']}")
+    lines.append(
+        f"- Differential attempted executable: {summary['differential_attempted_executable']}"
+    )
     lines.append(f"- Differential completed: {summary['differential_ok']}")
     lines.append(f"- Differential exact matches: {summary['differential_match']}")
     lines.append(f"- Differential mismatches: {summary['differential_mismatch_total']}")
+    lines.append(
+        f"- Differential missing attempts: {summary['differential_missing_attempts']}"
+    )
+    lines.append(f"- Differential parity ok: {summary['differential_parity_ok']}")
     lines.append(f"- Supported processed: {summary['supported_total']}")
     lines.append(f"- Supported passed: {summary['supported_pass']}")
     lines.append(f"- Mismatches: {summary['mismatch_count']}")
@@ -258,6 +301,14 @@ def write_summary_md(path: Path, summary: Dict[str, Any]) -> None:
     for key in sorted(mismatch_buckets.keys()):
         lines.append(f"- {key}: {mismatch_buckets[key]}")
 
+    missing_case_ids: List[str] = summary.get("differential_missing_case_ids", [])
+    if missing_case_ids:
+        lines.append("")
+        lines.append("## Differential Coverage Gaps")
+        lines.append("")
+        for case_id in missing_case_ids:
+            lines.append(f"- {case_id}")
+
     lines.append("")
     lines.append("## Unsupported Histogram")
     lines.append("")
@@ -306,6 +357,8 @@ def write_failures_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
 
 
 def gate_result(summary: Dict[str, Any]) -> Tuple[bool, str]:
+    if not summary.get("differential_parity_ok", True):
+        return False, "differential coverage regression detected"
     if summary.get("gate_fail", False):
         return False, "mismatch or new supported regressions detected"
     return True, "no mismatches and no new supported regressions"

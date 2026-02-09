@@ -99,7 +99,7 @@ jobs:
           if [[ -f "${PREV_SUMMARY}" ]]; then
             echo "| Metric | Previous | Current | Delta |" >> "${GITHUB_STEP_SUMMARY}"
             echo "|---|---:|---:|---:|" >> "${GITHUB_STEP_SUMMARY}"
-            for key in manifest_total emit_ok parse_ok jit_ok differential_match mismatch_count new_supported_regressions; do
+            for key in manifest_total emit_ok parse_ok jit_ok runnable_selected_executable differential_attempted_executable differential_missing_attempts differential_match mismatch_count new_supported_regressions; do
               prev=$(jq -r ".${key} // 0" "${PREV_SUMMARY}")
               cur=$(jq -r ".${key} // 0" "${CURRENT_SUMMARY}")
               delta=$((cur - prev))
