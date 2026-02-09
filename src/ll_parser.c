@@ -13,6 +13,7 @@
 #define VREG_INDEX_CAP 32768u
 #define BLOCK_INDEX_CAP 8192u
 #define GLOBAL_INDEX_CAP 8192u
+#define VREG_NUMERIC_CAP VREG_MAP_CAP
 
 typedef struct lr_parser {
     lr_lexer_t lex;
@@ -30,6 +31,9 @@ typedef struct lr_parser {
     int32_t vreg_index[VREG_INDEX_CAP];
     uint32_t vreg_used_slots[VREG_MAP_CAP];
     uint32_t vreg_used_slot_count;
+    uint32_t vreg_numeric[VREG_NUMERIC_CAP];
+    uint32_t vreg_numeric_used_slots[VREG_MAP_CAP];
+    uint32_t vreg_numeric_used_slot_count;
 
     /* block name -> id mapping for current function */
     struct { char *name; size_t name_len; uint32_t id; lr_block_t *block; uint32_t hash; } block_map[BLOCK_MAP_CAP];
@@ -130,14 +134,52 @@ static uint32_t hash_name(const char *name) {
     return hash_name_n(name, strlen(name));
 }
 
+static bool parse_u32_decimal_n(const char *s, size_t len, uint32_t *out) {
+    uint32_t v = 0;
+
+    if (len == 0)
+        return false;
+
+    for (size_t i = 0; i < len; i++) {
+        unsigned d = (unsigned)((unsigned char)s[i] - (unsigned char)'0');
+        if (d > 9u)
+            return false;
+        if (v > (UINT32_MAX - d) / 10u)
+            return false;
+        v = v * 10u + d;
+    }
+
+    *out = v;
+    return true;
+}
+
 static void clear_index(int32_t *index, size_t n) {
     for (size_t i = 0; i < n; i++)
         index[i] = -1;
 }
 
+static void clear_u32_map(uint32_t *map, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        map[i] = UINT32_MAX;
+}
+
 static void reset_used_index_slots(int32_t *index, const uint32_t *slots, uint32_t count) {
     for (uint32_t i = 0; i < count; i++)
         index[slots[i]] = -1;
+}
+
+static void reset_used_u32_slots(uint32_t *map, const uint32_t *slots, uint32_t count) {
+    for (uint32_t i = 0; i < count; i++)
+        map[slots[i]] = UINT32_MAX;
+}
+
+static void register_vreg_numeric_slot(lr_parser_t *p, uint32_t numeric, uint32_t id) {
+    if (numeric >= VREG_NUMERIC_CAP)
+        return;
+    if (p->vreg_numeric[numeric] == UINT32_MAX &&
+            p->vreg_numeric_used_slot_count < VREG_MAP_CAP)
+        p->vreg_numeric_used_slots[p->vreg_numeric_used_slot_count++] = numeric;
+    p->vreg_numeric[numeric] = id;
 }
 
 static uint32_t index_find_vreg_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
@@ -211,6 +253,7 @@ static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
     uint32_t hash;
     uint32_t idx;
     size_t name_len;
+    uint32_t numeric_name;
 
     if (p->vreg_map_count >= VREG_MAP_CAP) {
         error(p, "too many vregs in function (capacity %u)", VREG_MAP_CAP);
@@ -225,9 +268,32 @@ static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
     p->vreg_map[idx].id = id;
     p->vreg_map[idx].hash = hash;
     index_insert_vreg(p, idx);
+
+    if (parse_u32_decimal_n(name, name_len, &numeric_name))
+        register_vreg_numeric_slot(p, numeric_name, id);
+}
+
+static void register_vreg_number(lr_parser_t *p, uint32_t number, uint32_t id) {
+    char buf[16];
+    int len = snprintf(buf, sizeof(buf), "%u", number);
+    if (len <= 0 || (size_t)len >= sizeof(buf)) {
+        error(p, "vreg number formatting failed");
+        return;
+    }
+    register_vreg_name(p, lr_arena_strdup(p->arena, buf, (size_t)len), id);
 }
 
 static uint32_t resolve_vreg_n(lr_parser_t *p, const char *name, size_t name_len) {
+    uint32_t numeric_name;
+    if (parse_u32_decimal_n(name, name_len, &numeric_name) && numeric_name < VREG_NUMERIC_CAP) {
+        if (p->vreg_numeric[numeric_name] != UINT32_MAX)
+            return p->vreg_numeric[numeric_name];
+        /* auto-create common numeric vreg names without hash probe */
+        uint32_t id = lr_vreg_new(p->cur_func);
+        register_vreg_number(p, numeric_name, id);
+        return id;
+    }
+
     uint32_t hash = hash_name_n(name, name_len);
     uint32_t idx = index_find_vreg_n(p, name, name_len, hash);
     if (idx != UINT32_MAX)
@@ -1415,8 +1481,10 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     p->block_map_count = 0;
     reset_used_index_slots(p->vreg_index, p->vreg_used_slots, p->vreg_used_slot_count);
     reset_used_index_slots(p->block_index, p->block_used_slots, p->block_used_slot_count);
+    reset_used_u32_slots(p->vreg_numeric, p->vreg_numeric_used_slots, p->vreg_numeric_used_slot_count);
     p->vreg_used_slot_count = 0;
     p->block_used_slot_count = 0;
+    p->vreg_numeric_used_slot_count = 0;
 
     /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
@@ -1425,10 +1493,7 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             register_vreg_name(p, param_names[i], func->param_vregs[i]);
         } else {
             /* unnamed parameter: register numeric alias */
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%u", i);
-            register_vreg_name(p, lr_arena_strdup(p->arena, buf, strlen(buf)),
-                               func->param_vregs[i]);
+            register_vreg_number(p, i, func->param_vregs[i]);
         }
     }
 
@@ -1909,8 +1974,10 @@ lr_module_t *lr_parse_ll_text(const char *src, size_t len,
     clear_index(p.vreg_index, VREG_INDEX_CAP);
     clear_index(p.block_index, BLOCK_INDEX_CAP);
     clear_index(p.global_index, GLOBAL_INDEX_CAP);
+    clear_u32_map(p.vreg_numeric, VREG_NUMERIC_CAP);
     p.vreg_used_slot_count = 0;
     p.block_used_slot_count = 0;
+    p.vreg_numeric_used_slot_count = 0;
     next(&p);
 
     while (!check(&p, LR_TOK_EOF) && !p.had_error) {

@@ -60,6 +60,8 @@ int test_parser_function_pointer_type(void);
 int test_parser_quoted_label_names(void);
 int test_parser_boolean_literals(void);
 int test_parser_named_params_no_collision(void);
+int test_parser_unnamed_params_numeric_alias(void);
+int test_parser_high_numeric_vregs(void);
 int test_parser_cast_expr_in_aggregate_init(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
@@ -193,6 +195,8 @@ int main(void) {
     RUN_TEST(test_parser_quoted_label_names);
     RUN_TEST(test_parser_boolean_literals);
     RUN_TEST(test_parser_named_params_no_collision);
+    RUN_TEST(test_parser_unnamed_params_numeric_alias);
+    RUN_TEST(test_parser_high_numeric_vregs);
     RUN_TEST(test_parser_cast_expr_in_aggregate_init);
 
     fprintf(stderr, "\nCodegen tests:\n");
