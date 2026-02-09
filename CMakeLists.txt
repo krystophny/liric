@@ -169,6 +169,22 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
 
+add_test(
+    NAME bench_compat_check_freeze_artifacts
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_COMPAT_CHECK=$<TARGET_FILE:bench_compat_check>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_compat_check_freeze.cmake
+)
+
+add_test(
+    NAME bench_api_strict_mode_accounting
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_API=$<TARGET_FILE:bench_api>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_strict_mode.cmake
+)
+
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
