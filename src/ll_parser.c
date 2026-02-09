@@ -1765,18 +1765,25 @@ static void parse_global(lr_parser_t *p) {
             uint8_t *buf = lr_arena_array(p->arena, uint8_t, slen + 1);
             size_t out = 0;
             for (size_t i = 0; i < slen; i++) {
-                if (s[i] == '\\' && i + 2 < slen) {
-                    int hi = 0, lo = 0;
-                    char c1 = s[i + 1], c2 = s[i + 2];
-                    hi = (c1 >= '0' && c1 <= '9') ? c1 - '0' :
-                         (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10 :
-                         (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10 : -1;
-                    lo = (c2 >= '0' && c2 <= '9') ? c2 - '0' :
-                         (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10 :
-                         (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10 : -1;
-                    if (hi >= 0 && lo >= 0) {
-                        buf[out++] = (uint8_t)(hi * 16 + lo);
-                        i += 2;
+                if (s[i] == '\\' && i + 1 < slen) {
+                    if (i + 2 < slen) {
+                        int hi = 0, lo = 0;
+                        char c1 = s[i + 1], c2 = s[i + 2];
+                        hi = (c1 >= '0' && c1 <= '9') ? c1 - '0' :
+                             (c1 >= 'a' && c1 <= 'f') ? c1 - 'a' + 10 :
+                             (c1 >= 'A' && c1 <= 'F') ? c1 - 'A' + 10 : -1;
+                        lo = (c2 >= '0' && c2 <= '9') ? c2 - '0' :
+                             (c2 >= 'a' && c2 <= 'f') ? c2 - 'a' + 10 :
+                             (c2 >= 'A' && c2 <= 'F') ? c2 - 'A' + 10 : -1;
+                        if (hi >= 0 && lo >= 0) {
+                            buf[out++] = (uint8_t)(hi * 16 + lo);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    if (s[i + 1] == '\\') {
+                        buf[out++] = '\\';
+                        i++;
                         continue;
                     }
                 }
@@ -1835,6 +1842,14 @@ static void parse_global(lr_parser_t *p) {
             }
         }
     } else if (check(p, LR_TOK_NULL)) {
+        next(p);
+    } else if (check(p, LR_TOK_TRUE)) {
+        uint8_t *buf = lr_arena_array(p->arena, uint8_t, 1);
+        buf[0] = 1;
+        g->init_data = buf;
+        g->init_size = 1;
+        next(p);
+    } else if (check(p, LR_TOK_FALSE)) {
         next(p);
     } else if (check(p, LR_TOK_GETELEMENTPTR)) {
         lr_operand_t gep = parse_const_gep_operand(p, p->module->type_ptr);
