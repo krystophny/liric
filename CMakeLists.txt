@@ -139,6 +139,36 @@ target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
 add_test(NAME liric_tests COMMAND test_liric)
 
+add_test(
+    NAME liric_cli_emit_obj_opt_in
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:liric_bin>
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_test.o
+        -DMODE=emit
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
+)
+
+add_test(
+    NAME liric_cli_obj_disabled_by_default
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:liric_bin>
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_default_should_not_emit.o
+        -DMODE=default
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
+)
+
+add_test(
+    NAME liric_cli_emit_obj_jit_conflict
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:liric_bin>
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_conflict.o
+        -DMODE=conflict
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
+)
+
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
