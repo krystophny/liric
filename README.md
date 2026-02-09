@@ -50,37 +50,45 @@ Artifacts go to `/tmp/liric_bench/`.
 | lli matches LLVM output | 2165 | 95.5 |
 | Both liric and lli match | 2004 | 88.4 |
 
-## LL Benchmark: liric vs lli
+## API-First Performance Metrics
 
-1962 tests (the "both match" set), 3 iterations, CachyOS x86_64, February 2026.
+If your real workload uses the API (not `.ll` parsing), track these 3 metrics first:
 
-**Wall-clock** (full subprocess):
+1. **API build time**  
+Time spent in `lc_*` / builder calls to construct IR.
 
-| | Median | Aggregate | Faster |
-|---|---:|---:|---:|
-| liric | 10.1 ms | 20.5 s | 98.8% |
-| lli | 20.1 ms | 48.3 s | |
-| Speedup | 2.0x | 2.4x | |
+2. **JIT materialization time**  
+Time in `lr_jit_add_module()` until function pointers are ready.
 
-**Compile time** (in-process: parse + compile + symbol resolve):
+3. **Time-to-first-result**  
+`API build time + JIT materialization time + first function call`.
 
-| | Median | Aggregate | Faster |
-|---|---:|---:|---:|
-| liric | 0.80 ms | 2.6 s | 100% |
-| lli | 5.13 ms | 18.8 s | |
-| Speedup | 6.6x | 7.2x | |
+### Why these metrics
 
-## API Benchmark: lfortran+liric vs lfortran+LLVM
+- They map directly to API user latency.
+- Parser/lexer numbers are secondary diagnostics for API-heavy usage.
+- `bench_api` wall-clock is coarse-grained (10ms polling), so use it for broad trends, not micro-latency.
 
-159 tests (where both backends produce correct output), 1 iteration, CachyOS x86_64, February 2026.
+### Simple Baseline vs `lli` (reference)
 
-Wall-clock covers the full pipeline: compile + link/JIT + run.
+From `./build/bench_ll --iters 1` (1963 tests, February 2026):
 
-| | Median | Aggregate | Faster |
-|---|---:|---:|---:|
-| lfortran+liric | 40.2 ms | 6.5 s | 98.7% |
-| lfortran+LLVM | 60.3 ms | 9.0 s | |
-| Speedup | 1.5x | 1.4x | |
+- Wall-clock median: `liric 10.064 ms` vs `lli 20.119 ms` -> **2.00x faster**
+- JIT materialization median (fair internal): `liric 0.528 ms` vs `lli 5.100 ms` -> **9.88x faster**
+- Liric internal split median: parse `0.476 ms`, compile `0.054 ms`, lookup `0.0001 ms`
+
+Use this as a sanity baseline. For API product work, optimize and report the 3 API-first metrics above.
+
+### Secondary Diagnostics (Lexer/Parser, Not First-Class)
+
+Keep lexer/parser metrics separate and tracked, but treat them as second-order for API-first workloads.
+
+- LL parse median (`bench_ll` internal split): `0.476 ms`
+- Corpus parse share (`bench_corpus`): `~84%` of JIT time
+- Lexer hotspot share (callgrind profile): `lr_lexer_next ~46%`
+- Parser hotspot shares (callgrind profile): `parse_function_def ~4%`, `parse_type ~3%`
+
+Use these to detect frontend regressions and guide LL-text ingestion work, not as primary API latency KPIs.
 
 ## License
 
