@@ -1,5 +1,4 @@
 #include "ll_lexer.h"
-#include <ctype.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -7,8 +6,22 @@ void lr_lexer_init(lr_lexer_t *lex, const char *src, size_t len) {
     lex->src = src;
     lex->src_len = len;
     lex->pos = 0;
-    lex->line = 1;
-    lex->col = 1;
+}
+
+void lr_lexer_compute_loc(const lr_lexer_t *lex, const char *pos,
+                          uint32_t *out_line, uint32_t *out_col) {
+    const char *src = lex->src;
+    const char *end = (pos <= src + lex->src_len) ? pos : src + lex->src_len;
+    uint32_t line = 1;
+    const char *line_start = src;
+    for (const char *p = src; p < end; p++) {
+        if (*p == '\n') {
+            line++;
+            line_start = p + 1;
+        }
+    }
+    *out_line = line;
+    *out_col = (uint32_t)(end - line_start) + 1;
 }
 
 static inline bool is_digit_ascii(char c) {
@@ -26,38 +39,38 @@ static inline bool is_ident_char(char c) {
     return is_alpha_ascii(c) || is_digit_ascii(c) || c == '_' || c == '.' || c == '$';
 }
 
+static inline bool is_hex_digit(char c) {
+    unsigned char u = (unsigned char)c;
+    if ((unsigned)(u - (unsigned char)'0') < 10u) return true;
+    u = (unsigned char)(u | 32u);
+    return (unsigned)(u - (unsigned char)'a') < 6u;
+}
+
+static inline int hex_val(char c) {
+    unsigned char u = (unsigned char)c;
+    if ((unsigned)(u - (unsigned char)'0') < 10u) return u - '0';
+    u = (unsigned char)(u | 32u);
+    return u - 'a' + 10;
+}
+
 static void skip_whitespace_and_comments(lr_lexer_t *lex) {
     const char *src = lex->src;
     size_t pos = lex->pos;
     size_t n = lex->src_len;
-    uint32_t line = lex->line;
-    uint32_t col = lex->col;
 
     while (pos < n) {
         char c = src[pos];
         if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             pos++;
-            if (c == '\n') {
-                line++;
-                col = 1;
-            } else {
-                col++;
-            }
         } else if (c == ';') {
-            pos++;
-            col++;
-            while (pos < n && src[pos] != '\n') {
-                pos++;
-                col++;
-            }
+            const char *nl = memchr(src + pos, '\n', n - pos);
+            pos = nl ? (size_t)(nl - src) : n;
         } else {
             break;
         }
     }
 
     lex->pos = pos;
-    lex->line = line;
-    lex->col = col;
 }
 
 typedef struct { const char *name; lr_tok_t tok; } keyword_t;
@@ -502,103 +515,92 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
     }
     return LR_TOK_EOF;
 }
-static lr_token_t make_token(lr_tok_t kind, const char *start, size_t len,
-                             uint32_t line, uint32_t col) {
+
+static lr_token_t make_token(lr_tok_t kind, const char *start, size_t len) {
     lr_token_t t = {0};
     t.kind = kind;
     t.start = start;
     t.len = len;
-    t.line = line;
-    t.col = col;
     return t;
 }
 
 lr_token_t lr_lexer_next(lr_lexer_t *lex) {
     skip_whitespace_and_comments(lex);
     if (lex->pos >= lex->src_len)
-        return make_token(LR_TOK_EOF, lex->src + lex->pos, 0, lex->line, lex->col);
+        return make_token(LR_TOK_EOF, lex->src + lex->pos, 0);
 
     const char *src = lex->src;
     size_t n = lex->src_len;
     size_t pos = lex->pos;
-    uint32_t line = lex->line;
-    uint32_t col = lex->col;
     size_t start_pos = pos;
     const char *start = src + start_pos;
-    uint32_t start_line = line;
-    uint32_t start_col = col;
     char c = src[pos++];
-    col++;
     lr_token_t tok = {0};
 
     switch (c) {
     case '(':
-        tok = make_token(LR_TOK_LPAREN, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_LPAREN, start, 1);
         break;
     case ')':
-        tok = make_token(LR_TOK_RPAREN, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_RPAREN, start, 1);
         break;
     case '{':
-        tok = make_token(LR_TOK_LBRACE, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_LBRACE, start, 1);
         break;
     case '}':
-        tok = make_token(LR_TOK_RBRACE, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_RBRACE, start, 1);
         break;
     case '[':
-        tok = make_token(LR_TOK_LBRACKET, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_LBRACKET, start, 1);
         break;
     case ']':
-        tok = make_token(LR_TOK_RBRACKET, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_RBRACKET, start, 1);
         break;
     case ',':
-        tok = make_token(LR_TOK_COMMA, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_COMMA, start, 1);
         break;
     case '=':
-        tok = make_token(LR_TOK_EQUALS, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_EQUALS, start, 1);
         break;
     case '*':
-        tok = make_token(LR_TOK_STAR, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_STAR, start, 1);
         break;
     case ':':
-        tok = make_token(LR_TOK_COLON, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_COLON, start, 1);
         break;
     case '<':
-        tok = make_token(LR_TOK_LANGLE, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_LANGLE, start, 1);
         break;
     case '>':
-        tok = make_token(LR_TOK_RANGLE, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_RANGLE, start, 1);
         break;
     case '.':
         if (pos + 1 < n && src[pos] == '.' && src[pos + 1] == '.') {
             pos += 2;
-            col += 2;
-            tok = make_token(LR_TOK_DOTDOTDOT, start, 3, start_line, start_col);
+            tok = make_token(LR_TOK_DOTDOTDOT, start, 3);
         } else if (pos < n && is_ident_char(src[pos])) {
             size_t run = pos;
             while (run < n && is_ident_char(src[run])) run++;
-            col += (uint32_t)(run - pos);
             pos = run;
-            tok = make_token(LR_TOK_LOCAL_ID, start, pos - start_pos, start_line, start_col);
+            tok = make_token(LR_TOK_LOCAL_ID, start, pos - start_pos);
         } else {
-            tok = make_token(LR_TOK_ERROR, start, 1, start_line, start_col);
+            tok = make_token(LR_TOK_ERROR, start, 1);
         }
         break;
 
     case '!': {
         size_t run = pos;
         while (run < n && is_ident_char(src[run])) run++;
-        col += (uint32_t)(run - pos);
         pos = run;
-        tok = make_token(LR_TOK_METADATA_ID, start, pos - start_pos, start_line, start_col);
+        tok = make_token(LR_TOK_METADATA_ID, start, pos - start_pos);
         break;
     }
 
     case '#': {
         size_t run = pos;
         while (run < n && is_digit_ascii(src[run])) run++;
-        col += (uint32_t)(run - pos);
         pos = run;
-        tok = make_token(LR_TOK_ATTR_GROUP, start, pos - start_pos, start_line, start_col);
+        tok = make_token(LR_TOK_ATTR_GROUP, start, pos - start_pos);
         break;
     }
 
@@ -606,64 +608,37 @@ lr_token_t lr_lexer_next(lr_lexer_t *lex) {
     case '@': {
         if (pos < n && src[pos] == '"') {
             pos++;
-            col++;
             while (pos < n && src[pos] != '"') {
-                if (src[pos] == '\\' && pos + 1 < n) {
+                if (src[pos] == '\\' && pos + 1 < n)
                     pos++;
-                    col++;
-                }
-                if (src[pos] == '\n') {
-                    pos++;
-                    line++;
-                    col = 1;
-                } else {
-                    pos++;
-                    col++;
-                }
-            }
-            if (pos < n) {
                 pos++;
-                col++;
             }
+            if (pos < n)
+                pos++;
         } else {
             size_t run = pos;
             while (run < n && is_ident_char(src[run])) run++;
-            col += (uint32_t)(run - pos);
             pos = run;
         }
         tok = make_token(c == '%' ? LR_TOK_LOCAL_ID : LR_TOK_GLOBAL_ID,
-                         start, pos - start_pos, start_line, start_col);
+                         start, pos - start_pos);
         break;
     }
 
     case '"':
     case 'c': {
-        if (c == 'c' && !(pos < n && src[pos] == '"')) {
+        if (c == 'c' && !(pos < n && src[pos] == '"'))
             goto ident;
-        }
-        if (c == 'c') {
+        if (c == 'c')
             pos++;
-            col++;
-        }
         while (pos < n && src[pos] != '"') {
-            if (src[pos] == '\\' && pos + 1 < n) {
+            if (src[pos] == '\\' && pos + 1 < n)
                 pos++;
-                col++;
-            }
-            if (src[pos] == '\n') {
-                pos++;
-                line++;
-                col = 1;
-            } else {
-                pos++;
-                col++;
-            }
-        }
-        if (pos < n) {
             pos++;
-            col++;
         }
-        tok = make_token(LR_TOK_STRING_LIT, start, pos - start_pos, start_line, start_col);
+        if (pos < n)
+            pos++;
+        tok = make_token(LR_TOK_STRING_LIT, start, pos - start_pos);
         break;
     }
 
@@ -671,27 +646,22 @@ lr_token_t lr_lexer_next(lr_lexer_t *lex) {
         if (c == '-' || is_digit_ascii(c)) {
             bool is_neg = (c == '-');
             if (is_neg && !(pos < n && is_digit_ascii(src[pos]))) {
-                tok = make_token(LR_TOK_ERROR, start, 1, start_line, start_col);
+                tok = make_token(LR_TOK_ERROR, start, 1);
                 break;
             }
 
             if (c == '0' && pos < n && (src[pos] == 'x' || src[pos] == 'X')) {
                 size_t run = pos + 1;
-                while (run < n && isxdigit((unsigned char)src[run])) run++;
-                col += (uint32_t)(run - pos);
+                while (run < n && is_hex_digit(src[run])) run++;
                 pos = run;
-                tok = make_token(LR_TOK_FLOAT_LIT, start, pos - start_pos, start_line, start_col);
+                tok = make_token(LR_TOK_FLOAT_LIT, start, pos - start_pos);
                 {
-                    size_t len = tok.len;
-                    char buf[32];
-                    if (len >= 2 && len - 2 < sizeof(buf)) {
-                        memcpy(buf, start + 2, len - 2);
-                        buf[len - 2] = '\0';
-                        uint64_t bits = strtoull(buf, NULL, 16);
-                        double d;
-                        memcpy(&d, &bits, sizeof(d));
-                        tok.float_val = d;
-                    }
+                    uint64_t bits = 0;
+                    for (size_t i = start_pos + 2; i < pos; i++)
+                        bits = (bits << 4) | (uint64_t)hex_val(src[i]);
+                    double d;
+                    memcpy(&d, &bits, sizeof(d));
+                    tok.float_val = d;
                 }
                 break;
             }
@@ -699,32 +669,23 @@ lr_token_t lr_lexer_next(lr_lexer_t *lex) {
             {
                 size_t run = pos;
                 while (run < n && is_digit_ascii(src[run])) run++;
-                col += (uint32_t)(run - pos);
                 pos = run;
             }
 
             if (pos < n && (src[pos] == '.' || src[pos] == 'e' || src[pos] == 'E')) {
                 if (pos < n && src[pos] == '.') {
                     pos++;
-                    col++;
-                    while (pos < n && is_digit_ascii(src[pos])) {
+                    while (pos < n && is_digit_ascii(src[pos]))
                         pos++;
-                        col++;
-                    }
                 }
                 if (pos < n && (src[pos] == 'e' || src[pos] == 'E')) {
                     pos++;
-                    col++;
-                    if (pos < n && (src[pos] == '+' || src[pos] == '-')) {
+                    if (pos < n && (src[pos] == '+' || src[pos] == '-'))
                         pos++;
-                        col++;
-                    }
-                    while (pos < n && is_digit_ascii(src[pos])) {
+                    while (pos < n && is_digit_ascii(src[pos]))
                         pos++;
-                        col++;
-                    }
                 }
-                tok = make_token(LR_TOK_FLOAT_LIT, start, pos - start_pos, start_line, start_col);
+                tok = make_token(LR_TOK_FLOAT_LIT, start, pos - start_pos);
                 {
                     size_t len = tok.len;
                     char buf[64];
@@ -735,15 +696,13 @@ lr_token_t lr_lexer_next(lr_lexer_t *lex) {
                     }
                 }
             } else {
-                tok = make_token(LR_TOK_INT_LIT, start, pos - start_pos, start_line, start_col);
+                tok = make_token(LR_TOK_INT_LIT, start, pos - start_pos);
                 {
-                    size_t len = tok.len;
-                    char buf[32];
-                    if (len < sizeof(buf)) {
-                        memcpy(buf, start, len);
-                        buf[len] = '\0';
-                        tok.int_val = strtoll(buf, NULL, 10);
-                    }
+                    int64_t val = 0;
+                    size_t i = is_neg ? start_pos + 1 : start_pos;
+                    while (i < pos)
+                        val = val * 10 + (src[i++] - '0');
+                    tok.int_val = is_neg ? -val : val;
                 }
             }
             break;
@@ -752,23 +711,20 @@ ident:
         if (is_alpha_ascii(c) || c == '_') {
             size_t run = pos;
             while (run < n && is_ident_char(src[run])) run++;
-            col += (uint32_t)(run - pos);
             pos = run;
             {
                 size_t len = pos - start_pos;
                 lr_tok_t kw = lookup_keyword(start, len);
                 tok = make_token(kw != LR_TOK_EOF ? kw : LR_TOK_LOCAL_ID,
-                                 start, len, start_line, start_col);
+                                 start, len);
             }
             break;
         }
-        tok = make_token(LR_TOK_ERROR, start, 1, start_line, start_col);
+        tok = make_token(LR_TOK_ERROR, start, 1);
         break;
     }
 
     lex->pos = pos;
-    lex->line = line;
-    lex->col = col;
     return tok;
 }
 
