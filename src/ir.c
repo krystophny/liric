@@ -454,10 +454,16 @@ bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
     return true;
 }
 
-lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
-    lr_phi_copy_t **copies = lr_arena_array(arena, lr_phi_copy_t *, func->num_blocks);
-    for (uint32_t i = 0; i < func->num_blocks; i++)
-        copies[i] = NULL;
+lr_block_phi_copies_t *lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
+    lr_block_phi_copies_t *blocks =
+        lr_arena_array(arena, lr_block_phi_copies_t, func->num_blocks);
+    uint32_t *fill_pos = lr_arena_array(arena, uint32_t, func->num_blocks);
+
+    for (uint32_t i = 0; i < func->num_blocks; i++) {
+        blocks[i].copies = NULL;
+        blocks[i].count = 0;
+        fill_pos[i] = 0;
+    }
 
     if (func->block_array) {
         for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
@@ -470,15 +476,35 @@ lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
                     uint32_t pred_id = inst->operands[i + 1].block_id;
                     if (pred_id >= func->num_blocks)
                         continue;
-                    lr_phi_copy_t *pc = lr_arena_new(arena, lr_phi_copy_t);
-                    pc->dest_vreg = inst->dest;
-                    pc->src_op = inst->operands[i];
-                    pc->next = copies[pred_id];
-                    copies[pred_id] = pc;
+                    blocks[pred_id].count++;
                 }
             }
         }
-        return copies;
+
+        for (uint32_t i = 0; i < func->num_blocks; i++) {
+            if (blocks[i].count == 0)
+                continue;
+            blocks[i].copies = lr_arena_array(arena, lr_phi_copy_t, blocks[i].count);
+            fill_pos[i] = blocks[i].count;
+        }
+
+        for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+            lr_block_t *b = func->block_array[bi];
+            for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+                lr_inst_t *inst = b->inst_array[ii];
+                if (inst->op != LR_OP_PHI)
+                    continue;
+                for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+                    uint32_t pred_id = inst->operands[i + 1].block_id;
+                    if (pred_id >= func->num_blocks)
+                        continue;
+                    uint32_t slot = --fill_pos[pred_id];
+                    blocks[pred_id].copies[slot].dest_vreg = inst->dest;
+                    blocks[pred_id].copies[slot].src_op = inst->operands[i];
+                }
+            }
+        }
+        return blocks;
     }
 
     for (lr_block_t *b = func->first_block; b; b = b->next) {
@@ -489,15 +515,34 @@ lr_phi_copy_t **lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
                 uint32_t pred_id = inst->operands[i + 1].block_id;
                 if (pred_id >= func->num_blocks)
                     continue;
-                lr_phi_copy_t *pc = lr_arena_new(arena, lr_phi_copy_t);
-                pc->dest_vreg = inst->dest;
-                pc->src_op = inst->operands[i];
-                pc->next = copies[pred_id];
-                copies[pred_id] = pc;
+                blocks[pred_id].count++;
             }
         }
     }
-    return copies;
+
+    for (uint32_t i = 0; i < func->num_blocks; i++) {
+        if (blocks[i].count == 0)
+            continue;
+        blocks[i].copies = lr_arena_array(arena, lr_phi_copy_t, blocks[i].count);
+        fill_pos[i] = blocks[i].count;
+    }
+
+    for (lr_block_t *b = func->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op != LR_OP_PHI)
+                continue;
+            for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+                uint32_t pred_id = inst->operands[i + 1].block_id;
+                if (pred_id >= func->num_blocks)
+                    continue;
+                uint32_t slot = --fill_pos[pred_id];
+                blocks[pred_id].copies[slot].dest_vreg = inst->dest;
+                blocks[pred_id].copies[slot].src_op = inst->operands[i];
+            }
+        }
+    }
+
+    return blocks;
 }
 
 uint8_t lr_gep_index_signext_bytes(const lr_operand_t *idx_op) {

@@ -155,3 +155,81 @@ int test_ir_finalize_builds_dense_arrays(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *mod = lr_module_create(arena);
+    lr_func_t *func = lr_func_create(mod, "phi_copies", mod->type_i32, NULL, 0, false);
+    lr_block_t *entry = lr_block_create(func, arena, "entry");
+    lr_block_t *left = lr_block_create(func, arena, "left");
+    lr_block_t *right = lr_block_create(func, arena, "right");
+    lr_block_t *merge = lr_block_create(func, arena, "merge");
+
+    lr_operand_t condbr_ops[3] = {
+        lr_op_imm_i64(1, mod->type_i1),
+        lr_op_block(left->id),
+        lr_op_block(right->id),
+    };
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_CONDBR, mod->type_void, 0, condbr_ops, 3));
+
+    lr_operand_t left_br_ops[1] = { lr_op_block(merge->id) };
+    lr_block_append(left, lr_inst_create(arena, LR_OP_BR, mod->type_void, 0, left_br_ops, 1));
+
+    lr_operand_t right_br_ops[1] = { lr_op_block(merge->id) };
+    lr_block_append(right, lr_inst_create(arena, LR_OP_BR, mod->type_void, 0, right_br_ops, 1));
+
+    uint32_t phi0_dest = lr_vreg_new(func);
+    lr_operand_t phi0_ops[4] = {
+        lr_op_imm_i64(11, mod->type_i32), lr_op_block(left->id),
+        lr_op_imm_i64(21, mod->type_i32), lr_op_block(right->id),
+    };
+    lr_block_append(merge, lr_inst_create(arena, LR_OP_PHI, mod->type_i32, phi0_dest, phi0_ops, 4));
+
+    uint32_t phi1_dest = lr_vreg_new(func);
+    lr_operand_t phi1_ops[4] = {
+        lr_op_imm_i64(12, mod->type_i32), lr_op_block(left->id),
+        lr_op_imm_i64(22, mod->type_i32), lr_op_block(right->id),
+    };
+    lr_block_append(merge, lr_inst_create(arena, LR_OP_PHI, mod->type_i32, phi1_dest, phi1_ops, 4));
+
+    lr_operand_t ret_ops[1] = { lr_op_vreg(phi1_dest, mod->type_i32) };
+    lr_block_append(merge, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_ops, 1));
+
+    TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize succeeds");
+
+    lr_block_phi_copies_t *copies = lr_build_phi_copies(arena, func);
+    TEST_ASSERT(copies != NULL, "phi copies built");
+    TEST_ASSERT_EQ(copies[entry->id].count, 0, "entry has no incoming phi copies");
+    TEST_ASSERT_EQ(copies[merge->id].count, 0, "merge has no outgoing phi copies");
+    TEST_ASSERT_EQ(copies[left->id].count, 2, "left predecessor has two phi copies");
+    TEST_ASSERT_EQ(copies[right->id].count, 2, "right predecessor has two phi copies");
+
+    TEST_ASSERT_EQ(copies[left->id].copies[0].dest_vreg, phi1_dest,
+                   "left copy order matches previous linked-list emission");
+    TEST_ASSERT_EQ(copies[left->id].copies[1].dest_vreg, phi0_dest,
+                   "left copy second element matches previous order");
+    TEST_ASSERT_EQ(copies[left->id].copies[0].src_op.kind, LR_VAL_IMM_I64,
+                   "left first src is immediate");
+    TEST_ASSERT_EQ(copies[left->id].copies[1].src_op.kind, LR_VAL_IMM_I64,
+                   "left second src is immediate");
+    TEST_ASSERT_EQ(copies[left->id].copies[0].src_op.imm_i64, 12,
+                   "left first src value preserved");
+    TEST_ASSERT_EQ(copies[left->id].copies[1].src_op.imm_i64, 11,
+                   "left second src value preserved");
+
+    TEST_ASSERT_EQ(copies[right->id].copies[0].dest_vreg, phi1_dest,
+                   "right copy order matches previous linked-list emission");
+    TEST_ASSERT_EQ(copies[right->id].copies[1].dest_vreg, phi0_dest,
+                   "right copy second element matches previous order");
+    TEST_ASSERT_EQ(copies[right->id].copies[0].src_op.kind, LR_VAL_IMM_I64,
+                   "right first src is immediate");
+    TEST_ASSERT_EQ(copies[right->id].copies[1].src_op.kind, LR_VAL_IMM_I64,
+                   "right second src is immediate");
+    TEST_ASSERT_EQ(copies[right->id].copies[0].src_op.imm_i64, 22,
+                   "right first src value preserved");
+    TEST_ASSERT_EQ(copies[right->id].copies[1].src_op.imm_i64, 21,
+                   "right second src value preserved");
+
+    lr_arena_destroy(arena);
+    return 0;
+}

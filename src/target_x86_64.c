@@ -91,7 +91,7 @@ static void count_vreg_use(uint32_t *counts, uint32_t num_counts,
 }
 
 static uint32_t *build_vreg_use_counts(lr_arena_t *arena, lr_func_t *func,
-                                       lr_phi_copy_t **phi_copies) {
+                                       lr_block_phi_copies_t *phi_copies) {
     if (!arena || !func || func->next_vreg == 0)
         return NULL;
 
@@ -112,8 +112,9 @@ static uint32_t *build_vreg_use_counts(lr_arena_t *arena, lr_func_t *func,
 
     if (phi_copies) {
         for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-            for (lr_phi_copy_t *pc = phi_copies[bi]; pc; pc = pc->next)
-                count_vreg_use(counts, func->next_vreg, &pc->src_op);
+            for (uint32_t ci = 0; ci < phi_copies[bi].count; ci++)
+                count_vreg_use(counts, func->next_vreg,
+                               &phi_copies[bi].copies[ci].src_op);
         }
     }
 
@@ -684,10 +685,10 @@ static void emit_epilogue(x86_compile_ctx_t *ctx) {
 }
 
 /* Emit PHI copies for the current block as predecessor */
-static void emit_phi_copies(x86_compile_ctx_t *ctx, lr_phi_copy_t *copies) {
-    for (lr_phi_copy_t *pc = copies; pc; pc = pc->next) {
-        emit_load_operand(ctx, &pc->src_op, X86_RAX);
-        emit_store_slot(ctx, pc->dest_vreg, X86_RAX);
+static void emit_phi_copies(x86_compile_ctx_t *ctx, const lr_block_phi_copies_t *copies) {
+    for (uint32_t i = 0; i < copies->count; i++) {
+        emit_load_operand(ctx, &copies->copies[i].src_op, X86_RAX);
+        emit_store_slot(ctx, copies->copies[i].dest_vreg, X86_RAX);
     }
 }
 
@@ -985,11 +986,11 @@ static int32_t ensure_static_alloca_offset_cb(void *ctx, const lr_inst_t *inst) 
     return ensure_static_alloca_offset((x86_compile_ctx_t *)ctx, inst);
 }
 
-static void reserve_phi_dest_slots(x86_compile_ctx_t *ctx, lr_phi_copy_t **phi_copies,
+static void reserve_phi_dest_slots(x86_compile_ctx_t *ctx, lr_block_phi_copies_t *phi_copies,
                                    uint32_t num_blocks) {
     for (uint32_t bi = 0; bi < num_blocks; bi++) {
-        for (lr_phi_copy_t *pc = phi_copies[bi]; pc; pc = pc->next)
-            alloc_slot(ctx, pc->dest_vreg, 8, 8);
+        for (uint32_t ci = 0; ci < phi_copies[bi].count; ci++)
+            alloc_slot(ctx, phi_copies[bi].copies[ci].dest_vreg, 8, 8);
     }
 }
 
@@ -1038,8 +1039,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     attach_obj_symbol_meta_cache(&ctx);
 
-    /* Build PHI copy lists */
-    lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
+    /* Build PHI copy arrays keyed by predecessor block id. */
+    lr_block_phi_copies_t *phi_copies = lr_build_phi_copies(ctx.arena, func);
     if (!phi_copies)
         return -1;
     ctx.vreg_use_counts = build_vreg_use_counts(ctx.arena, func, phi_copies);
@@ -1074,13 +1075,13 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             ctx.current_inst_index = ii;
             switch (inst->op) {
             case LR_OP_RET: {
-                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_phi_copies(&ctx, &phi_copies[bi]);
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
                 emit_epilogue(&ctx);
                 break;
             }
             case LR_OP_RET_VOID: {
-                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_phi_copies(&ctx, &phi_copies[bi]);
                 emit_epilogue(&ctx);
                 break;
             }
@@ -1194,13 +1195,13 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 break;
             }
             case LR_OP_BR: {
-                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_phi_copies(&ctx, &phi_copies[bi]);
                 uint32_t target_id = inst->operands[0].block_id;
                 emit_jmp(&ctx, target_id);
                 break;
             }
             case LR_OP_CONDBR: {
-                emit_phi_copies(&ctx, phi_copies[bi]);
+                emit_phi_copies(&ctx, &phi_copies[bi]);
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
                 encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x85,
                               X86_RAX, X86_RAX, 1);
