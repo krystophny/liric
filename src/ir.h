@@ -122,6 +122,8 @@ typedef struct lr_inst {
         uint32_t *indices;
     };
     uint32_t num_indices;
+    bool call_external_abi;
+    bool call_vararg;
     struct lr_inst *next;
 } lr_inst_t;
 
