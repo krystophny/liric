@@ -345,6 +345,84 @@ int test_jit_forward_typed_call(void) {
     return 0;
 }
 
+int test_jit_forward_call_chain(void) {
+    enum { CHAIN_LEN = 64 };
+    char src[32768];
+    size_t pos = 0;
+
+    for (int i = 0; i < CHAIN_LEN; i++) {
+        TEST_ASSERT(append_ir(src, sizeof(src), &pos,
+                              "define i32 @chain_%d() {\n"
+                              "entry:\n"
+                              "  %%v = call i32 @chain_%d()\n"
+                              "  %%r = add i32 %%v, 1\n"
+                              "  ret i32 %%r\n"
+                              "}\n",
+                              i, i + 1) == 0,
+                    "emit forward chain function");
+    }
+    TEST_ASSERT(append_ir(src, sizeof(src), &pos,
+                          "define i32 @chain_%d() {\n"
+                          "entry:\n"
+                          "  ret i32 0\n"
+                          "}\n",
+                          CHAIN_LEN) == 0,
+                "emit chain leaf");
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "chain_0");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), CHAIN_LEN, "forward chain computes expected depth");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_self_recursive_call(void) {
+    const char *src =
+        "define i32 @sum_to_n(i32 %n) {\n"
+        "entry:\n"
+        "  %is_zero = icmp eq i32 %n, 0\n"
+        "  br i1 %is_zero, label %base, label %rec\n"
+        "base:\n"
+        "  ret i32 0\n"
+        "rec:\n"
+        "  %n1 = sub i32 %n, 1\n"
+        "  %tail = call i32 @sum_to_n(i32 %n1)\n"
+        "  %sum = add i32 %n, %tail\n"
+        "  ret i32 %sum\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(int);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "sum_to_n");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(0), 0, "sum_to_n(0) == 0");
+    TEST_ASSERT_EQ(fn(1), 1, "sum_to_n(1) == 1");
+    TEST_ASSERT_EQ(fn(5), 15, "sum_to_n(5) == 15");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_fadd_double_bits(void) {
     const char *src =
         "define double @fadd64(double %a, double %b) {\n"
