@@ -586,9 +586,14 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                     }
                 }
 
-                void *addr = lookup_symbol(j, name);
-                if (!addr && strcmp(name, f->name) == 0)
+                void *addr = NULL;
+                if (strcmp(name, f->name) == 0) {
+                    /* Always bind self-recursive references to the function
+                       being compiled, even if an external symbol exists. */
                     addr = self_addr;
+                } else {
+                    addr = lookup_symbol(j, name);
+                }
                 if (!addr) {
                     if (missing_symbol)
                         *missing_symbol = name;
