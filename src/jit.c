@@ -57,132 +57,18 @@ static uint32_t symbol_hash(const char *name) {
     return h;
 }
 
-static uint64_t llvm_fabs_f32_bits(uint64_t x_bits) {
-    uint32_t in_bits = (uint32_t)x_bits;
-    float x = 0.0f;
-    float out = 0.0f;
-    uint32_t out_bits = 0;
-    memcpy(&x, &in_bits, sizeof(in_bits));
-    out = fabsf(x);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return (uint64_t)out_bits;
-}
-
-static uint64_t llvm_fabs_f64_bits(uint64_t x_bits) {
-    double x = 0.0;
-    double out = 0.0;
-    uint64_t out_bits = 0;
-    memcpy(&x, &x_bits, sizeof(x_bits));
-    out = fabs(x);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return out_bits;
-}
-
-static uint64_t llvm_sqrt_f32_bits(uint64_t x_bits) {
-    uint32_t in_bits = (uint32_t)x_bits;
-    float x = 0.0f;
-    float out = 0.0f;
-    uint32_t out_bits = 0;
-    memcpy(&x, &in_bits, sizeof(in_bits));
-    out = sqrtf(x);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return (uint64_t)out_bits;
-}
-
-static uint64_t llvm_exp_f32_bits(uint64_t x_bits) {
-    uint32_t in_bits = (uint32_t)x_bits;
-    float x = 0.0f;
-    float out = 0.0f;
-    uint32_t out_bits = 0;
-    memcpy(&x, &in_bits, sizeof(in_bits));
-    out = expf(x);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return (uint64_t)out_bits;
-}
-
-static uint64_t llvm_copysign_f32_bits(uint64_t x_bits, uint64_t y_bits) {
-    uint32_t in_x_bits = (uint32_t)x_bits;
-    uint32_t in_y_bits = (uint32_t)y_bits;
-    float x = 0.0f;
-    float y = 0.0f;
-    float out = 0.0f;
-    uint32_t out_bits = 0;
-    memcpy(&x, &in_x_bits, sizeof(in_x_bits));
-    memcpy(&y, &in_y_bits, sizeof(in_y_bits));
-    out = copysignf(x, y);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return (uint64_t)out_bits;
-}
-
-static uint64_t llvm_pow_f32_bits(uint64_t x_bits, uint64_t y_bits) {
-    uint32_t in_x = (uint32_t)x_bits, in_y = (uint32_t)y_bits;
-    float x = 0.0f, y = 0.0f, out = 0.0f;
-    uint32_t out_bits = 0;
-    memcpy(&x, &in_x, sizeof(in_x));
-    memcpy(&y, &in_y, sizeof(in_y));
-    out = powf(x, y);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return (uint64_t)out_bits;
-}
-
-static uint64_t llvm_sqrt_f64_bits(uint64_t x_bits) {
-    double x = 0.0, out = 0.0;
-    uint64_t out_bits = 0;
-    memcpy(&x, &x_bits, sizeof(x_bits));
-    out = sqrt(x);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return out_bits;
-}
-
-static uint64_t llvm_exp_f64_bits(uint64_t x_bits) {
-    double x = 0.0, out = 0.0;
-    uint64_t out_bits = 0;
-    memcpy(&x, &x_bits, sizeof(x_bits));
-    out = exp(x);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return out_bits;
-}
-
-static uint64_t llvm_pow_f64_bits(uint64_t x_bits, uint64_t y_bits) {
-    double x = 0.0, y = 0.0, out = 0.0;
-    uint64_t out_bits = 0;
-    memcpy(&x, &x_bits, sizeof(x_bits));
-    memcpy(&y, &y_bits, sizeof(y_bits));
-    out = pow(x, y);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return out_bits;
-}
-
-static uint64_t llvm_copysign_f64_bits(uint64_t x_bits, uint64_t y_bits) {
-    double x = 0.0, y = 0.0, out = 0.0;
-    uint64_t out_bits = 0;
-    memcpy(&x, &x_bits, sizeof(x_bits));
-    memcpy(&y, &y_bits, sizeof(y_bits));
-    out = copysign(x, y);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return out_bits;
-}
-
-static uint64_t llvm_powi_f32_bits(uint64_t x_bits, uint64_t e_bits) {
-    uint32_t in_bits = (uint32_t)x_bits;
-    int32_t e = (int32_t)e_bits;
-    float x = 0.0f, out = 0.0f;
-    uint32_t out_bits = 0;
-    memcpy(&x, &in_bits, sizeof(in_bits));
-    out = powf(x, (float)e);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return (uint64_t)out_bits;
-}
-
-static uint64_t llvm_powi_f64_bits(uint64_t x_bits, uint64_t e_bits) {
-    double x = 0.0, out = 0.0;
-    uint64_t out_bits = 0;
-    int32_t e = (int32_t)e_bits;
-    memcpy(&x, &x_bits, sizeof(x_bits));
-    out = pow(x, (double)e);
-    memcpy(&out_bits, &out, sizeof(out_bits));
-    return out_bits;
-}
+static float llvm_fabs_f32(float x) { return fabsf(x); }
+static double llvm_fabs_f64(double x) { return fabs(x); }
+static float llvm_sqrt_f32(float x) { return sqrtf(x); }
+static float llvm_exp_f32(float x) { return expf(x); }
+static float llvm_copysign_f32(float x, float y) { return copysignf(x, y); }
+static float llvm_pow_f32(float x, float y) { return powf(x, y); }
+static double llvm_sqrt_f64(double x) { return sqrt(x); }
+static double llvm_exp_f64(double x) { return exp(x); }
+static double llvm_pow_f64(double x, double y) { return pow(x, y); }
+static double llvm_copysign_f64(double x, double y) { return copysign(x, y); }
+static float llvm_powi_f32(float x, int32_t e) { return powf(x, (float)e); }
+static double llvm_powi_f64(double x, int32_t e) { return pow(x, (double)e); }
 
 static void llvm_memset_p0i8_i64(void *dst, uint64_t val, int64_t len, uint64_t is_volatile) {
     (void)is_volatile;
@@ -402,18 +288,18 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
-    lr_jit_add_symbol(j, "llvm.fabs.f32", (void *)(uintptr_t)&llvm_fabs_f32_bits);
-    lr_jit_add_symbol(j, "llvm.fabs.f64", (void *)(uintptr_t)&llvm_fabs_f64_bits);
-    lr_jit_add_symbol(j, "llvm.sqrt.f32", (void *)(uintptr_t)&llvm_sqrt_f32_bits);
-    lr_jit_add_symbol(j, "llvm.sqrt.f64", (void *)(uintptr_t)&llvm_sqrt_f64_bits);
-    lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32_bits);
-    lr_jit_add_symbol(j, "llvm.exp.f64", (void *)(uintptr_t)&llvm_exp_f64_bits);
-    lr_jit_add_symbol(j, "llvm.pow.f32", (void *)(uintptr_t)&llvm_pow_f32_bits);
-    lr_jit_add_symbol(j, "llvm.pow.f64", (void *)(uintptr_t)&llvm_pow_f64_bits);
-    lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32_bits);
-    lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64_bits);
-    lr_jit_add_symbol(j, "llvm.powi.f32", (void *)(uintptr_t)&llvm_powi_f32_bits);
-    lr_jit_add_symbol(j, "llvm.powi.f64", (void *)(uintptr_t)&llvm_powi_f64_bits);
+    lr_jit_add_symbol(j, "llvm.fabs.f32", (void *)(uintptr_t)&llvm_fabs_f32);
+    lr_jit_add_symbol(j, "llvm.fabs.f64", (void *)(uintptr_t)&llvm_fabs_f64);
+    lr_jit_add_symbol(j, "llvm.sqrt.f32", (void *)(uintptr_t)&llvm_sqrt_f32);
+    lr_jit_add_symbol(j, "llvm.sqrt.f64", (void *)(uintptr_t)&llvm_sqrt_f64);
+    lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32);
+    lr_jit_add_symbol(j, "llvm.exp.f64", (void *)(uintptr_t)&llvm_exp_f64);
+    lr_jit_add_symbol(j, "llvm.pow.f32", (void *)(uintptr_t)&llvm_pow_f32);
+    lr_jit_add_symbol(j, "llvm.pow.f64", (void *)(uintptr_t)&llvm_pow_f64);
+    lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32);
+    lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64);
+    lr_jit_add_symbol(j, "llvm.powi.f32", (void *)(uintptr_t)&llvm_powi_f32);
+    lr_jit_add_symbol(j, "llvm.powi.f64", (void *)(uintptr_t)&llvm_powi_f64);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
@@ -557,6 +443,25 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                 const char *name = resolve_global_name(m, op->global_id);
                 if (!name || !name[0])
                     return -1;
+
+                /* For CALL callee (operand 0), capture ABI metadata
+                   before converting to IMM_I64 (which loses global_id). */
+                if (inst->op == LR_OP_CALL && i == 0) {
+                    lr_func_t *callee = NULL;
+                    for (lr_func_t *fn = m->first_func; fn; fn = fn->next) {
+                        if (strcmp(fn->name, name) == 0) {
+                            callee = fn;
+                            break;
+                        }
+                    }
+                    if (callee) {
+                        inst->call_external_abi = (callee->first_block == NULL);
+                        inst->call_vararg = callee->vararg;
+                    } else {
+                        inst->call_external_abi = true;
+                        inst->call_vararg = false;
+                    }
+                }
 
                 void *addr = lookup_symbol(j, name);
                 if (!addr && strcmp(name, f->name) == 0)

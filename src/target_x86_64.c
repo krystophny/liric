@@ -1198,6 +1198,11 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             case LR_OP_SITOFP: {
                 uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                size_t src_sz = lr_type_size(inst->operands[0].type);
+                if (src_sz == 1 || src_sz == 2)
+                    emit_movsx_rr(&ctx, X86_RAX, X86_RAX, (uint8_t)src_sz);
+                else if (src_sz == 4)
+                    emit_movsxd(&ctx, X86_RAX, X86_RAX);
                 emit_cvtsi2fp(&ctx, FP_SCRATCH0, X86_RAX, fsize);
                 emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
                 break;
@@ -1395,9 +1400,17 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 uint32_t stack_bytes = 0;
                 uint32_t fp_used_for_call = 0;
                 lr_func_t *callee_func = NULL;
-                bool use_external_sysv_fp =
-                    call_uses_external_sysv_abi(&ctx, inst, &callee_func);
-                bool callee_vararg = callee_func && callee_func->vararg;
+                bool use_external_sysv_fp = false;
+                bool callee_vararg = false;
+
+                if (inst->operands[0].kind == LR_VAL_GLOBAL) {
+                    use_external_sysv_fp =
+                        call_uses_external_sysv_abi(&ctx, inst, &callee_func);
+                    callee_vararg = callee_func && callee_func->vararg;
+                } else {
+                    use_external_sysv_fp = inst->call_external_abi;
+                    callee_vararg = inst->call_vararg;
+                }
 
                 if (use_external_sysv_fp) {
                     for (uint32_t i = 0; i < nargs; i++) {
@@ -1486,8 +1499,13 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 if (stack_bytes > 0)
                     emit_frame_free(&ctx, stack_bytes);
 
-                if (inst->type && inst->type->kind != LR_TYPE_VOID)
-                    emit_store_slot(&ctx, inst->dest, X86_RAX);
+                if (inst->type && inst->type->kind != LR_TYPE_VOID) {
+                    if (use_external_sysv_fp && is_fp_abi_type(inst->type))
+                        emit_store_fp_slot(&ctx, inst->dest, X86_XMM0,
+                                           fp_abi_size(inst->type));
+                    else
+                        emit_store_slot(&ctx, inst->dest, X86_RAX);
+                }
                 break;
             }
             case LR_OP_PHI:
