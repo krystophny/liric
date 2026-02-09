@@ -36,7 +36,7 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 # 2) LL benchmark: liric JIT vs lli -O0
 ./build/bench_ll --iters 3
 
-# 3) API JIT benchmark (primary): liric JIT vs LLVM JIT on identical emitted IR
+# 3) API JIT benchmark (primary): direct lfortran --jit (WITH_LIRIC) vs lfortran --jit (LLVM)
 ./build/bench_api_jit --iters 3 --min-completed 1
 ```
 

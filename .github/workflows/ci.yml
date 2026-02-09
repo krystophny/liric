@@ -27,3 +27,30 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  architecture:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Graphviz
+        run: sudo apt-get update && sudo apt-get install -y graphviz
+
+      - name: Validate and Generate Architecture
+        run: ./tools/arch_check.sh
+
+      - name: Upload Architecture Site
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-site
+          path: architecture/site/
+          if-no-files-found: error
+
+      - name: Upload Architecture Metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-generated
+          path: architecture/generated/
+          if-no-files-found: error

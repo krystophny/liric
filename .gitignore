@@ -2,6 +2,12 @@ build/
 build-*/
 *.o
 *.a
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Testing/
+Makefile
 __pycache__/
 *.py[cod]
 
@@ -17,9 +23,33 @@ SESSION_STATE.md
 
 # Sourcetrail
 *.srctrlprj
+*.srctrlprj-user
 *.srctrldb
 *.srctrlbm
 
 # cscope
 cscope.out*
 cscope.files
+
+# IDE/editor
+.idea/
+.vscode/
+.DS_Store
+
+# architecture generation artifacts
+architecture/generated/
+architecture/export/
+architecture/site/
+.cache/structurizr-cli/
+
+# profiling/debug artifacts
+*.prof
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.gcov
+callgrind.out*
+core
+core.*
+vgcore.*
