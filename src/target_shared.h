@@ -14,7 +14,8 @@ void lr_target_set_static_alloca_offset(lr_arena_t *arena,
                                         uint32_t *num_offsets,
                                         uint32_t vreg,
                                         int32_t offset);
-void lr_target_prescan_static_alloca_offsets(const lr_func_t *func,
+void lr_target_prescan_static_alloca_offsets(lr_func_t *func,
+                                             lr_arena_t *arena,
                                              void *ctx,
                                              lr_target_static_alloca_ensure_fn ensure);
 

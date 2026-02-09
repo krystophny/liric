@@ -834,6 +834,10 @@ static void reserve_phi_dest_slots(x86_compile_ctx_t *ctx, lr_phi_copy_t **phi_c
 static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                                 uint8_t *buf, size_t buflen, size_t *out_len,
                                 lr_arena_t *arena) {
+    lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
+    if (lr_func_finalize(func, layout_arena) != 0)
+        return -1;
+
     uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
     uint32_t fc = nb * 2;
     x86_compile_ctx_t ctx = {
@@ -863,8 +867,10 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     /* Build PHI copy lists */
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
+    if (!phi_copies)
+        return -1;
     reserve_phi_dest_slots(&ctx, phi_copies, nb);
-    lr_target_prescan_static_alloca_offsets(func, &ctx,
+    lr_target_prescan_static_alloca_offsets(func, layout_arena, &ctx,
                                             ensure_static_alloca_offset_cb);
 
     /* Emit prologue and patch stack size once frame growth is complete. */
@@ -881,11 +887,12 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     }
 
     /* Walk IR blocks and instructions, emitting code directly */
-    uint32_t bi = 0;
-    for (lr_block_t *b = func->first_block; b; b = b->next, bi++) {
+    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+        lr_block_t *b = func->block_array[bi];
         ctx.block_offsets[bi] = ctx.pos;
 
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+            lr_inst_t *inst = b->inst_array[ii];
             switch (inst->op) {
             case LR_OP_RET: {
                 emit_phi_copies(&ctx, phi_copies[bi]);
@@ -1496,7 +1503,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     for (uint32_t i = 0; i < ctx.num_fixups; i++) {
         size_t fix_pos = ctx.fixups[i].pos;
         uint32_t target = ctx.fixups[i].target;
-        if (target < bi && fix_pos + 4 <= ctx.buflen) {
+        if (target < func->num_blocks && fix_pos + 4 <= ctx.buflen) {
             int32_t rel = (int32_t)((int64_t)ctx.block_offsets[target] - (int64_t)(fix_pos + 4));
             buf[fix_pos + 0] = (uint8_t)(rel);
             buf[fix_pos + 1] = (uint8_t)(rel >> 8);
