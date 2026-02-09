@@ -1,5 +1,6 @@
 #include "target_aarch64.h"
 #include "target_common.h"
+#include "target_shared.h"
 #include "objfile.h"
 #include <limits.h>
 #include <stdbool.h>
@@ -47,22 +48,6 @@ typedef struct {
     uint8_t *sym_defined;
     uint32_t sym_count;
 } a64_compile_ctx_t;
-
-static void set_static_alloca_offset(a64_compile_ctx_t *ctx, uint32_t vreg,
-                                     int32_t offset) {
-    while (vreg >= ctx->num_static_alloca_offsets) {
-        uint32_t old = ctx->num_static_alloca_offsets;
-        uint32_t new_cap = old == 0 ? 64 : old * 2;
-        int32_t *no = lr_arena_array_uninit(ctx->arena, int32_t, new_cap);
-        if (old > 0)
-            memcpy(no, ctx->static_alloca_offsets, old * sizeof(int32_t));
-        for (uint32_t i = old; i < new_cap; i++)
-            no[i] = 0;
-        ctx->static_alloca_offsets = no;
-        ctx->num_static_alloca_offsets = new_cap;
-    }
-    ctx->static_alloca_offsets[vreg] = offset;
-}
 
 static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, size_t size) {
     if (vreg > 100000) return -8;
@@ -669,31 +654,27 @@ static void emit_signext_index_reg(a64_compile_ctx_t *ctx, uint8_t reg,
 }
 
 static int32_t ensure_static_alloca_offset(a64_compile_ctx_t *ctx, const lr_inst_t *inst) {
-    if (inst->dest < ctx->num_static_alloca_offsets) {
-        int32_t off = ctx->static_alloca_offsets[inst->dest];
-        if (off != 0)
-            return off;
-    }
+    int32_t off = lr_target_lookup_static_alloca_offset(ctx->static_alloca_offsets,
+                                                        ctx->num_static_alloca_offsets,
+                                                        inst->dest);
+    if (off != 0)
+        return off;
 
     ctx->stack_size += (uint32_t)lr_target_alloca_elem_size(inst, 8);
     ctx->stack_size = (ctx->stack_size + 7u) & ~7u;
     {
-        int32_t off = -(int32_t)ctx->stack_size;
-        set_static_alloca_offset(ctx, inst->dest, off);
-        return off;
+        int32_t new_off = -(int32_t)ctx->stack_size;
+        lr_target_set_static_alloca_offset(ctx->arena,
+                                           &ctx->static_alloca_offsets,
+                                           &ctx->num_static_alloca_offsets,
+                                           inst->dest,
+                                           new_off);
+        return new_off;
     }
 }
 
-static void prescan_static_alloca_offsets(a64_compile_ctx_t *ctx, const lr_func_t *func) {
-    for (const lr_block_t *b = func->first_block; b; b = b->next) {
-        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (inst->op != LR_OP_ALLOCA)
-                continue;
-            if (!lr_target_alloca_uses_static_storage(inst))
-                continue;
-            (void)ensure_static_alloca_offset(ctx, inst);
-        }
-    }
+static int32_t ensure_static_alloca_offset_cb(void *ctx, const lr_inst_t *inst) {
+    return ensure_static_alloca_offset((a64_compile_ctx_t *)ctx, inst);
 }
 
 static void reserve_phi_dest_slots(a64_compile_ctx_t *ctx, lr_phi_copy_t **phi_copies,
@@ -761,7 +742,8 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
     reserve_phi_dest_slots(&ctx, phi_copies, nb);
-    prescan_static_alloca_offsets(&ctx, func);
+    lr_target_prescan_static_alloca_offsets(func, &ctx,
+                                            ensure_static_alloca_offset_cb);
 
     size_t prologue_stack_patch_pos = emit_prologue_a64(&ctx);
 

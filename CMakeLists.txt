@@ -40,6 +40,7 @@ add_library(liric STATIC
     src/wasm_to_ir.c
     src/target_registry.c
     src/target_common.c
+    src/target_shared.c
     src/target_x86_64.c
     src/target_aarch64.c
     src/jit.c
@@ -129,6 +130,7 @@ add_executable(test_liric
     tests/test_parser.c
     tests/test_codegen.c
     tests/test_targets.c
+    tests/test_target_shared.c
     tests/test_jit.c
     tests/test_e2e.c
     tests/test_wasm.c
