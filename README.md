@@ -30,7 +30,7 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 ## Benchmarks
 
 ```bash
-# 1) Compatibility sweep (defines which tests both liric and lli get right)
+# 1) Compatibility sweep (creates shared benchmark corpus)
 ./build/bench_compat_check --timeout 15
 
 # 2) LL benchmark: liric JIT vs lli -O0
@@ -38,19 +38,15 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 
 # 3) API JIT benchmark (primary): liric JIT vs LLVM JIT on identical emitted IR
 ./build/bench_api_jit --iters 3 --min-completed 1
-
-# 4) API object-mode benchmark (legacy): lfortran+liric binary vs lfortran+LLVM binary
-./build/bench_api --iters 3 --min-completed 1
 ```
 
 Artifacts go to `/tmp/liric_bench/`.
 
 Primary artifacts:
 
-- `compat_api_100.txt` + `compat_api_100_options.jsonl` (frozen corpus from step 1)
+- `compat_ll.txt` + `compat_ll_options.jsonl` (shared corpus used by LL and API-JIT)
 - `bench_ll.jsonl` + `bench_ll_summary.json`
 - `bench_api_jit.jsonl` + `bench_api_jit_summary.json`
-- `bench_api.jsonl` + `bench_api_summary.json` (legacy object-mode)
 
 ## Compatibility
 
@@ -59,9 +55,9 @@ Primary artifacts:
 | | Count | % |
 |---|---:|---:|
 | LLVM produces correct output | 2246 | 99.1 |
-| liric matches LLVM output | 2049 | 90.4 |
-| lli matches LLVM output | 2165 | 95.5 |
-| Both liric and lli match | 2004 | 88.4 |
+| liric matches LLVM output | 2166 | 95.6 |
+| lli matches LLVM output | 2166 | 95.6 |
+| Both liric and lli match | 2121 | 93.6 |
 
 ## Performance
 
@@ -75,22 +71,22 @@ Command:
 ./build/bench_ll --iters 3 --timeout 20 --bench-dir /tmp/liric_bench
 ```
 
-Coverage: `270` completed tests, `3` iterations each.
+Coverage: `2121` attempted, `2081` completed, `40` skipped.
 
 | Metric | liric | lli | Speedup |
 |---|---:|---:|---:|
-| Wall median | `10.084 ms` | `30.176 ms` | **2.99x** |
-| Wall aggregate | `2803.50 ms` | `8963.53 ms` | **3.20x** |
-| Materialization median (`parse+compile+lookup` vs `parse+jit+lookup`) | `0.713 ms` | `6.088 ms` | **9.14x** |
-| Materialization aggregate | `267.20 ms` | `3834.94 ms` | **14.35x** |
+| Wall median | `10.065 ms` | `20.123 ms` | **2.00x** |
+| Wall aggregate | `21419.49 ms` | `54075.08 ms` | **2.52x** |
+| Materialization median (`parse+compile+lookup` vs `parse+jit+lookup`) | `0.620900 ms` | `5.427575 ms` | **9.05x** |
+| Materialization aggregate | `1734.594 ms` | `22596.259 ms` | **13.03x** |
 
 Phase split medians:
-- liric: parse `0.656 ms`, compile `0.059 ms`, lookup `0.0001 ms`
-- lli: parse `0.378 ms`, jit `0.0041 ms`, lookup `5.717 ms`
+- liric: parse `0.556 ms`, compile `0.062 ms`, lookup `0.0001 ms`
+- lli: parse `0.346 ms`, jit `0.0037 ms`, lookup `5.064 ms`
 
 Faster-case counts:
-- wall: `269/270`
-- materialization: `270/270`
+- wall: `2067/2081`
+- materialization: `2081/2081`
 
 ### API JIT Mode (Primary, `bench_api_jit`)
 
@@ -100,47 +96,22 @@ Command:
 ./build/bench_api_jit --iters 3 --bench-dir /tmp/liric_bench --min-completed 1
 ```
 
-Coverage: `100` attempted, `100` completed, `0` skipped.
+Coverage: `2121` attempted, `2080` completed, `41` skipped.
 
 | Metric | liric | LLVM baseline | Speedup |
 |---|---:|---:|---:|
-| Frontend median (shared LFortran emit) | `10.887 ms` | `10.887 ms` | `1.00x` |
-| Wall median (frontend + materialization + first call) | `11.537 ms` | `18.069 ms` | **1.54x** |
-| Wall aggregate | `1543 ms` | `2794 ms` | **1.81x** |
-| JIT materialization median | `0.619 ms` | `6.755 ms` | **11.97x** |
-| JIT materialization aggregate | `87 ms` | `1346 ms` | **15.43x** |
-| Execution median (entry call only) | `0.017 ms` | `0.021 ms` | **1.22x** |
+| Frontend median (shared LFortran emit) | `10.398 ms` | `10.398 ms` | `1.00x` |
+| Wall median (frontend + materialization + first call) | `11.011 ms` | `16.252 ms` | **1.47x** |
+| Wall aggregate | `29802 ms` | `51119 ms` | **1.72x** |
+| JIT materialization median | `0.564 ms` | `5.726 ms` | **10.53x** |
+| JIT materialization aggregate | `1629 ms` | `23213 ms` | **14.25x** |
+| Execution median (entry call only) | `0.019 ms` | `0.021 ms` | **1.13x** |
 
 Faster-case counts:
-- wall: `99/100`
-- materialization: `100/100`
-- execution: `80/100`
-
-### API Object Mode (Legacy, `bench_api`)
-
-Command:
-
-```bash
-./build/bench_api --iters 3 --bench-dir /tmp/liric_bench --min-completed 1
-```
-
-Coverage: `100` attempted, `18` completed, `82` skipped (`liric_run_failed`).
-
-| Metric | lfortran+`WITH_LIRIC` | lfortran+LLVM | Speedup |
-|---|---:|---:|---:|
-| Wall median (compile+run) | `29.086 ms` | `39.514 ms` | **1.39x** |
-| Wall aggregate | `522 ms` | `736 ms` | **1.41x** |
-| Compile median | `28.532 ms` | `38.877 ms` | **1.39x** |
-| Compile aggregate | `512 ms` | `726 ms` | **1.42x** |
-| Run median | `0.541 ms` | `0.556 ms` | **1.01x** |
-| Run aggregate | `10 ms` | `10 ms` | **1.03x** |
-
-Faster-case counts (completed set only):
-- wall: `18/18`
-- compile: `18/18`
-- run: `11/18`
-
-Interpretation: object-mode is no longer fully blocked, but coverage is still partial (`82` run failures). Primary API KPIs remain based on `bench_api_jit`.
+- wall: `2075/2080`
+- materialization: `2080/2080`
+- execution: `1609/2080`
+- skipped: `source_missing=1`, `llvm_jit_failed=40`
 
 ## License
 

@@ -14,11 +14,11 @@ file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${bench_dir}")
 file(MAKE_DIRECTORY "${test_dir}")
 
-file(WRITE "${bench_dir}/compat_api_100.txt"
+file(WRITE "${bench_dir}/compat_ll.txt"
 "good_case\n"
 "missing_case\n"
 "liric_run_fail\n")
-file(WRITE "${bench_dir}/compat_api_100_options.jsonl"
+file(WRITE "${bench_dir}/compat_ll_options.jsonl"
 "{\"name\":\"good_case\",\"options\":\"\"}\n"
 "{\"name\":\"missing_case\",\"options\":\"\"}\n"
 "{\"name\":\"liric_run_fail\",\"options\":\"\"}\n")

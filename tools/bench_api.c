@@ -541,22 +541,8 @@ static char *json_escape(const char *s) {
 }
 
 static void resolve_default_compat_artifacts(const char *bench_dir, char **compat_path, char **opts_path) {
-    char *compat_100 = path_join2(bench_dir, "compat_api_100.txt");
-    char *opts_100 = path_join2(bench_dir, "compat_api_100_options.jsonl");
-    char *compat_all = path_join2(bench_dir, "compat_api.txt");
-    char *opts_all = path_join2(bench_dir, "compat_api_options.jsonl");
-
-    if (file_exists(compat_100) && file_exists(opts_100)) {
-        *compat_path = compat_100;
-        *opts_path = opts_100;
-        free(compat_all);
-        free(opts_all);
-    } else {
-        *compat_path = compat_all;
-        *opts_path = opts_all;
-        free(compat_100);
-        free(opts_100);
-    }
+    *compat_path = path_join2(bench_dir, "compat_ll.txt");
+    *opts_path = path_join2(bench_dir, "compat_ll_options.jsonl");
 }
 
 static void write_json_success_row(FILE *f,
@@ -623,7 +609,7 @@ static void usage(void) {
     printf("  --runtime-lib PATH    path to liblfortran_runtime (auto-detected)\n");
     printf("  --test-dir PATH       path to integration_tests/ dir\n");
     printf("  --bench-dir PATH      output directory (default: /tmp/liric_bench)\n");
-    printf("  --compat-list PATH    compat list file (default: compat_api_100.txt if present, else compat_api.txt)\n");
+    printf("  --compat-list PATH    compat list file (default: compat_ll.txt)\n");
     printf("  --options-jsonl PATH  options jsonl file (default matches chosen compat list)\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           per-command timeout in seconds (default: 30)\n");
