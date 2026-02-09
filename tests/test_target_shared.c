@@ -156,6 +156,37 @@ int test_ir_finalize_builds_dense_arrays(void) {
     return 0;
 }
 
+int test_ir_inst_create_packs_operands_in_single_allocation(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *mod = lr_module_create(arena);
+    lr_operand_t ops[3] = {
+        lr_op_imm_i64(10, mod->type_i64),
+        lr_op_imm_i64(20, mod->type_i64),
+        lr_op_imm_i64(30, mod->type_i64),
+    };
+
+    lr_inst_t *inst = lr_inst_create(arena, LR_OP_ADD, mod->type_i64, 7, ops, 3);
+    TEST_ASSERT(inst != NULL, "instruction allocation succeeds");
+    TEST_ASSERT(inst->operands != NULL, "operand storage is present");
+    TEST_ASSERT_EQ(inst->num_operands, 3, "operand count preserved");
+    TEST_ASSERT_EQ(inst->operands[0].imm_i64, 10, "operand[0] copied");
+    TEST_ASSERT_EQ(inst->operands[1].imm_i64, 20, "operand[1] copied");
+    TEST_ASSERT_EQ(inst->operands[2].imm_i64, 30, "operand[2] copied");
+
+    ops[0].imm_i64 = 999;
+    TEST_ASSERT_EQ(inst->operands[0].imm_i64, 10, "operands are not aliased to input array");
+
+    {
+        size_t expected_offset = (sizeof(lr_inst_t) + _Alignof(lr_operand_t) - 1u)
+                                 & ~((size_t)_Alignof(lr_operand_t) - 1u);
+        TEST_ASSERT((uint8_t *)inst->operands == (uint8_t *)inst + expected_offset,
+                    "operands are packed immediately after instruction header");
+    }
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
     lr_arena_t *arena = lr_arena_create(0);
     lr_module_t *mod = lr_module_create(arena);

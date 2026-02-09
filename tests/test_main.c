@@ -73,6 +73,7 @@ int test_load_missing_runtime_library_fails(void);
 int test_target_shared_static_alloca_table(void);
 int test_target_shared_prescan_filters_dynamic_alloca(void);
 int test_ir_finalize_builds_dense_arrays(void);
+int test_ir_inst_create_packs_operands_in_single_allocation(void);
 int test_ir_phi_copies_flat_arrays_preserve_emission_order(void);
 int test_jit_ret_42(void);
 int test_jit_add_args(void);
@@ -209,6 +210,7 @@ int main(void) {
     RUN_TEST(test_target_shared_static_alloca_table);
     RUN_TEST(test_target_shared_prescan_filters_dynamic_alloca);
     RUN_TEST(test_ir_finalize_builds_dense_arrays);
+    RUN_TEST(test_ir_inst_create_packs_operands_in_single_allocation);
     RUN_TEST(test_ir_phi_copies_flat_arrays_preserve_emission_order);
 
     fprintf(stderr, "\nJIT tests:\n");

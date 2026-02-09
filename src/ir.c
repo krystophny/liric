@@ -148,17 +148,34 @@ uint32_t lr_vreg_new(lr_func_t *f) {
     return f->next_vreg++;
 }
 
+static size_t align_up_size(size_t value, size_t align) {
+    return (value + align - 1u) & ~(align - 1u);
+}
+
 lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
                            uint32_t dest, lr_operand_t *ops, uint32_t nops) {
-    lr_inst_t *inst = lr_arena_new(a, lr_inst_t);
+    size_t operands_offset = align_up_size(sizeof(lr_inst_t), _Alignof(lr_operand_t));
+    size_t total_size = operands_offset + sizeof(lr_operand_t) * nops;
+    lr_inst_t *inst = (lr_inst_t *)lr_arena_alloc_uninit(a, total_size, _Alignof(lr_inst_t));
+    if (!inst)
+        return NULL;
+
     inst->op = op;
     inst->type = type;
     inst->dest = dest;
+
     if (nops > 0) {
-        inst->operands = lr_arena_array(a, lr_operand_t, nops);
+        inst->operands = (lr_operand_t *)((uint8_t *)inst + operands_offset);
         memcpy(inst->operands, ops, sizeof(lr_operand_t) * nops);
+    } else {
+        inst->operands = NULL;
     }
+
     inst->num_operands = nops;
+    inst->num_indices = 0;
+    inst->call_external_abi = false;
+    inst->call_vararg = false;
+    inst->next = NULL;
     return inst;
 }
 
