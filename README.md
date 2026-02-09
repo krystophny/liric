@@ -37,10 +37,17 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 ./build/bench_ll --iters 3
 
 # 3) LFortran backend benchmark: lfortran+liric vs lfortran+LLVM
-./build/bench_api --iters 3
+# Uses frozen compat_api_100.* artifacts when present.
+./build/bench_api --iters 3 --min-completed 100
 ```
 
 Artifacts go to `/tmp/liric_bench/`.
+
+Strict-mode artifacts:
+
+- `compat_api_100.txt` + `compat_api_100_options.jsonl` (frozen corpus from step 1)
+- `bench_api.jsonl` (per-test status, including machine-readable skip reasons)
+- `bench_api_summary.json` (attempted/completed/skipped + skip reason buckets)
 
 ## Compatibility
 
@@ -68,7 +75,7 @@ Primary KPIs for API-heavy workloads:
 Command:
 
 ```bash
-./build/bench_api --iters 3 --bench-dir /tmp/liric_bench_100_api
+./build/bench_api --iters 3 --bench-dir /tmp/liric_bench_100_api --min-completed 100
 ```
 
 Attempted 100 tests, completed 15 on this machine (others skipped due runtime errors).

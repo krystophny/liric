@@ -39,8 +39,11 @@ typedef struct {
     const char *runtime_lib;
     const char *test_dir;
     const char *bench_dir;
+    const char *compat_list;
+    const char *options_jsonl;
     int iters;
     int timeout_sec;
+    int min_completed;
 } cfg_t;
 
 typedef struct {
@@ -509,6 +512,109 @@ static strlist_t tokenize_options(const char *opts) {
     return toks;
 }
 
+static char *json_escape(const char *s) {
+    size_t i, n = 0;
+    char *out, *p;
+    for (i = 0; s && s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\' || c == '"' || c == '\n' || c == '\r' || c == '\t') n += 2;
+        else if (c < 0x20) n += 6;
+        else n += 1;
+    }
+    out = (char *)malloc(n + 1);
+    if (!out) die("out of memory", NULL);
+    p = out;
+    for (i = 0; s && s[i]; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (c == '\\') { *p++ = '\\'; *p++ = '\\'; }
+        else if (c == '"') { *p++ = '\\'; *p++ = '"'; }
+        else if (c == '\n') { *p++ = '\\'; *p++ = 'n'; }
+        else if (c == '\r') { *p++ = '\\'; *p++ = 'r'; }
+        else if (c == '\t') { *p++ = '\\'; *p++ = 't'; }
+        else if (c < 0x20) {
+            sprintf(p, "\\u%04x", c);
+            p += 6;
+        } else *p++ = (char)c;
+    }
+    *p = '\0';
+    return out;
+}
+
+static void resolve_default_compat_artifacts(const char *bench_dir, char **compat_path, char **opts_path) {
+    char *compat_100 = path_join2(bench_dir, "compat_api_100.txt");
+    char *opts_100 = path_join2(bench_dir, "compat_api_100_options.jsonl");
+    char *compat_all = path_join2(bench_dir, "compat_api.txt");
+    char *opts_all = path_join2(bench_dir, "compat_api_options.jsonl");
+
+    if (file_exists(compat_100) && file_exists(opts_100)) {
+        *compat_path = compat_100;
+        *opts_path = opts_100;
+        free(compat_all);
+        free(opts_all);
+    } else {
+        *compat_path = compat_all;
+        *opts_path = opts_all;
+        free(compat_100);
+        free(opts_100);
+    }
+}
+
+static void write_json_success_row(FILE *f,
+                                   const char *name,
+                                   size_t iters_done,
+                                   double lw,
+                                   double ew,
+                                   double lc,
+                                   double ec,
+                                   double lr,
+                                   double er,
+                                   double wall_sp,
+                                   double compile_sp,
+                                   double run_sp) {
+    char *en = json_escape(name ? name : "");
+    fprintf(f,
+            "{\"name\":\"%s\",\"status\":\"ok\",\"iters\":%zu,"
+            "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
+            "\"liric_compile_median_ms\":%.6f,\"llvm_compile_median_ms\":%.6f,"
+            "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
+            "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
+            en, iters_done, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+    free(en);
+}
+
+static void write_json_skip_row(FILE *f, const char *name, const char *reason) {
+    char *en = json_escape(name ? name : "");
+    char *er = json_escape(reason ? reason : "unknown");
+    fprintf(f,
+            "{\"name\":\"%s\",\"status\":\"skipped\",\"reason\":\"%s\"}\n",
+            en, er);
+    free(en);
+    free(er);
+}
+
+#define SKIP_REASON_COUNT 10
+static const char *k_skip_reasons[SKIP_REASON_COUNT] = {
+    "workdir_create_failed",
+    "source_missing",
+    "llvm_compile_failed",
+    "llvm_compile_timeout",
+    "llvm_run_failed",
+    "llvm_run_timeout",
+    "liric_compile_failed",
+    "liric_compile_timeout",
+    "liric_run_failed",
+    "liric_run_timeout"
+};
+
+static int skip_reason_index(const char *reason) {
+    size_t i;
+    if (!reason) return -1;
+    for (i = 0; i < SKIP_REASON_COUNT; i++) {
+        if (strcmp(k_skip_reasons[i], reason) == 0) return (int)i;
+    }
+    return -1;
+}
+
 static void usage(void) {
     printf("usage: bench_api [options]\n");
     printf("  --lfortran PATH       path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
@@ -517,8 +623,11 @@ static void usage(void) {
     printf("  --runtime-lib PATH    path to liblfortran_runtime (auto-detected)\n");
     printf("  --test-dir PATH       path to integration_tests/ dir\n");
     printf("  --bench-dir PATH      output directory (default: /tmp/liric_bench)\n");
+    printf("  --compat-list PATH    compat list file (default: compat_api_100.txt if present, else compat_api.txt)\n");
+    printf("  --options-jsonl PATH  options jsonl file (default matches chosen compat list)\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           per-command timeout in seconds (default: 30)\n");
+    printf("  --min-completed N     fail if completed tests < N (default: 0)\n");
 }
 
 static cfg_t parse_args(int argc, char **argv) {
@@ -533,8 +642,11 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.runtime_lib = file_exists(default_runtime_dylib) ? default_runtime_dylib : default_runtime_so;
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
+    cfg.compat_list = NULL;
+    cfg.options_jsonl = NULL;
     cfg.iters = 3;
     cfg.timeout_sec = 30;
+    cfg.min_completed = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -552,12 +664,19 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
             cfg.bench_dir = argv[++i];
+        } else if (strcmp(argv[i], "--compat-list") == 0 && i + 1 < argc) {
+            cfg.compat_list = argv[++i];
+        } else if (strcmp(argv[i], "--options-jsonl") == 0 && i + 1 < argc) {
+            cfg.options_jsonl = argv[++i];
         } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             cfg.iters = atoi(argv[++i]);
             if (cfg.iters <= 0) cfg.iters = 3;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             cfg.timeout_sec = atoi(argv[++i]);
             if (cfg.timeout_sec <= 0) cfg.timeout_sec = 30;
+        } else if (strcmp(argv[i], "--min-completed") == 0 && i + 1 < argc) {
+            cfg.min_completed = atoi(argv[++i]);
+            if (cfg.min_completed < 0) cfg.min_completed = 0;
         } else {
             die("unknown argument", argv[i]);
         }
@@ -574,32 +693,51 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     cfg.test_dir = to_abs_path(cfg.test_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
+    if (cfg.compat_list) cfg.compat_list = to_abs_path(cfg.compat_list);
+    if (cfg.options_jsonl) cfg.options_jsonl = to_abs_path(cfg.options_jsonl);
 
     return cfg;
 }
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
-    char *compat_path;
+    char *compat_path = NULL;
+    char *opts_path = NULL;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
 
-    compat_path = path_join2(cfg.bench_dir, "compat_api.txt");
-    char *opts_path = path_join2(cfg.bench_dir, "compat_api_options.jsonl");
+    if (cfg.compat_list) compat_path = xstrdup(cfg.compat_list);
+    if (cfg.options_jsonl) opts_path = xstrdup(cfg.options_jsonl);
+    if (!compat_path || !opts_path) {
+        char *default_compat = NULL;
+        char *default_opts = NULL;
+        resolve_default_compat_artifacts(cfg.bench_dir, &default_compat, &default_opts);
+        if (!compat_path) compat_path = default_compat;
+        else free(default_compat);
+        if (!opts_path) opts_path = default_opts;
+        else free(default_opts);
+    }
+
     char *api_bin_dir = path_join2(cfg.bench_dir, "api_bin");
     char *jsonl_path = path_join2(cfg.bench_dir, "bench_api.jsonl");
+    char *summary_path = path_join2(cfg.bench_dir, "bench_api_summary.json");
     FILE *f;
     strlist_t tests;
     optlist_t opts;
     rowlist_t rows;
+    size_t skip_reason_counts[SKIP_REASON_COUNT];
     size_t i;
+    int exit_code = 0;
 
     strlist_init(&tests);
     rows.items = NULL;
     rows.n = rows.cap = 0;
+    memset(skip_reason_counts, 0, sizeof(skip_reason_counts));
 
     if (!file_exists(compat_path))
         die("compat list missing (run bench_compat_check first)", compat_path);
+    if (!file_exists(opts_path))
+        die("compat options missing (run bench_compat_check first)", opts_path);
 
     f = fopen(compat_path, "r");
     if (!f) die("failed to open compat list", compat_path);
@@ -624,6 +762,9 @@ int main(int argc, char **argv) {
     printf("  runtime_lib:    %s\n", cfg.runtime_lib);
     printf("  test_dir:       %s\n", cfg.test_dir);
     printf("  bench_dir:      %s\n", cfg.bench_dir);
+    printf("  compat_list:    %s\n", compat_path);
+    printf("  options_jsonl:  %s\n", opts_path);
+    printf("  min_completed:  %d\n", cfg.min_completed);
 
     {
         FILE *jf = fopen(jsonl_path, "w");
@@ -633,8 +774,8 @@ int main(int argc, char **argv) {
             const char *name = tests.items[i];
             const char *test_opts = optlist_find(&opts, name);
             strlist_t opt_toks;
-            char *source_path;
-            char *bin_path;
+            char *source_path = NULL;
+            char *bin_path = NULL;
             size_t it;
             double *liric_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
@@ -643,15 +784,21 @@ int main(int argc, char **argv) {
             double *llvm_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
-            int skipped = 0;
-            char work_tpl[] = "/tmp/liric_bench/work_api_XXXXXX";
+            const char *skip_reason = NULL;
+            char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
 
+            strlist_init(&opt_toks);
+            {
+                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_XXXXXX");
+                if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
+                    skip_reason = "workdir_template_too_long";
+                    goto skip_test;
+                }
+            }
             if (!mkdtemp(work_tpl)) {
-                printf("  [%zu/%zu] %s: skipped (failed to create temp work dir)\n", i + 1, tests.n, name);
-                free(liric_wall);
-                free(llvm_wall);
-                continue;
+                skip_reason = "workdir_create_failed";
+                goto skip_test;
             }
             work_dir = work_tpl;
 
@@ -666,8 +813,8 @@ int main(int argc, char **argv) {
             bin_path = path_join2(api_bin_dir, name);
 
             if (!file_exists(source_path)) {
-                printf("  [%zu/%zu] %s: skipped (source missing)\n", i + 1, tests.n, name);
-                goto next_test;
+                skip_reason = "source_missing";
+                goto skip_test;
             }
 
             for (it = 0; it < (size_t)cfg.iters; it++) {
@@ -696,7 +843,7 @@ int main(int argc, char **argv) {
                 compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, work_dir);
                 free(compile_argv);
                 if (compile_r.rc != 0) {
-                    skipped = 1;
+                    skip_reason = compile_r.timed_out ? "llvm_compile_timeout" : "llvm_compile_failed";
                     free_cmd_result(&compile_r);
                     break;
                 }
@@ -707,7 +854,7 @@ int main(int argc, char **argv) {
                 run_argv[1] = NULL;
                 run_r = run_cmd((char *const *)run_argv, cfg.timeout_sec, NULL, work_dir);
                 if (run_r.rc != 0) {
-                    skipped = 1;
+                    skip_reason = run_r.timed_out ? "llvm_run_timeout" : "llvm_run_failed";
                     free_cmd_result(&run_r);
                     break;
                 }
@@ -739,7 +886,7 @@ int main(int argc, char **argv) {
                 liric_compile_r = run_cmd(liric_compile_argv, cfg.timeout_sec, NULL, work_dir);
                 free(liric_compile_argv);
                 if (liric_compile_r.rc != 0) {
-                    skipped = 1;
+                    skip_reason = liric_compile_r.timed_out ? "liric_compile_timeout" : "liric_compile_failed";
                     free_cmd_result(&liric_compile_r);
                     free(liric_bin_path);
                     break;
@@ -751,7 +898,7 @@ int main(int argc, char **argv) {
                 liric_run_argv[1] = NULL;
                 liric_run_r = run_cmd((char *const *)liric_run_argv, cfg.timeout_sec, NULL, work_dir);
                 if (liric_run_r.rc != 0) {
-                    skipped = 1;
+                    skip_reason = liric_run_r.timed_out ? "liric_run_timeout" : "liric_run_failed";
                     free_cmd_result(&liric_run_r);
                     free(liric_bin_path);
                     break;
@@ -767,9 +914,9 @@ int main(int argc, char **argv) {
                 ok_n++;
             }
 
-            if (skipped || ok_n == 0) {
-                printf("  [%zu/%zu] %s: skipped (runtime error)\n", i + 1, tests.n, name);
-                goto next_test;
+            if (ok_n == 0) {
+                if (!skip_reason) skip_reason = "llvm_compile_failed";
+                goto skip_test;
             }
 
             {
@@ -793,16 +940,19 @@ int main(int argc, char **argv) {
                 row.llvm_run_ms = er;
                 rowlist_push(&rows, row);
 
-                fprintf(jf,
-                    "{\"name\":\"%s\",\"iters\":%zu,"
-                    "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
-                    "\"liric_compile_median_ms\":%.6f,\"llvm_compile_median_ms\":%.6f,"
-                    "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
-                    "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
-                    name, ok_n, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+                write_json_success_row(jf, name, ok_n, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
                 printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx), compile %.1fms vs %.1fms (%.2fx)\n",
                        i + 1, tests.n, name, lw, ew, wall_sp, lc, ec, compile_sp);
             }
+            goto next_test;
+
+skip_test:
+            {
+                int idx = skip_reason_index(skip_reason);
+                if (idx >= 0) skip_reason_counts[(size_t)idx]++;
+            }
+            write_json_skip_row(jf, name, skip_reason ? skip_reason : "unknown");
+            printf("  [%zu/%zu] %s: skipped (%s)\n", i + 1, tests.n, name, skip_reason ? skip_reason : "unknown");
 
 next_test:
             if (work_dir) rmdir(work_dir);
@@ -820,11 +970,7 @@ next_test:
         fclose(jf);
     }
 
-    if (rows.n == 0) {
-        die("no benchmark results", NULL);
-    }
-
-    {
+    if (rows.n > 0) {
         double *lw = (double *)malloc(rows.n * sizeof(double));
         double *ew = (double *)malloc(rows.n * sizeof(double));
         double *lc = (double *)malloc(rows.n * sizeof(double));
@@ -902,13 +1048,67 @@ next_test:
         free(compile_sp);
         free(run_sp);
     }
+    {
+        size_t attempted = tests.n;
+        size_t completed = rows.n;
+        size_t skipped = (attempted >= completed) ? (attempted - completed) : 0;
+        FILE *sf = fopen(summary_path, "w");
+        if (!sf) die("failed to open output", summary_path);
+
+        fprintf(sf, "{\n");
+        fprintf(sf, "  \"attempted\": %zu,\n", attempted);
+        fprintf(sf, "  \"completed\": %zu,\n", completed);
+        fprintf(sf, "  \"skipped\": %zu,\n", skipped);
+        fprintf(sf, "  \"iters\": %d,\n", cfg.iters);
+        fprintf(sf, "  \"min_completed\": %d,\n", cfg.min_completed);
+        fprintf(sf, "  \"completion_threshold_met\": %s,\n",
+                completed >= (size_t)cfg.min_completed ? "true" : "false");
+        {
+            char *ec = json_escape(compat_path);
+            char *eo = json_escape(opts_path);
+            fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
+            fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
+            free(ec);
+            free(eo);
+        }
+        fprintf(sf, "  \"skip_reasons\": {\n");
+        for (i = 0; i < SKIP_REASON_COUNT; i++) {
+            fprintf(sf, "    \"%s\": %zu%s\n",
+                    k_skip_reasons[i],
+                    skip_reason_counts[i],
+                    (i + 1 == SKIP_REASON_COUNT) ? "" : ",");
+        }
+        fprintf(sf, "  }\n");
+        fprintf(sf, "}\n");
+        fclose(sf);
+
+        printf("\n  Accounting: attempted=%zu completed=%zu skipped=%zu\n",
+               attempted, completed, skipped);
+        for (i = 0; i < SKIP_REASON_COUNT; i++) {
+            if (skip_reason_counts[i] > 0) {
+                printf("    skip[%s]=%zu\n", k_skip_reasons[i], skip_reason_counts[i]);
+            }
+        }
+        printf("  Summary: %s\n", summary_path);
+
+        if (completed == 0) {
+            fprintf(stderr, "no benchmark results completed\n");
+            exit_code = 1;
+        }
+        if (completed < (size_t)cfg.min_completed) {
+            fprintf(stderr, "completion gate failed: completed=%zu < min_completed=%d\n",
+                    completed, cfg.min_completed);
+            exit_code = 1;
+        }
+    }
 
     free(compat_path);
     free(opts_path);
     free(api_bin_dir);
     free(jsonl_path);
+    free(summary_path);
     strlist_free(&tests);
     optlist_free(&opts);
     rowlist_free(&rows);
-    return 0;
+    return exit_code;
 }

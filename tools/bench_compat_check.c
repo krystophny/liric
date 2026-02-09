@@ -58,6 +58,7 @@ typedef struct {
     const char *bench_dir;
     int timeout_sec;
     int limit;
+    int freeze_api_n;
 } cfg_t;
 
 typedef struct {
@@ -778,11 +779,26 @@ static int cmp_name_opt(const void *a, const void *b) {
     return strcmp(na->name, nb->name);
 }
 
+static const char *find_option_by_name(const name_opt_t *opts, size_t n, const char *name) {
+    size_t lo = 0;
+    size_t hi = n;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int cmp = strcmp(opts[mid].name, name);
+        if (cmp == 0) return opts[mid].options;
+        if (cmp < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return "";
+}
+
 static void usage(void) {
     printf("usage: bench_compat_check [options]\n");
     printf("  --workers N            (ignored, kept for compatibility)\n");
     printf("  --timeout N            command timeout in seconds (default: 15)\n");
     printf("  --limit N              limit number of tests (default: 0 = all)\n");
+    printf("  --bench-dir PATH       output directory (default: /tmp/liric_bench)\n");
+    printf("  --freeze-api N         frozen compat corpus size (default: 100)\n");
     printf("  --lfortran PATH        path to lfortran binary\n");
     printf("  --probe-runner PATH    path to liric_probe_runner\n");
     printf("  --runtime-lib PATH     path to liblfortran_runtime\n");
@@ -804,6 +820,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.timeout_sec = 15;
     cfg.limit = 0;
+    cfg.freeze_api_n = 100;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -817,6 +834,11 @@ static cfg_t parse_args(int argc, char **argv) {
         } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
             cfg.limit = atoi(argv[++i]);
             if (cfg.limit < 0) cfg.limit = 0;
+        } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
+            cfg.bench_dir = argv[++i];
+        } else if (strcmp(argv[i], "--freeze-api") == 0 && i + 1 < argc) {
+            cfg.freeze_api_n = atoi(argv[++i]);
+            if (cfg.freeze_api_n <= 0) cfg.freeze_api_n = 100;
         } else if (strcmp(argv[i], "--lfortran") == 0 && i + 1 < argc) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--probe-runner") == 0 && i + 1 < argc) {
@@ -841,6 +863,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     cfg.cmake = to_abs_path(cfg.cmake);
+    cfg.bench_dir = to_abs_path(cfg.bench_dir);
     if (strchr(cfg.lli, '/')) cfg.lli = to_abs_path(cfg.lli);
 
     return cfg;
@@ -856,6 +879,10 @@ int main(int argc, char **argv) {
     char *compat_ll_path = path_join2(cfg.bench_dir, "compat_ll.txt");
     char *opts_api_path = path_join2(cfg.bench_dir, "compat_api_options.jsonl");
     char *opts_ll_path = path_join2(cfg.bench_dir, "compat_ll_options.jsonl");
+    char frozen_list_name[64];
+    char frozen_opts_name[64];
+    char *frozen_api_path;
+    char *frozen_opts_path;
     char *runtime_dir = dirname_dup(cfg.runtime_lib);
     FILE *jsonl = NULL;
     char **compat_api = NULL;
@@ -871,6 +898,11 @@ int main(int argc, char **argv) {
     size_t liric_match_count = 0;
     size_t lli_match_count = 0;
     size_t both_match_count = 0;
+
+    snprintf(frozen_list_name, sizeof(frozen_list_name), "compat_api_%d.txt", cfg.freeze_api_n);
+    snprintf(frozen_opts_name, sizeof(frozen_opts_name), "compat_api_%d_options.jsonl", cfg.freeze_api_n);
+    frozen_api_path = path_join2(cfg.bench_dir, frozen_list_name);
+    frozen_opts_path = path_join2(cfg.bench_dir, frozen_opts_name);
 
     ensure_dir(cfg.bench_dir);
     ensure_dir(ll_dir);
@@ -926,7 +958,7 @@ int main(int argc, char **argv) {
         int llvm_rc = -1, liric_rc = -1, lli_rc = -1;
         char *error = xstrdup("");
         char *n_llvm_out = NULL, *n_liric_out = NULL, *n_lli_out = NULL;
-        char work_tpl[] = "/tmp/liric_bench/work_compat_XXXXXX";
+        char work_tpl[PATH_MAX];
         const char *work_dir = NULL;
         size_t j;
 
@@ -940,6 +972,19 @@ int main(int argc, char **argv) {
 
         if (cfg.limit > 0 && (int)processed >= cfg.limit) break;
 
+        {
+            int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_compat_XXXXXX");
+            if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
+                free(error);
+                error = xstrdup("work dir template too long");
+                write_json_row(jsonl, t->name, t->source, t->options_joined,
+                               llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                               llvm_rc, liric_rc, lli_rc, error);
+                UPDATE_STATS_AND_PROGRESS();
+                free(error);
+                continue;
+            }
+        }
         if (!mkdtemp(work_tpl)) {
             free(error);
             error = xstrdup("failed to create temp work dir");
@@ -1165,6 +1210,32 @@ int main(int argc, char **argv) {
         }
         fclose(f);
     }
+    {
+        size_t frozen_n = (size_t)cfg.freeze_api_n;
+        if (frozen_n > compat_api_n) frozen_n = compat_api_n;
+
+        {
+            FILE *f = fopen(frozen_api_path, "w");
+            if (!f) die("failed to open %s", frozen_api_path);
+            for (i = 0; i < frozen_n; i++) fprintf(f, "%s\n", compat_api[i]);
+            fclose(f);
+        }
+
+        {
+            FILE *f = fopen(frozen_opts_path, "w");
+            if (!f) die("failed to open %s", frozen_opts_path);
+            for (i = 0; i < frozen_n; i++) {
+                const char *name = compat_api[i];
+                const char *opts = find_option_by_name(opts_api, opts_api_n, name);
+                char *en = json_escape(name);
+                char *eo = json_escape(opts);
+                fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\"}\n", en, eo);
+                free(en);
+                free(eo);
+            }
+            fclose(f);
+        }
+    }
 
     printf("\nResults written to %s\n", jsonl_path);
     printf("processed:  %zu/%zu\n", processed, eligible);
@@ -1174,6 +1245,10 @@ int main(int argc, char **argv) {
     printf("both_match: %zu (%.1f%%)\n", both_match_count, processed ? (100.0 * (double)both_match_count / (double)processed) : 0.0);
     printf("compat_api: %zu tests -> %s\n", compat_api_n, compat_api_path);
     printf("compat_ll:  %zu tests -> %s\n", compat_ll_n, compat_ll_path);
+    printf("compat_api_frozen: %d requested, %zu written -> %s\n",
+           cfg.freeze_api_n,
+           ((size_t)cfg.freeze_api_n > compat_api_n) ? compat_api_n : (size_t)cfg.freeze_api_n,
+           frozen_api_path);
 
 #undef UPDATE_STATS_AND_PROGRESS
 
@@ -1200,6 +1275,8 @@ int main(int argc, char **argv) {
     free(compat_ll_path);
     free(opts_api_path);
     free(opts_ll_path);
+    free(frozen_api_path);
+    free(frozen_opts_path);
     free_testlist(&tests);
     return 0;
 }
