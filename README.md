@@ -36,8 +36,8 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 # 2) LL benchmark: liric JIT vs lli -O0
 ./build/bench_ll --iters 3
 
-# 3) API JIT benchmark (primary): direct lfortran --jit (WITH_LIRIC) vs lfortran --jit (LLVM)
-./build/bench_api_jit --iters 3 --min-completed 1
+# 3) API benchmark (primary, direct JIT): lfortran --jit (WITH_LIRIC) vs lfortran --jit (LLVM)
+./build/bench_api --iters 3 --min-completed 1
 ```
 
 Artifacts go to `/tmp/liric_bench/`.
@@ -46,7 +46,7 @@ Primary artifacts:
 
 - `compat_ll.txt` + `compat_ll_options.jsonl` (shared corpus used by LL and API-JIT)
 - `bench_ll.jsonl` + `bench_ll_summary.json`
-- `bench_api_jit.jsonl` + `bench_api_jit_summary.json`
+- `bench_api.jsonl` + `bench_api_summary.json`
 
 ## Compatibility
 
@@ -88,12 +88,12 @@ Faster-case counts:
 - wall: `2067/2081`
 - materialization: `2081/2081`
 
-### API JIT Mode (Primary, `bench_api_jit`)
+### API Mode (Primary, direct JIT, `bench_api`)
 
 Command:
 
 ```bash
-./build/bench_api_jit --iters 3 --bench-dir /tmp/liric_bench --min-completed 1
+./build/bench_api --iters 3 --bench-dir /tmp/liric_bench --min-completed 1
 ```
 
 Coverage: `2121` attempted, `2080` completed, `41` skipped.

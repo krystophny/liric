@@ -1,10 +1,10 @@
-// API benchmark: lfortran+LLVM (compile+link+run) vs lfortran+liric (compile+JIT+run).
-// Measures how much faster the liric backend is compared to the full LLVM pipeline.
-// Two metrics: wall-clock (total subprocess) and internal (codegen-only timing).
+// API benchmark (direct-JIT mode): compare lfortran --jit execution
+// between LLVM build and WITH_LIRIC build (no object/link benchmark path).
 
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,7 +14,6 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <limits.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -35,8 +34,6 @@ typedef struct {
 typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
-    const char *probe_runner;
-    const char *runtime_lib;
     const char *test_dir;
     const char *bench_dir;
     const char *compat_list;
@@ -65,6 +62,7 @@ typedef struct {
     double liric_run_ms;
     double llvm_compile_ms;
     double llvm_run_ms;
+    double frontend_ms;
 } row_t;
 
 typedef struct {
@@ -540,6 +538,89 @@ static char *json_escape(const char *s) {
     return out;
 }
 
+static char *strip_ansi(const char *s) {
+    size_t i, n = 0;
+    char *out, *p;
+    if (!s) return xstrdup("");
+    for (i = 0; s[i]; i++) {
+        if ((unsigned char)s[i] == 0x1b && s[i + 1] == '[') {
+            i += 2;
+            while (s[i] && (s[i] < '@' || s[i] > '~')) i++;
+            if (!s[i]) break;
+            continue;
+        }
+        n++;
+    }
+    out = (char *)malloc(n + 1);
+    if (!out) die("out of memory", NULL);
+    p = out;
+    for (i = 0; s[i]; i++) {
+        if ((unsigned char)s[i] == 0x1b && s[i + 1] == '[') {
+            i += 2;
+            while (s[i] && (s[i] < '@' || s[i] > '~')) i++;
+            if (!s[i]) break;
+            continue;
+        }
+        *p++ = s[i];
+    }
+    *p = '\0';
+    return out;
+}
+
+static int parse_time_component_ms(const char *clean_text, const char *key, double *out_ms) {
+    const char *line = clean_text;
+    size_t key_len = strlen(key);
+    while (*line) {
+        const char *end = strchr(line, '\n');
+        const char *start = line;
+        if (!end) end = line + strlen(line);
+        while (start < end && (*start == ' ' || *start == '\t')) start++;
+        if ((size_t)(end - start) > key_len && strncmp(start, key, key_len) == 0) {
+            const char *p = start + key_len;
+            while (p < end && !isdigit((unsigned char)*p) && *p != '-' && *p != '.') p++;
+            if (p < end) {
+                char *q = NULL;
+                double v = strtod(p, &q);
+                if (q && q > p) {
+                    *out_ms = v;
+                    return 1;
+                }
+            }
+        }
+        line = *end ? end + 1 : end;
+    }
+    return 0;
+}
+
+static int parse_lfortran_time_report(const char *stdout_text,
+                                      double *out_frontend_ms,
+                                      double *out_compile_ms,
+                                      double *out_run_ms,
+                                      double *out_wall_ms) {
+    char *clean = strip_ansi(stdout_text);
+    double file_read = 0.0, src_to_asr = 0.0, asr_passes = 0.0;
+    double asr_to_mod = 0.0, llvm_ir = 0.0, llvm_opt = 0.0;
+    double llvm_to_jit = 0.0, jit_run = 0.0, total = 0.0;
+    int ok =
+        parse_time_component_ms(clean, "File reading", &file_read) &&
+        parse_time_component_ms(clean, "Src -> ASR", &src_to_asr) &&
+        parse_time_component_ms(clean, "ASR passes (total)", &asr_passes) &&
+        parse_time_component_ms(clean, "ASR -> mod", &asr_to_mod) &&
+        parse_time_component_ms(clean, "LLVM IR creation", &llvm_ir) &&
+        parse_time_component_ms(clean, "LLVM opt", &llvm_opt) &&
+        parse_time_component_ms(clean, "LLVM -> JIT", &llvm_to_jit) &&
+        parse_time_component_ms(clean, "JIT run", &jit_run) &&
+        parse_time_component_ms(clean, "Total time", &total);
+    if (ok) {
+        *out_frontend_ms = file_read + src_to_asr + asr_passes + asr_to_mod + llvm_ir + llvm_opt;
+        *out_compile_ms = llvm_to_jit;
+        *out_run_ms = jit_run;
+        *out_wall_ms = total;
+    }
+    free(clean);
+    return ok;
+}
+
 static void resolve_default_compat_artifacts(const char *bench_dir, char **compat_path, char **opts_path) {
     *compat_path = path_join2(bench_dir, "compat_ll.txt");
     *opts_path = path_join2(bench_dir, "compat_ll_options.jsonl");
@@ -554,17 +635,19 @@ static void write_json_success_row(FILE *f,
                                    double ec,
                                    double lr,
                                    double er,
+                                   double front,
                                    double wall_sp,
                                    double compile_sp,
                                    double run_sp) {
     char *en = json_escape(name ? name : "");
     fprintf(f,
             "{\"name\":\"%s\",\"status\":\"ok\",\"iters\":%zu,"
+            "\"frontend_median_ms\":%.6f,"
             "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
             "\"liric_compile_median_ms\":%.6f,\"llvm_compile_median_ms\":%.6f,"
             "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
             "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
-            en, iters_done, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+            en, iters_done, front, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
     free(en);
 }
 
@@ -578,18 +661,14 @@ static void write_json_skip_row(FILE *f, const char *name, const char *reason) {
     free(er);
 }
 
-#define SKIP_REASON_COUNT 10
+#define SKIP_REASON_COUNT 6
 static const char *k_skip_reasons[SKIP_REASON_COUNT] = {
     "workdir_create_failed",
     "source_missing",
-    "llvm_compile_failed",
-    "llvm_compile_timeout",
-    "llvm_run_failed",
-    "llvm_run_timeout",
-    "liric_compile_failed",
-    "liric_compile_timeout",
-    "liric_run_failed",
-    "liric_run_timeout"
+    "llvm_jit_failed",
+    "llvm_jit_timeout",
+    "liric_jit_failed",
+    "liric_jit_timeout"
 };
 
 static int skip_reason_index(const char *reason) {
@@ -603,29 +682,23 @@ static int skip_reason_index(const char *reason) {
 
 static void usage(void) {
     printf("usage: bench_api [options]\n");
-    printf("  --lfortran PATH       path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
-    printf("  --lfortran-liric PATH path to lfortran+liric binary (default: ../lfortran/build-liric/src/bin/lfortran)\n");
-    printf("  --probe-runner PATH   path to liric_probe_runner (default: build/liric_probe_runner)\n");
-    printf("  --runtime-lib PATH    path to liblfortran_runtime (auto-detected)\n");
-    printf("  --test-dir PATH       path to integration_tests/ dir\n");
-    printf("  --bench-dir PATH      output directory (default: /tmp/liric_bench)\n");
-    printf("  --compat-list PATH    compat list file (default: compat_ll.txt)\n");
-    printf("  --options-jsonl PATH  options jsonl file (default matches chosen compat list)\n");
-    printf("  --iters N             iterations per test (default: 3)\n");
-    printf("  --timeout N           per-command timeout in seconds (default: 30)\n");
-    printf("  --min-completed N     fail if completed tests < N (default: 0)\n");
+    printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
+    printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran)\n");
+    printf("  --test-dir PATH      path to integration_tests/ dir\n");
+    printf("  --bench-dir PATH     output directory (default: /tmp/liric_bench)\n");
+    printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
+    printf("  --options-jsonl PATH options jsonl file (default matches chosen compat list)\n");
+    printf("  --iters N            iterations per test (default: 3)\n");
+    printf("  --timeout N          per-command timeout in seconds (default: 30)\n");
+    printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
 }
 
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
-    const char *default_runtime_dylib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
-    const char *default_runtime_so = "../lfortran/build/src/runtime/liblfortran_runtime.so";
 
     cfg.lfortran = "../lfortran/build/src/bin/lfortran";
     cfg.lfortran_liric = "../lfortran/build-liric/src/bin/lfortran";
-    cfg.probe_runner = "build/liric_probe_runner";
-    cfg.runtime_lib = file_exists(default_runtime_dylib) ? default_runtime_dylib : default_runtime_so;
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
@@ -642,10 +715,6 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-liric") == 0 && i + 1 < argc) {
             cfg.lfortran_liric = argv[++i];
-        } else if (strcmp(argv[i], "--probe-runner") == 0 && i + 1 < argc) {
-            cfg.probe_runner = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
-            cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
@@ -669,14 +738,10 @@ static cfg_t parse_args(int argc, char **argv) {
     }
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
-    if (!file_exists(cfg.lfortran_liric)) die("lfortran (liric) not found", cfg.lfortran_liric);
-    if (!file_exists(cfg.probe_runner)) die("probe runner not found", cfg.probe_runner);
-    if (!file_exists(cfg.runtime_lib)) die("runtime lib not found", cfg.runtime_lib);
+    if (!file_exists(cfg.lfortran_liric)) die("lfortran (WITH_LIRIC) not found", cfg.lfortran_liric);
 
     cfg.lfortran = to_abs_path(cfg.lfortran);
     cfg.lfortran_liric = to_abs_path(cfg.lfortran_liric);
-    cfg.probe_runner = to_abs_path(cfg.probe_runner);
-    cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     cfg.test_dir = to_abs_path(cfg.test_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
     if (cfg.compat_list) cfg.compat_list = to_abs_path(cfg.compat_list);
@@ -704,7 +769,6 @@ int main(int argc, char **argv) {
         else free(default_opts);
     }
 
-    char *api_bin_dir = path_join2(cfg.bench_dir, "api_bin");
     char *jsonl_path = path_join2(cfg.bench_dir, "bench_api.jsonl");
     char *summary_path = path_join2(cfg.bench_dir, "bench_api_summary.json");
     FILE *f;
@@ -738,19 +802,16 @@ int main(int argc, char **argv) {
     fclose(f);
 
     opts = parse_options_jsonl(opts_path);
-
-    ensure_dir(api_bin_dir);
+    ensure_dir(cfg.bench_dir);
 
     printf("Benchmarking %zu tests, %d iterations each\n", tests.n, cfg.iters);
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
-    printf("  probe_runner:   %s\n", cfg.probe_runner);
-    printf("  runtime_lib:    %s\n", cfg.runtime_lib);
-    printf("  test_dir:       %s\n", cfg.test_dir);
-    printf("  bench_dir:      %s\n", cfg.bench_dir);
-    printf("  compat_list:    %s\n", compat_path);
-    printf("  options_jsonl:  %s\n", opts_path);
-    printf("  min_completed:  %d\n", cfg.min_completed);
+    printf("  test_dir:      %s\n", cfg.test_dir);
+    printf("  bench_dir:     %s\n", cfg.bench_dir);
+    printf("  compat_list:   %s\n", compat_path);
+    printf("  options_jsonl: %s\n", opts_path);
+    printf("  min_completed: %d\n", cfg.min_completed);
 
     {
         FILE *jf = fopen(jsonl_path, "w");
@@ -761,7 +822,6 @@ int main(int argc, char **argv) {
             const char *test_opts = optlist_find(&opts, name);
             strlist_t opt_toks;
             char *source_path = NULL;
-            char *bin_path = NULL;
             size_t it;
             double *liric_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
@@ -769,6 +829,7 @@ int main(int argc, char **argv) {
             double *liric_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *frontend = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             const char *skip_reason = NULL;
             char work_tpl[PATH_MAX];
@@ -776,9 +837,9 @@ int main(int argc, char **argv) {
 
             strlist_init(&opt_toks);
             {
-                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_XXXXXX");
+                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_jit_XXXXXX");
                 if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
-                    skip_reason = "workdir_template_too_long";
+                    skip_reason = "workdir_create_failed";
                     goto skip_test;
                 }
             }
@@ -796,112 +857,85 @@ int main(int argc, char **argv) {
                 source_path = path_join2(cfg.test_dir, fname);
             }
 
-            bin_path = path_join2(api_bin_dir, name);
-
             if (!file_exists(source_path)) {
                 skip_reason = "source_missing";
                 goto skip_test;
             }
 
             for (it = 0; it < (size_t)cfg.iters; it++) {
-                char **compile_argv;
-                char *run_argv[2];
-                char **liric_compile_argv;
-                char *liric_run_argv[2];
-                char *liric_bin_path;
-                cmd_result_t compile_r, run_r, liric_compile_r, liric_run_r;
-                double compile_ms, run_ms, liric_compile_ms, liric_run_ms;
-                size_t argc_compile, j;
+                char **llvm_argv = NULL;
+                char **liric_argv = NULL;
+                cmd_result_t llvm_r, liric_r;
+                size_t argc_jit, j;
+                double llvm_front = 0.0, llvm_compile_ms = 0.0, llvm_run_ms = 0.0, llvm_wall_ms = 0.0;
+                double liric_front = 0.0, liric_compile_ms = 0.0, liric_run_ms = 0.0, liric_wall_ms = 0.0;
 
-                /* --- LLVM side: lfortran+LLVM compile + run --- */
-                argc_compile = 4 + opt_toks.n + 1;
-                compile_argv = (char **)calloc(argc_compile + 1, sizeof(char *));
-                if (!compile_argv) die("out of memory", NULL);
-                compile_argv[0] = (char *)cfg.lfortran;
-                compile_argv[1] = "--no-color";
+                argc_jit = 5 + opt_toks.n + 1;
+
+                llvm_argv = (char **)calloc(argc_jit + 1, sizeof(char *));
+                if (!llvm_argv) die("out of memory", NULL);
+                llvm_argv[0] = (char *)cfg.lfortran;
+                llvm_argv[1] = "--backend=llvm";
+                llvm_argv[2] = "--jit";
+                llvm_argv[3] = "--time-report";
+                llvm_argv[4] = "--no-color";
                 for (j = 0; j < opt_toks.n; j++)
-                    compile_argv[2 + j] = opt_toks.items[j];
-                compile_argv[2 + opt_toks.n] = source_path;
-                compile_argv[3 + opt_toks.n] = "-o";
-                compile_argv[4 + opt_toks.n] = bin_path;
-                compile_argv[5 + opt_toks.n] = NULL;
+                    llvm_argv[5 + j] = opt_toks.items[j];
+                llvm_argv[5 + opt_toks.n] = source_path;
+                llvm_argv[6 + opt_toks.n] = NULL;
 
-                compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, work_dir);
-                free(compile_argv);
-                if (compile_r.rc != 0) {
-                    skip_reason = compile_r.timed_out ? "llvm_compile_timeout" : "llvm_compile_failed";
-                    free_cmd_result(&compile_r);
+                llvm_r = run_cmd(llvm_argv, cfg.timeout_sec, NULL, work_dir);
+                free(llvm_argv);
+                if (llvm_r.rc != 0) {
+                    skip_reason = llvm_r.timed_out ? "llvm_jit_timeout" : "llvm_jit_failed";
+                    free_cmd_result(&llvm_r);
                     break;
                 }
-                compile_ms = compile_r.elapsed_ms;
-                free_cmd_result(&compile_r);
-
-                run_argv[0] = bin_path;
-                run_argv[1] = NULL;
-                run_r = run_cmd((char *const *)run_argv, cfg.timeout_sec, NULL, work_dir);
-                if (run_r.rc != 0) {
-                    skip_reason = run_r.timed_out ? "llvm_run_timeout" : "llvm_run_failed";
-                    free_cmd_result(&run_r);
+                if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_front, &llvm_compile_ms, &llvm_run_ms, &llvm_wall_ms)) {
+                    skip_reason = "llvm_jit_failed";
+                    free_cmd_result(&llvm_r);
                     break;
                 }
-                run_ms = run_r.elapsed_ms;
-                free_cmd_result(&run_r);
+                free_cmd_result(&llvm_r);
 
-                llvm_wall[ok_n] = compile_ms + run_ms;
-                llvm_compile[ok_n] = compile_ms;
-                llvm_run[ok_n] = run_ms;
-
-                /* --- Liric side: lfortran+liric compile + run --- */
-                {
-                    char liric_bin_name[512];
-                    snprintf(liric_bin_name, sizeof(liric_bin_name), "%s_liric", name);
-                    liric_bin_path = path_join2(api_bin_dir, liric_bin_name);
-                }
-
-                liric_compile_argv = (char **)calloc(argc_compile + 1, sizeof(char *));
-                if (!liric_compile_argv) die("out of memory", NULL);
-                liric_compile_argv[0] = (char *)cfg.lfortran_liric;
-                liric_compile_argv[1] = "--no-color";
+                liric_argv = (char **)calloc(argc_jit + 1, sizeof(char *));
+                if (!liric_argv) die("out of memory", NULL);
+                liric_argv[0] = (char *)cfg.lfortran_liric;
+                liric_argv[1] = "--backend=llvm";
+                liric_argv[2] = "--jit";
+                liric_argv[3] = "--time-report";
+                liric_argv[4] = "--no-color";
                 for (j = 0; j < opt_toks.n; j++)
-                    liric_compile_argv[2 + j] = opt_toks.items[j];
-                liric_compile_argv[2 + opt_toks.n] = source_path;
-                liric_compile_argv[3 + opt_toks.n] = "-o";
-                liric_compile_argv[4 + opt_toks.n] = liric_bin_path;
-                liric_compile_argv[5 + opt_toks.n] = NULL;
+                    liric_argv[5 + j] = opt_toks.items[j];
+                liric_argv[5 + opt_toks.n] = source_path;
+                liric_argv[6 + opt_toks.n] = NULL;
 
-                liric_compile_r = run_cmd(liric_compile_argv, cfg.timeout_sec, NULL, work_dir);
-                free(liric_compile_argv);
-                if (liric_compile_r.rc != 0) {
-                    skip_reason = liric_compile_r.timed_out ? "liric_compile_timeout" : "liric_compile_failed";
-                    free_cmd_result(&liric_compile_r);
-                    free(liric_bin_path);
+                liric_r = run_cmd(liric_argv, cfg.timeout_sec, NULL, work_dir);
+                free(liric_argv);
+                if (liric_r.rc != 0) {
+                    skip_reason = liric_r.timed_out ? "liric_jit_timeout" : "liric_jit_failed";
+                    free_cmd_result(&liric_r);
                     break;
                 }
-                liric_compile_ms = liric_compile_r.elapsed_ms;
-                free_cmd_result(&liric_compile_r);
-
-                liric_run_argv[0] = liric_bin_path;
-                liric_run_argv[1] = NULL;
-                liric_run_r = run_cmd((char *const *)liric_run_argv, cfg.timeout_sec, NULL, work_dir);
-                if (liric_run_r.rc != 0) {
-                    skip_reason = liric_run_r.timed_out ? "liric_run_timeout" : "liric_run_failed";
-                    free_cmd_result(&liric_run_r);
-                    free(liric_bin_path);
+                if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_front, &liric_compile_ms, &liric_run_ms, &liric_wall_ms)) {
+                    skip_reason = "liric_jit_failed";
+                    free_cmd_result(&liric_r);
                     break;
                 }
-                liric_run_ms = liric_run_r.elapsed_ms;
-                free_cmd_result(&liric_run_r);
+                free_cmd_result(&liric_r);
 
-                liric_wall[ok_n] = liric_compile_ms + liric_run_ms;
+                frontend[ok_n] = 0.5 * (llvm_front + liric_front);
+                llvm_compile[ok_n] = llvm_compile_ms;
+                llvm_run[ok_n] = llvm_run_ms;
+                llvm_wall[ok_n] = llvm_wall_ms;
                 liric_compile[ok_n] = liric_compile_ms;
                 liric_run[ok_n] = liric_run_ms;
-                free(liric_bin_path);
-
+                liric_wall[ok_n] = liric_wall_ms;
                 ok_n++;
             }
 
             if (ok_n == 0) {
-                if (!skip_reason) skip_reason = "llvm_compile_failed";
+                if (!skip_reason) skip_reason = "llvm_jit_failed";
                 goto skip_test;
             }
 
@@ -912,6 +946,7 @@ int main(int argc, char **argv) {
                 double ec = median(llvm_compile, ok_n);
                 double lr = median(liric_run, ok_n);
                 double er = median(llvm_run, ok_n);
+                double fm = median(frontend, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
                 double compile_sp = lc > 0 ? ec / lc : 0.0;
                 double run_sp = lr > 0 ? er / lr : 0.0;
@@ -924,10 +959,11 @@ int main(int argc, char **argv) {
                 row.liric_run_ms = lr;
                 row.llvm_compile_ms = ec;
                 row.llvm_run_ms = er;
+                row.frontend_ms = fm;
                 rowlist_push(&rows, row);
 
-                write_json_success_row(jf, name, ok_n, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
-                printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx), compile %.1fms vs %.1fms (%.2fx)\n",
+                write_json_success_row(jf, name, ok_n, lw, ew, lc, ec, lr, er, fm, wall_sp, compile_sp, run_sp);
+                printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), jit %.2fms vs %.2fms (%.2fx)\n",
                        i + 1, tests.n, name, lw, ew, wall_sp, lc, ec, compile_sp);
             }
             goto next_test;
@@ -943,13 +979,13 @@ skip_test:
 next_test:
             if (work_dir) rmdir(work_dir);
             free(source_path);
-            free(bin_path);
             free(liric_wall);
             free(llvm_wall);
             free(liric_compile);
             free(liric_run);
             free(llvm_compile);
             free(llvm_run);
+            free(frontend);
             strlist_free(&opt_toks);
         }
 
@@ -963,6 +999,7 @@ next_test:
         double *ec = (double *)malloc(rows.n * sizeof(double));
         double *lr = (double *)malloc(rows.n * sizeof(double));
         double *er = (double *)malloc(rows.n * sizeof(double));
+        double *fm = (double *)malloc(rows.n * sizeof(double));
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
         double *compile_sp = (double *)malloc(rows.n * sizeof(double));
         double *run_sp = (double *)malloc(rows.n * sizeof(double));
@@ -973,6 +1010,7 @@ next_test:
         double sum_lw = 0.0, sum_ew = 0.0;
         double sum_lc = 0.0, sum_ec = 0.0;
         double sum_lr = 0.0, sum_er = 0.0;
+        double sum_fm = 0.0;
 
         for (j = 0; j < rows.n; j++) {
             lw[j] = rows.items[j].liric_wall_ms;
@@ -981,6 +1019,7 @@ next_test:
             ec[j] = rows.items[j].llvm_compile_ms;
             lr[j] = rows.items[j].liric_run_ms;
             er[j] = rows.items[j].llvm_run_ms;
+            fm[j] = rows.items[j].frontend_ms;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
             compile_sp[j] = lc[j] > 0 ? ec[j] / lc[j] : 0.0;
             run_sp[j] = lr[j] > 0 ? er[j] / lr[j] : 0.0;
@@ -993,33 +1032,40 @@ next_test:
             sum_ec += ec[j];
             sum_lr += lr[j];
             sum_er += er[j];
+            sum_fm += fm[j];
         }
 
         printf("\n========================================================================\n");
-        printf("  lfortran+LLVM vs lfortran+liric (API path)\n");
+        printf("  API JIT mode: Fortran frontend + LLVM JIT vs Fortran frontend + liric JIT\n");
         printf("  %zu tests, %d iterations each\n", rows.n, cfg.iters);
         printf("========================================================================\n");
 
-        printf("\n  WALL-CLOCK (compile+link+run vs compile+JIT+run)\n");
+        printf("\n  FRONTEND (common to both)\n");
+        printf("  Median:    %.3f ms\n", median(fm, rows.n));
+        printf("  Aggregate: %.0f ms\n", sum_fm);
+
+        printf("\n  WALL-CLOCK (frontend + jit-materialize + exec)\n");
         printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
                median(lw, rows.n), median(ew, rows.n), median(wall_sp, rows.n));
-        printf("  Mean-ish:  aggregate %.0f ms vs %.0f ms, speedup %.2fx\n",
+        printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
                sum_lw, sum_ew, (sum_lw > 0 ? sum_ew / sum_lw : 0.0));
         printf("  P90/P95:   %.2fx / %.2fx\n", percentile(wall_sp, rows.n, 90), percentile(wall_sp, rows.n, 95));
         printf("  Faster:    %zu/%zu (%.1f%%)\n", wall_faster, rows.n, 100.0 * (double)wall_faster / (double)rows.n);
 
-        printf("\n  PHASE BREAKDOWN (subprocess medians)\n");
-        printf("  Compile:   liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
+        printf("\n  JIT MATERIALIZATION (LLVM -> JIT)\n");
+        printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
                median(lc, rows.n), median(ec, rows.n), median(compile_sp, rows.n));
-        printf("  Compile+:  aggregate %.0f ms vs %.0f ms, speedup %.2fx\n",
+        printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
                sum_lc, sum_ec, (sum_lc > 0 ? sum_ec / sum_lc : 0.0));
-        printf("  Compile F: %zu/%zu (%.1f%%)\n",
+        printf("  Faster:    %zu/%zu (%.1f%%)\n",
                compile_faster, rows.n, 100.0 * (double)compile_faster / (double)rows.n);
-        printf("  Run:       liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
+
+        printf("\n  EXECUTION (entry invocation only)\n");
+        printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
                median(lr, rows.n), median(er, rows.n), median(run_sp, rows.n));
-        printf("  Run+:      aggregate %.0f ms vs %.0f ms, speedup %.2fx\n",
+        printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
                sum_lr, sum_er, (sum_lr > 0 ? sum_er / sum_lr : 0.0));
-        printf("  Run F:     %zu/%zu (%.1f%%)\n",
+        printf("  Faster:    %zu/%zu (%.1f%%)\n",
                run_faster, rows.n, 100.0 * (double)run_faster / (double)rows.n);
 
         printf("\n  Results: %s\n", jsonl_path);
@@ -1030,6 +1076,7 @@ next_test:
         free(ec);
         free(lr);
         free(er);
+        free(fm);
         free(wall_sp);
         free(compile_sp);
         free(run_sp);
@@ -1090,7 +1137,6 @@ next_test:
 
     free(compat_path);
     free(opts_path);
-    free(api_bin_dir);
     free(jsonl_path);
     free(summary_path);
     strlist_free(&tests);
