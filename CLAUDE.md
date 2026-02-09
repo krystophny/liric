@@ -74,6 +74,46 @@ Uses `compat_api.txt` and `compat_api_options.jsonl` from Step 1.
 
 All outputs go to `/tmp/liric_bench/`.
 
+**Focused corpus benchmark** (100 curated tests, fast iteration):
+```bash
+./build/bench_corpus                    # run all 100, print timing table
+./build/bench_corpus --top 10           # show top 10 slowest
+./build/bench_corpus --iters 3          # 3 iterations, keep best
+./build/bench_corpus --csv              # CSV output for analysis
+./build/bench_corpus --single <name>    # single test (for perf/callgrind)
+```
+The corpus (`tools/corpus_100.tsv`) contains 100 representative passing tests covering
+39 categories, from 494 bytes to 2MB, totaling 9.8MB of LLVM IR. Requires
+`/tmp/liric_lfortran_mass/cache/` from a prior mass test run.
+
+Profiling workflow:
+```bash
+# callgrind (deterministic, best for optimization work)
+valgrind --tool=callgrind --callgrind-out-file=/tmp/cg.out \
+  ./build/liric_probe_runner --ignore-retcode \
+  --load-lib <runtime.so> --func main --sig i32_argc_argv <test.ll>
+callgrind_annotate /tmp/cg.out | head -60
+
+# perf (sampling, for large workloads)
+perf record -g -F 999 -- ./build/bench_corpus
+perf report --stdio --no-children --percent-limit 1
+```
+
+## Current Performance Profile (2026-02-08)
+
+100-case corpus (9.8MB LLVM IR): **99ms JIT total** (parse 84ms/85%, compile 15ms/15%).
+
+Top hotspots (callgrind, `functions_30` 2MB test):
+- `lr_lexer_next`: 46% — lexer is the dominant bottleneck
+- `strtol` (from lexer): 3% — integer literal parsing
+- `parse_function_def`: 4% — parser
+- `parse_type`: 3% — type parsing
+- `resolve_vreg_n`: 3% — vreg name lookup
+- `lr_arena_alloc`: 3% — arena allocator
+- Backend (compile): 15% total — already fast
+
+**Priority: parser/lexer optimization (issues #144, #145).**
+
 ## Pipeline
 
 ```
@@ -205,7 +245,8 @@ RUN_TEST(test_name);           // in main()
 - No object file emission (JIT only, no ahead-of-time compilation)
 - WASM frontend: MVP integer subset only (no FP, SIMD, tables, bulk memory, multi-memory)
 - Stack-based register allocation only (no liveness analysis)
-- LFortran mass tests: 174/2415 passing (see STATUS.md for breakdown)
+- LFortran mass tests: 2200/2422 passing, 88 mismatches, 44 JIT failures (see STATUS.md)
+- Lexer is 46% of JIT time — primary optimization target (#144)
 
 ## Coding Style
 
