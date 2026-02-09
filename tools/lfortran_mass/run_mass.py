@@ -37,6 +37,23 @@ FORTRAN_SUFFIXES = FORTRAN_FIXED_SUFFIXES | FORTRAN_FREE_SUFFIXES | {
 C_SUFFIXES = {".c"}
 CXX_SUFFIXES = {".cc", ".cpp", ".cxx", ".c++"}
 HEADER_SUFFIXES = {".h", ".hh", ".hpp", ".hxx"}
+OPENMP_LIB_NAMES = (
+    "libgomp.so",
+    "libgomp.so.1",
+    "libomp.so",
+    "libomp.so.5",
+    "libomp.dylib",
+    "libgomp.dylib",
+)
+DEFAULT_OPENMP_LIB_DIRS = (
+    "/usr/lib",
+    "/usr/lib64",
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib/aarch64-linux-gnu",
+    "/lib/x86_64-linux-gnu",
+    "/lib/aarch64-linux-gnu",
+    "/opt/homebrew/lib",
+)
 
 
 @dataclass(frozen=True)
@@ -785,6 +802,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-auto-openmp-lib",
+        action="store_true",
+        help=(
+            "Disable automatic preload of OpenMP runtime "
+            "(libgomp/libomp) when OpenMP tests are selected"
+        ),
+    )
+    parser.add_argument(
         "--diag-fail-logs",
         action="store_true",
         help=(
@@ -852,6 +877,61 @@ def resolve_default_runtime_lib(lfortran_root: Path, lfortran_bin: Path) -> Opti
         so_candidates = sorted(resolved_dir.glob("liblfortran_runtime.so.*"))
         if so_candidates:
             return so_candidates[0].resolve()
+
+    return None
+
+
+def entry_needs_openmp_runtime(entry: Any) -> bool:
+    labels = [str(x) for x in getattr(entry, "labels", [])]
+    if "llvm_omp" in labels:
+        return True
+
+    tokens = split_options(str(getattr(entry, "options", "")))
+    return "--openmp" in tokens or "-fopenmp" in tokens
+
+
+def resolve_default_openmp_lib(lfortran_root: Path, lfortran_bin: Path) -> Optional[Path]:
+    env_openmp_lib = os.environ.get("LFORTRAN_OPENMP_LIBRARY", "").strip()
+    if env_openmp_lib:
+        openmp_lib = Path(env_openmp_lib).resolve()
+        if openmp_lib.exists():
+            return openmp_lib
+
+    env_openmp_dir = os.environ.get("LFORTRAN_OPENMP_LIBRARY_DIR", "").strip()
+    candidate_dirs: List[Path] = []
+    if env_openmp_dir:
+        candidate_dirs.append(Path(env_openmp_dir))
+
+    candidate_dirs.extend(
+        [
+            (lfortran_bin.parent / ".." / "runtime"),
+            (lfortran_bin.parent / ".." / ".." / "runtime"),
+            (lfortran_root / "build" / "src" / "runtime"),
+            (lfortran_root / "build" / "runtime"),
+            (lfortran_root / "build" / "lib"),
+        ]
+    )
+    candidate_dirs.extend(Path(p) for p in DEFAULT_OPENMP_LIB_DIRS)
+
+    seen = set()
+    for dir_path in candidate_dirs:
+        resolved_dir = dir_path.resolve()
+        key = str(resolved_dir)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not resolved_dir.exists() or not resolved_dir.is_dir():
+            continue
+
+        for name in OPENMP_LIB_NAMES:
+            lib = resolved_dir / name
+            if lib.exists():
+                return lib.resolve()
+
+        for pattern in ("libgomp.so*", "libomp.so*", "libomp*.dylib", "libgomp*.dylib"):
+            candidates = sorted(resolved_dir.glob(pattern))
+            if candidates:
+                return candidates[0].resolve()
 
     return None
 
@@ -1016,6 +1096,20 @@ def main() -> int:
     lfortran_tests_toml.write_jsonl(manifest_path, manifest_rows)
     report.write_jsonl(selection_path, selection_rows)
 
+    openmp_needed = any(entry_needs_openmp_runtime(entry) for entry in entries)
+    if args.no_auto_openmp_lib:
+        auto_openmp_lib_str = "disabled"
+    elif not openmp_needed:
+        auto_openmp_lib_str = "not-needed"
+    else:
+        auto_openmp_lib = resolve_default_openmp_lib(lfortran_root, lfortran_bin)
+        if auto_openmp_lib is not None:
+            auto_openmp_lib_str = str(auto_openmp_lib)
+            if auto_openmp_lib_str not in runtime_libs:
+                runtime_libs.append(auto_openmp_lib_str)
+        else:
+            auto_openmp_lib_str = "none"
+
     cfg = RunnerConfig(
         lfortran_bin=lfortran_bin,
         liric_bin=liric_bin,
@@ -1077,6 +1171,7 @@ def main() -> int:
     print(f"filtered_non_llvm: {skipped_non_llvm}")
     print(f"filtered_expected_fail: {skipped_expected_fail}")
     print(f"auto_runtime_lib: {auto_runtime_lib_str}")
+    print(f"auto_openmp_lib: {auto_openmp_lib_str}")
     print(f"deduped_cases: {deduped_count}")
 
     ok, message = report.gate_result(summary)
