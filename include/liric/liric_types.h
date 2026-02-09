@@ -54,6 +54,7 @@ struct lr_block {
     struct lr_inst *last;
     struct lr_inst **inst_array;
     uint32_t num_insts;
+    struct lr_func *func;
     struct lr_block *next;
 };
 
@@ -69,6 +70,9 @@ struct lr_func {
     lr_block_t *first_block;
     lr_block_t *last_block;
     lr_block_t **block_array;
+    struct lr_inst **linear_inst_array;
+    uint32_t *block_inst_offsets;
+    uint32_t num_linear_insts;
     uint32_t num_blocks;
     uint32_t next_vreg;
     struct lr_func *next;

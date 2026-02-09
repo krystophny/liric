@@ -56,17 +56,14 @@ void lr_target_prescan_static_alloca_offsets(lr_func_t *func,
         return;
     }
 
-    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-        const lr_block_t *b = func->block_array[bi];
-        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
-            const lr_inst_t *inst = b->inst_array[ii];
-            if (inst->op != LR_OP_ALLOCA) {
-                continue;
-            }
-            if (!lr_target_alloca_uses_static_storage(inst)) {
-                continue;
-            }
-            (void)ensure(ctx, inst);
+    for (uint32_t ii = 0; ii < func->num_linear_insts; ii++) {
+        const lr_inst_t *inst = func->linear_inst_array[ii];
+        if (inst->op != LR_OP_ALLOCA) {
+            continue;
         }
+        if (!lr_target_alloca_uses_static_storage(inst)) {
+            continue;
+        }
+        (void)ensure(ctx, inst);
     }
 }
