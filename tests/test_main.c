@@ -66,6 +66,7 @@ int test_parser_cast_expr_in_aggregate_init(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
 int test_codegen_skip_redundant_immediate_reload(void);
+int test_codegen_reuse_cached_vreg_across_scratch_regs(void);
 int test_codegen_keep_store_for_next_inst_multiuse_vreg(void);
 int test_codegen_zero_immediate_uses_xor_when_flags_dead(void);
 int test_codegen_select_zero_keeps_mov_for_flags(void);
@@ -210,6 +211,7 @@ int main(void) {
     RUN_TEST(test_codegen_ret_42);
     RUN_TEST(test_codegen_add);
     RUN_TEST(test_codegen_skip_redundant_immediate_reload);
+    RUN_TEST(test_codegen_reuse_cached_vreg_across_scratch_regs);
     RUN_TEST(test_codegen_keep_store_for_next_inst_multiuse_vreg);
     RUN_TEST(test_codegen_zero_immediate_uses_xor_when_flags_dead);
     RUN_TEST(test_codegen_select_zero_keeps_mov_for_flags);
