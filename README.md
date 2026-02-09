@@ -99,6 +99,28 @@ Keep these separate from primary API KPIs:
 - Lexer hotspot share (callgrind): `lr_lexer_next ~46%`
 - Parser hotspots (callgrind): `parse_function_def ~4%`, `parse_type ~3%`
 
+### Next Major Speedup: Direct API JIT (No Object Files)
+
+Current API flow still pays object/link overhead. The next first-class path should remove file/object creation:
+
+1. LFortran emits module IR directly to liric C API (in-memory).
+2. Liric JIT materializes code directly (`lr_jit_add_module`), no `.o` and no system linker.
+3. Runtime symbols come from one of:
+   - preloaded runtime shared library (`dlsym` path), or
+   - runtime LLVM IR/bitcode module compiled once and registered in the same JIT instance.
+
+Primary KPIs for this path:
+
+- API build time (frontend -> liric IR)
+- JIT materialization time (no object/link phases)
+- Time-to-first-result
+
+Validation target:
+
+- Add a dedicated API fast-path benchmark mode against LFortran API workloads.
+- Keep LL-file benchmark and lexer/parser metrics as separate diagnostics.
+- Tracking: issues `#156` (direct API JIT path) and `#157` (stable 100-case API corpus).
+
 ## License
 
 MIT
