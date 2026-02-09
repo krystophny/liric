@@ -107,6 +107,7 @@ int test_jit_fptrunc_f64_f32(void);
 int test_jit_fcmp_oeq(void);
 int test_jit_fp_arithmetic_chain(void);
 int test_jit_insert_extractvalue_struct_fields(void);
+int test_jit_late_frame_patch_and_phi_slots(void);
 int test_jit_packed_struct_float_constant(void);
 int test_jit_packed_struct_double_constant(void);
 int test_e2e_ret_42(void);
@@ -230,6 +231,7 @@ int main(void) {
     RUN_TEST(test_jit_fcmp_oeq);
     RUN_TEST(test_jit_fp_arithmetic_chain);
     RUN_TEST(test_jit_insert_extractvalue_struct_fields);
+    RUN_TEST(test_jit_late_frame_patch_and_phi_slots);
     RUN_TEST(test_jit_packed_struct_float_constant);
     RUN_TEST(test_jit_packed_struct_double_constant);
 

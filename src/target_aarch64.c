@@ -17,8 +17,8 @@
  * AAPCS64 argument registers: X0-X7 (8 args).
  *
  * ISel and encoding are fused into a single compile pass.
- * A pre-scan allocates all stack slots before emitting the prologue so
- * that the sub sp,N immediate is known up front.
+ * Stack slots are allocated lazily while emitting instructions; the prologue
+ * stack adjustment is patched after emission when final frame size is known.
  */
 
 #define FP_SCRATCH0  A64_D0
@@ -546,8 +546,7 @@ static void emit_setcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
 }
 
 static void emit_epilogue_a64(a64_compile_ctx_t *ctx) {
-    if (ctx->stack_size > 0)
-        emit_sp_adjust(ctx->buf, &ctx->pos, ctx->buflen, ctx->stack_size, false);
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_add_imm(true, A64_SP, A64_FP, 0));
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0xA8C17BFDu); /* ldp x29, x30, [sp], #16 */
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0xD65F03C0u); /* ret */
 }
@@ -669,40 +668,48 @@ static void emit_signext_index_reg(a64_compile_ctx_t *ctx, uint8_t reg,
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, insn);
 }
 
-/*
- * Pre-scan: walk all instructions to allocate stack slots for every vreg
- * destination and handle static allocas. This must run before the prologue
- * so that stack_size is known.
- */
-static void prescan_slots(a64_compile_ctx_t *ctx, lr_func_t *func) {
-    for (lr_block_t *b = func->first_block; b; b = b->next) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            switch (inst->op) {
-            case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
-                bool use_static = lr_target_alloca_uses_static_storage(inst);
-                if (use_static) {
-                    ctx->stack_size += (uint32_t)elem_sz;
-                    ctx->stack_size = (ctx->stack_size + 7) & ~7u;
-                    set_static_alloca_offset(ctx, inst->dest, -(int32_t)ctx->stack_size);
-                }
-                alloc_slot(ctx, inst->dest, 8);
-                break;
-            }
-            case LR_OP_PHI:
-                alloc_slot(ctx, inst->dest, 8);
-                break;
-            default:
-                if (lr_target_inst_has_result_slot(inst)) {
-                    size_t ty_sz = lr_target_inst_result_slot_size(inst, 8);
-                    alloc_slot(ctx, inst->dest, ty_sz);
-                }
-                break;
-            }
-        }
+static int32_t ensure_static_alloca_offset(a64_compile_ctx_t *ctx, const lr_inst_t *inst) {
+    if (inst->dest < ctx->num_static_alloca_offsets) {
+        int32_t off = ctx->static_alloca_offsets[inst->dest];
+        if (off != 0)
+            return off;
     }
-    for (uint32_t i = 0; i < func->num_params; i++)
-        alloc_slot(ctx, func->param_vregs[i], 8);
+
+    ctx->stack_size += (uint32_t)lr_target_alloca_elem_size(inst, 8);
+    ctx->stack_size = (ctx->stack_size + 7u) & ~7u;
+    {
+        int32_t off = -(int32_t)ctx->stack_size;
+        set_static_alloca_offset(ctx, inst->dest, off);
+        return off;
+    }
+}
+
+static void reserve_phi_dest_slots(a64_compile_ctx_t *ctx, lr_phi_copy_t **phi_copies,
+                                   uint32_t num_blocks) {
+    for (uint32_t bi = 0; bi < num_blocks; bi++) {
+        for (lr_phi_copy_t *pc = phi_copies[bi]; pc; pc = pc->next)
+            alloc_slot(ctx, pc->dest_vreg, 8);
+    }
+}
+
+static size_t emit_prologue_a64(a64_compile_ctx_t *ctx) {
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
+    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x910003FDu); /* mov x29, sp */
+    {
+        size_t imm_pos = ctx->pos;
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_movz(true, A64_X15, 0, 0));
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_movk(true, A64_X15, 0, 1));
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_sub_reg(true, A64_SP, A64_SP, A64_X15));
+        return imm_pos;
+    }
+}
+
+static void patch_prologue_stack_adjust(a64_compile_ctx_t *ctx, size_t imm_pos,
+                                        uint32_t frame_stack_size) {
+    patch_u32(ctx->buf, ctx->buflen, imm_pos + 0,
+              enc_movz(true, A64_X15, (uint16_t)(frame_stack_size & 0xFFFFu), 0));
+    patch_u32(ctx->buf, ctx->buflen, imm_pos + 4,
+              enc_movk(true, A64_X15, (uint16_t)((frame_stack_size >> 16) & 0xFFFFu), 1));
 }
 
 /*
@@ -738,30 +745,10 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     attach_obj_symbol_defined_cache(&ctx);
 
-    prescan_slots(&ctx, func);
-
-    ctx.stack_size = (ctx.stack_size + 15) & ~15u;
-
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
+    reserve_phi_dest_slots(&ctx, phi_copies, nb);
 
-    /* Prologue: stp x29, x30, [sp, #-16]!; mov x29, sp; sub sp, sp, N */
-    emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
-    emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x910003FDu); /* mov x29, sp */
-    if (ctx.stack_size > 4096) {
-        uint32_t remaining = ctx.stack_size;
-        while (remaining > 4096) {
-            uint32_t chunk = remaining > 4095u ? 4095u : remaining;
-            emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                     enc_sub_imm(true, A64_SP, A64_SP, chunk));
-            /* str xzr, [sp] -- probe page */
-            emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xF90003FFu);
-            remaining -= chunk;
-        }
-        if (remaining > 0)
-            emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, remaining, true);
-    } else if (ctx.stack_size > 0) {
-        emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, ctx.stack_size, true);
-    }
+    size_t prologue_stack_patch_pos = emit_prologue_a64(&ctx);
 
     /* Store parameters: first 8 from registers, rest from caller frame */
     static const uint8_t param_regs[] = {
@@ -951,10 +938,7 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 bool use_static = lr_target_alloca_uses_static_storage(inst);
 
                 if (use_static) {
-                    int32_t off = 0;
-                    if (inst->dest < ctx.num_static_alloca_offsets) {
-                        off = ctx.static_alloca_offsets[inst->dest];
-                    }
+                    int32_t off = ensure_static_alloca_offset(&ctx, inst);
                     emit_addr(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP, off);
                     emit_store_slot(&ctx, inst->dest, A64_X9);
                 } else {
@@ -1411,6 +1395,9 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
         }
     }
+
+    patch_prologue_stack_adjust(&ctx, prologue_stack_patch_pos,
+                                (ctx.stack_size + 15u) & ~15u);
 
     *out_len = ctx.pos;
     if (ctx.pos > buflen)

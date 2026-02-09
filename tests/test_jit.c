@@ -1438,3 +1438,48 @@ int test_jit_insert_extractvalue_struct_fields(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+int test_jit_late_frame_patch_and_phi_slots(void) {
+    const char *src =
+        "define i32 @frame_phi(i32 %flag) {\n"
+        "entry:\n"
+        "  %is_zero = icmp eq i32 %flag, 0\n"
+        "  br i1 %is_zero, label %fast, label %slow\n"
+        "fast:\n"
+        "  ret i32 7\n"
+        "slow:\n"
+        "  %is_one = icmp eq i32 %flag, 1\n"
+        "  br i1 %is_one, label %s1, label %s2\n"
+        "s1:\n"
+        "  br label %join\n"
+        "join:\n"
+        "  %base = phi i64 [10, %s1], [20, %s2]\n"
+        "  %p = alloca i64\n"
+        "  store i64 %base, ptr %p\n"
+        "  %v = load i64, ptr %p\n"
+        "  %sum = add i64 %v, 32\n"
+        "  %ret = trunc i64 %sum to i32\n"
+        "  ret i32 %ret\n"
+        "s2:\n"
+        "  br label %join\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(int);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "frame_phi");
+    TEST_ASSERT(fn != NULL, "function lookup");
+
+    TEST_ASSERT_EQ(fn(0), 7, "fast return path");
+    TEST_ASSERT_EQ(fn(1), 42, "phi path via s1");
+    TEST_ASSERT_EQ(fn(2), 52, "phi path via late predecessor s2");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
