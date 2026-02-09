@@ -162,6 +162,34 @@ int test_jit_icmp(void) {
     return 0;
 }
 
+int test_jit_select_immediate_zero(void) {
+    const char *src =
+        "define i64 @pick(i64 %x) {\n"
+        "entry:\n"
+        "  %cond = icmp ne i64 %x, 0\n"
+        "  %r = select i1 %cond, i64 7, i64 0\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef long long (*fn_t)(long long);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "pick");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(0), 0, "pick(0) == 0");
+    TEST_ASSERT_EQ(fn(1), 7, "pick(1) == 7");
+    TEST_ASSERT_EQ(fn(-3), 7, "pick(-3) == 7");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_branch(void) {
     const char *src =
         "define i32 @abs(i32 %x) {\n"
