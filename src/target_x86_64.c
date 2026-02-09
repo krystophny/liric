@@ -16,8 +16,8 @@
  * System V argument registers: RDI, RSI, RDX, RCX, R8, R9 (6 args).
  *
  * ISel and encoding are fused into a single compile pass.
- * A pre-scan allocates all stack slots before emitting the prologue so
- * that the sub rsp,N immediate is known up front.
+ * Stack slots are allocated lazily while emitting instructions; the prologue
+ * stack adjustment is patched after emission when final frame size is known.
  */
 
 #define FP_SCRATCH0  X86_XMM0
@@ -75,7 +75,6 @@ static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg,
     }
 
     if (ctx->stack_slots[vreg] != 0) {
-        /* Prescan reserves the maximum size for each vreg. */
         return ctx->stack_slots[vreg];
     }
 
@@ -115,6 +114,15 @@ static void emit_byte(uint8_t *buf, size_t *pos, size_t len, uint8_t b) {
 static void emit_u32(uint8_t *buf, size_t *pos, size_t len, uint32_t v) {
     for (int i = 0; i < 4; i++)
         emit_byte(buf, pos, len, (uint8_t)(v >> (i * 8)));
+}
+
+static void patch_u32(uint8_t *buf, size_t len, size_t pos, uint32_t v) {
+    if (pos + 4 > len)
+        return;
+    buf[pos + 0] = (uint8_t)(v >> 0);
+    buf[pos + 1] = (uint8_t)(v >> 8);
+    buf[pos + 2] = (uint8_t)(v >> 16);
+    buf[pos + 3] = (uint8_t)(v >> 24);
 }
 
 static void emit_u64(uint8_t *buf, size_t *pos, size_t len, uint64_t v) {
@@ -509,49 +517,20 @@ static void emit_load_fp_operand(x86_compile_ctx_t *ctx,
     }
 }
 
-/* Emit prologue: push rbp; mov rbp, rsp; sub rsp, N (with probing) */
-static void emit_prologue(x86_compile_ctx_t *ctx) {
+/* Emit prologue and reserve a patch slot for `sub rsp, imm32`. */
+static size_t emit_prologue(x86_compile_ctx_t *ctx) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x55); /* push rbp */
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, false));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x89);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, X86_RSP, X86_RBP)); /* mov rbp, rsp */
 
-    if (ctx->stack_size > 4096) {
-        uint32_t pages = ctx->stack_size / 4096;
-        uint32_t remainder = ctx->stack_size % 4096;
-        /* mov r11d, pages (REX.B + mov r/m32, imm32) */
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x41);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xBB);
-        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, pages);
-        /* loop: sub rsp, 4096 (7 bytes) */
-        size_t loop_top = ctx->pos;
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, false));
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x81);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 5, X86_RSP));
-        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 4096);
-        /* test [rsp], eax -- touch page (3 bytes: 85 04 24) */
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x85);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x04);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x24);
-        /* dec r11 (3 bytes: 49 FF CB) */
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, true));
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xFF);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 1, X86_R11 & 7));
-        /* jnz loop_top (2 bytes) */
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x75);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                  (uint8_t)(loop_top - (ctx->pos + 1)));
-        if (remainder > 0) {
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, false));
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x81);
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 5, X86_RSP));
-            emit_u32(ctx->buf, &ctx->pos, ctx->buflen, remainder);
-        }
-    } else if (ctx->stack_size > 0) {
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, false));
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x81);
-        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 5, X86_RSP));
-        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, ctx->stack_size);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, false, false, false));
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x81);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 5, X86_RSP));
+    {
+        size_t imm_pos = ctx->pos;
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+        return imm_pos;
     }
 }
 
@@ -827,51 +806,32 @@ static void emit_cmovcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst,
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
 }
 
-/*
- * Pre-scan: walk all instructions to allocate stack slots for every vreg
- * destination and handle static allocas. This must run before the prologue
- * so that stack_size is known.
- */
-static void prescan_slots(x86_compile_ctx_t *ctx, lr_func_t *func) {
-    for (lr_block_t *b = func->first_block; b; b = b->next) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            switch (inst->op) {
-            case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
-                size_t elem_align = lr_type_align(inst->type);
-                if (elem_align < 8) elem_align = 8;
-                bool use_static = lr_target_alloca_uses_static_storage(inst);
-                if (use_static) {
-                    ctx->stack_size = (uint32_t)align_up(ctx->stack_size, elem_align);
-                    ctx->stack_size += (uint32_t)elem_sz;
-                    set_static_alloca_offset(ctx, inst->dest, -(int32_t)ctx->stack_size);
-                }
-                alloc_slot(ctx, inst->dest, 8, 8);
-                break;
-            }
-            case LR_OP_PHI:
-                alloc_slot(ctx, inst->dest, 8, 8);
-                break;
-            default:
-                if (lr_target_inst_has_result_slot(inst)) {
-                    size_t ty_sz = lr_target_inst_result_slot_size(inst, 8);
-                    size_t ty_align = 8;
-                    if (inst->op == LR_OP_LOAD && ty_sz > 8) {
-                        size_t load_align = lr_type_align(inst->type);
-                        if (load_align > ty_align) {
-                            ty_align = load_align;
-                        }
-                        if (ty_align < 8) ty_align = 8;
-                    }
-                    alloc_slot(ctx, inst->dest, ty_sz, ty_align);
-                }
-                break;
-            }
-        }
+static int32_t ensure_static_alloca_offset(x86_compile_ctx_t *ctx, const lr_inst_t *inst) {
+    if (inst->dest < ctx->num_static_alloca_offsets) {
+        int32_t off = ctx->static_alloca_offsets[inst->dest];
+        if (off != 0)
+            return off;
     }
-    /* Also ensure parameter vregs are allocated */
-    for (uint32_t i = 0; i < func->num_params; i++)
-        alloc_slot(ctx, func->param_vregs[i], 8, 8);
+
+    size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
+    size_t elem_align = lr_type_align(inst->type);
+    if (elem_align < 8)
+        elem_align = 8;
+    ctx->stack_size = (uint32_t)align_up(ctx->stack_size, elem_align);
+    ctx->stack_size += (uint32_t)elem_sz;
+    {
+        int32_t off = -(int32_t)ctx->stack_size;
+        set_static_alloca_offset(ctx, inst->dest, off);
+        return off;
+    }
+}
+
+static void reserve_phi_dest_slots(x86_compile_ctx_t *ctx, lr_phi_copy_t **phi_copies,
+                                   uint32_t num_blocks) {
+    for (uint32_t bi = 0; bi < num_blocks; bi++) {
+        for (lr_phi_copy_t *pc = phi_copies[bi]; pc; pc = pc->next)
+            alloc_slot(ctx, pc->dest_vreg, 8, 8);
+    }
 }
 
 /*
@@ -908,17 +868,12 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
 
     attach_obj_symbol_meta_cache(&ctx);
 
-    /* Pre-scan to allocate all slots and compute static alloca sizes */
-    prescan_slots(&ctx, func);
-
-    /* Align stack to 16 bytes */
-    ctx.stack_size = (ctx.stack_size + 15) & ~15u;
-
     /* Build PHI copy lists */
     lr_phi_copy_t **phi_copies = lr_build_phi_copies(ctx.arena, func);
+    reserve_phi_dest_slots(&ctx, phi_copies, nb);
 
-    /* Emit prologue */
-    emit_prologue(&ctx);
+    /* Emit prologue and patch stack size once frame growth is complete. */
+    size_t prologue_stack_patch_pos = emit_prologue(&ctx);
 
     /* Store parameters: first 6 from registers, rest from caller frame */
     static const uint8_t param_regs[] = { X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9 };
@@ -1080,10 +1035,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 bool use_static = lr_target_alloca_uses_static_storage(inst);
 
                 if (use_static) {
-                    int32_t off = 0;
-                    if (inst->dest < ctx.num_static_alloca_offsets) {
-                        off = ctx.static_alloca_offsets[inst->dest];
-                    }
+                    int32_t off = ensure_static_alloca_offset(&ctx, inst);
                     /* lea rax, [rbp + off] */
                     encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8D, X86_RAX, X86_RBP, off, 8);
                     emit_store_slot(&ctx, inst->dest, X86_RAX);
@@ -1535,7 +1487,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 break;
             }
             case LR_OP_PHI:
-                /* Handled via phi_copies; slot already allocated in prescan */
+                /* Handled via phi_copies. */
                 break;
             case LR_OP_UNREACHABLE:
                 break;
@@ -1556,6 +1508,11 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             buf[fix_pos + 2] = (uint8_t)(rel >> 16);
             buf[fix_pos + 3] = (uint8_t)(rel >> 24);
         }
+    }
+
+    {
+        uint32_t frame_stack_size = (ctx.stack_size + 15u) & ~15u;
+        patch_u32(buf, buflen, prologue_stack_patch_pos, frame_stack_size);
     }
 
     *out_len = ctx.pos;
