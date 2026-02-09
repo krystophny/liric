@@ -20,6 +20,9 @@ public:
     };
 
     GlobalVariable() = default;
+    ~GlobalVariable() {
+        detail::unregister_value_wrapper(this);
+    }
 
     GlobalVariable(Module &M, Type *Ty, bool isConstant,
                    LinkageTypes Linkage, Constant *Initializer = nullptr,
