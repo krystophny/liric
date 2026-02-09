@@ -711,7 +711,9 @@ static size_t emit_prologue_a64(a64_compile_ctx_t *ctx) {
         size_t imm_pos = ctx->pos;
         emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_movz(true, A64_X15, 0, 0));
         emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_movk(true, A64_X15, 0, 1));
-        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_sub_reg(true, A64_SP, A64_SP, A64_X15));
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_add_imm(true, A64_X14, A64_SP, 0));
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_sub_reg(true, A64_X14, A64_X14, A64_X15));
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, enc_add_imm(true, A64_SP, A64_X14, 0));
         return imm_pos;
     }
 }
@@ -970,9 +972,14 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                              enc_logic_reg(0x8A000000u, true, A64_X9, A64_X9, A64_X10));
                     /* sub sp, sp, X9 */
                     emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_sub_reg(true, A64_SP, A64_SP, A64_X9));
-                    /* mov X9, sp */
-                    emit_mov_reg(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_SP, true);
+                             enc_add_imm(true, A64_X14, A64_SP, 0));
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_sub_reg(true, A64_X14, A64_X14, A64_X9));
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_add_imm(true, A64_SP, A64_X14, 0));
+                    /* x9 now holds alloca result pointer */
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_add_imm(true, A64_X9, A64_SP, 0));
                     emit_store_slot(&ctx, inst->dest, A64_X9);
                 }
                 break;

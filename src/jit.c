@@ -48,6 +48,18 @@ static double lr_jit_now_us(void) {
 static void register_builtin_symbols(lr_jit_t *j);
 static const char *resolve_global_name(lr_module_t *m, uint32_t global_id);
 
+typedef struct lr_func_name_entry {
+    const char *name;
+    uint32_t hash;
+    uint32_t idx;
+    struct lr_func_name_entry *next;
+} lr_func_name_entry_t;
+
+typedef struct lr_dep_edge {
+    uint32_t to;
+    struct lr_dep_edge *next;
+} lr_dep_edge_t;
+
 static uint32_t symbol_hash(const char *name) {
     uint32_t h = 2166136261u;
     while (*name) {
@@ -424,6 +436,117 @@ static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
     return NULL;
 }
 
+static uint32_t next_pow2_u32(uint32_t v) {
+    uint32_t p = 1;
+    while (p < v)
+        p <<= 1;
+    return p;
+}
+
+static uint32_t find_func_index_by_name(lr_func_name_entry_t **buckets,
+                                        uint32_t bucket_count, const char *name) {
+    if (!name || !name[0] || !buckets || bucket_count == 0)
+        return UINT32_MAX;
+    uint32_t hash = symbol_hash(name);
+    uint32_t bucket = hash & (bucket_count - 1u);
+    for (lr_func_name_entry_t *e = buckets[bucket]; e; e = e->next) {
+        if (e->hash == hash && strcmp(e->name, name) == 0)
+            return e->idx;
+    }
+    return UINT32_MAX;
+}
+
+static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfuncs,
+                               lr_arena_t *arena, uint32_t *order, uint32_t *out_count) {
+    if (!m || !funcs || !arena || !order || !out_count)
+        return -1;
+    if (nfuncs == 0) {
+        *out_count = 0;
+        return 0;
+    }
+
+    uint32_t bucket_count = next_pow2_u32(nfuncs * 2u);
+    if (bucket_count < 8)
+        bucket_count = 8;
+    lr_func_name_entry_t **buckets =
+        lr_arena_array(arena, lr_func_name_entry_t *, bucket_count);
+    if (!buckets)
+        return -1;
+
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        const char *name = funcs[i]->name;
+        if (!name || !name[0])
+            continue;
+        uint32_t hash = symbol_hash(name);
+        uint32_t bucket = hash & (bucket_count - 1u);
+        lr_func_name_entry_t *e = lr_arena_new(arena, lr_func_name_entry_t);
+        if (!e)
+            return -1;
+        e->name = name;
+        e->hash = hash;
+        e->idx = i;
+        e->next = buckets[bucket];
+        buckets[bucket] = e;
+    }
+
+    uint32_t *indegree = lr_arena_array(arena, uint32_t, nfuncs);
+    lr_dep_edge_t **outgoing = lr_arena_array(arena, lr_dep_edge_t *, nfuncs);
+    if (!indegree || !outgoing)
+        return -1;
+
+    for (uint32_t caller_idx = 0; caller_idx < nfuncs; caller_idx++) {
+        lr_func_t *f = funcs[caller_idx];
+        for (lr_block_t *b = f->first_block; b; b = b->next) {
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
+                    lr_operand_t *op = &inst->operands[oi];
+                    if (op->kind != LR_VAL_GLOBAL)
+                        continue;
+
+                    const char *name = resolve_global_name(m, op->global_id);
+                    if (!name || !name[0])
+                        return -1;
+
+                    uint32_t callee_idx =
+                        find_func_index_by_name(buckets, bucket_count, name);
+                    if (callee_idx == UINT32_MAX || callee_idx == caller_idx)
+                        continue;
+
+                    lr_dep_edge_t *edge = lr_arena_new(arena, lr_dep_edge_t);
+                    if (!edge)
+                        return -1;
+                    edge->to = caller_idx;
+                    edge->next = outgoing[callee_idx];
+                    outgoing[callee_idx] = edge;
+                    indegree[caller_idx]++;
+                }
+            }
+        }
+    }
+
+    uint32_t *queue = lr_arena_array(arena, uint32_t, nfuncs);
+    if (!queue)
+        return -1;
+    uint32_t qhead = 0, qtail = 0;
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        if (indegree[i] == 0)
+            queue[qtail++] = i;
+    }
+
+    uint32_t count = 0;
+    while (qhead < qtail) {
+        uint32_t idx = queue[qhead++];
+        order[count++] = idx;
+        for (lr_dep_edge_t *edge = outgoing[idx]; edge; edge = edge->next) {
+            if (--indegree[edge->to] == 0)
+                queue[qtail++] = edge->to;
+        }
+    }
+
+    *out_count = count;
+    return 0;
+}
+
 /*
  * Resolve global/function symbol operands to concrete addresses.
  * Returns:
@@ -463,9 +586,14 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                     }
                 }
 
-                void *addr = lookup_symbol(j, name);
-                if (!addr && strcmp(name, f->name) == 0)
+                void *addr = NULL;
+                if (strcmp(name, f->name) == 0) {
+                    /* Always bind self-recursive references to the function
+                       being compiled, even if an external symbol exists. */
                     addr = self_addr;
+                } else {
+                    addr = lookup_symbol(j, name);
+                }
                 if (!addr) {
                     if (missing_symbol)
                         *missing_symbol = name;
@@ -478,6 +606,31 @@ static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
             }
         }
     }
+    return 0;
+}
+
+static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
+                                const char **missing_symbol) {
+    void *self_addr = j->code_buf + j->code_size;
+    JIT_PROF_START(resolve);
+    int resolve_rc = resolve_global_operands(j, m, f, self_addr, missing_symbol);
+    JIT_PROF_END(resolve);
+    if (resolve_rc != 0)
+        return resolve_rc;
+
+    uint8_t *func_start = j->code_buf + j->code_size;
+    size_t free_space = j->code_cap - j->code_size;
+    size_t code_len = 0;
+    JIT_PROF_START(compile);
+    int rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
+    JIT_PROF_END(compile);
+    if (rc != 0)
+        return rc;
+    if (code_len > free_space)
+        return -1;
+
+    j->code_size += code_len;
+    lr_jit_add_symbol(j, f->name, func_start);
     return 0;
 }
 
@@ -536,39 +689,39 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
 
     JIT_PROF_START(compile_loop);
     bool *compiled = lr_arena_array(j->arena, bool, nfuncs);
+    uint32_t *compile_order = lr_arena_array(j->arena, uint32_t, nfuncs);
+    uint32_t topo_count = 0;
+    if (!compiled || !compile_order)
+        return -1;
+    if (build_compile_order(m, funcs, nfuncs, j->arena, compile_order, &topo_count) != 0)
+        return -1;
+
     uint32_t remaining = nfuncs;
+    const char *last_missing = NULL;
+    for (uint32_t oi = 0; oi < topo_count; oi++) {
+        uint32_t idx = compile_order[oi];
+        int rc = compile_one_function(j, m, funcs[idx], &last_missing);
+        if (rc == 1)
+            continue;
+        if (rc != 0)
+            return rc;
+        compiled[idx] = true;
+        remaining--;
+    }
+
     while (remaining > 0) {
         bool progress = false;
-        const char *last_missing = NULL;
+        last_missing = NULL;
 
         for (uint32_t i = 0; i < nfuncs; i++) {
             if (compiled[i])
                 continue;
 
-            lr_func_t *f = funcs[i];
-            void *self_addr = j->code_buf + j->code_size;
-            JIT_PROF_START(resolve);
-            int resolve_rc = resolve_global_operands(j, m, f, self_addr, &last_missing);
-            JIT_PROF_END(resolve);
-            if (resolve_rc == 1)
+            int rc = compile_one_function(j, m, funcs[i], &last_missing);
+            if (rc == 1)
                 continue;
-            if (resolve_rc != 0)
-                return -1;
-
-            uint8_t *func_start = j->code_buf + j->code_size;
-            size_t free_space = j->code_cap - j->code_size;
-            size_t code_len = 0;
-            JIT_PROF_START(compile);
-            int rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
-            JIT_PROF_END(compile);
-            if (rc != 0) return rc;
-
-            if (code_len > free_space)
-                return -1;
-
-            j->code_size += code_len;
-
-            lr_jit_add_symbol(j, f->name, func_start);
+            if (rc != 0)
+                return rc;
             compiled[i] = true;
             remaining--;
             progress = true;
