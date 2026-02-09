@@ -86,6 +86,10 @@ typedef struct lc_module_compat {
     lc_phi_node_t **pending_phis;
     uint32_t phi_count;
     uint32_t phi_cap;
+    lr_module_t *cache_owner_mod;
+    lr_func_t **func_by_sym;
+    lr_global_t **global_by_sym;
+    uint32_t sym_cache_cap;
 } lc_module_compat_t;
 
 struct lc_phi_node {
@@ -190,6 +194,132 @@ static void func_cache_add(lc_module_compat_t *mod, lc_value_t *fv) {
         mod->func_value_cap = new_cap;
     }
     mod->func_values[mod->func_value_count++] = fv;
+}
+
+static void clear_symbol_caches(lc_module_compat_t *mod) {
+    if (!mod) return;
+    free(mod->func_by_sym);
+    free(mod->global_by_sym);
+    mod->func_by_sym = NULL;
+    mod->global_by_sym = NULL;
+    mod->sym_cache_cap = 0;
+    mod->cache_owner_mod = mod->mod;
+}
+
+static void ensure_cache_owner(lc_module_compat_t *mod) {
+    if (!mod) return;
+    if (mod->cache_owner_mod != mod->mod)
+        clear_symbol_caches(mod);
+}
+
+static int ensure_symbol_cache_cap(lc_module_compat_t *mod, uint32_t min_cap) {
+    if (!mod) return -1;
+    ensure_cache_owner(mod);
+    if (mod->sym_cache_cap >= min_cap)
+        return 0;
+
+    uint32_t new_cap = mod->sym_cache_cap ? mod->sym_cache_cap : 64u;
+    while (new_cap < min_cap)
+        new_cap *= 2u;
+
+    lr_func_t **new_func = (lr_func_t **)calloc(new_cap, sizeof(*new_func));
+    lr_global_t **new_global = (lr_global_t **)calloc(new_cap, sizeof(*new_global));
+    if (!new_func || !new_global) {
+        free(new_func);
+        free(new_global);
+        return -1;
+    }
+    if (mod->sym_cache_cap > 0) {
+        memcpy(new_func, mod->func_by_sym,
+               sizeof(*new_func) * mod->sym_cache_cap);
+        memcpy(new_global, mod->global_by_sym,
+               sizeof(*new_global) * mod->sym_cache_cap);
+    }
+    free(mod->func_by_sym);
+    free(mod->global_by_sym);
+    mod->func_by_sym = new_func;
+    mod->global_by_sym = new_global;
+    mod->sym_cache_cap = new_cap;
+    return 0;
+}
+
+static uint32_t compat_symbol_id(lc_module_compat_t *mod, const char *name) {
+    if (!mod || !mod->mod || !name || !name[0])
+        return UINT32_MAX;
+    uint32_t sym_id = lr_module_intern_symbol(mod->mod, name);
+    if (sym_id == UINT32_MAX)
+        return UINT32_MAX;
+    if (ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
+        return UINT32_MAX;
+    return sym_id;
+}
+
+static lr_func_t *find_func_linear(lr_module_t *m, const char *name) {
+    if (!m || !name) return NULL;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static lr_global_t *find_global_linear(lr_module_t *m, const char *name) {
+    if (!m || !name) return NULL;
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return g;
+    }
+    return NULL;
+}
+
+static void cache_func_by_symbol(lc_module_compat_t *mod, uint32_t sym_id,
+                                 lr_func_t *func) {
+    if (!mod || !func || sym_id == UINT32_MAX)
+        return;
+    if (ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
+        return;
+    mod->func_by_sym[sym_id] = func;
+}
+
+static void cache_global_by_symbol(lc_module_compat_t *mod, uint32_t sym_id,
+                                   lr_global_t *global) {
+    if (!mod || !global || sym_id == UINT32_MAX)
+        return;
+    if (ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
+        return;
+    mod->global_by_sym[sym_id] = global;
+}
+
+static lr_func_t *lookup_func_cached(lc_module_compat_t *mod, const char *name,
+                                     uint32_t *sym_id_out) {
+    uint32_t sym_id = compat_symbol_id(mod, name);
+    if (sym_id_out)
+        *sym_id_out = sym_id;
+    if (sym_id == UINT32_MAX)
+        return NULL;
+    lr_func_t *f = mod->func_by_sym[sym_id];
+    if (f)
+        return f;
+    f = find_func_linear(mod->mod, name);
+    if (f)
+        mod->func_by_sym[sym_id] = f;
+    return f;
+}
+
+static lr_global_t *lookup_global_cached(lc_module_compat_t *mod, const char *name,
+                                         uint32_t *sym_id_out) {
+    uint32_t sym_id = compat_symbol_id(mod, name);
+    if (sym_id_out)
+        *sym_id_out = sym_id;
+    if (sym_id == UINT32_MAX)
+        return NULL;
+    lr_global_t *g = mod->global_by_sym[sym_id];
+    if (g)
+        return g;
+    g = find_global_linear(mod->mod, name);
+    if (g)
+        mod->global_by_sym[sym_id] = g;
+    return g;
 }
 
 /* ---- lc_value_to_desc ---- */
@@ -298,6 +428,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
 
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
+    cm->cache_owner_mod = cm->mod;
 
     cm->ctx = ctx;
     ctx->mod = cm->mod;
@@ -325,6 +456,8 @@ void lc_module_destroy(lc_module_compat_t *mod) {
     lr_arena_destroy(mod->mod->arena);
     value_pool_free(mod);
     free(mod->func_values);
+    free(mod->func_by_sym);
+    free(mod->global_by_sym);
     free((void *)mod->name);
     free(mod);
 }
@@ -573,14 +706,16 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
                                         const char *name, lr_type_t *type) {
     if (!mod || !name) return safe_undef(mod);
     lr_module_t *m = mod->mod;
-    for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (g->name && strcmp(g->name, name) == 0) {
-            uint32_t sym_id = lr_module_intern_symbol(m, name);
-            return lc_value_global(mod, sym_id, m->type_ptr, g->name);
-        }
+    uint32_t sym_id = UINT32_MAX;
+    lr_global_t *g = lookup_global_cached(mod, name, &sym_id);
+    if (!g) {
+        if (sym_id == UINT32_MAX)
+            return safe_undef(mod);
+        g = lr_global_create(m, name, type, false);
+        if (!g)
+            return safe_undef(mod);
+        cache_global_by_symbol(mod, sym_id, g);
     }
-    lr_global_t *g = lr_global_create(m, name, type, false);
-    uint32_t sym_id = lr_module_intern_symbol(m, name);
     return lc_value_global(mod, sym_id, m->type_ptr, g->name);
 }
 
@@ -588,10 +723,13 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
 
 static lc_value_t *create_func_value(lc_module_compat_t *mod,
                                       lr_func_t *func) {
-    uint32_t sym_id = lr_module_intern_symbol(mod->mod, func->name);
+    uint32_t sym_id = compat_symbol_id(mod, func->name);
+    if (sym_id == UINT32_MAX)
+        return safe_undef(mod);
     lc_value_t *v = lc_value_global(mod, sym_id, mod->mod->type_ptr,
                                      func->name);
     v->global.func = func;
+    cache_func_by_symbol(mod, sym_id, func);
     func_cache_add(mod, v);
     return v;
 }
@@ -637,20 +775,13 @@ lr_func_t *lc_value_get_func(lc_value_t *val) {
     return val->global.func;
 }
 
-static lr_func_t *find_func_by_name(lr_module_t *m, const char *name) {
-    for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (strcmp(f->name, name) == 0) return f;
-    }
-    return NULL;
-}
-
 lc_value_t *lc_func_get_arg(lc_module_compat_t *mod, lc_value_t *func_val,
                              unsigned idx) {
     if (!func_val || func_val->kind != LC_VAL_GLOBAL)
         return safe_undef(mod);
     lr_func_t *f = func_val->global.func;
     if (!f && mod) {
-        f = find_func_by_name(mod->mod, func_val->global.name);
+        f = lookup_func_cached(mod, func_val->global.name, NULL);
     }
     if (!f || idx >= f->num_params) return safe_undef(mod);
     return lc_value_argument(mod, idx, f->param_types[idx], f);
@@ -715,11 +846,14 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
     }
     lr_global_t *g = lr_global_create(mod->mod, actual_name, type, is_const);
     if (init_data && init_size > 0) {
-        g->init_data = lr_arena_alloc(mod->mod->arena, init_size, 1);
+        g->init_data = lr_arena_alloc_uninit(mod->mod->arena, init_size, 1);
         memcpy(g->init_data, init_data, init_size);
         g->init_size = init_size;
     }
-    uint32_t sym_id = lr_module_intern_symbol(mod->mod, g->name);
+    uint32_t sym_id = compat_symbol_id(mod, g->name);
+    if (sym_id == UINT32_MAX)
+        return safe_undef(mod);
+    cache_global_by_symbol(mod, sym_id, g);
     return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
 }
 
@@ -727,7 +861,10 @@ lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
                                lr_type_t *type) {
     lr_global_t *g = lr_global_create(mod->mod, name, type, false);
     g->is_external = true;
-    uint32_t sym_id = lr_module_intern_symbol(mod->mod, name);
+    uint32_t sym_id = compat_symbol_id(mod, name);
+    if (sym_id == UINT32_MAX)
+        return safe_undef(mod);
+    cache_global_by_symbol(mod, sym_id, g);
     return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
 }
 
@@ -1576,13 +1713,21 @@ lc_value_t *lc_create_insertvalue(lc_module_compat_t *mod, lr_block_t *b,
 
 /* ---- MemCpy / MemSet ---- */
 
-static lr_func_t *ensure_libc_decl(lr_module_t *m, const char *name,
-                                    lr_type_t *ret, lr_type_t **params,
-                                    uint32_t num_params) {
-    for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (strcmp(f->name, name) == 0) return f;
-    }
-    return lr_func_declare(m, name, ret, params, num_params, false);
+static lr_func_t *ensure_libc_decl(lc_module_compat_t *mod, const char *name,
+                                   lr_type_t *ret, lr_type_t **params,
+                                   uint32_t num_params) {
+    uint32_t sym_id = UINT32_MAX;
+    lr_func_t *f = lookup_func_cached(mod, name, &sym_id);
+    if (f)
+        return f;
+
+    lr_func_t *decl = lr_func_declare(mod->mod, name, ret, params, num_params, false);
+    if (!decl)
+        return NULL;
+    if (sym_id == UINT32_MAX)
+        sym_id = compat_symbol_id(mod, name);
+    cache_func_by_symbol(mod, sym_id, decl);
+    return decl;
 }
 
 void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
@@ -1590,8 +1735,9 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
-    lr_func_t *decl = ensure_libc_decl(m, "memcpy", m->type_ptr, params, 3);
-    uint32_t sym_id = lr_module_intern_symbol(m, "memcpy");
+    lr_func_t *decl = ensure_libc_decl(mod, "memcpy", m->type_ptr, params, 3);
+    uint32_t sym_id = compat_symbol_id(mod, "memcpy");
+    if (!decl || sym_id == UINT32_MAX) return;
 
     lr_operand_desc_t dd = lc_value_to_desc(dst);
     lr_operand_desc_t sd = lc_value_to_desc(src);
@@ -1616,8 +1762,9 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_i32, m->type_i64 };
-    lr_func_t *decl = ensure_libc_decl(m, "memset", m->type_ptr, params, 3);
-    uint32_t sym_id = lr_module_intern_symbol(m, "memset");
+    lr_func_t *decl = ensure_libc_decl(mod, "memset", m->type_ptr, params, 3);
+    uint32_t sym_id = compat_symbol_id(mod, "memset");
+    if (!decl || sym_id == UINT32_MAX) return;
 
     lr_operand_desc_t dd = lc_value_to_desc(dst);
     lr_operand_desc_t vd = lc_value_to_desc(val);
@@ -1642,8 +1789,9 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
-    lr_func_t *decl = ensure_libc_decl(m, "memmove", m->type_ptr, params, 3);
-    uint32_t sym_id = lr_module_intern_symbol(m, "memmove");
+    lr_func_t *decl = ensure_libc_decl(mod, "memmove", m->type_ptr, params, 3);
+    uint32_t sym_id = compat_symbol_id(mod, "memmove");
+    if (!decl || sym_id == UINT32_MAX) return;
     (void)decl;
 
     lr_operand_desc_t dd = lc_value_to_desc(dst);

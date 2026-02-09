@@ -18,10 +18,14 @@ typedef struct lr_arena {
 
 lr_arena_t *lr_arena_create(size_t default_chunk_size);
 void *lr_arena_alloc(lr_arena_t *a, size_t size, size_t align);
+void *lr_arena_alloc_uninit(lr_arena_t *a, size_t size, size_t align);
 char *lr_arena_strdup(lr_arena_t *a, const char *s, size_t len);
 void lr_arena_destroy(lr_arena_t *a);
 
 #define lr_arena_new(a, T) ((T *)lr_arena_alloc((a), sizeof(T), _Alignof(T)))
 #define lr_arena_array(a, T, n) ((T *)lr_arena_alloc((a), sizeof(T) * (n), _Alignof(T)))
+#define lr_arena_new_uninit(a, T) ((T *)lr_arena_alloc_uninit((a), sizeof(T), _Alignof(T)))
+#define lr_arena_array_uninit(a, T, n) \
+    ((T *)lr_arena_alloc_uninit((a), sizeof(T) * (n), _Alignof(T)))
 
 #endif
