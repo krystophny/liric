@@ -19,10 +19,13 @@ ctest --test-dir build --output-on-failure
 ```bash
 ./build/liric --jit file.ll
 ./build/liric --dump-ir file.ll
+./build/liric --emit-obj out.o file.ll
 ./build/liric --jit file.wasm --func add --args 2 3
 ```
 
 For programmatic IR construction, use the C API in `include/liric/liric.h`.
+
+`--emit-obj` is an explicit opt-in compatibility mode. The primary/first-class path is direct JIT for low-latency compilation.
 
 ## Benchmarks
 

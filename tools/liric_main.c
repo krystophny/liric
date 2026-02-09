@@ -1,6 +1,8 @@
 #include "../src/ir.h"
 #include "../src/jit.h"
 #include "../src/liric.h"
+#include "../src/objfile.h"
+#include "../src/target.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +45,7 @@ static char *read_stdin(size_t *out_len) {
 int main(int argc, char **argv) {
     bool jit_mode = false;
     bool dump_ir = false;
+    const char *emit_obj_path = NULL;
     const char *input_file = NULL;
     const char *func_name = "main";
     const char *load_libs[64];
@@ -51,6 +54,7 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--jit") == 0) jit_mode = true;
         else if (strcmp(argv[i], "--dump-ir") == 0) dump_ir = true;
+        else if (strcmp(argv[i], "--emit-obj") == 0 && i + 1 < argc) emit_obj_path = argv[++i];
         else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) func_name = argv[++i];
         else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
             if (num_load_libs < 64)
@@ -64,6 +68,11 @@ int main(int argc, char **argv) {
             fprintf(stderr, "unknown option: %s\n", argv[i]);
             return 1;
         }
+    }
+
+    if (emit_obj_path && jit_mode) {
+        fprintf(stderr, "--emit-obj and --jit are mutually exclusive\n");
+        return 1;
     }
 
     size_t src_len;
@@ -94,6 +103,37 @@ int main(int argc, char **argv) {
 
     if (dump_ir) {
         lr_module_dump(m, stdout);
+        lr_module_free(m);
+        free(src);
+        return 0;
+    }
+
+    if (emit_obj_path) {
+        const lr_target_t *target = lr_target_host();
+        if (!target) {
+            fprintf(stderr, "failed to detect host target\n");
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+
+        FILE *out = fopen(emit_obj_path, "wb");
+        if (!out) {
+            fprintf(stderr, "failed to open object output: %s\n", emit_obj_path);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+
+        int rc = lr_emit_object(m, target, out);
+        fclose(out);
+        if (rc != 0) {
+            fprintf(stderr, "object emission failed\n");
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+
         lr_module_free(m);
         free(src);
         return 0;
