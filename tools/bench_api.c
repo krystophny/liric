@@ -58,8 +58,10 @@ typedef struct {
     char *name;
     double liric_wall_ms;
     double llvm_wall_ms;
-    double liric_internal_ms;
-    double llvm_internal_ms;
+    double liric_compile_ms;
+    double liric_run_ms;
+    double llvm_compile_ms;
+    double llvm_run_ms;
 } row_t;
 
 typedef struct {
@@ -72,6 +74,19 @@ static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static volatile sig_atomic_t g_timeout_child = -1;
+static volatile sig_atomic_t g_timeout_fired = 0;
+
+static void timeout_kill_handler(int signo) {
+    pid_t child;
+    (void)signo;
+    child = (pid_t)g_timeout_child;
+    if (child > 0) {
+        g_timeout_fired = 1;
+        kill(child, SIGKILL);
+    }
 }
 
 static void die(const char *msg, const char *path) {
@@ -164,25 +179,59 @@ static char *read_all_file(const char *path) {
 }
 
 static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
-    double start = now_ms();
     int status;
-    while (1) {
-        pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) {
-            *status_out = status;
-            return 0;
-        }
+    pid_t r;
+
+    if (timeout_sec <= 0) {
+        do {
+            r = waitpid(pid, &status, 0);
+        } while (r < 0 && errno == EINTR);
         if (r < 0) {
             *status_out = 0;
             return -1;
         }
-        if ((now_ms() - start) > timeout_sec * 1000.0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            *status_out = status;
+        *status_out = status;
+        return 0;
+    }
+
+    {
+        struct sigaction sa_new, sa_old;
+        memset(&sa_new, 0, sizeof(sa_new));
+        sa_new.sa_handler = timeout_kill_handler;
+        sigemptyset(&sa_new.sa_mask);
+        sa_new.sa_flags = 0;
+        if (sigaction(SIGALRM, &sa_new, &sa_old) != 0) {
+            *status_out = 0;
+            return -1;
+        }
+
+        g_timeout_child = (sig_atomic_t)pid;
+        g_timeout_fired = 0;
+        alarm((unsigned int)timeout_sec);
+
+        do {
+            r = waitpid(pid, &status, 0);
+        } while (r < 0 && errno == EINTR);
+
+        alarm(0);
+        g_timeout_child = -1;
+        sigaction(SIGALRM, &sa_old, NULL);
+
+        if (r < 0) {
+            *status_out = 0;
+            g_timeout_fired = 0;
+            return -1;
+        }
+        *status_out = status;
+
+        if (g_timeout_fired &&
+            WIFSIGNALED(status) &&
+            WTERMSIG(status) == SIGKILL) {
+            g_timeout_fired = 0;
             return 1;
         }
-        usleep(10000);
+        g_timeout_fired = 0;
+        return 0;
     }
 }
 
@@ -589,6 +638,10 @@ int main(int argc, char **argv) {
             size_t it;
             double *liric_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *llvm_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *llvm_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             int skipped = 0;
             char work_tpl[] = "/tmp/liric_bench/work_api_XXXXXX";
@@ -662,6 +715,8 @@ int main(int argc, char **argv) {
                 free_cmd_result(&run_r);
 
                 llvm_wall[ok_n] = compile_ms + run_ms;
+                llvm_compile[ok_n] = compile_ms;
+                llvm_run[ok_n] = run_ms;
 
                 /* --- Liric side: lfortran+liric compile + run --- */
                 {
@@ -705,6 +760,8 @@ int main(int argc, char **argv) {
                 free_cmd_result(&liric_run_r);
 
                 liric_wall[ok_n] = liric_compile_ms + liric_run_ms;
+                liric_compile[ok_n] = liric_compile_ms;
+                liric_run[ok_n] = liric_run_ms;
                 free(liric_bin_path);
 
                 ok_n++;
@@ -718,23 +775,33 @@ int main(int argc, char **argv) {
             {
                 double lw = median(liric_wall, ok_n);
                 double ew = median(llvm_wall, ok_n);
+                double lc = median(liric_compile, ok_n);
+                double ec = median(llvm_compile, ok_n);
+                double lr = median(liric_run, ok_n);
+                double er = median(llvm_run, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
+                double compile_sp = lc > 0 ? ec / lc : 0.0;
+                double run_sp = lr > 0 ? er / lr : 0.0;
                 row_t row;
 
                 row.name = xstrdup(name);
                 row.liric_wall_ms = lw;
                 row.llvm_wall_ms = ew;
-                row.liric_internal_ms = 0.0;
-                row.llvm_internal_ms = 0.0;
+                row.liric_compile_ms = lc;
+                row.liric_run_ms = lr;
+                row.llvm_compile_ms = ec;
+                row.llvm_run_ms = er;
                 rowlist_push(&rows, row);
 
                 fprintf(jf,
                     "{\"name\":\"%s\",\"iters\":%zu,"
                     "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
-                    "\"wall_speedup\":%.6f}\n",
-                    name, ok_n, lw, ew, wall_sp);
-                printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx)\n",
-                       i + 1, tests.n, name, lw, ew, wall_sp);
+                    "\"liric_compile_median_ms\":%.6f,\"llvm_compile_median_ms\":%.6f,"
+                    "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
+                    "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
+                    name, ok_n, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+                printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx), compile %.1fms vs %.1fms (%.2fx)\n",
+                       i + 1, tests.n, name, lw, ew, wall_sp, lc, ec, compile_sp);
             }
 
 next_test:
@@ -743,6 +810,10 @@ next_test:
             free(bin_path);
             free(liric_wall);
             free(llvm_wall);
+            free(liric_compile);
+            free(liric_run);
+            free(llvm_compile);
+            free(llvm_run);
             strlist_free(&opt_toks);
         }
 
@@ -756,18 +827,40 @@ next_test:
     {
         double *lw = (double *)malloc(rows.n * sizeof(double));
         double *ew = (double *)malloc(rows.n * sizeof(double));
+        double *lc = (double *)malloc(rows.n * sizeof(double));
+        double *ec = (double *)malloc(rows.n * sizeof(double));
+        double *lr = (double *)malloc(rows.n * sizeof(double));
+        double *er = (double *)malloc(rows.n * sizeof(double));
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
+        double *compile_sp = (double *)malloc(rows.n * sizeof(double));
+        double *run_sp = (double *)malloc(rows.n * sizeof(double));
         size_t j;
         size_t wall_faster = 0;
+        size_t compile_faster = 0;
+        size_t run_faster = 0;
         double sum_lw = 0.0, sum_ew = 0.0;
+        double sum_lc = 0.0, sum_ec = 0.0;
+        double sum_lr = 0.0, sum_er = 0.0;
 
         for (j = 0; j < rows.n; j++) {
             lw[j] = rows.items[j].liric_wall_ms;
             ew[j] = rows.items[j].llvm_wall_ms;
+            lc[j] = rows.items[j].liric_compile_ms;
+            ec[j] = rows.items[j].llvm_compile_ms;
+            lr[j] = rows.items[j].liric_run_ms;
+            er[j] = rows.items[j].llvm_run_ms;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
+            compile_sp[j] = lc[j] > 0 ? ec[j] / lc[j] : 0.0;
+            run_sp[j] = lr[j] > 0 ? er[j] / lr[j] : 0.0;
             if (wall_sp[j] > 1.0) wall_faster++;
+            if (compile_sp[j] > 1.0) compile_faster++;
+            if (run_sp[j] > 1.0) run_faster++;
             sum_lw += lw[j];
             sum_ew += ew[j];
+            sum_lc += lc[j];
+            sum_ec += ec[j];
+            sum_lr += lr[j];
+            sum_er += er[j];
         }
 
         printf("\n========================================================================\n");
@@ -783,11 +876,31 @@ next_test:
         printf("  P90/P95:   %.2fx / %.2fx\n", percentile(wall_sp, rows.n, 90), percentile(wall_sp, rows.n, 95));
         printf("  Faster:    %zu/%zu (%.1f%%)\n", wall_faster, rows.n, 100.0 * (double)wall_faster / (double)rows.n);
 
+        printf("\n  PHASE BREAKDOWN (subprocess medians)\n");
+        printf("  Compile:   liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
+               median(lc, rows.n), median(ec, rows.n), median(compile_sp, rows.n));
+        printf("  Compile+:  aggregate %.0f ms vs %.0f ms, speedup %.2fx\n",
+               sum_lc, sum_ec, (sum_lc > 0 ? sum_ec / sum_lc : 0.0));
+        printf("  Compile F: %zu/%zu (%.1f%%)\n",
+               compile_faster, rows.n, 100.0 * (double)compile_faster / (double)rows.n);
+        printf("  Run:       liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
+               median(lr, rows.n), median(er, rows.n), median(run_sp, rows.n));
+        printf("  Run+:      aggregate %.0f ms vs %.0f ms, speedup %.2fx\n",
+               sum_lr, sum_er, (sum_lr > 0 ? sum_er / sum_lr : 0.0));
+        printf("  Run F:     %zu/%zu (%.1f%%)\n",
+               run_faster, rows.n, 100.0 * (double)run_faster / (double)rows.n);
+
         printf("\n  Results: %s\n", jsonl_path);
 
         free(lw);
         free(ew);
+        free(lc);
+        free(ec);
+        free(lr);
+        free(er);
         free(wall_sp);
+        free(compile_sp);
+        free(run_sp);
     }
 
     free(compat_path);
