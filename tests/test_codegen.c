@@ -68,3 +68,54 @@ int test_codegen_add(void) {
     lr_arena_destroy(arena);
     return 0;
 }
+
+static int has_immediate_store_reload_pair(const uint8_t *code, size_t code_len) {
+    for (size_t i = 0; i + 7 < code_len; i++) {
+        if (code[i + 0] == 0x48 && code[i + 1] == 0x89 && code[i + 2] == 0x45 &&
+            code[i + 4] == 0x48 && code[i + 5] == 0x8B && code[i + 6] == 0x45 &&
+            code[i + 3] == code[i + 7]) {
+            return 1;
+        }
+    }
+    for (size_t i = 0; i + 13 < code_len; i++) {
+        if (code[i + 0] == 0x48 && code[i + 1] == 0x89 && code[i + 2] == 0x85 &&
+            code[i + 7] == 0x48 && code[i + 8] == 0x8B && code[i + 9] == 0x85 &&
+            memcmp(&code[i + 3], &code[i + 10], 4) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int test_codegen_skip_redundant_immediate_reload(void) {
+    const char *src =
+        "define i64 @f(i64 %a, i64 %b, i64 %c) {\n"
+        "entry:\n"
+        "  %t = add i64 %a, %b\n"
+        "  %u = mul i64 %t, %c\n"
+        "  ret i64 %u\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target exists");
+    if (strcmp(target->name, "x86_64") != 0) {
+        lr_arena_destroy(arena);
+        return 0;
+    }
+
+    uint8_t code[4096];
+    size_t code_len = 0;
+    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    TEST_ASSERT_EQ(rc, 0, "compile succeeds");
+    TEST_ASSERT(code_len > 0, "generated some code");
+    TEST_ASSERT(!has_immediate_store_reload_pair(code, code_len),
+                "no immediate store+reload for same stack slot");
+
+    lr_arena_destroy(arena);
+    return 0;
+}

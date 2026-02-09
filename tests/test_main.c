@@ -63,6 +63,7 @@ int test_parser_named_params_no_collision(void);
 int test_parser_cast_expr_in_aggregate_init(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
+int test_codegen_skip_redundant_immediate_reload(void);
 int test_host_target_name(void);
 int test_create_host_target(void);
 int test_create_unknown_target_fails(void);
@@ -193,6 +194,7 @@ int main(void) {
     fprintf(stderr, "\nCodegen tests:\n");
     RUN_TEST(test_codegen_ret_42);
     RUN_TEST(test_codegen_add);
+    RUN_TEST(test_codegen_skip_redundant_immediate_reload);
 
     fprintf(stderr, "\nTarget tests:\n");
     RUN_TEST(test_host_target_name);
