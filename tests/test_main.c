@@ -92,6 +92,7 @@ int test_jit_varargs_printf_double_call(void);
 int test_jit_const_gep_vtable_function_ptr(void);
 int test_jit_llvm_intrinsic_fabs_f32(void);
 int test_jit_llvm_intrinsic_memcpy_memset(void);
+int test_jit_llvm_intrinsic_memmove(void);
 int test_jit_gep_struct_field(void);
 int test_jit_gep_array_index(void);
 int test_jit_gep_negative_i32_index(void);
@@ -222,6 +223,7 @@ int main(void) {
     RUN_TEST(test_jit_const_gep_vtable_function_ptr);
     RUN_TEST(test_jit_llvm_intrinsic_fabs_f32);
     RUN_TEST(test_jit_llvm_intrinsic_memcpy_memset);
+    RUN_TEST(test_jit_llvm_intrinsic_memmove);
     RUN_TEST(test_jit_gep_struct_field);
     RUN_TEST(test_jit_gep_array_index);
     RUN_TEST(test_jit_gep_negative_i32_index);
