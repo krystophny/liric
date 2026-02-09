@@ -128,6 +128,49 @@ class ReportSelectionSummaryTests(unittest.TestCase):
             1,
         )
 
+    def test_differential_parity_gap_is_gated(self) -> None:
+        processed = [
+            {
+                "case_id": "ok",
+                "classification": "pass",
+                "run_requested": True,
+                "jit_ok": True,
+                "differential_attempted": True,
+            },
+            {
+                "case_id": "missing",
+                "classification": "pass",
+                "run_requested": True,
+                "jit_ok": True,
+                "differential_attempted": False,
+            },
+            {
+                "case_id": "not_executable",
+                "classification": "unsupported_feature",
+                "run_requested": True,
+                "jit_ok": False,
+                "differential_attempted": False,
+            },
+        ]
+        summary = report.summarize(
+            manifest_total=3,
+            processed=processed,
+            baseline=[],
+            selection_rows=[],
+        )
+
+        self.assertEqual(summary["runnable_selected"], 3)
+        self.assertEqual(summary["runnable_selected_executable"], 2)
+        self.assertEqual(summary["differential_attempted_executable"], 1)
+        self.assertEqual(summary["differential_missing_attempts"], 1)
+        self.assertEqual(summary["differential_missing_case_ids"], ["missing"])
+        self.assertFalse(summary["differential_parity_ok"])
+        self.assertTrue(summary["gate_fail"])
+
+        ok, message = report.gate_result(summary)
+        self.assertFalse(ok)
+        self.assertEqual(message, "differential coverage regression detected")
+
 
 if __name__ == "__main__":
     unittest.main()
