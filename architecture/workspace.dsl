@@ -157,37 +157,40 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
                 tags "Tools"
                 url "https://github.com/krystophny/liric/tree/main/tools"
             }
+
+            !docs docs
+            !adrs adrs
         }
 
-        engineer -> liric "Reads architecture and runs build/test/bench/JIT workflows"
-        engineer -> lfortran "Builds and runs LFortran integration benchmarks"
+        engineer -> liric "Reads architecture and runs build/test/bench/JIT workflows" "CLI and scripts"
+        engineer -> lfortran "Builds and runs LFortran integration benchmarks" "CLI and scripts"
 
-        lfortran -> compat_layer "Generates/consumes LLVM-style APIs through liric compatibility path"
+        lfortran -> compat_layer "Generates/consumes LLVM-style APIs through liric compatibility path" "LLVM-compatible C/C++ API"
 
-        api_frontdoor -> ll_frontend "Routes .ll parsing"
-        api_frontdoor -> wasm_frontend "Routes .wasm parsing"
-        api_frontdoor -> core_ir "Owns module lifecycle and builder entrypoints"
-        api_frontdoor -> jit_runtime "Creates JIT, adds modules, resolves functions"
-        api_frontdoor -> obj_emit "Emits object files from liric modules"
+        api_frontdoor -> ll_frontend "Routes .ll parsing" "frontend dispatch"
+        api_frontdoor -> wasm_frontend "Routes .wasm parsing" "frontend dispatch"
+        api_frontdoor -> core_ir "Owns module lifecycle and builder entrypoints" "C API calls"
+        api_frontdoor -> jit_runtime "Creates JIT, adds modules, resolves functions" "C API calls"
+        api_frontdoor -> obj_emit "Emits object files from liric modules" "C API calls"
 
-        ll_frontend -> core_ir "Builds lr_module_t from text IR"
-        wasm_frontend -> core_ir "Builds lr_module_t from binary WASM"
+        ll_frontend -> core_ir "Builds lr_module_t from text IR" "IR builder calls"
+        wasm_frontend -> core_ir "Builds lr_module_t from binary WASM" "IR builder calls"
 
-        compat_layer -> core_ir "Builds/updates IR via lc_* builders"
-        compat_layer -> api_frontdoor "Uses public module/JIT interfaces"
+        compat_layer -> core_ir "Builds/updates IR via lc_* builders" "compat builder API"
+        compat_layer -> api_frontdoor "Uses public module/JIT interfaces" "public C API"
 
-        core_ir -> backends "Supplies target-independent SSA for codegen"
-        backends -> jit_runtime "Produces machine code for in-memory execution"
-        backends -> obj_emit "Produces machine code/relocations for object files"
+        core_ir -> backends "Supplies target-independent SSA for codegen" "compile interface"
+        backends -> jit_runtime "Produces machine code for in-memory execution" "code buffer"
+        backends -> obj_emit "Produces machine code/relocations for object files" "object code sections"
 
-        obj_emit -> host_runtime "Objects are linked and resolved by host linker/runtime"
+        obj_emit -> host_runtime "Objects are linked and resolved by host linker/runtime" "ELF/Mach-O and linker"
 
-        jit_runtime -> host_runtime "Loads shared libraries and resolves symbols"
-        jit_runtime -> backends "Invokes host-compatible target compiler"
+        jit_runtime -> host_runtime "Loads shared libraries and resolves symbols" "dlopen/dlsym"
+        jit_runtime -> backends "Invokes host-compatible target compiler" "compile interface"
 
-        tools -> api_frontdoor "CLI parse/dump/jit workflows"
-        tools -> jit_runtime "Probe runner and JIT execution harness"
-        tools -> lli "Benchmarks compare liric against lli baseline"
+        tools -> api_frontdoor "CLI parse/dump/jit workflows" "direct API usage"
+        tools -> jit_runtime "Probe runner and JIT execution harness" "JIT invocation"
+        tools -> lli "Benchmarks compare liric against lli baseline" "subprocess benchmark harness"
 
         frontend_registry_ll -> ll_lexer "Dispatches LL parse path" "function call"
         ll_lexer -> ll_parser "Token stream" "in-memory token API"
