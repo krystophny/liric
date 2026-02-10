@@ -24,6 +24,8 @@ typedef struct lr_sym_miss_entry {
     struct lr_sym_miss_entry *bucket_next;
 } lr_sym_miss_entry_t;
 
+typedef struct lr_lazy_func_entry lr_lazy_func_entry_t;
+
 struct lr_jit;
 typedef void *(*lr_symbol_provider_resolve_fn)(struct lr_jit *jit, const char *name);
 
@@ -52,6 +54,10 @@ typedef struct lr_jit {
     uint32_t sym_bucket_count;
     lr_sym_miss_entry_t **miss_buckets;
     uint32_t miss_bucket_count;
+    lr_lazy_func_entry_t *lazy_funcs;
+    lr_lazy_func_entry_t **lazy_func_buckets;
+    uint32_t lazy_func_bucket_count;
+    uint32_t materialize_depth;
     lr_lib_entry_t *libs;
     lr_symbol_provider_t *symbol_providers;
     lr_symbol_provider_t *symbol_providers_tail;

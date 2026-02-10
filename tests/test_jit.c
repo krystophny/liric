@@ -557,7 +557,42 @@ int test_jit_unresolved_symbol_fails(void) {
     lr_jit_t *jit = lr_jit_create();
     TEST_ASSERT(jit != NULL, "jit create");
     int rc = lr_jit_add_module(jit, m);
-    TEST_ASSERT(rc != 0, "jit add module fails for unresolved symbol");
+    TEST_ASSERT_EQ(rc, 0, "jit add module succeeds before lazy materialization");
+    TEST_ASSERT(lr_jit_get_function(jit, "f") == NULL,
+                "function materialization fails for unresolved symbol");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_lazy_materializes_reachable_functions_only(void) {
+    const char *src =
+        "define i32 @ok() {\n"
+        "entry:\n"
+        "  ret i32 42\n"
+        "}\n"
+        "define i32 @bad() {\n"
+        "entry:\n"
+        "  %v = call i32 @missing()\n"
+        "  ret i32 %v\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t ok_fn; LR_JIT_GET_FN(ok_fn, jit, "ok");
+    TEST_ASSERT(ok_fn != NULL, "ok materializes");
+    TEST_ASSERT_EQ(ok_fn(), 42, "ok() returns 42");
+
+    TEST_ASSERT(lr_jit_get_function(jit, "bad") == NULL,
+                "bad materialization fails without breaking ok");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
