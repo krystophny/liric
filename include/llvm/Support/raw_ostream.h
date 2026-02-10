@@ -9,9 +9,15 @@
 #include <type_traits>
 #include <vector>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define LIRIC_LLVM_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define LIRIC_LLVM_HIDDEN
+#endif
+
 namespace llvm {
 
-class raw_ostream {
+class LIRIC_LLVM_HIDDEN raw_ostream {
 public:
     virtual ~raw_ostream() = default;
     virtual raw_ostream &write(const char *ptr, size_t size) = 0;
@@ -74,14 +80,14 @@ public:
     }
 };
 
-class raw_pwrite_stream : public raw_ostream {
+class LIRIC_LLVM_HIDDEN raw_pwrite_stream : public raw_ostream {
 public:
     virtual void pwrite(const char *Ptr, size_t Size, uint64_t Offset) {
         (void)Ptr; (void)Size; (void)Offset;
     }
 };
 
-class raw_fd_ostream : public raw_pwrite_stream {
+class LIRIC_LLVM_HIDDEN raw_fd_ostream : public raw_pwrite_stream {
     FILE *f_;
     bool owns_;
 
@@ -120,7 +126,7 @@ public:
     FILE *getFileOrNull() const override { return f_; }
 };
 
-class raw_string_ostream : public raw_pwrite_stream {
+class LIRIC_LLVM_HIDDEN raw_string_ostream : public raw_pwrite_stream {
     std::string &str_;
 
 public:
@@ -132,7 +138,7 @@ public:
     std::string &str() { return str_; }
 };
 
-class raw_svector_ostream : public raw_pwrite_stream {
+class LIRIC_LLVM_HIDDEN raw_svector_ostream : public raw_pwrite_stream {
     std::vector<char> *vec_ = nullptr;
     std::string fallback_;
 
@@ -159,16 +165,18 @@ public:
     }
 };
 
-inline raw_fd_ostream &errs() {
+inline LIRIC_LLVM_HIDDEN raw_fd_ostream &errs() {
     static raw_fd_ostream s(2, false);
     return s;
 }
 
-inline raw_fd_ostream &outs() {
+inline LIRIC_LLVM_HIDDEN raw_fd_ostream &outs() {
     static raw_fd_ostream s(1, false);
     return s;
 }
 
 } // namespace llvm
+
+#undef LIRIC_LLVM_HIDDEN
 
 #endif

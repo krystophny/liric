@@ -666,6 +666,22 @@ static int test_stringref_twine() {
     return 0;
 }
 
+static int test_twine_abi_layout_and_concat() {
+    size_t expected_size = sizeof(void *) == 8 ? 40u : 20u;
+    TEST_ASSERT_EQ(sizeof(llvm::Twine), expected_size, "twine ABI size");
+    TEST_ASSERT_EQ(alignof(llvm::Twine), alignof(void *), "twine ABI alignment");
+
+    llvm::Twine lhs("ab");
+    llvm::Twine rhs("cd");
+    std::string joined = (lhs + rhs).str();
+    TEST_ASSERT(joined == "abcd", "twine concat");
+
+    llvm::Twine null_twine = llvm::Twine::createNull();
+    TEST_ASSERT(null_twine.str().empty(), "null twine renders empty");
+
+    return 0;
+}
+
 static int test_arrayref() {
     int arr[] = {1, 2, 3};
     llvm::ArrayRef<int> ref(arr, 3);
@@ -1013,6 +1029,7 @@ int main() {
     fprintf(stderr, "Infrastructure tests:\n");
     RUN_TEST(test_llvm_version);
     RUN_TEST(test_stringref_twine);
+    RUN_TEST(test_twine_abi_layout_and_concat);
     RUN_TEST(test_arrayref);
     RUN_TEST(test_apint_apfloat);
     RUN_TEST(test_casting_helpers);

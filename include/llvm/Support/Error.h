@@ -8,9 +8,15 @@
 #include <type_traits>
 #include <utility>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define LIRIC_LLVM_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define LIRIC_LLVM_HIDDEN
+#endif
+
 namespace llvm {
 
-class ErrorInfoBase {
+class LIRIC_LLVM_HIDDEN ErrorInfoBase {
 public:
     virtual ~ErrorInfoBase() = default;
     virtual void log(raw_ostream &OS) const = 0;
@@ -22,7 +28,7 @@ public:
     }
 };
 
-class StringError : public ErrorInfoBase {
+class LIRIC_LLVM_HIDDEN StringError : public ErrorInfoBase {
     std::string Msg;
 public:
     StringError(const std::string &S, std::error_code = {}) : Msg(S) {}
@@ -30,7 +36,7 @@ public:
     std::string message() const override { return Msg; }
 };
 
-class Error {
+class LIRIC_LLVM_HIDDEN Error {
     std::unique_ptr<ErrorInfoBase> Payload;
     bool Checked = false;
 
@@ -231,5 +237,7 @@ inline std::string toString(Error E) {
 }
 
 } // namespace llvm
+
+#undef LIRIC_LLVM_HIDDEN
 
 #endif
