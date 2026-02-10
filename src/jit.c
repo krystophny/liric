@@ -142,12 +142,12 @@ static uint32_t g_mat_cache_epoch = 1u;
 
 static void register_builtin_symbols(lr_jit_t *j);
 static int register_default_symbol_providers(lr_jit_t *j);
-static void *resolve_symbol_from_jit_table(lr_jit_t *j, const char *name);
 static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name);
 static void *resolve_symbol_from_process(lr_jit_t *j, const char *name);
 static lr_lazy_func_entry_t *find_lazy_func_entry(lr_jit_t *j, const char *name, uint32_t hash);
 static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry);
 static int jit_ensure_module_symbols_interned(lr_module_t *m);
+static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash);
 static const lr_mat_cache_entry_t *materialize_cache_lookup(const lr_target_t *target,
                                                             const uint8_t *module_sig,
                                                             size_t module_sig_len,
@@ -979,6 +979,22 @@ static lr_sym_entry_t *find_symbol_entry(lr_jit_t *j, const char *name, uint32_t
     return NULL;
 }
 
+static lr_sym_entry_t *lookup_last_entry(lr_jit_t *j, const char *name, uint32_t hash) {
+    if (!j || !j->lookup_last_entry || j->lookup_last_hash != hash)
+        return NULL;
+    lr_sym_entry_t *entry = j->lookup_last_entry;
+    if (entry->hash != hash || strcmp(entry->name, name) != 0)
+        return NULL;
+    return entry;
+}
+
+static void update_last_symbol_lookup(lr_jit_t *j, lr_sym_entry_t *entry, uint32_t hash) {
+    if (!j)
+        return;
+    j->lookup_last_entry = entry;
+    j->lookup_last_hash = entry ? hash : 0u;
+}
+
 static lr_lazy_func_entry_t *find_lazy_func_entry(lr_jit_t *j, const char *name, uint32_t hash) {
     if (!j || !name || !name[0] || !j->lazy_func_buckets || j->lazy_func_bucket_count == 0)
         return NULL;
@@ -1086,9 +1102,6 @@ static int register_symbol_provider(lr_jit_t *j, const char *name,
 }
 
 static int register_default_symbol_providers(lr_jit_t *j) {
-    if (register_symbol_provider(j, "jit-table", resolve_symbol_from_jit_table,
-                                 false, false) != 0)
-        return -1;
     if (register_symbol_provider(j, "loaded-libraries", resolve_symbol_from_loaded_libraries,
                                  true, true) != 0)
         return -1;
@@ -1105,6 +1118,7 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     lr_sym_entry_t *existing = find_symbol_entry(j, name, hash);
     if (existing) {
         existing->addr = addr;
+        update_last_symbol_lookup(j, existing, hash);
         return;
     }
 
@@ -1121,6 +1135,7 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     } else {
         e->bucket_next = NULL;
     }
+    update_last_symbol_lookup(j, e, hash);
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
@@ -1160,14 +1175,6 @@ int lr_jit_load_library(lr_jit_t *j, const char *path) {
     return 0;
 }
 
-static void *resolve_symbol_from_jit_table(lr_jit_t *j, const char *name) {
-    if (!j || !name || !name[0])
-        return NULL;
-    uint32_t hash = symbol_hash(name);
-    lr_sym_entry_t *entry = find_symbol_entry(j, name, hash);
-    return entry ? entry->addr : NULL;
-}
-
 static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name) {
     if (!j || !name || !name[0])
         return NULL;
@@ -1186,17 +1193,23 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
     return dlsym(RTLD_DEFAULT, name);
 }
 
-static void *lookup_symbol(lr_jit_t *j, const char *name) {
-    if (!j || !name || !name[0])
-        return NULL;
-
-    uint32_t hash = symbol_hash(name);
+static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) {
     lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
     if (lazy) {
         if (lazy->state == LR_LAZY_FUNC_COMPILING)
             return lazy->pending_addr;
         if (lazy->state != LR_LAZY_FUNC_READY)
             return NULL;
+    }
+
+    lr_sym_entry_t *cached_entry = lookup_last_entry(j, name, hash);
+    if (cached_entry)
+        return cached_entry->addr;
+
+    lr_sym_entry_t *entry = find_symbol_entry(j, name, hash);
+    if (entry) {
+        update_last_symbol_lookup(j, entry, hash);
+        return entry->addr;
     }
 
     bool miss_known = miss_cache_contains(j, name, hash);
@@ -1220,18 +1233,27 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return NULL;
 }
 
+static void *lookup_symbol(lr_jit_t *j, const char *name) {
+    if (!j || !name || !name[0])
+        return NULL;
+    return lookup_symbol_hashed(j, name, symbol_hash(name));
+}
+
 static void *lookup_symbol_materializing_lazy(lr_jit_t *j, const char *name) {
-    void *addr = lookup_symbol(j, name);
-    if (addr || !j || !name || !name[0])
-        return addr;
+    if (!j || !name || !name[0])
+        return NULL;
 
     uint32_t hash = symbol_hash(name);
+    void *addr = lookup_symbol_hashed(j, name, hash);
+    if (addr)
+        return addr;
+
     lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
     if (!lazy || lazy->state == LR_LAZY_FUNC_READY || lazy->state == LR_LAZY_FUNC_COMPILING)
         return NULL;
     if (materialize_lazy_function(j, lazy) != 0)
         return NULL;
-    return lookup_symbol(j, name);
+    return lookup_symbol_hashed(j, name, hash);
 }
 
 static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
@@ -2455,15 +2477,18 @@ void lr_jit_end_update(lr_jit_t *j) {
 void *lr_jit_get_function(lr_jit_t *j, const char *name) {
     if (!j || !name || !name[0])
         return NULL;
-    if (jit_lazy_materialization_enabled()) {
-        uint32_t hash = symbol_hash(name);
-        lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
-        if (lazy && lazy->state != LR_LAZY_FUNC_READY) {
-            if (materialize_lazy_function(j, lazy) != 0)
-                return NULL;
-        }
+    uint32_t hash = symbol_hash(name);
+    void *addr = lookup_symbol_hashed(j, name, hash);
+    if (addr || !jit_lazy_materialization_enabled())
+        return addr;
+
+    /* Materialize only when the fast path misses a lazy pending entry. */
+    lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+    if (lazy && lazy->state != LR_LAZY_FUNC_READY) {
+        if (materialize_lazy_function(j, lazy) != 0)
+            return NULL;
     }
-    return lookup_symbol(j, name);
+    return lookup_symbol_hashed(j, name, hash);
 }
 
 void lr_jit_destroy(lr_jit_t *j) {

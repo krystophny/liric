@@ -107,6 +107,37 @@ static int prefetch_mid1_stub(void) {
     return 41;
 }
 
+static int cache_override_symbol_one(void) {
+    return 1;
+}
+
+static int cache_override_symbol_nine(void) {
+    return 9;
+}
+
+int test_jit_add_symbol_updates_cached_lookup(void) {
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    lr_jit_add_symbol(jit, "cached_override", (void *)(uintptr_t)&cache_override_symbol_one);
+
+    typedef int (*fn_t)(void);
+    fn_t fn = NULL;
+    LR_JIT_GET_FN(fn, jit, "cached_override");
+    TEST_ASSERT(fn != NULL, "first lookup resolves symbol");
+    TEST_ASSERT_EQ(fn(), 1, "first symbol implementation is called");
+
+    lr_jit_add_symbol(jit, "cached_override", (void *)(uintptr_t)&cache_override_symbol_nine);
+
+    fn = NULL;
+    LR_JIT_GET_FN(fn, jit, "cached_override");
+    TEST_ASSERT(fn != NULL, "second lookup resolves symbol");
+    TEST_ASSERT_EQ(fn(), 9, "updated symbol implementation is called");
+
+    lr_jit_destroy(jit);
+    return 0;
+}
+
 int test_jit_ret_42(void) {
     const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
     lr_arena_t *arena = lr_arena_create(0);
@@ -129,6 +160,78 @@ int test_jit_ret_42(void) {
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
     return 0;
+}
+
+int test_jit_lazy_repeated_lookup_returns_ready_symbol(void) {
+    const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_jit_t *jit = NULL;
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    lr_module_t *m = parse(src, arena);
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    if (lr_jit_add_module(jit, m) != 0) {
+        fprintf(stderr, "  FAIL: jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    typedef int (*fn_t)(void);
+    fn_t first = NULL;
+    LR_JIT_GET_FN(first, jit, "f");
+    if (!first) {
+        fprintf(stderr, "  FAIL: first lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (first() != 42) {
+        fprintf(stderr, "  FAIL: first call result (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    fn_t second = NULL;
+    LR_JIT_GET_FN(second, jit, "f");
+    if (!second) {
+        fprintf(stderr, "  FAIL: second lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (second != first) {
+        fprintf(stderr, "  FAIL: repeated lookup returns same address (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (second() != 42) {
+        fprintf(stderr, "  FAIL: second call result (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
+    return status;
 }
 
 int test_jit_add_args(void) {
