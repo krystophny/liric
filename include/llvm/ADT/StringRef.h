@@ -5,9 +5,15 @@
 #include <string>
 #include <string_view>
 
+#if defined(__GNUC__) || defined(__clang__)
+#define LIRIC_LLVM_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define LIRIC_LLVM_HIDDEN
+#endif
+
 namespace llvm {
 
-class StringRef {
+class LIRIC_LLVM_HIDDEN StringRef {
     const char *data_;
     size_t len_;
 
@@ -33,5 +39,7 @@ public:
 };
 
 } // namespace llvm
+
+#undef LIRIC_LLVM_HIDDEN
 
 #endif

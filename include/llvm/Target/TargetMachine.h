@@ -18,7 +18,7 @@ class raw_pwrite_stream;
 namespace legacy { class PassManager; }
 
 namespace detail {
-struct ObjEmitState {
+struct __attribute__((visibility("hidden"))) ObjEmitState {
     raw_pwrite_stream *out = nullptr;
     CodeGenFileType file_type{};
 };
