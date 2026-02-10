@@ -892,8 +892,6 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                                  uint8_t *buf, size_t buflen, size_t *out_len,
                                  lr_arena_t *arena) {
     lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
-    if (lr_func_finalize(func, layout_arena) != 0)
-        return -1;
 
     uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
     uint32_t fc = nb * 2;

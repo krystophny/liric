@@ -236,6 +236,7 @@ lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
                            uint32_t dest, lr_operand_t *ops, uint32_t nops);
 void lr_block_append(lr_block_t *b, lr_inst_t *inst);
 int lr_func_finalize(lr_func_t *f, lr_arena_t *a);
+bool lr_func_is_finalized(const lr_func_t *f);
 lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
                                bool is_const);
 
