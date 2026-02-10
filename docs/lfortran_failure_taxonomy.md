@@ -1,8 +1,7 @@
 # LFortran Mass Failure Taxonomy
 
 This document defines the stable root-cause taxonomy used by
-`tools/lfortran_mass/report.py` and `tools/lfortran_mass/nightly_mass.sh`
-summary artifacts.
+`tools/lfortran_mass/nightly_mass.sh` summary artifacts.
 
 ## Taxonomy Dimensions
 
