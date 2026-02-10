@@ -648,6 +648,13 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
             lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)ldr_off, sym_idx,
                               LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12);
         }
+        if (op->global_offset != 0) {
+            /* Constant-GEP globals carry byte addends in global_offset. */
+            uint8_t add_reg = (reg == A64_X15) ? A64_X14 : A64_X15;
+            emit_move_imm_ctx(ctx, add_reg, op->global_offset, true);
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_add_reg(true, reg, reg, add_reg));
+        }
         invalidate_cached_reg_a64(ctx, reg);
     }
 }
