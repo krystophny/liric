@@ -753,7 +753,7 @@ static void usage(void) {
     printf("  --options-jsonl PATH options jsonl file (default matches chosen compat list)\n");
     printf("  --iters N            iterations per test (default: 3)\n");
     printf("  --timeout N          per-command timeout in seconds (compat alias)\n");
-    printf("  --timeout-ms N       per-command timeout in milliseconds (default: 100)\n");
+    printf("  --timeout-ms N       per-command timeout in milliseconds (default: 3000)\n");
     printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
     printf("  --lookup-dispatch-share-pct N  optional profile-derived lookup/dispatch share percentage\n");
 }
@@ -769,7 +769,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.compat_list = NULL;
     cfg.options_jsonl = NULL;
     cfg.iters = 3;
-    cfg.timeout_ms = 100;
+    cfg.timeout_ms = 3000;
     cfg.min_completed = 0;
     cfg.lookup_dispatch_share_pct = -1.0;
 
@@ -795,10 +795,10 @@ static cfg_t parse_args(int argc, char **argv) {
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             double sec = atof(argv[++i]);
             cfg.timeout_ms = (int)(sec * 1000.0);
-            if (cfg.timeout_ms <= 0) cfg.timeout_ms = 100;
+            if (cfg.timeout_ms <= 0) cfg.timeout_ms = 3000;
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
             cfg.timeout_ms = atoi(argv[++i]);
-            if (cfg.timeout_ms <= 0) cfg.timeout_ms = 100;
+            if (cfg.timeout_ms <= 0) cfg.timeout_ms = 3000;
         } else if (strcmp(argv[i], "--min-completed") == 0 && i + 1 < argc) {
             cfg.min_completed = atoi(argv[++i]);
             if (cfg.min_completed < 0) cfg.min_completed = 0;

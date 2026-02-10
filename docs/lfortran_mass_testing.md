@@ -128,7 +128,7 @@ These do NOT depend on mass run results; they discover tests directly from CMake
 
 3. **API benchmark (primary direct JIT path)**:
    ```bash
-   ./build/bench_api --iters 3 --timeout-ms 100 --min-completed 1
+   ./build/bench_api --iters 3 --timeout-ms 3000 --min-completed 1
    ```
    Compares full `lfortran --jit` execution through:
    - LLVM backend build

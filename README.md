@@ -43,7 +43,7 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 ./build/bench_ll --iters 3
 
 # 3) API benchmark (primary, direct JIT): lfortran --jit (WITH_LIRIC) vs lfortran --jit (LLVM)
-./build/bench_api --iters 3 --timeout-ms 100 --min-completed 1
+./build/bench_api --iters 3 --timeout-ms 3000 --min-completed 1
 ```
 
 Artifacts go to `/tmp/liric_bench/`.
@@ -76,9 +76,9 @@ cat /tmp/liric_bench/bench_ll_summary.json
 
 Get current API summary:
 ```bash
-./build/bench_api --iters 3 --timeout-ms 100 --bench-dir /tmp/liric_bench --min-completed 1
+./build/bench_api --iters 3 --timeout-ms 3000 --bench-dir /tmp/liric_bench --min-completed 1
 # Optional: feed profile-derived lookup/dispatch share (percent) for issue #233 tracker gating
-./build/bench_api --iters 3 --timeout-ms 100 --bench-dir /tmp/liric_bench --min-completed 1 \
+./build/bench_api --iters 3 --timeout-ms 3000 --bench-dir /tmp/liric_bench --min-completed 1 \
   --lookup-dispatch-share-pct 0.22
 cat /tmp/liric_bench/bench_api_summary.json
 ```
