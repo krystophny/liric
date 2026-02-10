@@ -46,6 +46,9 @@ find_runtime_lib() {
     return 1
 }
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+unsupported_bucket_map_path="${script_dir}/unsupported_bucket_map.json"
+
 lfortran_root=""
 lfortran_bin=""
 probe_runner=""
@@ -158,6 +161,7 @@ if [[ -z "$compat_jsonl" ]]; then
 fi
 
 [[ -f "$compat_jsonl" ]] || die "compat jsonl not found: $compat_jsonl"
+[[ -f "$unsupported_bucket_map_path" ]] || die "unsupported bucket map not found: $unsupported_bucket_map_path"
 
 manifest_path="${output_root}/manifest_tests_toml.jsonl"
 selection_path="${output_root}/selection_decisions.jsonl"
@@ -165,6 +169,7 @@ results_path="${output_root}/results.jsonl"
 summary_json_path="${output_root}/summary.json"
 summary_md_path="${output_root}/summary.md"
 failures_path="${output_root}/failures.csv"
+unsupported_coverage_path="${output_root}/unsupported_bucket_coverage.md"
 
 jq -c '
 {
@@ -188,43 +193,84 @@ jq -c '
 ' "$compat_jsonl" > "$selection_path"
 
 jq -c '
+def str_lc($v): ($v // "" | tostring | ascii_downcase);
+def has_any($s; $patterns): any($patterns[]; $s | contains(.));
+def classify_liric_fail:
+  (str_lc(.error)) as $err |
+  if has_any($err; ["unresolved symbol", "function not found", "unsupported signature", "entrypoint", "dlsym"])
+  then "unsupported_abi"
+  else "unsupported_feature"
+  end;
+def mismatch_symptom:
+  if (.llvm_rc != .liric_rc) then "rc-mismatch"
+  else "wrong-stdout"
+  end;
+def feature_family:
+  (str_lc(.options)) as $opts |
+  (str_lc(.error)) as $err |
+  if ($opts | contains("openmp")) or ($err | contains("openmp")) then "openmp"
+  elif has_any($err; ["intrinsic", "memset", "memcpy", "memmove", "libm", "math"]) then "intrinsics"
+  elif ($err | contains("complex")) then "complex"
+  else "general"
+  end;
 def classification:
   if (.llvm_ok | not) then "lfortran_emit_fail"
-  elif (.liric_ok | not) then "unsupported_feature"
+  elif (.liric_ok | not) then classify_liric_fail
   elif (.liric_match | not) then "mismatch"
   else "pass"
   end;
+def stage($c):
+  if $c == "lfortran_emit_fail" then "codegen"
+  elif $c == "unsupported_abi" then "jit-link"
+  elif $c == "unsupported_feature" then "runtime"
+  elif $c == "mismatch" then "output-format"
+  else "pass"
+  end;
+def taxonomy($c):
+  if $c == "pass" then null
+  elif $c == "lfortran_emit_fail" then "codegen|compiler-error|general"
+  elif $c == "unsupported_abi" then "jit-link|unresolved-symbol|runtime-api"
+  elif $c == "unsupported_feature" then ("runtime|unsupported-feature|" + feature_family)
+  elif $c == "mismatch" then ("output-format|" + mismatch_symptom + "|general")
+  else "runtime|unknown|general"
+  end;
+. as $row |
+(classification) as $classification |
 {
-  "case_id": .name,
-  "filename": .name,
-  "source_path": .source,
+  "case_id": $row.name,
+  "filename": $row.name,
+  "source_path": $row.source,
   "corpus": "integration_cmake",
   "emit_attempted": true,
-  "emit_ok": .llvm_ok,
-  "parse_attempted": .llvm_ok,
-  "parse_ok": .liric_ok,
-  "jit_attempted": .llvm_ok,
-  "jit_ok": .liric_ok,
+  "emit_ok": $row.llvm_ok,
+  "parse_attempted": $row.llvm_ok,
+  "parse_ok": $row.liric_ok,
+  "jit_attempted": $row.llvm_ok,
+  "jit_ok": $row.liric_ok,
   "run_requested": true,
-  "differential_attempted": (.llvm_ok and .liric_ok),
-  "differential_ok": (.llvm_ok and .liric_ok),
-  "differential_match": (if (.llvm_ok and .liric_ok) then .liric_match else null end),
-  "differential_rc_match": (if (.llvm_ok and .liric_ok) then (.llvm_rc == .liric_rc) else null end),
-  "differential_stdout_match": (if (.llvm_ok and .liric_ok) then .liric_match else null end),
-  "differential_stderr_match": (if (.llvm_ok and .liric_ok) then true else null end),
-  "stage":
-    (if (.llvm_ok | not) then "emit"
-     elif (.liric_ok | not) then "jit"
-     elif (.liric_match | not) then "differential"
-     else "pass"
-     end),
+  "differential_attempted": ($row.llvm_ok and $row.liric_ok),
+  "differential_ok": ($row.llvm_ok and $row.liric_ok),
+  "differential_match": (if ($row.llvm_ok and $row.liric_ok) then $row.liric_match else null end),
+  "differential_rc_match": (if ($row.llvm_ok and $row.liric_ok) then ($row.llvm_rc == $row.liric_rc) else null end),
+  "differential_stdout_match": (if ($row.llvm_ok and $row.liric_ok) then $row.liric_match else null end),
+  "differential_stderr_match": (if ($row.llvm_ok and $row.liric_ok) then true else null end),
+  "stage": stage($classification),
+  "taxonomy_node": taxonomy($classification),
+  "raw_error": ($row.error // ""),
   "reason":
-    (if (.llvm_ok | not) then "lfortran emission/native execution failed"
-     elif (.liric_ok | not) then "liric jit execution failed"
-     elif (.liric_match | not) then "differential mismatch"
+    (if $classification == "lfortran_emit_fail" then "lfortran emission/native execution failed"
+     elif $classification == "unsupported_abi" then
+         (if (($row.error // "") != "") then ("liric jit ABI/link failure: " + ($row.error // ""))
+          else "liric jit ABI/link failure"
+          end)
+     elif $classification == "unsupported_feature" then
+         (if (($row.error // "") != "") then ("liric unsupported feature/runtime failure: " + ($row.error // ""))
+          else "liric unsupported feature/runtime failure"
+          end)
+     elif $classification == "mismatch" then "differential mismatch"
      else ""
      end),
-  "classification": classification
+  "classification": $classification
 }
 ' "$compat_jsonl" > "$results_path"
 
@@ -240,11 +286,72 @@ fi
 jq -n \
     --slurpfile current "$results_path" \
     --slurpfile baseline "$baseline_for_jq" \
+    --slurpfile bucket_map "$unsupported_bucket_map_path" \
 '
 def counts($arr):
   reduce $arr[] as $r ({}; .[$r.classification] = ((.[$r.classification] // 0) + 1));
+def taxonomy_counts($arr; $classes):
+  reduce $arr[] as $r (
+    {};
+    if ($r.taxonomy_node == null) then .
+    elif ($classes == null or ($classes | index($r.classification))) then
+      .[$r.taxonomy_node] = ((.[$r.taxonomy_node] // 0) + 1)
+    else .
+    end
+  );
+def sorted_entries($obj):
+  ($obj // {} | to_entries | sort_by(-.value, .key));
+def unsupported_total($arr):
+  [ $arr[] | select(.classification == "unsupported_feature" or .classification == "unsupported_abi") ] | length;
+def bucket_coverage($counts; $map):
+  [ sorted_entries($counts)[] as $entry
+    | ($map[$entry.key] // {}) as $meta
+    | ($meta.issues // []) as $issues
+    | {
+        "taxonomy_node": $entry.key,
+        "count": $entry.value,
+        "mapped": (($issues | length) > 0 or (($meta.rationale // "") != "")),
+        "issues": ($issues | map("#" + tostring)),
+        "rationale": ($meta.rationale // "")
+      }
+  ];
 ($current) as $rows |
-($baseline | map({key: .case_id, value: .classification}) | from_entries) as $baseline_map |
+($baseline) as $baseline_rows |
+($bucket_map[0] // {}) as $bucket_map_obj |
+($baseline_rows | map({key: .case_id, value: .classification}) | from_entries) as $baseline_map |
+($rows | taxonomy_counts(.; null)) as $all_taxonomy_counts |
+($rows | taxonomy_counts(.; ["mismatch"])) as $mismatch_taxonomy_counts |
+($rows | taxonomy_counts(.; ["unsupported_feature", "unsupported_abi"])) as $unsupported_taxonomy_counts |
+($baseline_rows | taxonomy_counts(.; ["unsupported_feature", "unsupported_abi"])) as $baseline_unsupported_taxonomy_counts |
+($rows | unsupported_total(.)) as $unsupported_total_current |
+($baseline_rows | unsupported_total(.)) as $unsupported_total_baseline |
+($unsupported_total_current - $unsupported_total_baseline) as $unsupported_total_delta |
+(
+  [ (($unsupported_taxonomy_counts + $baseline_unsupported_taxonomy_counts) | keys_unsorted[]) ]
+  | unique
+  | sort
+  | map(
+      . as $k |
+      {
+        "taxonomy_node": $k,
+        "current": ($unsupported_taxonomy_counts[$k] // 0),
+        "baseline": ($baseline_unsupported_taxonomy_counts[$k] // 0),
+        "delta": (($unsupported_taxonomy_counts[$k] // 0) - ($baseline_unsupported_taxonomy_counts[$k] // 0)),
+        "trend":
+          (if (($unsupported_taxonomy_counts[$k] // 0) < ($baseline_unsupported_taxonomy_counts[$k] // 0)) then "improving"
+           elif (($unsupported_taxonomy_counts[$k] // 0) > ($baseline_unsupported_taxonomy_counts[$k] // 0)) then "regressing"
+           else "stable"
+           end)
+      }
+    )
+) as $unsupported_taxonomy_delta |
+($unsupported_taxonomy_counts | bucket_coverage(.; $bucket_map_obj)) as $unsupported_bucket_issue_coverage |
+(
+  [ $unsupported_bucket_issue_coverage[]
+    | select(.mapped | not)
+    | .taxonomy_node
+  ]
+) as $unsupported_bucket_unmapped |
 ($rows | length) as $manifest_total |
 ([ $rows[] | select(.emit_ok) ] | length) as $emit_ok |
 ([ $rows[] | select(.parse_ok) ] | length) as $parse_ok |
@@ -284,6 +391,20 @@ def counts($arr):
   "differential_missing_attempts": $diff_missing_attempts,
   "differential_parity_ok": ($diff_missing_attempts == 0),
   "classification_counts": counts($rows),
+  "taxonomy_counts": $all_taxonomy_counts,
+  "mismatch_taxonomy_counts": $mismatch_taxonomy_counts,
+  "unsupported_taxonomy_counts": $unsupported_taxonomy_counts,
+  "unsupported_bucket_issue_coverage": $unsupported_bucket_issue_coverage,
+  "unsupported_bucket_unmapped": $unsupported_bucket_unmapped,
+  "unsupported_total_baseline": $unsupported_total_baseline,
+  "unsupported_total_current": $unsupported_total_current,
+  "unsupported_total_delta": $unsupported_total_delta,
+  "unsupported_total_trend":
+    (if $unsupported_total_delta < 0 then "improving"
+     elif $unsupported_total_delta > 0 then "regressing"
+     else "stable"
+     end),
+  "unsupported_taxonomy_delta": $unsupported_taxonomy_delta,
   "mismatch_count": $mismatch_count,
   "new_supported_regressions": ($regressed_case_ids | length),
   "regressed_case_ids": $regressed_case_ids,
@@ -308,10 +429,111 @@ def counts($arr):
       "- Differential exact matches: \(.differential_match)\n" +
       "- Differential missing attempts: \(.differential_missing_attempts)\n" +
       "- Mismatches: \(.mismatch_count)\n" +
+      "- Unsupported total baseline: \(.unsupported_total_baseline)\n" +
+      "- Unsupported total current: \(.unsupported_total_current)\n" +
+      "- Unsupported total delta: \(.unsupported_total_delta)\n" +
+      "- Unsupported total trend: \(.unsupported_total_trend)\n" +
       "- New supported regressions: \(.new_supported_regressions)\n" +
       "- Gate fail: \(.gate_fail)"
     ' "$summary_json_path"
+    echo
+    echo "## Classification Counts"
+    echo
+    jq -r '
+      (.classification_counts // {}) as $counts |
+      if ($counts | length) == 0 then "- (none)"
+      else
+        $counts
+        | to_entries
+        | sort_by(.key)
+        | .[]
+        | "- \(.key): \(.value)"
+      end
+    ' "$summary_json_path"
+    echo
+    echo "## Taxonomy Counts (Unsupported)"
+    echo
+    jq -r '
+      (.unsupported_taxonomy_counts // {}) as $counts |
+      if ($counts | length) == 0 then "- (none)"
+      else
+        $counts
+        | to_entries
+        | sort_by(-.value, .key)
+        | .[]
+        | "- \(.key): \(.value)"
+      end
+    ' "$summary_json_path"
+    echo
+    echo "## Unsupported Bucket Coverage"
+    echo
+    jq -r '
+      (.unsupported_bucket_issue_coverage // []) as $rows |
+      if ($rows | length) == 0 then "- (none)"
+      else
+        $rows[]
+        | "- \(.taxonomy_node): \(.count) -> " +
+          (if ((.issues // []) | length) > 0 then (.issues | join(", "))
+           elif ((.rationale // "") != "") then "deferred"
+           else "unmapped"
+           end) +
+          (if ((.rationale // "") != "") then " (\(.rationale))"
+           else ""
+           end)
+      end
+    ' "$summary_json_path"
+    echo
+    echo "## Unsupported Bucket Mapping Gaps"
+    echo
+    jq -r '
+      (.unsupported_bucket_unmapped // []) as $rows |
+      if ($rows | length) == 0 then "- none"
+      else
+        $rows[]
+        | "- " + .
+      end
+    ' "$summary_json_path"
 } > "$summary_md_path"
+
+jq -r '
+  "# Unsupported Bucket Coverage\n\n" +
+  "| Bucket | Count | Mapping | Rationale |\n" +
+  "|---|---:|---|---|\n" +
+  (
+    (.unsupported_bucket_issue_coverage // []) as $rows |
+    if ($rows | length) == 0 then
+      "| (none) | 0 | n/a | n/a |"
+    else
+      (
+        $rows
+        | map(
+            "| `\(.taxonomy_node)` | \(.count) | " +
+            (if ((.issues // []) | length) > 0 then (.issues | join(", "))
+             elif ((.rationale // "") != "") then "deferred"
+             else "unmapped"
+             end) +
+            " | " +
+            (((.rationale // "") | gsub("\\|"; "\\\\|"))) +
+            " |"
+          )
+        | join("\n")
+      )
+    end
+  ) +
+  "\n\n## Unsupported Trend\n\n" +
+  "- baseline: \(.unsupported_total_baseline // 0)\n" +
+  "- current: \(.unsupported_total_current // 0)\n" +
+  "- delta: \(.unsupported_total_delta // 0)\n" +
+  "- trend: \(.unsupported_total_trend // "stable")\n" +
+  "\n## Unmapped Buckets\n\n" +
+  (
+    (.unsupported_bucket_unmapped // []) as $rows |
+    if ($rows | length) == 0 then "- none"
+    else ($rows | map("- " + .) | join("\n"))
+    end
+  ) +
+  "\n"
+' "$summary_json_path" > "$unsupported_coverage_path"
 
 {
     echo "case_id,filename,source_path,classification,stage,reason"
