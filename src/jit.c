@@ -1684,6 +1684,21 @@ static uint32_t materialize_prefetch_thread_count(uint32_t pending_count) {
 #endif
 }
 
+static bool jit_lazy_materialization_enabled(void) {
+    const char *env = getenv("LIRIC_JIT_LAZY");
+    if (!env || !env[0])
+        return false;
+
+    if (strcmp(env, "0") == 0 ||
+        strcmp(env, "false") == 0 || strcmp(env, "FALSE") == 0 ||
+        strcmp(env, "off") == 0 || strcmp(env, "OFF") == 0 ||
+        strcmp(env, "no") == 0 || strcmp(env, "NO") == 0) {
+        return false;
+    }
+
+    return true;
+}
+
 #if LR_HAS_PTHREADS
 static void *materialize_prefetch_worker_main(void *arg) {
     lr_materialize_prefetch_worker_t *w = (lr_materialize_prefetch_worker_t *)arg;
@@ -2265,8 +2280,14 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
 
     bool own_wx_transition = !j->update_active;
+    bool lazy_mode = jit_lazy_materialization_enabled();
     int rc = -1;
     size_t code_size_before = j->code_size;
+    lr_objfile_ctx_t fixup_ctx;
+    memset(&fixup_ctx, 0, sizeof(fixup_ctx));
+    bool fixup_ctx_ready = false;
+    void *saved_obj_ctx = NULL;
+    bool obj_ctx_installed = false;
 
     if (own_wx_transition) {
         JIT_PROF_START(make_writable);
@@ -2303,8 +2324,19 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
     if (finalize_module_functions(m, funcs, nfuncs, j->arena) != 0)
         goto done;
-    if (register_lazy_module_functions(j, m, funcs, nfuncs) != 0)
-        goto done;
+    if (lazy_mode) {
+        if (register_lazy_module_functions(j, m, funcs, nfuncs) != 0)
+            goto done;
+    } else {
+        for (uint32_t i = 0; i < nfuncs; i++) {
+            const char *name = funcs[i]->name;
+            if (name && name[0]) {
+                uint32_t hash = symbol_hash(name);
+                if (!find_symbol_entry(j, name, hash))
+                    miss_cache_add(j, name, hash);
+            }
+        }
+    }
 
     /* Resolve function declarations eagerly — these are external symbols
        that will be needed during compilation (e.g., runtime functions). */
@@ -2314,12 +2346,64 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
     JIT_PROF_END(pre_register);
 
-    /* Re-apply now for globals that only reference non-function symbols. */
+    if (lazy_mode) {
+        /* In lazy mode, globals may reference functions not materialized yet. */
+        if (apply_module_global_relocs(j, m) != 0)
+            goto done;
+        rc = 0;
+        goto done;
+    }
+
+    fixup_ctx.preserve_symbol_names = true;
+    if (jit_build_module_symbol_cache(&fixup_ctx, m) != 0)
+        goto done;
+    fixup_ctx_ready = true;
+    saved_obj_ctx = m->obj_ctx;
+    m->obj_ctx = &fixup_ctx;
+    obj_ctx_installed = true;
+
+    JIT_PROF_START(compile_loop);
+    void **func_addrs = lr_arena_array(j->arena, void *, nfuncs);
+    if (!func_addrs)
+        goto done;
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        int func_rc = compile_one_function(j, m, funcs[i], &fixup_ctx, &func_addrs[i]);
+        if (func_rc != 0) {
+            rc = func_rc;
+            goto done;
+        }
+    }
+    JIT_PROF_END(compile_loop);
+
+    JIT_PROF_START(patch_fixups);
+    const char *missing_symbol = NULL;
+    if (apply_jit_relocs(j, &fixup_ctx, &missing_symbol) != 0) {
+        JIT_PROF_END(patch_fixups);
+        if (missing_symbol)
+            fprintf(stderr, "unresolved symbol: %s\n", missing_symbol);
+        goto done;
+    }
+    JIT_PROF_END(patch_fixups);
+
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        if (funcs[i]->name && funcs[i]->name[0] && func_addrs[i])
+            lr_jit_add_symbol(j, funcs[i]->name, func_addrs[i]);
+    }
+
+    /* Re-apply relocations after module-defined function symbols exist. */
     if (apply_module_global_relocs(j, m) != 0)
         goto done;
     rc = 0;
 
 done:
+    if (obj_ctx_installed) {
+        m->obj_ctx = saved_obj_ctx;
+        obj_ctx_installed = false;
+    }
+    if (fixup_ctx_ready) {
+        jit_free_obj_ctx(&fixup_ctx);
+        fixup_ctx_ready = false;
+    }
     if (j->update_active && j->code_size > code_size_before)
         j->update_dirty = true;
     if (own_wx_transition) {
@@ -2354,11 +2438,13 @@ void lr_jit_end_update(lr_jit_t *j) {
 void *lr_jit_get_function(lr_jit_t *j, const char *name) {
     if (!j || !name || !name[0])
         return NULL;
-    uint32_t hash = symbol_hash(name);
-    lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
-    if (lazy && lazy->state != LR_LAZY_FUNC_READY) {
-        if (materialize_lazy_function(j, lazy) != 0)
-            return NULL;
+    if (jit_lazy_materialization_enabled()) {
+        uint32_t hash = symbol_hash(name);
+        lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+        if (lazy && lazy->state != LR_LAZY_FUNC_READY) {
+            if (materialize_lazy_function(j, lazy) != 0)
+                return NULL;
+        }
     }
     return lookup_symbol(j, name);
 }
