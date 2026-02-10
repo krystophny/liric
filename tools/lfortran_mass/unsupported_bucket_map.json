@@ -1,0 +1,50 @@
+{
+  "jit-link|unresolved-symbol|runtime-api": {
+    "issues": [79],
+    "rationale": "Runtime symbol/ABI integration gap tracked in runtime ABI lane."
+  },
+  "runtime|segfault|general": {
+    "issues": [78],
+    "rationale": "Runtime crash stability gap."
+  },
+  "runtime|unsupported-feature|intrinsics": {
+    "issues": [75, 76],
+    "rationale": "Missing intrinsic support family."
+  },
+  "runtime|unsupported-feature|complex": {
+    "issues": [77],
+    "rationale": "Complex runtime/codegen support gap."
+  },
+  "runtime|unsupported-feature|openmp": {
+    "issues": [82],
+    "rationale": "OpenMP runtime integration gap."
+  },
+  "runtime|unsupported-feature|general": {
+    "issues": [81, 102],
+    "rationale": "General unsupported runtime bucket pending decomposition into focused child issues."
+  },
+  "parse|unsupported-feature|general": {
+    "issues": [50, 51, 53, 74],
+    "rationale": "LLVM IR parser feature coverage gaps."
+  },
+  "output-format|wrong-stdout|general": {
+    "issues": [54],
+    "rationale": "Differential output mismatch tracking."
+  },
+  "output-format|wrong-stderr|general": {
+    "issues": [55],
+    "rationale": "Differential stderr mismatch tracking."
+  },
+  "output-format|rc-mismatch|general": {
+    "issues": [16],
+    "rationale": "Differential return-code parity lane."
+  },
+  "output-format|wrong-stdout+stderr|general": {
+    "issues": [16],
+    "rationale": "Differential combined output parity lane."
+  },
+  "codegen|compiler-error|general": {
+    "issues": [81, 102],
+    "rationale": "Emission/codegen failures require decomposition into focused child issues."
+  }
+}

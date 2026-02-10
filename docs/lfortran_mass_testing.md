@@ -73,7 +73,9 @@ All artifacts are written under `/tmp/liric_lfortran_mass/`:
 - `manifest_tests_toml.jsonl`: selected manifest rows with `corpus` metadata
 - `selection_decisions.jsonl`: per-case selection decision and skip reason
 - `results.jsonl`: per-case outcomes
+- `summary.json`: machine-readable aggregate metrics
 - `summary.md`: aggregate metrics
+- `unsupported_bucket_coverage.md`: unsupported taxonomy buckets mapped to issue/rationale ownership
 - `failures.csv`: non-pass rows for triage
 - `bench/compat_check.jsonl`: compatibility rows from `bench_compat_check`
 
@@ -83,12 +85,11 @@ All artifacts are written under `/tmp/liric_lfortran_mass/`:
 - LLVM emission attempted/succeeded
 - Liric parse attempted/passed
 - Liric JIT attempted/passed
-- Differential attempted/completed/exact-match counts
-- Selected/skipped counts per corpus
-- Skip reason histogram and skip reasons by corpus
-- Supported processed/passed counts
-- Unsupported histogram
-- Taxonomy counts per root-cause node (`stage|symptom|feature_family`)
+- Differential attempted/exact-match counts
+- Classification counts
+- Unsupported taxonomy counts per root-cause node (`stage|symptom|feature_family`)
+- Unsupported bucket-to-issue coverage (or explicit deferred rationale)
+- Unsupported trend vs baseline (`improving`/`regressing`/`stable`)
 - Mismatch count
 - New supported regressions vs baseline
 - Gate decision

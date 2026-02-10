@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(LIRIC_HAVE_LLVM_BITCODE)
+#if LIRIC_HAVE_LLVM_BITCODE
 #include <llvm-c/BitReader.h>
 #include <llvm-c/Core.h>
 #endif
@@ -25,7 +25,7 @@ bool lr_bc_is_bitcode(const uint8_t *data, size_t len) {
     return false;
 }
 
-#if !defined(LIRIC_HAVE_LLVM_BITCODE)
+#if !LIRIC_HAVE_LLVM_BITCODE
 
 bool lr_bc_parser_available(void) {
     return false;

@@ -1,7 +1,8 @@
 # LFortran Mass Failure Taxonomy
 
 This document defines the stable root-cause taxonomy used by
-`tools/lfortran_mass/report.py` summary artifacts.
+`tools/lfortran_mass/report.py` and `tools/lfortran_mass/nightly_mass.sh`
+summary artifacts.
 
 ## Taxonomy Dimensions
 
@@ -40,6 +41,8 @@ Each non-pass result is mapped to one node:
 ## Bucket Mapping For Umbrella Issues
 
 This maps historical bucket issues to concrete child issues.
+Machine-readable ownership for shell workflow artifacts is kept in
+`tools/lfortran_mass/unsupported_bucket_map.json`.
 
 ### Differential mismatch bucket (`#80`, closed)
 
@@ -63,3 +66,6 @@ This maps historical bucket issues to concrete child issues.
 - `taxonomy_counts`: all non-pass nodes.
 - `mismatch_taxonomy_counts`: only `mismatch` rows (`#80` lineage).
 - `unsupported_taxonomy_counts`: only `unsupported_feature`/`unsupported_abi` rows (`#81` lineage).
+- `unsupported_bucket_issue_coverage`: unsupported taxonomy buckets annotated with
+  mapped issues or deferred rationale.
+- `unsupported_bucket_unmapped`: unsupported taxonomy nodes with no mapping/rationale.

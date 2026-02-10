@@ -56,6 +56,7 @@ foreach(path
     "${OUT_PASS}/results.jsonl"
     "${OUT_PASS}/summary.json"
     "${OUT_PASS}/summary.md"
+    "${OUT_PASS}/unsupported_bucket_coverage.md"
     "${OUT_PASS}/failures.csv"
 )
     if(NOT EXISTS "${path}")
@@ -76,6 +77,7 @@ endif()
 
 file(WRITE "${COMPAT_FAIL}"
     "{\"name\":\"case_mismatch\",\"source\":\"/tmp/c.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":true,\"lli_ok\":true,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":0,\"lli_rc\":0,\"error\":\"\"}\n"
+    "{\"name\":\"case_unresolved_symbol\",\"source\":\"/tmp/d.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":false,\"lli_ok\":false,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":-1,\"lli_rc\":-1,\"error\":\"unresolved symbol: _lfortran_printf\"}\n"
 )
 file(WRITE "${BASELINE_FAIL}"
     "{\"case_id\":\"case_mismatch\",\"classification\":\"pass\"}\n"
@@ -106,4 +108,13 @@ if(NOT summary_fail MATCHES "\"new_supported_regressions\"[ \t]*:[ \t]*1")
 endif()
 if(NOT summary_fail MATCHES "\"gate_fail\"[ \t]*:[ \t]*true")
     message(FATAL_ERROR "expected gate_fail=true in fail summary")
+endif()
+if(NOT summary_fail MATCHES "\"unsupported_abi\"[ \t]*:[ \t]*1")
+    message(FATAL_ERROR "expected unsupported_abi=1 in fail summary")
+endif()
+if(NOT summary_fail MATCHES "jit-link\\|unresolved-symbol\\|runtime-api")
+    message(FATAL_ERROR "expected unresolved-symbol taxonomy bucket in fail summary")
+endif()
+if(NOT summary_fail MATCHES "\"#79\"")
+    message(FATAL_ERROR "expected unsupported bucket issue mapping to include #79")
 endif()
