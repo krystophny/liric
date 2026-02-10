@@ -249,6 +249,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_api_llvm_retry_paths
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_API=$<TARGET_FILE:bench_api>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_llvm_retry_paths.cmake
+)
+
+add_test(
     NAME bench_api_strict_mode
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>

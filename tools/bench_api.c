@@ -375,6 +375,35 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_
     return r;
 }
 
+static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
+                                         const strlist_t *opt_toks,
+                                         const char *extra_opt,
+                                         const char *source_path,
+                                         int timeout_ms,
+                                         const char *work_dir) {
+    size_t j;
+    size_t extra_n = (extra_opt && extra_opt[0] != '\0') ? 1 : 0;
+    size_t argc_jit = 5 + opt_toks->n + extra_n + 1;
+    char **argv = (char **)calloc(argc_jit + 1, sizeof(char *));
+    cmd_result_t r;
+    if (!argv) die("out of memory", NULL);
+
+    argv[0] = (char *)lfortran_bin;
+    argv[1] = "--backend=llvm";
+    argv[2] = "--jit";
+    argv[3] = "--time-report";
+    argv[4] = "--no-color";
+    for (j = 0; j < opt_toks->n; j++)
+        argv[5 + j] = opt_toks->items[j];
+    if (extra_n) argv[5 + opt_toks->n] = (char *)extra_opt;
+    argv[5 + opt_toks->n + extra_n] = (char *)source_path;
+    argv[6 + opt_toks->n + extra_n] = NULL;
+
+    r = run_cmd(argv, timeout_ms, NULL, work_dir);
+    free(argv);
+    return r;
+}
+
 static void free_cmd_result(cmd_result_t *r) {
     free(r->stdout_text);
     free(r->stderr_text);
@@ -619,6 +648,15 @@ static strlist_t tokenize_options(const char *opts) {
     }
 
     return toks;
+}
+
+static int strlist_contains_exact(const strlist_t *l, const char *needle) {
+    size_t i;
+    if (!l || !needle) return 0;
+    for (i = 0; i < l->n; i++) {
+        if (strcmp(l->items[i], needle) == 0) return 1;
+    }
+    return 0;
 }
 
 static char *json_escape(const char *s) {
@@ -1250,11 +1288,14 @@ static int side_index(const char *side) {
     return 2;
 }
 
-#define SKIP_REASON_COUNT 10
+#define SKIP_REASON_COUNT 13
 static const char *k_skip_reasons[SKIP_REASON_COUNT] = {
     "workdir_create_failed",
     "source_missing",
     "llvm_jit_failed",
+    "llvm_jit_verifier_pointee_mismatch",
+    "llvm_jit_runtime_io_error",
+    "llvm_jit_expected_nonzero_or_stop",
     "llvm_jit_timeout",
     "liric_jit_failed",
     "liric_jit_timeout",
@@ -1279,6 +1320,35 @@ static const char *classify_jit_failure_reason(int is_liric, int rc) {
     if (rc == -SIGSEGV)
         return is_liric ? "liric_jit_sigsegv" : "llvm_jit_sigsegv";
     return is_liric ? "liric_jit_failed" : "llvm_jit_failed";
+}
+
+static int text_has(const char *text, const char *needle) {
+    return text && needle && strstr(text, needle) != NULL;
+}
+
+static int cmd_output_has(const cmd_result_t *r, const char *needle) {
+    if (!r || !needle) return 0;
+    return text_has(r->stdout_text, needle) || text_has(r->stderr_text, needle);
+}
+
+static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
+    if (!r) return "llvm_jit_failed";
+    if (r->rc == -SIGABRT || r->rc == -SIGSEGV)
+        return classify_jit_failure_reason(0, r->rc);
+    if (cmd_output_has(r, "explicit pointee type doesn't match operand's pointee type"))
+        return "llvm_jit_verifier_pointee_mismatch";
+    if (cmd_output_has(r, "Runtime error: File `") ||
+        cmd_output_has(r, "Runtime error: End of file!") ||
+        cmd_output_has(r, "Error: Failed to read") ||
+        cmd_output_has(r, "Error: Invalid input for"))
+        return "llvm_jit_runtime_io_error";
+    if (cmd_output_has(r, "Error stop") ||
+        cmd_output_has(r, "ERROR STOP") ||
+        cmd_output_has(r, "\nSTOP") ||
+        cmd_output_has(r, "\nSTOP ")) {
+        return "llvm_jit_expected_nonzero_or_stop";
+    }
+    return "llvm_jit_failed";
 }
 
 static void usage(void) {
@@ -1490,6 +1560,7 @@ int main(int argc, char **argv) {
             int nonzero_compat_rc = 0;
             char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
+            const char *failure_work_dir = NULL;
             int keep_work_dir = 0;
             memset(&skip_diag, 0, sizeof(skip_diag));
 
@@ -1509,6 +1580,7 @@ int main(int argc, char **argv) {
                 goto skip_test;
             }
             work_dir = work_tpl;
+            failure_work_dir = work_dir;
 
             opt_toks = tokenize_options(test_opts);
 
@@ -1525,62 +1597,81 @@ int main(int argc, char **argv) {
             }
 
             for (it = 0; it < (size_t)cfg.iters; it++) {
-                char **llvm_argv = NULL;
-                char **liric_argv = NULL;
                 cmd_result_t llvm_r, liric_r;
-                size_t argc_jit, j;
                 time_report_t llvm_time;
                 time_report_t liric_time;
                 double llvm_front = 0.0, llvm_compile_ms = 0.0, llvm_run_ms = 0.0, llvm_wall_ms = 0.0;
                 double liric_front = 0.0, liric_compile_ms = 0.0, liric_run_ms = 0.0, liric_wall_ms = 0.0;
+                const char *attempt_work_dir = work_dir;
+                const char *extra_retry_opt = NULL;
+                int retried_test_dir = 0;
+                int retried_fast = 0;
+                int run_success = 0;
 
-                argc_jit = 5 + opt_toks.n + 1;
-
-                llvm_argv = (char **)calloc(argc_jit + 1, sizeof(char *));
-                if (!llvm_argv) die("out of memory", NULL);
-                llvm_argv[0] = (char *)cfg.lfortran;
-                llvm_argv[1] = "--backend=llvm";
-                llvm_argv[2] = "--jit";
-                llvm_argv[3] = "--time-report";
-                llvm_argv[4] = "--no-color";
-                for (j = 0; j < opt_toks.n; j++)
-                    llvm_argv[5 + j] = opt_toks.items[j];
-                llvm_argv[5 + opt_toks.n] = source_path;
-                llvm_argv[6 + opt_toks.n] = NULL;
-
-                llvm_r = run_cmd(llvm_argv, cfg.timeout_ms, NULL, work_dir);
-                free(llvm_argv);
-                if (llvm_r.timed_out) {
-                    skip_reason = "llvm_jit_timeout";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
-                    free_cmd_result(&llvm_r);
-                    break;
-                }
-
-                liric_argv = (char **)calloc(argc_jit + 1, sizeof(char *));
-                if (!liric_argv) die("out of memory", NULL);
-                liric_argv[0] = (char *)cfg.lfortran_liric;
-                liric_argv[1] = "--backend=llvm";
-                liric_argv[2] = "--jit";
-                liric_argv[3] = "--time-report";
-                liric_argv[4] = "--no-color";
-                for (j = 0; j < opt_toks.n; j++)
-                    liric_argv[5 + j] = opt_toks.items[j];
-                liric_argv[5 + opt_toks.n] = source_path;
-                liric_argv[6 + opt_toks.n] = NULL;
-
-                liric_r = run_cmd(liric_argv, cfg.timeout_ms, NULL, work_dir);
-                free(liric_argv);
-                if (liric_r.timed_out) {
-                    skip_reason = "liric_jit_timeout";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
-                    free_cmd_result(&llvm_r);
-                    free_cmd_result(&liric_r);
-                    break;
-                }
-
-                if (llvm_r.rc != 0 || liric_r.rc != 0) {
+                for (;;) {
+                    const char *llvm_reason = NULL;
                     int same_nonzero = 0;
+                    failure_work_dir = attempt_work_dir;
+
+                    llvm_r = run_lfortran_jit_cmd(cfg.lfortran,
+                                                  &opt_toks,
+                                                  extra_retry_opt,
+                                                  source_path,
+                                                  cfg.timeout_ms,
+                                                  attempt_work_dir);
+                    if (llvm_r.timed_out) {
+                        skip_reason = "llvm_jit_timeout";
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
+                        free_cmd_result(&llvm_r);
+                        break;
+                    }
+
+                    liric_r = run_lfortran_jit_cmd(cfg.lfortran_liric,
+                                                   &opt_toks,
+                                                   extra_retry_opt,
+                                                   source_path,
+                                                   cfg.timeout_ms,
+                                                   attempt_work_dir);
+                    if (liric_r.timed_out) {
+                        skip_reason = "liric_jit_timeout";
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        break;
+                    }
+
+                    if (llvm_r.rc == 0 && liric_r.rc == 0) {
+                        run_success = 1;
+                        break;
+                    }
+
+                    if (llvm_r.rc != 0)
+                        llvm_reason = classify_llvm_failure_from_output(&llvm_r);
+
+                    if (!retried_test_dir &&
+                        llvm_r.rc != 0 &&
+                        llvm_reason &&
+                        strcmp(llvm_reason, "llvm_jit_runtime_io_error") == 0 &&
+                        strcmp(attempt_work_dir, cfg.test_dir) != 0) {
+                        retried_test_dir = 1;
+                        attempt_work_dir = cfg.test_dir;
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        continue;
+                    }
+
+                    if (!retried_fast &&
+                        llvm_r.rc != 0 &&
+                        llvm_reason &&
+                        strcmp(llvm_reason, "llvm_jit_verifier_pointee_mismatch") == 0 &&
+                        !strlist_contains_exact(&opt_toks, "--fast")) {
+                        retried_fast = 1;
+                        extra_retry_opt = "--fast";
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        continue;
+                    }
+
                     if (llvm_r.rc != 0 && liric_r.rc != 0 && llvm_r.rc == liric_r.rc) {
                         char *llvm_out = normalize_output(llvm_r.stdout_text);
                         char *liric_out = normalize_output(liric_r.stdout_text);
@@ -1597,7 +1688,7 @@ int main(int argc, char **argv) {
                         nonzero_compat = 1;
                         nonzero_compat_rc = llvm_r.rc;
                     } else if (llvm_r.rc != 0) {
-                        skip_reason = classify_jit_failure_reason(0, llvm_r.rc);
+                        skip_reason = llvm_reason ? llvm_reason : classify_jit_failure_reason(0, llvm_r.rc);
                         skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
                     } else {
                         skip_reason = classify_jit_failure_reason(1, liric_r.rc);
@@ -1607,6 +1698,8 @@ int main(int argc, char **argv) {
                     free_cmd_result(&liric_r);
                     break;
                 }
+
+                if (!run_success) break;
 
                 memset(&llvm_time, 0, sizeof(llvm_time));
                 if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
@@ -1705,8 +1798,14 @@ skip_test:
             if (!skip_diag.reason)
                 skip_diag_set_basic(&skip_diag, skip_reason ? skip_reason : "unknown", "harness", 0, "");
             maybe_write_failure_logs(fail_log_dir, name, &skip_diag);
-            if (cfg.keep_fail_workdirs && work_dir) {
+            if (!skip_diag.work_dir && failure_work_dir)
+                skip_diag.work_dir = xstrdup(failure_work_dir);
+            if (cfg.keep_fail_workdirs &&
+                work_dir &&
+                failure_work_dir &&
+                strcmp(failure_work_dir, work_dir) == 0) {
                 keep_work_dir = 1;
+                free(skip_diag.work_dir);
                 skip_diag.work_dir = xstrdup(work_dir);
             }
             skip_side_counts[(size_t)side_index(skip_diag.failing_side)]++;
