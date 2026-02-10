@@ -543,6 +543,27 @@ int test_jit_self_recursive_call_ignores_prebound_symbol(void) {
     return 0;
 }
 
+int test_jit_unresolved_symbol_fails(void) {
+    const char *src =
+        "define i32 @f() {\n"
+        "entry:\n"
+        "  %0 = call i32 @missing()\n"
+        "  ret i32 %0\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT(rc != 0, "jit add module fails for unresolved symbol");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_fadd_double_bits(void) {
     const char *src =
         "define double @fadd64(double %a, double %b) {\n"

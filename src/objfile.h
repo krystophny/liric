@@ -50,6 +50,7 @@ typedef struct lr_objfile_ctx {
     uint8_t *module_sym_defined;
     lr_func_t **module_sym_funcs;
     uint32_t module_sym_count;
+    bool preserve_symbol_names;
 } lr_objfile_ctx_t;
 
 /* Mapped relocation info returned by format-specific reloc mappers */

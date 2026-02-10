@@ -99,6 +99,7 @@ int test_jit_forward_call_chain(void);
 int test_jit_batched_module_updates(void);
 int test_jit_self_recursive_call(void);
 int test_jit_self_recursive_call_ignores_prebound_symbol(void);
+int test_jit_unresolved_symbol_fails(void);
 int test_jit_fadd_double_bits(void);
 int test_jit_fmul_float_bits(void);
 int test_jit_phi_select_nested(void);
@@ -251,6 +252,7 @@ int main(void) {
     RUN_TEST(test_jit_batched_module_updates);
     RUN_TEST(test_jit_self_recursive_call);
     RUN_TEST(test_jit_self_recursive_call_ignores_prebound_symbol);
+    RUN_TEST(test_jit_unresolved_symbol_fails);
     RUN_TEST(test_jit_fadd_double_bits);
     RUN_TEST(test_jit_fmul_float_bits);
     RUN_TEST(test_jit_phi_select_nested);

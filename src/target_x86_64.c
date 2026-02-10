@@ -1657,8 +1657,22 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 if (callee_vararg)
                     emit_mov_imm(&ctx, X86_RAX, (int64_t)fp_used_for_call, false);
 
-                if (ctx.obj_ctx &&
-                    inst->operands[0].kind == LR_VAL_GLOBAL) {
+                bool emit_reloc_call = ctx.obj_ctx &&
+                                       inst->operands[0].kind == LR_VAL_GLOBAL;
+                if (emit_reloc_call && ctx.obj_ctx->preserve_symbol_names) {
+                    const lr_operand_t *callee = &inst->operands[0];
+                    const char *sym_name = lr_module_symbol_name(ctx.mod, callee->global_id);
+                    bool defined = false;
+                    if (sym_name) {
+                        if (callee->global_id < ctx.sym_count)
+                            defined = ctx.sym_defined[callee->global_id] != 0;
+                        else
+                            defined = is_symbol_defined_in_module(ctx.mod, sym_name);
+                    }
+                    emit_reloc_call = defined;
+                }
+
+                if (emit_reloc_call) {
                     const char *sym_name = lr_module_symbol_name(
                         ctx.mod, inst->operands[0].global_id);
                     if (sym_name) {

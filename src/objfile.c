@@ -141,7 +141,8 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                bool is_defined, uint8_t section,
                                uint32_t offset) {
     if (!name) return UINT32_MAX;
-    name = remap_intrinsic(name);
+    if (!oc->preserve_symbol_names)
+        name = remap_intrinsic(name);
     uint32_t hash = obj_symbol_hash(name);
 
     if (oc->symbol_index_cap == 0) {
