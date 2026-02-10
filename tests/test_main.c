@@ -95,6 +95,7 @@ int test_jit_select_immediate_zero(void);
 int test_jit_branch(void);
 int test_jit_loop(void);
 int test_jit_alloca_load_store(void);
+int test_jit_typeless_load_defaults_to_ptr_width(void);
 int test_jit_alloca_many_static_slots(void);
 int test_jit_forward_typed_call(void);
 int test_jit_forward_call_chain(void);
@@ -260,6 +261,7 @@ int main(void) {
     RUN_TEST(test_jit_branch);
     RUN_TEST(test_jit_loop);
     RUN_TEST(test_jit_alloca_load_store);
+    RUN_TEST(test_jit_typeless_load_defaults_to_ptr_width);
     RUN_TEST(test_jit_alloca_many_static_slots);
     RUN_TEST(test_jit_forward_typed_call);
     RUN_TEST(test_jit_forward_call_chain);

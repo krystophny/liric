@@ -1269,6 +1269,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             case LR_OP_LOAD: {
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
                 size_t load_sz = lr_type_size(inst->type);
+                if (load_sz == 0)
+                    load_sz = 8;
                 if (load_sz > 8) {
                     size_t load_align = lr_type_align(inst->type);
                     int32_t dst_off = alloc_slot(&ctx, inst->dest, load_sz, load_align);
