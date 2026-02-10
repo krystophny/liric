@@ -121,6 +121,33 @@ static int test_basic_types() {
     return 0;
 }
 
+static int test_type_context_stability_across_nested_modules() {
+    llvm::LLVMContext ctx_a;
+    llvm::Module mod_a("ctx_a", ctx_a);
+
+    llvm::Type *a_i8 = llvm::Type::getInt8Ty(ctx_a);
+    llvm::Type *a_i8_ptr = a_i8 ? a_i8->getPointerTo() : nullptr;
+    TEST_ASSERT(a_i8 != nullptr, "ctx_a i8");
+    TEST_ASSERT(a_i8_ptr != nullptr, "ctx_a i8*");
+
+    {
+        llvm::LLVMContext ctx_b;
+        llvm::Module mod_b("ctx_b", ctx_b);
+        llvm::Type *b_i8 = llvm::Type::getInt8Ty(ctx_b);
+        llvm::Type *b_i8_ptr = b_i8 ? b_i8->getPointerTo() : nullptr;
+        TEST_ASSERT(b_i8 != nullptr, "ctx_b i8");
+        TEST_ASSERT(b_i8_ptr != nullptr, "ctx_b i8*");
+        TEST_ASSERT(a_i8 != b_i8, "contexts must keep distinct i8 identities");
+        TEST_ASSERT(a_i8_ptr != b_i8_ptr, "contexts must keep distinct i8* identities");
+    }
+
+    llvm::Type *a_i8_after = llvm::Type::getInt8Ty(ctx_a);
+    llvm::Type *a_i8_ptr_after = a_i8_after ? a_i8_after->getPointerTo() : nullptr;
+    TEST_ASSERT(a_i8_after == a_i8, "ctx_a i8 identity stable after nested module");
+    TEST_ASSERT(a_i8_ptr_after == a_i8_ptr, "ctx_a i8* identity stable after nested module");
+    return 0;
+}
+
 static int test_function_type() {
     llvm::LLVMContext ctx;
     llvm::Module mod("ftypes", ctx);
@@ -994,6 +1021,7 @@ int main() {
     fprintf(stderr, "\nModule and Type tests:\n");
     RUN_TEST(test_context_and_module);
     RUN_TEST(test_basic_types);
+    RUN_TEST(test_type_context_stability_across_nested_modules);
     RUN_TEST(test_function_type);
     RUN_TEST(test_struct_type);
     RUN_TEST(test_array_type);

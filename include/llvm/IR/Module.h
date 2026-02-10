@@ -186,43 +186,52 @@ inline lc_module_compat_t *liric_get_current_module() {
 }
 
 inline Type *Type::getVoidTy(LLVMContext &C) {
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? Type::wrap(lc_get_void_type(mod)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    Type *ty = mod ? Type::wrap(lc_get_void_type(mod)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline Type *Type::getFloatTy(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? Type::wrap(lc_get_float_type(mod)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    Type *ty = mod ? Type::wrap(lc_get_float_type(mod)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline Type *Type::getDoubleTy(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? Type::wrap(lc_get_double_type(mod)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    Type *ty = mod ? Type::wrap(lc_get_double_type(mod)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline IntegerType *Type::getInt1Ty(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? IntegerType::wrap(lc_get_int_type(mod, 1)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    IntegerType *ty = mod ? IntegerType::wrap(lc_get_int_type(mod, 1)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline IntegerType *Type::getInt8Ty(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? IntegerType::wrap(lc_get_int_type(mod, 8)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    IntegerType *ty = mod ? IntegerType::wrap(lc_get_int_type(mod, 8)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline IntegerType *Type::getInt16Ty(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? IntegerType::wrap(lc_get_int_type(mod, 16)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    IntegerType *ty = mod ? IntegerType::wrap(lc_get_int_type(mod, 16)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline IntegerType *Type::getInt32Ty(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? IntegerType::wrap(lc_get_int_type(mod, 32)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    IntegerType *ty = mod ? IntegerType::wrap(lc_get_int_type(mod, 32)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 inline IntegerType *Type::getInt64Ty(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? IntegerType::wrap(lc_get_int_type(mod, 64)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    IntegerType *ty = mod ? IntegerType::wrap(lc_get_int_type(mod, 64)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 
 inline void Type::print(raw_ostream &OS, bool IsForDebug) const {
@@ -243,8 +252,11 @@ inline void Type::print(raw_ostream &OS, bool IsForDebug) const {
 }
 
 inline Type *Type::getPointerElementType() const {
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? Type::wrap(lc_get_ptr_type(mod)) : nullptr;
+    LLVMContext &ctx = getContext();
+    lc_module_compat_t *mod = ctx.getDefaultModule();
+    Type *ty = mod ? Type::wrap(lc_get_ptr_type(mod)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &ctx);
+    return ty;
 }
 
 inline PointerType *Type::getInt8PtrTy(LLVMContext &C, unsigned AS) {
@@ -258,19 +270,20 @@ inline IntegerType *Type::getIntNTy(LLVMContext &C, unsigned N) {
 
 inline PointerType *Type::getPointerTo(unsigned AddrSpace) const {
     (void)AddrSpace;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? PointerType::wrap(lc_get_ptr_type(mod)) : nullptr;
+    return PointerType::get(getContext(), 0);
 }
 
 inline LLVMContext &Type::getContext() const {
-    static LLVMContext dummy;
-    return dummy;
+    if (const LLVMContext *ctx = detail::lookup_type_context(impl()))
+        return *const_cast<LLVMContext *>(ctx);
+    return LLVMContext::getGlobal();
 }
 
 inline IntegerType *IntegerType::get(LLVMContext &C, unsigned NumBits) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? IntegerType::wrap(lc_get_int_type(mod, NumBits)) : nullptr;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    IntegerType *ty = mod ? IntegerType::wrap(lc_get_int_type(mod, NumBits)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 
 inline FunctionType *FunctionType::get(Type *Result, ArrayRef<Type *> Params,
@@ -285,6 +298,7 @@ inline FunctionType *FunctionType::get(Type *Result, ArrayRef<Type *> Params,
         lc_module_get_ir(mod), Result->impl(),
         Params.empty() ? nullptr : param_types.data(),
         static_cast<uint32_t>(Params.size()), isVarArg);
+    detail::register_type_context(ft, &Result->getContext());
     return FunctionType::wrap(ft);
 }
 
@@ -309,13 +323,13 @@ inline void StructType::setBody(ArrayRef<Type *> Elements, bool isPkd) {
 }
 
 inline StructType *StructType::create(LLVMContext &C, StringRef Name) {
-    (void)C;
     lc_module_compat_t *mod = Module::getCurrentModule();
     if (!mod) return nullptr;
     lr_module_t *m = lc_module_get_ir(mod);
     char *name_dup = lr_arena_strdup(m->arena, Name.data(), Name.size());
     lr_type_t *st = lr_type_struct_new(m, nullptr, 0, false);
     st->struc.name = name_dup;
+    detail::register_type_context(st, &C);
     return StructType::wrap(st);
 }
 
@@ -330,7 +344,6 @@ inline StructType *StructType::create(LLVMContext &C, ArrayRef<Type *> Elements,
 
 inline StructType *StructType::get(LLVMContext &C, ArrayRef<Type *> Elements,
                                     bool isPkd) {
-    (void)C;
     lc_module_compat_t *mod = Module::getCurrentModule();
     if (!mod) return nullptr;
     lr_module_t *m = lc_module_get_ir(mod);
@@ -342,6 +355,7 @@ inline StructType *StructType::get(LLVMContext &C, ArrayRef<Type *> Elements,
     lr_type_t *st = lr_type_struct_new(m,
                                         fields.empty() ? nullptr : fields.data(),
                                         n, isPkd);
+    detail::register_type_context(st, &C);
     return StructType::wrap(st);
 }
 
@@ -350,25 +364,25 @@ inline ArrayType *ArrayType::get(Type *ElementType, uint64_t NumElements) {
     if (!mod) return nullptr;
     lr_type_t *at = lr_type_array_new(lc_module_get_ir(mod),
                                        ElementType->impl(), NumElements);
+    detail::register_type_context(at, &ElementType->getContext());
     return ArrayType::wrap(at);
 }
 
 inline PointerType *PointerType::get(LLVMContext &C, unsigned AddressSpace) {
-    (void)C; (void)AddressSpace;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? PointerType::wrap(lc_get_ptr_type(mod)) : nullptr;
+    (void)AddressSpace;
+    lc_module_compat_t *mod = C.getDefaultModule();
+    PointerType *ty = mod ? PointerType::wrap(lc_get_ptr_type(mod)) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &C);
+    return ty;
 }
 
 inline PointerType *PointerType::getUnqual(Type *ElementType) {
-    (void)ElementType;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? PointerType::wrap(lc_get_ptr_type(mod)) : nullptr;
+    if (ElementType) return PointerType::get(ElementType->getContext(), 0);
+    return PointerType::get(LLVMContext::getGlobal(), 0);
 }
 
 inline PointerType *PointerType::getUnqual(LLVMContext &C) {
-    (void)C;
-    lc_module_compat_t *mod = Module::getCurrentModule();
-    return mod ? PointerType::wrap(lc_get_ptr_type(mod)) : nullptr;
+    return PointerType::get(C, 0);
 }
 
 inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
