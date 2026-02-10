@@ -39,7 +39,7 @@ typedef struct {
     const char *compat_list;
     const char *options_jsonl;
     int iters;
-    int timeout_sec;
+    int timeout_ms;
     int min_completed;
     double lookup_dispatch_share_pct;
 } cfg_t;
@@ -96,19 +96,6 @@ static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
-static volatile sig_atomic_t g_timeout_child = -1;
-static volatile sig_atomic_t g_timeout_fired = 0;
-
-static void timeout_kill_handler(int signo) {
-    pid_t child;
-    (void)signo;
-    child = (pid_t)g_timeout_child;
-    if (child > 0) {
-        g_timeout_fired = 1;
-        kill(child, SIGKILL);
-    }
 }
 
 static void die(const char *msg, const char *path) {
@@ -200,11 +187,11 @@ static char *read_all_file(const char *path) {
     return buf;
 }
 
-static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
+static int wait_with_timeout(pid_t pid, int timeout_ms, int *status_out) {
     int status;
     pid_t r;
 
-    if (timeout_sec <= 0) {
+    if (timeout_ms <= 0) {
         do {
             r = waitpid(pid, &status, 0);
         } while (r < 0 && errno == EINTR);
@@ -217,47 +204,40 @@ static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
     }
 
     {
-        struct sigaction sa_new, sa_old;
-        memset(&sa_new, 0, sizeof(sa_new));
-        sa_new.sa_handler = timeout_kill_handler;
-        sigemptyset(&sa_new.sa_mask);
-        sa_new.sa_flags = 0;
-        if (sigaction(SIGALRM, &sa_new, &sa_old) != 0) {
+        const double deadline_ms = now_ms() + (double)timeout_ms;
+        for (;;) {
+            r = waitpid(pid, &status, WNOHANG);
+            if (r == pid) {
+                *status_out = status;
+                return 0;
+            }
+            if (r == 0) {
+                struct timespec ts;
+                if (now_ms() >= deadline_ms) {
+                    kill(pid, SIGKILL);
+                    do {
+                        r = waitpid(pid, &status, 0);
+                    } while (r < 0 && errno == EINTR);
+                    if (r < 0) {
+                        *status_out = 0;
+                        return -1;
+                    }
+                    *status_out = status;
+                    return 1;
+                }
+                ts.tv_sec = 0;
+                ts.tv_nsec = 1000000L; // 1ms polling interval
+                nanosleep(&ts, NULL);
+                continue;
+            }
+            if (errno == EINTR) continue;
             *status_out = 0;
             return -1;
         }
-
-        g_timeout_child = (sig_atomic_t)pid;
-        g_timeout_fired = 0;
-        alarm((unsigned int)timeout_sec);
-
-        do {
-            r = waitpid(pid, &status, 0);
-        } while (r < 0 && errno == EINTR);
-
-        alarm(0);
-        g_timeout_child = -1;
-        sigaction(SIGALRM, &sa_old, NULL);
-
-        if (r < 0) {
-            *status_out = 0;
-            g_timeout_fired = 0;
-            return -1;
-        }
-        *status_out = status;
-
-        if (g_timeout_fired &&
-            WIFSIGNALED(status) &&
-            WTERMSIG(status) == SIGKILL) {
-            g_timeout_fired = 0;
-            return 1;
-        }
-        g_timeout_fired = 0;
-        return 0;
     }
 }
 
-static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env_lib_dir,
+static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_lib_dir,
                             const char *work_dir) {
     cmd_result_t r;
     char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
@@ -306,7 +286,7 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env
     close(out_fd);
     close(err_fd);
 
-    if (wait_with_timeout(pid, timeout_sec, &status) == 1) {
+    if (wait_with_timeout(pid, timeout_ms, &status) == 1) {
         r.timed_out = 1;
         r.rc = -99;
     } else if (WIFEXITED(status)) {
@@ -772,7 +752,8 @@ static void usage(void) {
     printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
     printf("  --options-jsonl PATH options jsonl file (default matches chosen compat list)\n");
     printf("  --iters N            iterations per test (default: 3)\n");
-    printf("  --timeout N          per-command timeout in seconds (default: 30)\n");
+    printf("  --timeout N          per-command timeout in seconds (compat alias)\n");
+    printf("  --timeout-ms N       per-command timeout in milliseconds (default: 100)\n");
     printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
     printf("  --lookup-dispatch-share-pct N  optional profile-derived lookup/dispatch share percentage\n");
 }
@@ -788,7 +769,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.compat_list = NULL;
     cfg.options_jsonl = NULL;
     cfg.iters = 3;
-    cfg.timeout_sec = 30;
+    cfg.timeout_ms = 100;
     cfg.min_completed = 0;
     cfg.lookup_dispatch_share_pct = -1.0;
 
@@ -812,8 +793,12 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.iters = atoi(argv[++i]);
             if (cfg.iters <= 0) cfg.iters = 3;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
-            cfg.timeout_sec = atoi(argv[++i]);
-            if (cfg.timeout_sec <= 0) cfg.timeout_sec = 30;
+            double sec = atof(argv[++i]);
+            cfg.timeout_ms = (int)(sec * 1000.0);
+            if (cfg.timeout_ms <= 0) cfg.timeout_ms = 100;
+        } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
+            cfg.timeout_ms = atoi(argv[++i]);
+            if (cfg.timeout_ms <= 0) cfg.timeout_ms = 100;
         } else if (strcmp(argv[i], "--min-completed") == 0 && i + 1 < argc) {
             cfg.min_completed = atoi(argv[++i]);
             if (cfg.min_completed < 0) cfg.min_completed = 0;
@@ -983,7 +968,7 @@ int main(int argc, char **argv) {
                 llvm_argv[5 + opt_toks.n] = source_path;
                 llvm_argv[6 + opt_toks.n] = NULL;
 
-                llvm_r = run_cmd(llvm_argv, cfg.timeout_sec, NULL, work_dir);
+                llvm_r = run_cmd(llvm_argv, cfg.timeout_ms, NULL, work_dir);
                 free(llvm_argv);
                 if (llvm_r.timed_out) {
                     skip_reason = "llvm_jit_timeout";
@@ -1003,7 +988,7 @@ int main(int argc, char **argv) {
                 liric_argv[5 + opt_toks.n] = source_path;
                 liric_argv[6 + opt_toks.n] = NULL;
 
-                liric_r = run_cmd(liric_argv, cfg.timeout_sec, NULL, work_dir);
+                liric_r = run_cmd(liric_argv, cfg.timeout_ms, NULL, work_dir);
                 free(liric_argv);
                 if (liric_r.timed_out) {
                     skip_reason = "liric_jit_timeout";
