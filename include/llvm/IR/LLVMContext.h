@@ -7,6 +7,7 @@
 namespace llvm {
 
 class Function;
+class LLVMContext;
 
 namespace detail {
     inline thread_local lc_module_compat_t *fallback_module = nullptr;
@@ -17,6 +18,8 @@ namespace detail {
         function_wrappers;
     inline thread_local std::unordered_map<const lr_block_t *, Function *>
         block_parents;
+    inline thread_local std::unordered_map<const lr_type_t *, const LLVMContext *>
+        type_contexts;
 
     inline void register_value_wrapper(const void *obj, lc_value_t *v) {
         if (obj && v) value_wrappers[obj] = v;
@@ -62,6 +65,27 @@ namespace detail {
             }
         }
     }
+
+    inline void register_type_context(const lr_type_t *ty,
+                                      const LLVMContext *ctx) {
+        if (ty && ctx) type_contexts[ty] = ctx;
+    }
+
+    inline const LLVMContext *lookup_type_context(const lr_type_t *ty) {
+        auto it = type_contexts.find(ty);
+        return it == type_contexts.end() ? nullptr : it->second;
+    }
+
+    inline void unregister_type_contexts(const LLVMContext *ctx) {
+        if (!ctx) return;
+        for (auto it = type_contexts.begin(); it != type_contexts.end();) {
+            if (it->second == ctx) {
+                it = type_contexts.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
 }
 
 class LLVMContext {
@@ -73,6 +97,17 @@ public:
                     default_mod_(lc_module_create(ctx_, "__liric_ctx__")) {
         if (!detail::fallback_module)
             detail::fallback_module = default_mod_;
+        if (default_mod_) {
+            detail::register_type_context(lc_get_void_type(default_mod_), this);
+            detail::register_type_context(lc_get_int_type(default_mod_, 1), this);
+            detail::register_type_context(lc_get_int_type(default_mod_, 8), this);
+            detail::register_type_context(lc_get_int_type(default_mod_, 16), this);
+            detail::register_type_context(lc_get_int_type(default_mod_, 32), this);
+            detail::register_type_context(lc_get_int_type(default_mod_, 64), this);
+            detail::register_type_context(lc_get_float_type(default_mod_), this);
+            detail::register_type_context(lc_get_double_type(default_mod_), this);
+            detail::register_type_context(lc_get_ptr_type(default_mod_), this);
+        }
     }
     ~LLVMContext() {
         if (detail::fallback_module == default_mod_)
