@@ -100,6 +100,8 @@ static const char *remap_intrinsic(const char *name) {
     if (strcmp(name, "llvm.copysign.f64") == 0) return "copysign";
     if (strcmp(name, "llvm.powi.f32.i32") == 0) return "powf";
     if (strcmp(name, "llvm.powi.f64.i32") == 0) return "pow";
+    if (strcmp(name, "llvm.powi.f32.i64") == 0) return "powf";
+    if (strcmp(name, "llvm.powi.f64.i64") == 0) return "pow";
     if (strcmp(name, "llvm.fabs.f32") == 0) return "fabsf";
     if (strcmp(name, "llvm.fabs.f64") == 0) return "fabs";
     if (strcmp(name, "llvm.sin.f32") == 0) return "sinf";

@@ -1906,6 +1906,35 @@ int test_jit_llvm_intrinsic_fabs_f32(void) {
     return 0;
 }
 
+int test_jit_llvm_intrinsic_powi_f32_i32(void) {
+    const char *src =
+        "declare float @llvm.powi.f32.i32(float, i32)\n"
+        "define i32 @call_powi_bits() {\n"
+        "entry:\n"
+        "  %r = call float @llvm.powi.f32.i32(float 2.0, i32 3)\n"
+        "  %bits = bitcast float %r to i32\n"
+        "  ret i32 %bits\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_powi_bits");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 0x41000000, "powi(2.0f, 3) bits");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_llvm_intrinsic_memcpy_memset(void) {
     const char *src =
         "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"

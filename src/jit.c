@@ -768,6 +768,8 @@ static double llvm_pow_f64(double x, double y) { return pow(x, y); }
 static double llvm_copysign_f64(double x, double y) { return copysign(x, y); }
 static float llvm_powi_f32(float x, int32_t e) { return powf(x, (float)e); }
 static double llvm_powi_f64(double x, int32_t e) { return pow(x, (double)e); }
+static float llvm_powi_f32_i64(float x, int64_t e) { return powf(x, (float)e); }
+static double llvm_powi_f64_i64(double x, int64_t e) { return pow(x, (double)e); }
 
 static void llvm_memset_p0i8_i64(void *dst, uint64_t val, int64_t len, uint64_t is_volatile) {
     (void)is_volatile;
@@ -1176,6 +1178,10 @@ static void register_builtin_symbols(lr_jit_t *j) {
     lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64);
     lr_jit_add_symbol(j, "llvm.powi.f32", (void *)(uintptr_t)&llvm_powi_f32);
     lr_jit_add_symbol(j, "llvm.powi.f64", (void *)(uintptr_t)&llvm_powi_f64);
+    lr_jit_add_symbol(j, "llvm.powi.f32.i32", (void *)(uintptr_t)&llvm_powi_f32);
+    lr_jit_add_symbol(j, "llvm.powi.f64.i32", (void *)(uintptr_t)&llvm_powi_f64);
+    lr_jit_add_symbol(j, "llvm.powi.f32.i64", (void *)(uintptr_t)&llvm_powi_f32_i64);
+    lr_jit_add_symbol(j, "llvm.powi.f64.i64", (void *)(uintptr_t)&llvm_powi_f64_i64);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
