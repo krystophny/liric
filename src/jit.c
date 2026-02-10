@@ -995,13 +995,34 @@ static void update_last_symbol_lookup(lr_jit_t *j, lr_sym_entry_t *entry, uint32
     j->lookup_last_hash = entry ? hash : 0u;
 }
 
+static lr_lazy_func_entry_t *lookup_last_lazy_entry(lr_jit_t *j, const char *name, uint32_t hash) {
+    if (!j || !j->lookup_last_lazy_entry || j->lookup_last_lazy_hash != hash)
+        return NULL;
+    lr_lazy_func_entry_t *entry = j->lookup_last_lazy_entry;
+    if (entry->hash != hash || strcmp(entry->name, name) != 0)
+        return NULL;
+    return entry;
+}
+
+static void update_last_lazy_lookup(lr_jit_t *j, lr_lazy_func_entry_t *entry, uint32_t hash) {
+    if (!j)
+        return;
+    j->lookup_last_lazy_entry = entry;
+    j->lookup_last_lazy_hash = entry ? hash : 0u;
+}
+
 static lr_lazy_func_entry_t *find_lazy_func_entry(lr_jit_t *j, const char *name, uint32_t hash) {
     if (!j || !name || !name[0] || !j->lazy_func_buckets || j->lazy_func_bucket_count == 0)
         return NULL;
+    lr_lazy_func_entry_t *cached = lookup_last_lazy_entry(j, name, hash);
+    if (cached)
+        return cached;
     uint32_t bucket = hash & (j->lazy_func_bucket_count - 1u);
     for (lr_lazy_func_entry_t *e = j->lazy_func_buckets[bucket]; e; e = e->bucket_next) {
-        if (e->hash == hash && strcmp(e->name, name) == 0)
+        if (e->hash == hash && strcmp(e->name, name) == 0) {
+            update_last_lazy_lookup(j, e, hash);
             return e;
+        }
     }
     return NULL;
 }
@@ -1023,6 +1044,7 @@ static lr_lazy_func_entry_t *upsert_lazy_func_entry(lr_jit_t *j, lr_module_t *m,
         existing->func_sig_len = func_sig_len;
         existing->pending_addr = NULL;
         existing->state = LR_LAZY_FUNC_PENDING;
+        update_last_lazy_lookup(j, existing, hash);
         return existing;
     }
 
@@ -1049,6 +1071,7 @@ static lr_lazy_func_entry_t *upsert_lazy_func_entry(lr_jit_t *j, lr_module_t *m,
     } else {
         entry->bucket_next = NULL;
     }
+    update_last_lazy_lookup(j, entry, hash);
     return entry;
 }
 
@@ -1065,6 +1088,8 @@ static bool miss_cache_contains(lr_jit_t *j, const char *name, uint32_t hash) {
 
 static void miss_cache_add(lr_jit_t *j, const char *name, uint32_t hash) {
     if (!j || !j->miss_buckets || j->miss_bucket_count == 0)
+        return;
+    if (miss_cache_contains(j, name, hash))
         return;
     uint32_t bucket = hash & (j->miss_bucket_count - 1u);
     lr_sym_miss_entry_t *m = lr_arena_new(j->arena, lr_sym_miss_entry_t);
@@ -1194,12 +1219,14 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
 }
 
 static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) {
-    lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
-    if (lazy) {
-        if (lazy->state == LR_LAZY_FUNC_COMPILING)
-            return lazy->pending_addr;
-        if (lazy->state != LR_LAZY_FUNC_READY)
-            return NULL;
+    if (j->lazy_funcs) {
+        lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+        if (lazy) {
+            if (lazy->state == LR_LAZY_FUNC_COMPILING)
+                return lazy->pending_addr;
+            if (lazy->state != LR_LAZY_FUNC_READY)
+                return NULL;
+        }
     }
 
     lr_sym_entry_t *cached_entry = lookup_last_entry(j, name, hash);
@@ -1328,6 +1355,22 @@ static int finalize_module_functions(lr_module_t *m, lr_func_t **funcs, uint32_t
     return 0;
 }
 
+static uint32_t module_symbol_id(const lr_module_t *m, const char *name, uint32_t hash) {
+    if (!m || !name || !name[0] || m->symbol_index_cap == 0)
+        return UINT32_MAX;
+    uint32_t slot = hash & (m->symbol_index_cap - 1u);
+    for (;;) {
+        uint32_t stored = m->symbol_index[slot];
+        if (stored == 0)
+            return UINT32_MAX;
+        uint32_t idx = stored - 1u;
+        if (m->symbol_hashes[idx] == hash &&
+            strcmp(m->symbol_names[idx], name) == 0)
+            return idx;
+        slot = (slot + 1u) & (m->symbol_index_cap - 1u);
+    }
+}
+
 static int jit_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
     if (!oc || !m)
         return -1;
@@ -1352,7 +1395,8 @@ static int jit_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (!f->name || !f->name[0])
             continue;
-        uint32_t sym_id = lr_module_intern_symbol(m, f->name);
+        uint32_t hash = symbol_hash(f->name);
+        uint32_t sym_id = module_symbol_id(m, f->name, hash);
         if (sym_id == UINT32_MAX)
             return -1;
         if (sym_id >= oc->module_sym_count)
@@ -1364,7 +1408,8 @@ static int jit_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->name || !g->name[0] || g->is_external)
             continue;
-        uint32_t sym_id = lr_module_intern_symbol(m, g->name);
+        uint32_t hash = symbol_hash(g->name);
+        uint32_t sym_id = module_symbol_id(m, g->name, hash);
         if (sym_id == UINT32_MAX)
             return -1;
         if (sym_id < oc->module_sym_count)
@@ -1508,7 +1553,11 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char
                 }
                 target_addr = (void *)(j->code_buf + sym->offset);
             } else {
-                target_addr = lookup_symbol(j, sym_name);
+                if (!sym_name || !sym_name[0]) {
+                    rc = -1;
+                    break;
+                }
+                target_addr = lookup_symbol_hashed(j, sym_name, sym->hash);
             }
             if (resolved_targets)
                 resolved_targets[rel->symbol_idx] = target_addr;

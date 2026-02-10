@@ -704,6 +704,73 @@ int test_jit_self_recursive_call_ignores_prebound_symbol(void) {
     return 0;
 }
 
+static int lazy_shadowed_host(void) {
+    return 1234;
+}
+
+int test_jit_lazy_function_ignores_prebound_symbol(void) {
+    const char *src =
+        "define i32 @lazy_shadowed() {\n"
+        "entry:\n"
+        "  ret i32 7\n"
+        "}\n";
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena = NULL;
+    lr_jit_t *jit = NULL;
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
+    lr_module_t *m = parse(src, arena);
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
+    lr_jit_add_symbol(jit, "lazy_shadowed", (void *)(uintptr_t)&lazy_shadowed_host);
+
+    if (lr_jit_add_module(jit, m) != 0) {
+        fprintf(stderr, "  FAIL: jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    typedef int (*fn_t)(void);
+    fn_t fn = NULL;
+    LR_JIT_GET_FN(fn, jit, "lazy_shadowed");
+    if (!fn) {
+        fprintf(stderr, "  FAIL: function lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (fn() != 7) {
+        fprintf(stderr, "  FAIL: lazy function overrides prebound symbol (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
+    return status;
+}
+
 int test_jit_unresolved_symbol_fails(void) {
     const char *src =
         "define i32 @f() {\n"

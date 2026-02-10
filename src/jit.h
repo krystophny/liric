@@ -55,6 +55,8 @@ typedef struct lr_jit {
     uint32_t sym_bucket_count;
     lr_sym_entry_t *lookup_last_entry;
     uint32_t lookup_last_hash;
+    lr_lazy_func_entry_t *lookup_last_lazy_entry;
+    uint32_t lookup_last_lazy_hash;
     lr_sym_miss_entry_t **miss_buckets;
     uint32_t miss_bucket_count;
     lr_lazy_func_entry_t *lazy_funcs;
