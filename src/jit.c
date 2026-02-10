@@ -1761,24 +1761,67 @@ worker_done:
 }
 #endif
 
-static uint32_t materialize_prefetch_collect_targets(lr_jit_t *j,
-                                                     const lr_lazy_func_entry_t *trigger,
-                                                     lr_materialize_prefetch_task_t *tasks,
-                                                     uint32_t task_cap) {
-    if (!j || !trigger || !trigger->module || !trigger->func || !tasks || task_cap == 0)
-        return 0;
+static bool materialize_prefetch_has_task(const lr_materialize_prefetch_task_t *tasks,
+                                          uint32_t count,
+                                          const lr_lazy_func_entry_t *entry) {
+    if (!tasks || !entry)
+        return false;
+    for (uint32_t i = 0; i < count; i++) {
+        if (tasks[i].entry == entry)
+            return true;
+    }
+    return false;
+}
 
-    uint32_t count = 0;
-    lr_module_t *m = trigger->module;
-    lr_func_t *f = trigger->func;
+static uint32_t materialize_prefetch_maybe_add_target(lr_jit_t *j,
+                                                      lr_module_t *root_module,
+                                                      const char *sym_name,
+                                                      lr_materialize_prefetch_task_t *tasks,
+                                                      uint32_t count,
+                                                      uint32_t task_cap) {
+    if (!j || !root_module || !sym_name || !sym_name[0] || !tasks || count >= task_cap)
+        return count;
+
+    uint32_t hash = symbol_hash(sym_name);
+    lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
+    if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
+        return count;
+    if (entry->module != root_module)
+        return count;
+    if (!entry->module_sig || entry->module_sig_len == 0 ||
+        !entry->func_sig || entry->func_sig_len == 0)
+        return count;
+    if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
+                                 entry->func_sig, entry->func_sig_len, false))
+        return count;
+    if (materialize_prefetch_has_task(tasks, count, entry))
+        return count;
+
+    tasks[count].entry = entry;
+    return count + 1u;
+}
+
+static uint32_t materialize_prefetch_collect_from_function(lr_jit_t *j,
+                                                           lr_module_t *root_module,
+                                                           const lr_lazy_func_entry_t *source,
+                                                           lr_materialize_prefetch_task_t *tasks,
+                                                           uint32_t count,
+                                                           uint32_t task_cap) {
+    if (!j || !root_module || !source || !source->module || !source->func ||
+        !tasks || count >= task_cap)
+        return count;
+
+    lr_module_t *m = source->module;
+    lr_func_t *f = source->func;
+
     if (f->block_array && f->num_blocks > 0) {
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+        for (uint32_t bi = 0; bi < f->num_blocks && count < task_cap; bi++) {
             const lr_block_t *b = f->block_array[bi];
             if (!b)
                 continue;
 
             if (b->inst_array && b->num_insts > 0) {
-                for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+                for (uint32_t ii = 0; ii < b->num_insts && count < task_cap; ii++) {
                     const lr_inst_t *inst = b->inst_array[ii];
                     if (!inst || inst->op != LR_OP_CALL || inst->num_operands == 0)
                         continue;
@@ -1786,115 +1829,55 @@ static uint32_t materialize_prefetch_collect_targets(lr_jit_t *j,
                     if (callee->kind != LR_VAL_GLOBAL)
                         continue;
                     const char *sym_name = lr_module_symbol_name(m, callee->global_id);
-                    if (!sym_name || !sym_name[0] || strcmp(sym_name, trigger->name) == 0)
-                        continue;
-
-                    uint32_t hash = symbol_hash(sym_name);
-                    lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
-                    if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
-                        continue;
-                    if (!entry->module_sig || entry->module_sig_len == 0 ||
-                        !entry->func_sig || entry->func_sig_len == 0)
-                        continue;
-                    if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
-                                                 entry->func_sig, entry->func_sig_len, false))
-                        continue;
-
-                    bool seen = false;
-                    for (uint32_t k = 0; k < count; k++) {
-                        if (tasks[k].entry == entry) {
-                            seen = true;
-                            break;
-                        }
-                    }
-                    if (seen)
-                        continue;
-
-                    tasks[count].entry = entry;
-                    count++;
-                    if (count == task_cap)
-                        return count;
+                    count = materialize_prefetch_maybe_add_target(j, root_module, sym_name,
+                                                                   tasks, count, task_cap);
                 }
                 continue;
             }
 
-            for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            for (const lr_inst_t *inst = b->first; inst && count < task_cap; inst = inst->next) {
                 if (inst->op != LR_OP_CALL || inst->num_operands == 0)
                     continue;
                 const lr_operand_t *callee = &inst->operands[0];
                 if (callee->kind != LR_VAL_GLOBAL)
                     continue;
                 const char *sym_name = lr_module_symbol_name(m, callee->global_id);
-                if (!sym_name || !sym_name[0] || strcmp(sym_name, trigger->name) == 0)
-                    continue;
-
-                uint32_t hash = symbol_hash(sym_name);
-                lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
-                if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
-                    continue;
-                if (!entry->module_sig || entry->module_sig_len == 0 ||
-                    !entry->func_sig || entry->func_sig_len == 0)
-                    continue;
-                if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
-                                             entry->func_sig, entry->func_sig_len, false))
-                    continue;
-
-                bool seen = false;
-                for (uint32_t k = 0; k < count; k++) {
-                    if (tasks[k].entry == entry) {
-                        seen = true;
-                        break;
-                    }
-                }
-                if (seen)
-                    continue;
-
-                tasks[count].entry = entry;
-                count++;
-                if (count == task_cap)
-                    return count;
+                count = materialize_prefetch_maybe_add_target(j, root_module, sym_name,
+                                                               tasks, count, task_cap);
             }
         }
         return count;
     }
 
-    for (const lr_block_t *b = f->first_block; b; b = b->next) {
-        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+    for (const lr_block_t *b = f->first_block; b && count < task_cap; b = b->next) {
+        for (const lr_inst_t *inst = b->first; inst && count < task_cap; inst = inst->next) {
             if (inst->op != LR_OP_CALL || inst->num_operands == 0)
                 continue;
             const lr_operand_t *callee = &inst->operands[0];
             if (callee->kind != LR_VAL_GLOBAL)
                 continue;
             const char *sym_name = lr_module_symbol_name(m, callee->global_id);
-            if (!sym_name || !sym_name[0] || strcmp(sym_name, trigger->name) == 0)
-                continue;
-
-            uint32_t hash = symbol_hash(sym_name);
-            lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
-            if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
-                continue;
-            if (!entry->module_sig || entry->module_sig_len == 0 ||
-                !entry->func_sig || entry->func_sig_len == 0)
-                continue;
-            if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
-                                         entry->func_sig, entry->func_sig_len, false))
-                continue;
-
-            bool seen = false;
-            for (uint32_t k = 0; k < count; k++) {
-                if (tasks[k].entry == entry) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (seen)
-                continue;
-
-            tasks[count].entry = entry;
-            count++;
-            if (count == task_cap)
-                return count;
+            count = materialize_prefetch_maybe_add_target(j, root_module, sym_name,
+                                                           tasks, count, task_cap);
         }
+    }
+    return count;
+}
+
+static uint32_t materialize_prefetch_collect_targets(lr_jit_t *j,
+                                                     lr_materialize_prefetch_task_t *tasks,
+                                                     uint32_t task_cap) {
+    if (!j || !tasks || task_cap == 0 || !tasks[0].entry || !tasks[0].entry->module)
+        return 0;
+
+    lr_module_t *root_module = tasks[0].entry->module;
+    uint32_t count = 1u;
+
+    /* Walk the reachable call graph so deep dependency chains can be prefetched once. */
+    for (uint32_t scan = 0; scan < count && count < task_cap; scan++) {
+        const lr_lazy_func_entry_t *source = tasks[scan].entry;
+        count = materialize_prefetch_collect_from_function(j, root_module, source,
+                                                            tasks, count, task_cap);
     }
 
     return count;
@@ -1914,7 +1897,7 @@ static bool materialize_prefetch_module_functions(lr_jit_t *j,
     if (!j || !j->target || !trigger || !trigger->module)
         return false;
 
-    uint32_t task_cap = 1; /* trigger + direct callees */
+    uint32_t task_cap = 1; /* trigger + reachable callees */
     for (lr_func_t *f = trigger->module->first_func; f; f = f->next) {
         if (!f->name || !f->name[0] || f->is_decl)
             continue;
@@ -1931,8 +1914,7 @@ static bool materialize_prefetch_module_functions(lr_jit_t *j,
         return false;
 
     tasks[0].entry = (lr_lazy_func_entry_t *)trigger;
-    uint32_t pending = 1u + materialize_prefetch_collect_targets(j, trigger,
-                                                                 tasks + 1u, task_cap - 1u);
+    uint32_t pending = materialize_prefetch_collect_targets(j, tasks, task_cap);
     if (pending < MATERIALIZE_PREFETCH_MIN_PENDING) {
         free(tasks);
         return false;

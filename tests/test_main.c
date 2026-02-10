@@ -102,6 +102,7 @@ int test_jit_self_recursive_call_ignores_prebound_symbol(void);
 int test_jit_unresolved_symbol_fails(void);
 int test_jit_lazy_materializes_reachable_functions_only(void);
 int test_jit_parallel_prefetch_replays_pending_functions(void);
+int test_jit_parallel_prefetch_caches_transitive_chain(void);
 int test_jit_parallel_prefetch_stress_repeatable(void);
 int test_jit_materialization_cache_reuse_across_jits(void);
 int test_jit_materialization_cache_invalidation_epoch(void);
@@ -260,6 +261,7 @@ int main(void) {
     RUN_TEST(test_jit_unresolved_symbol_fails);
     RUN_TEST(test_jit_lazy_materializes_reachable_functions_only);
     RUN_TEST(test_jit_parallel_prefetch_replays_pending_functions);
+    RUN_TEST(test_jit_parallel_prefetch_caches_transitive_chain);
     RUN_TEST(test_jit_parallel_prefetch_stress_repeatable);
     RUN_TEST(test_jit_materialization_cache_reuse_across_jits);
     RUN_TEST(test_jit_materialization_cache_invalidation_epoch);
