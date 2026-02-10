@@ -126,7 +126,17 @@ These do NOT depend on mass run results; they discover tests directly from CMake
    parse+compile-vs-parse+jit speedup to
    `/tmp/liric_bench/bench_ll_summary.json`.
 
-3. **Optional per-file LLVM in-process phase timing**:
+3. **API benchmark (primary direct JIT path)**:
+   ```bash
+   ./build/bench_api --iters 3 --timeout-ms 100 --min-completed 1
+   ```
+   Compares full `lfortran --jit` execution through:
+   - LLVM backend build
+   - WITH_LIRIC build
+   Outputs include completion/skip accounting and per-phase medians in
+   `/tmp/liric_bench/bench_api_summary.json`.
+
+4. **Optional per-file LLVM in-process phase timing**:
    ```bash
    ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
    ```
@@ -143,3 +153,5 @@ All artifacts in `/tmp/liric_bench/`:
 - `compat_ll.txt`: test names passing liric + lli compat
 - `bench_ll.jsonl`: LL-file benchmark timing data
 - `bench_ll_summary.json`: aggregate medians/sums including parser-vs-compile split
+- `bench_api.jsonl`: API benchmark timing/skip rows
+- `bench_api_summary.json`: API benchmark aggregate medians, skip reasons, phase tracker
