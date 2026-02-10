@@ -1,4 +1,5 @@
 #include "frontend_registry.h"
+#include "bc_decode.h"
 #include "ll_parser.h"
 #include "wasm_decode.h"
 #include "wasm_to_ir.h"
@@ -18,6 +19,10 @@ static bool match_ll_fallback(const uint8_t *data, size_t len) {
     return true;
 }
 
+static bool match_bc_magic(const uint8_t *data, size_t len) {
+    return lr_bc_is_bitcode(data, len);
+}
+
 static lr_module_t *parse_ll_with_arena(const uint8_t *data, size_t len,
                                         lr_arena_t *arena, char *err, size_t errlen) {
     if (!data && len != 0)
@@ -33,11 +38,21 @@ static lr_module_t *parse_wasm_with_arena(const uint8_t *data, size_t len,
     return lr_wasm_to_ir(wmod, arena, err, errlen);
 }
 
+static lr_module_t *parse_bc_with_arena(const uint8_t *data, size_t len,
+                                        lr_arena_t *arena, char *err, size_t errlen) {
+    return lr_parse_bc_data(data, len, arena, err, errlen);
+}
+
 static const lr_frontend_t g_frontends[] = {
     {
         .name = "wasm",
         .matches_input = match_wasm_magic,
         .parse_with_arena = parse_wasm_with_arena,
+    },
+    {
+        .name = "bc",
+        .matches_input = match_bc_magic,
+        .parse_with_arena = parse_bc_with_arena,
     },
     {
         .name = "ll",
@@ -52,6 +67,8 @@ const lr_frontend_t *lr_frontend_by_name(const char *name) {
 
     if (strcmp(name, "llvm-ir") == 0)
         name = "ll";
+    else if (strcmp(name, "llvm-bc") == 0)
+        name = "bc";
 
     size_t n = sizeof(g_frontends) / sizeof(g_frontends[0]);
     for (size_t i = 0; i < n; i++) {

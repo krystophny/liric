@@ -1,4 +1,5 @@
 #include "ll_parser.h"
+#include "frontend_common.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -817,7 +818,7 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         uint32_t gid = resolve_global_n(p, name.s, name.len);
         if (gid == UINT32_MAX) {
             char *owned = lr_arena_strdup(p->arena, name.s, name.len);
-            gid = lr_module_intern_symbol(p->module, owned);
+            gid = lr_frontend_intern_symbol(p->module, owned);
             register_global_n(p, owned, name.len, gid);
         }
         return lr_op_global(gid, type);
@@ -1552,10 +1553,6 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
         return;
     }
     char *name = tok_name(p, &p->cur);
-    if (resolve_global(p, name) == UINT32_MAX) {
-        uint32_t sym_id = lr_module_intern_symbol(p->module, name);
-        register_global(p, name, sym_id);
-    }
     next(p);
 
     expect(p, LR_TOK_LPAREN);
@@ -1598,12 +1595,12 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
     while (check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) next(p);
     skip_attrs(p);
 
-    lr_func_t *func;
-    if (is_decl) {
-        func = lr_func_declare(p->module, name, ret_type, params, nparams, vararg);
-    } else {
-        func = lr_func_create(p->module, name, ret_type, params, nparams, vararg);
-    }
+    uint32_t sym_id = UINT32_MAX;
+    lr_func_t *func = lr_frontend_create_function(p->module, name, ret_type,
+                                                  params, nparams, vararg,
+                                                  is_decl, &sym_id);
+    if (resolve_global(p, name) == UINT32_MAX)
+        register_global(p, name, sym_id);
     register_func(p, name, func);
 
     if (!is_decl)
@@ -1701,7 +1698,7 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
         next(p);
         uint32_t gid = resolve_global(p, ref_name);
         if (gid == UINT32_MAX) {
-            gid = lr_module_intern_symbol(p->module, ref_name);
+            gid = lr_frontend_intern_symbol(p->module, ref_name);
             register_global(p, ref_name, gid);
         }
         lr_reloc_t *r = lr_arena_new(p->arena, lr_reloc_t);
@@ -1817,7 +1814,7 @@ static void parse_global(lr_parser_t *p) {
 
     lr_type_t *ty = parse_type(p);
     lr_global_t *g = lr_global_create(p->module, name, ty, is_const);
-    uint32_t sym_id = lr_module_intern_symbol(p->module, g->name);
+    uint32_t sym_id = lr_frontend_intern_symbol(p->module, g->name);
     if (resolve_global(p, g->name) == UINT32_MAX)
         register_global(p, g->name, sym_id);
 
@@ -1940,7 +1937,7 @@ static void parse_global(lr_parser_t *p) {
         next(p);
         uint32_t gid = resolve_global(p, ref_name);
         if (gid == UINT32_MAX) {
-            gid = lr_module_intern_symbol(p->module, ref_name);
+            gid = lr_frontend_intern_symbol(p->module, ref_name);
             register_global(p, ref_name, gid);
         }
         size_t sz = lr_type_size(ty);

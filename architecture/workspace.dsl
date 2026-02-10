@@ -33,6 +33,31 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
                 }
             }
 
+            bc_frontend = container "LLVM Bitcode Frontend" "Parses LLVM .bc input directly into liric SSA IR (no .ll text conversion)." "C11" {
+                tags "Frontend"
+                url "https://github.com/krystophny/liric/tree/main/src"
+
+                bc_decode_comp = component "BC Decoder" "Decodes LLVM bitcode and translates LLVM IR module/function/block/instruction graph into liric IR." "src/bc_decode.c" {
+                    tags "Frontend"
+                    url "https://github.com/krystophny/liric/blob/main/src/bc_decode.c"
+                }
+
+                frontend_registry_bc = component "Frontend Registry (BC path)" "Frontend selection and auto-detection routing for BC parsing." "src/frontend_registry.c" {
+                    tags "API"
+                    url "https://github.com/krystophny/liric/blob/main/src/frontend_registry.c"
+                }
+            }
+
+            frontend_common = container "Frontend Common Helpers" "Shared symbol/function/error helpers reused across LL and BC parser frontends." "C11" {
+                tags "Frontend"
+                url "https://github.com/krystophny/liric/tree/main/src"
+
+                frontend_common_comp = component "Frontend Common API" "Common parser helper functions for symbol interning, function creation, and diagnostics." "src/frontend_common.c" {
+                    tags "Frontend"
+                    url "https://github.com/krystophny/liric/blob/main/src/frontend_common.c"
+                }
+            }
+
             wasm_frontend = container "WASM Frontend" "Decodes .wasm binaries and converts stack machine semantics into SSA IR." "C11" {
                 tags "Frontend"
                 url "https://github.com/krystophny/liric/tree/main/src"
@@ -168,13 +193,18 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
         lfortran -> compat_layer "Generates/consumes LLVM-style APIs through liric compatibility path" "LLVM-compatible C/C++ API"
 
         api_frontdoor -> ll_frontend "Routes .ll parsing" "frontend dispatch"
+        api_frontdoor -> bc_frontend "Routes .bc parsing" "frontend dispatch"
         api_frontdoor -> wasm_frontend "Routes .wasm parsing" "frontend dispatch"
         api_frontdoor -> core_ir "Owns module lifecycle and builder entrypoints" "C API calls"
         api_frontdoor -> jit_runtime "Creates JIT, adds modules, resolves functions" "C API calls"
         api_frontdoor -> obj_emit "Emits object files from liric modules" "C API calls"
 
         ll_frontend -> core_ir "Builds lr_module_t from text IR" "IR builder calls"
+        bc_frontend -> core_ir "Builds lr_module_t from LLVM bitcode decode path" "IR builder calls"
         wasm_frontend -> core_ir "Builds lr_module_t from binary WASM" "IR builder calls"
+        ll_frontend -> frontend_common "Reuses shared frontend helpers" "common parser helpers"
+        bc_frontend -> frontend_common "Reuses shared frontend helpers" "common parser helpers"
+        frontend_common -> core_ir "Creates symbols/functions shared by parser frontends" "IR API helpers"
 
         compat_layer -> core_ir "Builds/updates IR via lc_* builders" "compat builder API"
         compat_layer -> api_frontdoor "Uses public module/JIT interfaces" "public C API"
@@ -193,6 +223,7 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
         tools -> lli "Benchmarks compare liric against lli baseline" "subprocess benchmark harness"
 
         frontend_registry_ll -> ll_lexer "Dispatches LL parse path" "function call"
+        frontend_registry_bc -> bc_decode_comp "Dispatches BC parse path" "function call"
         ll_lexer -> ll_parser "Token stream" "in-memory token API"
         ll_parser -> ir_model "Builds module/function/block/instruction graph" "IR construction"
         ll_parser -> arena_alloc "Allocates parser-owned nodes" "arena allocation"
@@ -247,6 +278,18 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
             include *
             autolayout lr
             title "LLVM IR Frontend Components"
+        }
+
+        component bc_frontend "BCFrontendComponents" {
+            include *
+            autolayout lr
+            title "LLVM Bitcode Frontend Components"
+        }
+
+        component frontend_common "FrontendCommonComponents" {
+            include *
+            autolayout lr
+            title "Frontend Common Helper Components"
         }
 
         component wasm_frontend "WasmFrontendComponents" {

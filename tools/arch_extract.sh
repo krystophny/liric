@@ -19,7 +19,7 @@ mkdir -p "${OUT_DIR}"
         | sort \
         | while IFS= read -r path; do
             case "${path}" in
-                src/ll_*|src/frontend_registry.*) subsystem="frontend-llvm" ;;
+                src/ll_*|src/bc_decode.*|src/frontend_common.*|src/frontend_registry.*) subsystem="frontend-llvm" ;;
                 src/wasm_*) subsystem="frontend-wasm" ;;
                 src/jit.*) subsystem="jit" ;;
                 src/target_*|src/target.h) subsystem="backend" ;;

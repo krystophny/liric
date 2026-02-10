@@ -36,6 +36,8 @@ add_library(liric STATIC
     src/ir.c
     src/ll_lexer.c
     src/ll_parser.c
+    src/frontend_common.c
+    src/bc_decode.c
     src/frontend_registry.c
     src/wasm_decode.c
     src/wasm_to_ir.c
@@ -84,6 +86,11 @@ target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+set(LIRIC_HAVE_LLVM_BITCODE OFF)
+set(LIRIC_LLVM_BITCODE_LDFLAGS_LIST)
+set(LIRIC_LLVM_BITCODE_LIBS_LIST)
+set(LIRIC_LLVM_BITCODE_SYSTEM_LIBS_LIST)
+
 find_program(LLVM_CONFIG_EXE llvm-config)
 if(LLVM_CONFIG_EXE)
     execute_process(
@@ -106,9 +113,22 @@ if(LLVM_CONFIG_EXE)
         OUTPUT_VARIABLE LLVM_SYSTEM_LIBS
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --libs core bitreader
+        OUTPUT_VARIABLE LLVM_BITCODE_LIBS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
     separate_arguments(LLVM_LDFLAGS_LIST NATIVE_COMMAND "${LLVM_LDFLAGS}")
     separate_arguments(LLVM_LIBS_LIST NATIVE_COMMAND "${LLVM_LIBS}")
     separate_arguments(LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LLVM_SYSTEM_LIBS}")
+    separate_arguments(LLVM_BITCODE_LIBS_LIST NATIVE_COMMAND "${LLVM_BITCODE_LIBS}")
+
+    if(LLVM_BITCODE_LIBS_LIST)
+        set(LIRIC_HAVE_LLVM_BITCODE ON)
+        set(LIRIC_LLVM_BITCODE_LDFLAGS_LIST ${LLVM_LDFLAGS_LIST})
+        set(LIRIC_LLVM_BITCODE_LIBS_LIST ${LLVM_BITCODE_LIBS_LIST})
+        set(LIRIC_LLVM_BITCODE_SYSTEM_LIBS_LIST ${LLVM_SYSTEM_LIBS_LIST})
+    endif()
 
     add_executable(bench_lli_phases tools/bench_lli_phases.c)
     target_include_directories(bench_lli_phases PRIVATE ${LLVM_INCLUDE_DIR})
@@ -124,6 +144,18 @@ else()
     message(STATUS "llvm-config not found: bench_lli_phases target will not be built")
 endif()
 
+if(LIRIC_HAVE_LLVM_BITCODE)
+    target_compile_definitions(liric PUBLIC LIRIC_HAVE_LLVM_BITCODE=1)
+    target_include_directories(liric PRIVATE ${LLVM_INCLUDE_DIR})
+    target_link_options(liric PUBLIC ${LIRIC_LLVM_BITCODE_LDFLAGS_LIST})
+    target_link_libraries(liric PUBLIC
+        ${LIRIC_LLVM_BITCODE_LIBS_LIST}
+        ${LIRIC_LLVM_BITCODE_SYSTEM_LIBS_LIST}
+    )
+else()
+    target_compile_definitions(liric PUBLIC LIRIC_HAVE_LLVM_BITCODE=0)
+endif()
+
 enable_testing()
 add_executable(test_liric
     tests/test_main.c
@@ -134,6 +166,7 @@ add_executable(test_liric
     tests/test_target_shared.c
     tests/test_jit.c
     tests/test_e2e.c
+    tests/test_bc.c
     tests/test_wasm.c
     tests/test_builder.c
     tests/test_objfile.c

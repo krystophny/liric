@@ -21,6 +21,7 @@ typedef struct lr_jit lr_jit_t;
 /* ---- Frontend: text / binary parsers ----------------------------------- */
 
 lr_module_t *lr_parse_ll(const char *src, size_t len, char *err, size_t errlen);
+lr_module_t *lr_parse_bc(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_wasm(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t errlen);
 
