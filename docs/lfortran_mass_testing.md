@@ -5,8 +5,7 @@ Run nightly compatibility gating without a required Python path by using
 integration metadata from `../lfortran/integration_tests/CMakeLists.txt` and
 the C benchmark tools (`bench_compat_check` + shell post-processing).
 
-The Python mass harness remains available for offline deep-dive analysis, but is
-no longer required for the active nightly workflow path.
+The nightly workflow path is shell + jq + C tooling only (no Python dependency).
 
 Roadmap and scorecard are tracked in `docs/lfortran_mass_tracker.md`.
 Stable mismatch/unsupported root-cause taxonomy is defined in
