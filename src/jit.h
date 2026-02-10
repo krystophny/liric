@@ -4,6 +4,7 @@
 #include "ir.h"
 #include "target.h"
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct lr_sym_entry {
     char *name;
@@ -75,6 +76,12 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
 void lr_jit_end_update(lr_jit_t *j);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);
 void lr_jit_destroy(lr_jit_t *j);
+void lr_jit_materialize_cache_invalidate_all(void);
+uint32_t lr_jit_materialize_cache_epoch(void);
+void lr_jit_materialize_cache_reset_stats(void);
+uint64_t lr_jit_materialize_cache_hits(void);
+uint64_t lr_jit_materialize_cache_misses(void);
+uint64_t lr_jit_materialize_cache_entries(void);
 
 /*
  * POSIX guarantees void* and function pointers have the same size/representation.
