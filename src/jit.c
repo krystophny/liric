@@ -1,5 +1,6 @@
 #include "jit.h"
 #include "ir.h"
+#include "objfile.h"
 #include "target.h"
 #include <stdlib.h>
 #include <string.h>
@@ -50,19 +51,6 @@ static int register_default_symbol_providers(lr_jit_t *j);
 static void *resolve_symbol_from_jit_table(lr_jit_t *j, const char *name);
 static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name);
 static void *resolve_symbol_from_process(lr_jit_t *j, const char *name);
-static const char *resolve_global_name(lr_module_t *m, uint32_t global_id);
-
-typedef struct lr_func_name_entry {
-    const char *name;
-    uint32_t hash;
-    uint32_t idx;
-    struct lr_func_name_entry *next;
-} lr_func_name_entry_t;
-
-typedef struct lr_dep_edge {
-    uint32_t to;
-    struct lr_dep_edge *next;
-} lr_dep_edge_t;
 
 static uint32_t symbol_hash(const char *name) {
     uint32_t h = 2166136261u;
@@ -527,41 +515,6 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
     return apply_module_global_relocs(j, m);
 }
 
-static const char *resolve_global_name(lr_module_t *m, uint32_t global_id) {
-    const char *name = lr_module_symbol_name(m, global_id);
-    if (name && name[0])
-        return name;
-
-    /* Backward-compatible fallback for modules that encoded function index. */
-    uint32_t idx = 0;
-    for (lr_func_t *fn = m->first_func; fn; fn = fn->next, idx++) {
-        if (idx == global_id)
-            return fn->name;
-    }
-
-    return NULL;
-}
-
-static uint32_t next_pow2_u32(uint32_t v) {
-    uint32_t p = 1;
-    while (p < v)
-        p <<= 1;
-    return p;
-}
-
-static uint32_t find_func_index_by_name(lr_func_name_entry_t **buckets,
-                                        uint32_t bucket_count, const char *name) {
-    if (!name || !name[0] || !buckets || bucket_count == 0)
-        return UINT32_MAX;
-    uint32_t hash = symbol_hash(name);
-    uint32_t bucket = hash & (bucket_count - 1u);
-    for (lr_func_name_entry_t *e = buckets[bucket]; e; e = e->next) {
-        if (e->hash == hash && strcmp(e->name, name) == 0)
-            return e->idx;
-    }
-    return UINT32_MAX;
-}
-
 static int finalize_module_functions(lr_module_t *m, lr_func_t **funcs, uint32_t nfuncs,
                                      lr_arena_t *fallback_arena) {
     lr_arena_t *layout_arena = (m && m->arena) ? m->arena : fallback_arena;
@@ -572,174 +525,255 @@ static int finalize_module_functions(lr_module_t *m, lr_func_t **funcs, uint32_t
     return 0;
 }
 
-static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfuncs,
-                               lr_arena_t *arena, uint32_t *order, uint32_t *out_count) {
-    if (!m || !funcs || !arena || !order || !out_count)
+static int jit_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
+    if (!oc || !m)
         return -1;
-    if (nfuncs == 0) {
-        *out_count = 0;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && f->name[0])
+            lr_module_intern_symbol(m, f->name);
+    }
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && g->name[0])
+            lr_module_intern_symbol(m, g->name);
+    }
+
+    oc->module_sym_count = m->num_symbols;
+    if (oc->module_sym_count == 0)
         return 0;
+
+    oc->module_sym_defined = (uint8_t *)calloc(oc->module_sym_count, sizeof(uint8_t));
+    oc->module_sym_funcs = (lr_func_t **)calloc(oc->module_sym_count, sizeof(lr_func_t *));
+    if (!oc->module_sym_defined || !oc->module_sym_funcs) {
+        free(oc->module_sym_defined);
+        free(oc->module_sym_funcs);
+        oc->module_sym_defined = NULL;
+        oc->module_sym_funcs = NULL;
+        oc->module_sym_count = 0;
+        return -1;
     }
 
-    uint32_t bucket_count = next_pow2_u32(nfuncs * 2u);
-    if (bucket_count < 8)
-        bucket_count = 8;
-    lr_func_name_entry_t **buckets =
-        lr_arena_array(arena, lr_func_name_entry_t *, bucket_count);
-    if (!buckets)
-        return -1;
-
-    for (uint32_t i = 0; i < nfuncs; i++) {
-        const char *name = funcs[i]->name;
-        if (!name || !name[0])
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0])
             continue;
-        uint32_t hash = symbol_hash(name);
-        uint32_t bucket = hash & (bucket_count - 1u);
-        lr_func_name_entry_t *e = lr_arena_new(arena, lr_func_name_entry_t);
-        if (!e)
-            return -1;
-        e->name = name;
-        e->hash = hash;
-        e->idx = i;
-        e->next = buckets[bucket];
-        buckets[bucket] = e;
+        uint32_t sym_id = lr_module_intern_symbol(m, f->name);
+        if (sym_id >= oc->module_sym_count)
+            continue;
+        oc->module_sym_funcs[sym_id] = f;
+        if (f->first_block)
+            oc->module_sym_defined[sym_id] = 1;
     }
-
-    uint32_t *indegree = lr_arena_array(arena, uint32_t, nfuncs);
-    lr_dep_edge_t **outgoing = lr_arena_array(arena, lr_dep_edge_t *, nfuncs);
-    if (!indegree || !outgoing)
-        return -1;
-
-    for (uint32_t caller_idx = 0; caller_idx < nfuncs; caller_idx++) {
-        lr_func_t *f = funcs[caller_idx];
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
-            lr_block_t *b = f->block_array[bi];
-            for (uint32_t ii = 0; ii < b->num_insts; ii++) {
-                lr_inst_t *inst = b->inst_array[ii];
-                for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
-                    lr_operand_t *op = &inst->operands[oi];
-                    if (op->kind != LR_VAL_GLOBAL)
-                        continue;
-
-                    const char *name = resolve_global_name(m, op->global_id);
-                    if (!name || !name[0])
-                        return -1;
-
-                    uint32_t callee_idx =
-                        find_func_index_by_name(buckets, bucket_count, name);
-                    if (callee_idx == UINT32_MAX || callee_idx == caller_idx)
-                        continue;
-
-                    lr_dep_edge_t *edge = lr_arena_new(arena, lr_dep_edge_t);
-                    if (!edge)
-                        return -1;
-                    edge->to = caller_idx;
-                    edge->next = outgoing[callee_idx];
-                    outgoing[callee_idx] = edge;
-                    indegree[caller_idx]++;
-                }
-            }
-        }
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->name || !g->name[0] || g->is_external)
+            continue;
+        uint32_t sym_id = lr_module_intern_symbol(m, g->name);
+        if (sym_id < oc->module_sym_count)
+            oc->module_sym_defined[sym_id] = 1;
     }
-
-    uint32_t *queue = lr_arena_array(arena, uint32_t, nfuncs);
-    if (!queue)
-        return -1;
-    uint32_t qhead = 0, qtail = 0;
-    for (uint32_t i = 0; i < nfuncs; i++) {
-        if (indegree[i] == 0)
-            queue[qtail++] = i;
-    }
-
-    uint32_t count = 0;
-    while (qhead < qtail) {
-        uint32_t idx = queue[qhead++];
-        order[count++] = idx;
-        for (lr_dep_edge_t *edge = outgoing[idx]; edge; edge = edge->next) {
-            if (--indegree[edge->to] == 0)
-                queue[qtail++] = edge->to;
-        }
-    }
-
-    *out_count = count;
     return 0;
 }
 
-/*
- * Resolve global/function symbol operands to concrete addresses.
- * Returns:
- *   0  success
- *   1  unresolved symbol (retry later)
- *  -1  malformed IR/symbol table state
- */
-static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
-                                   void *self_addr, const char **missing_symbol) {
-    for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
-        lr_block_t *b = f->block_array[bi];
-        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
-            lr_inst_t *inst = b->inst_array[ii];
-            for (uint32_t i = 0; i < inst->num_operands; i++) {
-                lr_operand_t *op = &inst->operands[i];
-                if (op->kind != LR_VAL_GLOBAL)
-                    continue;
+static void jit_free_obj_ctx(lr_objfile_ctx_t *ctx) {
+    if (!ctx)
+        return;
+    free(ctx->relocs);
+    free(ctx->symbols);
+    free(ctx->symbol_index);
+    free(ctx->module_sym_defined);
+    free(ctx->module_sym_funcs);
+    memset(ctx, 0, sizeof(*ctx));
+}
 
-                const char *name = resolve_global_name(m, op->global_id);
-                if (!name || !name[0])
-                    return -1;
+static uint32_t read_u32(const uint8_t *buf, uint32_t off) {
+    return (uint32_t)buf[off]
+         | ((uint32_t)buf[off + 1] << 8)
+         | ((uint32_t)buf[off + 2] << 16)
+         | ((uint32_t)buf[off + 3] << 24);
+}
 
-                /* For CALL callee (operand 0), capture ABI metadata
-                   before converting to IMM_I64 (which loses global_id). */
-                if (inst->op == LR_OP_CALL && i == 0) {
-                    lr_func_t *callee = NULL;
-                    for (lr_func_t *fn = m->first_func; fn; fn = fn->next) {
-                        if (strcmp(fn->name, name) == 0) {
-                            callee = fn;
-                            break;
-                        }
-                    }
-                    if (callee) {
-                        inst->call_external_abi = (callee->first_block == NULL);
-                        inst->call_vararg = callee->vararg;
-                    } else {
-                        inst->call_external_abi = true;
-                        inst->call_vararg = false;
-                    }
-                }
-
-                void *addr = NULL;
-                if (strcmp(name, f->name) == 0) {
-                    /* Always bind self-recursive references to the function
-                       being compiled, even if an external symbol exists. */
-                    addr = self_addr;
-                } else {
-                    addr = lookup_symbol(j, name);
-                }
-                if (!addr) {
-                    if (missing_symbol)
-                        *missing_symbol = name;
-                    return 1;
-                }
-
-                op->kind = LR_VAL_IMM_I64;
-                op->imm_i64 = (int64_t)(intptr_t)addr + op->global_offset;
-                op->global_offset = 0;
-            }
-        }
-    }
+static int write_u32(uint8_t *buf, size_t buflen, uint32_t off, uint32_t value) {
+    if ((size_t)off + 4 > buflen)
+        return -1;
+    buf[off] = (uint8_t)value;
+    buf[off + 1] = (uint8_t)(value >> 8);
+    buf[off + 2] = (uint8_t)(value >> 16);
+    buf[off + 3] = (uint8_t)(value >> 24);
     return 0;
+}
+
+static int write_u64(uint8_t *buf, size_t buflen, uint32_t off, uint64_t value) {
+    if ((size_t)off + 8 > buflen)
+        return -1;
+    for (int i = 0; i < 8; i++)
+        buf[off + i] = (uint8_t)(value >> (i * 8));
+    return 0;
+}
+
+static int patch_x86_rel32(uint8_t *buf, size_t buflen, uint32_t off, uintptr_t target) {
+    uintptr_t place = (uintptr_t)(buf + off);
+    int64_t disp = (int64_t)(intptr_t)target - (int64_t)(intptr_t)(place + 4u);
+    if (disp < INT32_MIN || disp > INT32_MAX)
+        return -1;
+    return write_u32(buf, buflen, off, (uint32_t)(int32_t)disp);
+}
+
+static int patch_aarch64_branch26(uint8_t *buf, size_t buflen, uint32_t off, uintptr_t target) {
+    if ((size_t)off + 4 > buflen)
+        return -1;
+    uintptr_t place = (uintptr_t)(buf + off);
+    int64_t imm = ((int64_t)(intptr_t)target - (int64_t)(intptr_t)place) / 4;
+    if (imm < -(1LL << 25) || imm >= (1LL << 25))
+        return -1;
+    uint32_t insn = read_u32(buf, off);
+    insn = (insn & 0xFC000000u) | ((uint32_t)imm & 0x03FFFFFFu);
+    return write_u32(buf, buflen, off, insn);
+}
+
+static int patch_aarch64_page21(uint8_t *buf, size_t buflen, uint32_t off, uintptr_t target) {
+    if ((size_t)off + 4 > buflen)
+        return -1;
+    uintptr_t place = (uintptr_t)(buf + off);
+    uint64_t target_page = ((uint64_t)target) & ~0xFFFULL;
+    uint64_t place_page = ((uint64_t)place) & ~0xFFFULL;
+    int64_t pages = ((int64_t)target_page - (int64_t)place_page) >> 12;
+    if (pages < -(1LL << 20) || pages >= (1LL << 20))
+        return -1;
+    uint32_t insn = read_u32(buf, off);
+    insn &= ~((0x3u << 29) | (0x7FFFFu << 5));
+    insn |= (((uint32_t)pages & 0x3u) << 29);
+    insn |= ((((uint32_t)pages >> 2) & 0x7FFFFu) << 5);
+    return write_u32(buf, buflen, off, insn);
+}
+
+static int patch_aarch64_pageoff12(uint8_t *buf, size_t buflen, uint32_t off,
+                                   uintptr_t target, bool got_load) {
+    if ((size_t)off + 4 > buflen)
+        return -1;
+    uint32_t imm = (uint32_t)(target & 0xFFFu);
+    if (got_load) {
+        if ((imm & 0x7u) != 0)
+            return -1;
+        imm >>= 3;
+    }
+    uint32_t insn = read_u32(buf, off);
+    insn &= ~(0xFFFu << 10);
+    insn |= ((imm & 0xFFFu) << 10);
+    return write_u32(buf, buflen, off, insn);
+}
+
+static void *alloc_got_slot(lr_jit_t *j, void *target_addr) {
+    size_t off = align_up(j->data_size, sizeof(void *));
+    if (off + sizeof(void *) > j->data_cap)
+        return NULL;
+    void *slot = j->data_buf + off;
+    memcpy(slot, &target_addr, sizeof(target_addr));
+    j->data_size = off + sizeof(void *);
+    return slot;
+}
+
+static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char **missing_symbol) {
+    if (!j || !ctx)
+        return -1;
+    void **got_slots = NULL;
+    if (ctx->num_symbols > 0) {
+        got_slots = (void **)calloc(ctx->num_symbols, sizeof(void *));
+        if (!got_slots)
+            return -1;
+    }
+
+    int rc = 0;
+    for (uint32_t i = 0; i < ctx->num_relocs; i++) {
+        const lr_obj_reloc_t *rel = &ctx->relocs[i];
+        if (rel->symbol_idx >= ctx->num_symbols) {
+            rc = -1;
+            break;
+        }
+
+        const lr_obj_symbol_t *sym = &ctx->symbols[rel->symbol_idx];
+        const char *sym_name = sym->name;
+        void *target_addr = NULL;
+        if (sym->is_defined && sym->section == 1) {
+            if ((size_t)sym->offset >= j->code_size) {
+                rc = -1;
+                break;
+            }
+            target_addr = (void *)(j->code_buf + sym->offset);
+        } else {
+            target_addr = lookup_symbol(j, sym_name);
+        }
+        if (!target_addr) {
+            if (missing_symbol)
+                *missing_symbol = sym_name;
+            rc = -1;
+            break;
+        }
+
+        uintptr_t patch_target = (uintptr_t)target_addr;
+        if (rel->type == LR_RELOC_X86_64_GOTPCREL ||
+            rel->type == LR_RELOC_ARM64_GOT_LOAD_PAGE21 ||
+            rel->type == LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12) {
+            if (!got_slots || rel->symbol_idx >= ctx->num_symbols) {
+                rc = -1;
+                break;
+            }
+            if (!got_slots[rel->symbol_idx]) {
+                got_slots[rel->symbol_idx] = alloc_got_slot(j, target_addr);
+                if (!got_slots[rel->symbol_idx]) {
+                    rc = -1;
+                    break;
+                }
+            } else {
+                memcpy(got_slots[rel->symbol_idx], &target_addr, sizeof(target_addr));
+            }
+            patch_target = (uintptr_t)got_slots[rel->symbol_idx];
+        }
+
+        switch (rel->type) {
+        case LR_RELOC_X86_64_PC32:
+        case LR_RELOC_X86_64_PLT32:
+        case LR_RELOC_X86_64_GOTPCREL:
+            rc = patch_x86_rel32(j->code_buf, j->code_size, rel->offset, patch_target);
+            break;
+        case LR_RELOC_X86_64_64:
+            rc = write_u64(j->code_buf, j->code_size, rel->offset, (uint64_t)patch_target);
+            break;
+        case LR_RELOC_ARM64_BRANCH26:
+            rc = patch_aarch64_branch26(j->code_buf, j->code_size, rel->offset, patch_target);
+            break;
+        case LR_RELOC_ARM64_PAGE21:
+        case LR_RELOC_ARM64_GOT_LOAD_PAGE21:
+            rc = patch_aarch64_page21(j->code_buf, j->code_size, rel->offset, patch_target);
+            break;
+        case LR_RELOC_ARM64_PAGEOFF12:
+            rc = patch_aarch64_pageoff12(j->code_buf, j->code_size, rel->offset,
+                                         patch_target, false);
+            break;
+        case LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12:
+            rc = patch_aarch64_pageoff12(j->code_buf, j->code_size, rel->offset,
+                                         patch_target, true);
+            break;
+        default:
+            rc = -1;
+            break;
+        }
+        if (rc != 0)
+            break;
+    }
+
+    free(got_slots);
+    return rc;
 }
 
 static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
-                                const char **missing_symbol) {
-    void *self_addr = j->code_buf + j->code_size;
-    JIT_PROF_START(resolve);
-    int resolve_rc = resolve_global_operands(j, m, f, self_addr, missing_symbol);
-    JIT_PROF_END(resolve);
-    if (resolve_rc != 0)
-        return resolve_rc;
-
+                                lr_objfile_ctx_t *fixup_ctx, void **func_addr_out) {
     uint8_t *func_start = j->code_buf + j->code_size;
     size_t free_space = j->code_cap - j->code_size;
+    uint32_t reloc_base = fixup_ctx->num_relocs;
+    if (f->name && f->name[0]) {
+        uint32_t sym_idx = lr_obj_ensure_symbol(fixup_ctx, f->name, true, 1,
+                                                (uint32_t)j->code_size);
+        if (sym_idx == UINT32_MAX)
+            return -1;
+    }
     size_t code_len = 0;
     JIT_PROF_START(compile);
     int rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
@@ -749,8 +783,12 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     if (code_len > free_space)
         return -1;
 
+    for (uint32_t ri = reloc_base; ri < fixup_ctx->num_relocs; ri++)
+        fixup_ctx->relocs[ri].offset += (uint32_t)j->code_size;
+
+    if (func_addr_out)
+        *func_addr_out = func_start;
     j->code_size += code_len;
-    lr_jit_add_symbol(j, f->name, func_start);
     return 0;
 }
 
@@ -760,6 +798,11 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     bool own_wx_transition = !j->update_active;
     int rc = -1;
     size_t code_size_before = j->code_size;
+    lr_objfile_ctx_t fixup_ctx;
+    memset(&fixup_ctx, 0, sizeof(fixup_ctx));
+    bool fixup_ctx_ready = false;
+    void *saved_obj_ctx = NULL;
+    bool obj_ctx_installed = false;
 
     if (own_wx_transition) {
         JIT_PROF_START(make_writable);
@@ -814,57 +857,40 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
     JIT_PROF_END(pre_register);
 
-    JIT_PROF_START(compile_loop);
-    bool *compiled = lr_arena_array(j->arena, bool, nfuncs);
-    uint32_t *compile_order = lr_arena_array(j->arena, uint32_t, nfuncs);
-    uint32_t topo_count = 0;
-    if (!compiled || !compile_order)
+    fixup_ctx.preserve_symbol_names = true;
+    if (jit_build_module_symbol_cache(&fixup_ctx, m) != 0)
         goto done;
-    if (build_compile_order(m, funcs, nfuncs, j->arena, compile_order, &topo_count) != 0)
-        goto done;
+    fixup_ctx_ready = true;
+    saved_obj_ctx = m->obj_ctx;
+    m->obj_ctx = &fixup_ctx;
+    obj_ctx_installed = true;
 
-    uint32_t remaining = nfuncs;
-    const char *last_missing = NULL;
-    for (uint32_t oi = 0; oi < topo_count; oi++) {
-        uint32_t idx = compile_order[oi];
-        int func_rc = compile_one_function(j, m, funcs[idx], &last_missing);
-        if (func_rc == 1)
-            continue;
+    JIT_PROF_START(compile_loop);
+    void **func_addrs = lr_arena_array(j->arena, void *, nfuncs);
+    if (!func_addrs)
+        goto done;
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        int func_rc = compile_one_function(j, m, funcs[i], &fixup_ctx, &func_addrs[i]);
         if (func_rc != 0) {
             rc = func_rc;
             goto done;
         }
-        compiled[idx] = true;
-        remaining--;
-    }
-
-    while (remaining > 0) {
-        bool progress = false;
-        last_missing = NULL;
-
-        for (uint32_t i = 0; i < nfuncs; i++) {
-            if (compiled[i])
-                continue;
-
-            int func_rc = compile_one_function(j, m, funcs[i], &last_missing);
-            if (func_rc == 1)
-                continue;
-            if (func_rc != 0) {
-                rc = func_rc;
-                goto done;
-            }
-            compiled[i] = true;
-            remaining--;
-            progress = true;
-        }
-
-        if (!progress) {
-            if (last_missing)
-                fprintf(stderr, "unresolved symbol: %s\n", last_missing);
-            goto done;
-        }
     }
     JIT_PROF_END(compile_loop);
+
+    JIT_PROF_START(patch_fixups);
+    const char *missing_symbol = NULL;
+    if (apply_jit_relocs(j, &fixup_ctx, &missing_symbol) != 0) {
+        if (missing_symbol)
+            fprintf(stderr, "unresolved symbol: %s\n", missing_symbol);
+        goto done;
+    }
+    JIT_PROF_END(patch_fixups);
+
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        if (funcs[i]->name && funcs[i]->name[0] && func_addrs[i])
+            lr_jit_add_symbol(j, funcs[i]->name, func_addrs[i]);
+    }
 
     /* Re-apply relocations after module-defined function symbols exist.
        This fixes globals (e.g. vtables) referencing internal functions. */
@@ -874,6 +900,14 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     rc = 0;
 
 done:
+    if (obj_ctx_installed) {
+        m->obj_ctx = saved_obj_ctx;
+        obj_ctx_installed = false;
+    }
+    if (fixup_ctx_ready) {
+        jit_free_obj_ctx(&fixup_ctx);
+        fixup_ctx_ready = false;
+    }
     if (j->update_active && j->code_size > code_size_before)
         j->update_dirty = true;
     if (own_wx_transition) {

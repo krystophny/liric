@@ -648,6 +648,13 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
             lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)ldr_off, sym_idx,
                               LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12);
         }
+        if (op->global_offset != 0) {
+            /* Constant-GEP globals carry byte addends in global_offset. */
+            uint8_t add_reg = (reg == A64_X15) ? A64_X14 : A64_X15;
+            emit_move_imm_ctx(ctx, add_reg, op->global_offset, true);
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen,
+                     enc_add_reg(true, reg, reg, add_reg));
+        }
         invalidate_cached_reg_a64(ctx, reg);
     }
 }
@@ -1518,8 +1525,22 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                         emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
                 }
 
-                if (ctx.obj_ctx &&
-                    inst->operands[0].kind == LR_VAL_GLOBAL) {
+                bool emit_reloc_call = ctx.obj_ctx &&
+                                       inst->operands[0].kind == LR_VAL_GLOBAL;
+                if (emit_reloc_call && ctx.obj_ctx->preserve_symbol_names) {
+                    const lr_operand_t *callee = &inst->operands[0];
+                    const char *sym_name = lr_module_symbol_name(ctx.mod, callee->global_id);
+                    bool defined = false;
+                    if (sym_name) {
+                        if (callee->global_id < ctx.sym_count)
+                            defined = ctx.sym_defined[callee->global_id] != 0;
+                        else
+                            defined = is_symbol_defined_in_module(ctx.mod, sym_name);
+                    }
+                    emit_reloc_call = defined;
+                }
+
+                if (emit_reloc_call) {
                     const char *sym_name = lr_module_symbol_name(
                         ctx.mod, inst->operands[0].global_id);
                     if (sym_name) {
