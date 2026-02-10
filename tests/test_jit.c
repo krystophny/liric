@@ -1558,6 +1558,40 @@ int test_jit_external_call_abs(void) {
     return 0;
 }
 
+int test_jit_external_call_abs_twice(void) {
+    const char *src =
+        "declare i32 @abs(i32)\n"
+        "define i32 @call_abs_twice(i32 %x) {\n"
+        "entry:\n"
+        "  %a = call i32 @abs(i32 %x)\n"
+        "  %b = call i32 @abs(i32 -7)\n"
+        "  %sum = add i32 %a, %b\n"
+        "  ret i32 %sum\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int (*abs_fn)(int) = abs;
+    void *abs_addr = NULL;
+    memcpy(&abs_addr, &abs_fn, sizeof(abs_addr));
+    lr_jit_add_symbol(jit, "abs", abs_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(int);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_abs_twice");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(-5), 12, "external abs call reused across relocations");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_varargs_printf_call(void) {
     const char *src =
         "declare i32 @printf(ptr, ...)\n"

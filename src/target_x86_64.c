@@ -96,8 +96,6 @@ static uint32_t *build_vreg_use_counts(lr_arena_t *arena, lr_func_t *func,
         return NULL;
 
     uint32_t *counts = lr_arena_array(arena, uint32_t, func->next_vreg);
-    for (uint32_t i = 0; i < func->next_vreg; i++)
-        counts[i] = 0;
 
     for (uint32_t ii = 0; ii < func->num_linear_insts; ii++) {
         lr_inst_t *inst = func->linear_inst_array[ii];
@@ -1030,6 +1028,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                                 uint8_t *buf, size_t buflen, size_t *out_len,
                                 lr_arena_t *arena) {
     lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
+    uint32_t initial_stack_slots = func->next_vreg > 64 ? func->next_vreg : 64;
 
     uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
     uint32_t fc = nb * 2;
@@ -1038,9 +1037,9 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .buflen = buflen,
         .pos = 0,
         .stack_size = 0,
-        .stack_slots = NULL,
-        .stack_slot_sizes = NULL,
-        .num_stack_slots = 0,
+        .stack_slots = lr_arena_array(arena, int32_t, initial_stack_slots),
+        .stack_slot_sizes = lr_arena_array(arena, uint32_t, initial_stack_slots),
+        .num_stack_slots = initial_stack_slots,
         .static_alloca_offsets = NULL,
         .num_static_alloca_offsets = 0,
         .block_offsets = lr_arena_array_uninit(arena, size_t, nb),

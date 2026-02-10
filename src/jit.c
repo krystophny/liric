@@ -1453,10 +1453,18 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char
     if (!j || !ctx)
         return -1;
     void **got_slots = NULL;
+    void **resolved_targets = NULL;
+    uint8_t *resolved_mask = NULL;
     if (ctx->num_symbols > 0) {
         got_slots = (void **)calloc(ctx->num_symbols, sizeof(void *));
-        if (!got_slots)
+        resolved_targets = (void **)calloc(ctx->num_symbols, sizeof(void *));
+        resolved_mask = (uint8_t *)calloc(ctx->num_symbols, sizeof(uint8_t));
+        if (!got_slots || !resolved_targets || !resolved_mask) {
+            free(got_slots);
+            free(resolved_targets);
+            free(resolved_mask);
             return -1;
+        }
     }
 
     int rc = 0;
@@ -1469,15 +1477,21 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char
 
         const lr_obj_symbol_t *sym = &ctx->symbols[rel->symbol_idx];
         const char *sym_name = sym->name;
-        void *target_addr = NULL;
-        if (sym->is_defined && sym->section == 1) {
-            if ((size_t)sym->offset >= j->code_size) {
-                rc = -1;
-                break;
+        void *target_addr = resolved_targets ? resolved_targets[rel->symbol_idx] : NULL;
+        if (!resolved_mask || !resolved_mask[rel->symbol_idx]) {
+            if (sym->is_defined && sym->section == 1) {
+                if ((size_t)sym->offset >= j->code_size) {
+                    rc = -1;
+                    break;
+                }
+                target_addr = (void *)(j->code_buf + sym->offset);
+            } else {
+                target_addr = lookup_symbol(j, sym_name);
             }
-            target_addr = (void *)(j->code_buf + sym->offset);
-        } else {
-            target_addr = lookup_symbol(j, sym_name);
+            if (resolved_targets)
+                resolved_targets[rel->symbol_idx] = target_addr;
+            if (resolved_mask)
+                resolved_mask[rel->symbol_idx] = 1;
         }
         if (!target_addr) {
             if (missing_symbol)
@@ -1539,6 +1553,8 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char
     }
 
     free(got_slots);
+    free(resolved_targets);
+    free(resolved_mask);
     return rc;
 }
 
@@ -2333,7 +2349,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
             if (name && name[0]) {
                 uint32_t hash = symbol_hash(name);
                 if (!find_symbol_entry(j, name, hash))
-                    miss_cache_add(j, name, hash);
+                    if (!miss_cache_contains(j, name, hash))
+                        miss_cache_add(j, name, hash);
             }
         }
     }
