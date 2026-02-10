@@ -98,10 +98,22 @@ typedef struct {
     int signal;
     int timed_out;
     size_t iteration;
+    double elapsed_ms;
+    int timeout_ms;
+    size_t stdout_bytes;
+    size_t stderr_bytes;
+    size_t stdout_nonempty_lines;
+    size_t stderr_nonempty_lines;
+    int timeout_silent;
+    size_t time_report_phase_count;
+    double time_report_last_phase_ms;
     char *stdout_text;
     char *stderr_text;
     char *stdout_excerpt;
     char *stderr_excerpt;
+    char *last_stdout_line;
+    char *last_stderr_line;
+    char *time_report_last_phase;
     char *work_dir;
     char *stdout_log_path;
     char *stderr_log_path;
@@ -709,12 +721,145 @@ static const char *signal_name_from_num(int sig) {
     }
 }
 
+static char *copy_with_ellipsis(const char *s, size_t n, size_t max_len) {
+    char *out;
+    if (!s || n == 0) return xstrdup("");
+    if (n <= max_len) {
+        out = (char *)malloc(n + 1);
+        if (!out) die("out of memory", NULL);
+        memcpy(out, s, n);
+        out[n] = '\0';
+        return out;
+    }
+    if (max_len < 3) return xstrdup("");
+    out = (char *)malloc(max_len + 1);
+    if (!out) die("out of memory", NULL);
+    memcpy(out, s, max_len);
+    out[max_len] = '\0';
+    out[max_len - 3] = '.';
+    out[max_len - 2] = '.';
+    out[max_len - 1] = '.';
+    return out;
+}
+
+static char *last_nonempty_line(const char *text, size_t max_len, size_t *nonempty_lines_out) {
+    const char *line;
+    const char *last_start = NULL;
+    size_t last_len = 0;
+    size_t nonempty = 0;
+
+    if (!text) {
+        if (nonempty_lines_out) *nonempty_lines_out = 0;
+        return xstrdup("");
+    }
+
+    line = text;
+    while (*line) {
+        const char *raw_end = strchr(line, '\n');
+        const char *start = line;
+        const char *end;
+        if (!raw_end) raw_end = line + strlen(line);
+        end = raw_end;
+        if (end > start && end[-1] == '\r') end--;
+        while (start < end && (*start == ' ' || *start == '\t')) start++;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        if (end > start) {
+            nonempty++;
+            last_start = start;
+            last_len = (size_t)(end - start);
+        }
+        line = *raw_end ? raw_end + 1 : raw_end;
+    }
+
+    if (nonempty_lines_out) *nonempty_lines_out = nonempty;
+    if (!last_start) return xstrdup("");
+    return copy_with_ellipsis(last_start, last_len, max_len);
+}
+
+static int parse_phase_line_ms(const char *line_start,
+                               const char *line_end,
+                               const char *key,
+                               double *out_ms) {
+    size_t key_len = strlen(key);
+    const char *start = line_start;
+    const char *p;
+
+    while (start < line_end && (*start == ' ' || *start == '\t')) start++;
+    if ((size_t)(line_end - start) <= key_len) return 0;
+    if (strncmp(start, key, key_len) != 0) return 0;
+
+    p = start + key_len;
+    while (p < line_end && !isdigit((unsigned char)*p) && *p != '-' && *p != '.') p++;
+    if (p < line_end) {
+        char *q = NULL;
+        double v = strtod(p, &q);
+        if (q && q > p) {
+            *out_ms = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void extract_timeout_phase_progress(const char *stdout_text,
+                                           size_t *phase_count_out,
+                                           char **last_phase_out,
+                                           double *last_phase_ms_out) {
+    static const char *k_phase_keys[] = {
+        "File reading",
+        "Src -> ASR",
+        "ASR passes (total)",
+        "ASR -> mod",
+        "LLVM IR creation",
+        "LLVM opt",
+        "LLVM -> JIT",
+        "JIT run",
+        "Total time"
+    };
+    const char *line;
+    size_t i;
+    size_t phase_count = 0;
+    const char *last_phase = NULL;
+    double last_phase_ms = 0.0;
+
+    if (phase_count_out) *phase_count_out = 0;
+    if (last_phase_out) *last_phase_out = NULL;
+    if (last_phase_ms_out) *last_phase_ms_out = 0.0;
+    if (!stdout_text || !stdout_text[0]) return;
+
+    line = stdout_text;
+    while (*line) {
+        const char *raw_end = strchr(line, '\n');
+        const char *line_end;
+        if (!raw_end) raw_end = line + strlen(line);
+        line_end = raw_end;
+        if (line_end > line && line_end[-1] == '\r') line_end--;
+        for (i = 0; i < sizeof(k_phase_keys) / sizeof(k_phase_keys[0]); i++) {
+            double v = 0.0;
+            if (parse_phase_line_ms(line, line_end, k_phase_keys[i], &v)) {
+                phase_count++;
+                last_phase = k_phase_keys[i];
+                last_phase_ms = v;
+                break;
+            }
+        }
+        line = *raw_end ? raw_end + 1 : raw_end;
+    }
+
+    if (phase_count_out) *phase_count_out = phase_count;
+    if (last_phase_out && last_phase) *last_phase_out = xstrdup(last_phase);
+    if (last_phase_ms_out) *last_phase_ms_out = last_phase_ms;
+}
+
 static void skip_diag_reset(skip_diag_t *d) {
     if (!d) return;
     free(d->stdout_text);
     free(d->stderr_text);
     free(d->stdout_excerpt);
     free(d->stderr_excerpt);
+    free(d->last_stdout_line);
+    free(d->last_stderr_line);
+    free(d->time_report_last_phase);
     free(d->work_dir);
     free(d->stdout_log_path);
     free(d->stderr_log_path);
@@ -738,20 +883,37 @@ static void skip_diag_from_cmd(skip_diag_t *d,
                                const char *reason,
                                const char *failing_side,
                                size_t iteration,
-                               const cmd_result_t *r) {
+                               const cmd_result_t *r,
+                               int timeout_ms) {
     skip_diag_reset(d);
     d->reason = reason;
     d->failing_side = failing_side;
     d->iteration = iteration;
     d->timed_out = r ? r->timed_out : 0;
+    d->timeout_ms = timeout_ms;
     if (r) {
+        size_t stream_nonempty = 0;
         d->has_rc = 1;
         d->rc = r->rc;
+        d->elapsed_ms = r->elapsed_ms;
         if (r->rc < 0) d->signal = -r->rc;
         d->stdout_text = xstrdup(r->stdout_text ? r->stdout_text : "");
         d->stderr_text = xstrdup(r->stderr_text ? r->stderr_text : "");
+        d->stdout_bytes = strlen(d->stdout_text);
+        d->stderr_bytes = strlen(d->stderr_text);
         d->stdout_excerpt = make_excerpt(d->stdout_text, 256);
         d->stderr_excerpt = make_excerpt(d->stderr_text, 256);
+        d->last_stdout_line = last_nonempty_line(d->stdout_text, 160, &stream_nonempty);
+        d->stdout_nonempty_lines = stream_nonempty;
+        d->last_stderr_line = last_nonempty_line(d->stderr_text, 160, &stream_nonempty);
+        d->stderr_nonempty_lines = stream_nonempty;
+        if (d->timed_out) {
+            extract_timeout_phase_progress(d->stdout_text,
+                                           &d->time_report_phase_count,
+                                           &d->time_report_last_phase,
+                                           &d->time_report_last_phase_ms);
+            d->timeout_silent = (d->stdout_nonempty_lines == 0 && d->stderr_nonempty_lines == 0);
+        }
     }
 }
 
@@ -953,6 +1115,45 @@ static void write_json_nonzero_compat_row(FILE *f, const char *name, int rc) {
     free(en);
 }
 
+static void write_json_skip_diag_fields(FILE *f, const skip_diag_t *diag) {
+    char *last_stdout = NULL;
+    char *last_stderr = NULL;
+    char *last_phase = NULL;
+    if (!f || !diag) return;
+
+    fprintf(f,
+            ",\"elapsed_ms\":%.3f,\"timeout_ms\":%d,"
+            "\"stdout_bytes\":%zu,\"stderr_bytes\":%zu,"
+            "\"stdout_nonempty_lines\":%zu,\"stderr_nonempty_lines\":%zu",
+            diag->elapsed_ms, diag->timeout_ms,
+            diag->stdout_bytes, diag->stderr_bytes,
+            diag->stdout_nonempty_lines, diag->stderr_nonempty_lines);
+
+    if (diag->last_stdout_line && diag->last_stdout_line[0] != '\0') {
+        last_stdout = json_escape(diag->last_stdout_line);
+        fprintf(f, ",\"last_stdout_line\":\"%s\"", last_stdout);
+    }
+    if (diag->last_stderr_line && diag->last_stderr_line[0] != '\0') {
+        last_stderr = json_escape(diag->last_stderr_line);
+        fprintf(f, ",\"last_stderr_line\":\"%s\"", last_stderr);
+    }
+
+    if (diag->timed_out) {
+        fprintf(f, ",\"timeout_silent\":%s,\"time_report_phase_count\":%zu",
+                diag->timeout_silent ? "true" : "false",
+                diag->time_report_phase_count);
+        if (diag->time_report_last_phase && diag->time_report_last_phase[0] != '\0') {
+            last_phase = json_escape(diag->time_report_last_phase);
+            fprintf(f, ",\"time_report_last_phase\":\"%s\",\"time_report_last_phase_ms\":%.6f",
+                    last_phase, diag->time_report_last_phase_ms);
+        }
+    }
+
+    free(last_stdout);
+    free(last_stderr);
+    free(last_phase);
+}
+
 static void write_json_skip_row(FILE *f, const char *name, const skip_diag_t *diag) {
     char *en = json_escape(name ? name : "");
     char *er = json_escape((diag && diag->reason) ? diag->reason : "unknown");
@@ -972,6 +1173,7 @@ static void write_json_skip_row(FILE *f, const char *name, const skip_diag_t *di
             (diag && diag->has_rc) ? diag->rc : 0,
             (diag && diag->signal > 0) ? diag->signal : 0,
             sig_name, esout, eserr);
+    if (diag) write_json_skip_diag_fields(f, diag);
     if (diag && diag->work_dir) {
         char *ework = json_escape(diag->work_dir);
         fprintf(f, ",\"work_dir\":\"%s\"", ework);
@@ -1016,6 +1218,7 @@ static void write_json_failure_detail_row(FILE *f, const char *name, const skip_
             (diag && diag->has_rc) ? diag->rc : 0,
             (diag && diag->signal > 0) ? diag->signal : 0,
             sig_name, esout, eserr);
+    if (diag) write_json_skip_diag_fields(f, diag);
     if (diag && diag->work_dir) {
         char *ework = json_escape(diag->work_dir);
         fprintf(f, ",\"work_dir\":\"%s\"", ework);
@@ -1349,7 +1552,7 @@ int main(int argc, char **argv) {
                 free(llvm_argv);
                 if (llvm_r.timed_out) {
                     skip_reason = "llvm_jit_timeout";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r);
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
                     free_cmd_result(&llvm_r);
                     break;
                 }
@@ -1370,7 +1573,7 @@ int main(int argc, char **argv) {
                 free(liric_argv);
                 if (liric_r.timed_out) {
                     skip_reason = "liric_jit_timeout";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r);
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
@@ -1395,10 +1598,10 @@ int main(int argc, char **argv) {
                         nonzero_compat_rc = llvm_r.rc;
                     } else if (llvm_r.rc != 0) {
                         skip_reason = classify_jit_failure_reason(0, llvm_r.rc);
-                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r);
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
                     } else {
                         skip_reason = classify_jit_failure_reason(1, liric_r.rc);
-                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r);
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
                     }
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
@@ -1408,7 +1611,7 @@ int main(int argc, char **argv) {
                 memset(&llvm_time, 0, sizeof(llvm_time));
                 if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
                     skip_reason = "llvm_jit_failed";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r);
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
@@ -1416,7 +1619,7 @@ int main(int argc, char **argv) {
                 memset(&liric_time, 0, sizeof(liric_time));
                 if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
                     skip_reason = "liric_jit_failed";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r);
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
