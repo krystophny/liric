@@ -76,6 +76,10 @@ static int append_ir(char *buf, size_t cap, size_t *pos, const char *fmt, ...) {
     return 0;
 }
 
+static int prefetch_mid1_stub(void) {
+    return 41;
+}
+
 int test_jit_ret_42(void) {
     const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
     lr_arena_t *arena = lr_arena_create(0);
@@ -705,6 +709,111 @@ int test_jit_parallel_prefetch_replays_pending_functions(void) {
 
     if (lr_jit_materialize_cache_entries() < 2) {
         fprintf(stderr, "  FAIL: prefetched dependencies populate cache (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_parallel_prefetch_env(old_env, had_old_env);
+    return status;
+}
+
+int test_jit_parallel_prefetch_caches_transitive_chain(void) {
+    const char *src =
+        "define i32 @leaf() {\n"
+        "entry:\n"
+        "  ret i32 39\n"
+        "}\n"
+        "define i32 @mid2() {\n"
+        "entry:\n"
+        "  %v = call i32 @leaf()\n"
+        "  %r = add i32 %v, 1\n"
+        "  ret i32 %r\n"
+        "}\n"
+        "define i32 @mid1() {\n"
+        "entry:\n"
+        "  %v = call i32 @mid2()\n"
+        "  %r = add i32 %v, 1\n"
+        "  ret i32 %r\n"
+        "}\n"
+        "define i32 @root() {\n"
+        "entry:\n"
+        "  %v = call i32 @mid1()\n"
+        "  %r = add i32 %v, 1\n"
+        "  ret i32 %r\n"
+        "}\n"
+        "define i32 @unused() {\n"
+        "entry:\n"
+        "  ret i32 7\n"
+        "}\n";
+
+    char *old_env = NULL;
+    int had_old_env = 0;
+    if (set_parallel_prefetch_env("4", &old_env, &had_old_env) != 0) {
+        fprintf(stderr, "  FAIL: set parallel prefetch env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena = NULL;
+    lr_jit_t *jit = NULL;
+
+    lr_jit_materialize_cache_invalidate_all();
+    lr_jit_materialize_cache_reset_stats();
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
+    lr_module_t *m = parse(src, arena);
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    /* Keep root materialization from recursively compiling mid1 so cache
+       growth reflects prefetch reachability through mid1->mid2->leaf. */
+    lr_jit_add_symbol(jit, "mid1", (void *)(uintptr_t)&prefetch_mid1_stub);
+
+    if (lr_jit_add_module(jit, m) != 0) {
+        fprintf(stderr, "  FAIL: jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    typedef int (*fn_t)(void);
+    fn_t root_fn = NULL;
+    LR_JIT_GET_FN(root_fn, jit, "root");
+    if (!root_fn) {
+        fprintf(stderr, "  FAIL: function root lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (root_fn() != 42) {
+        fprintf(stderr, "  FAIL: root() result (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_hits() != 0) {
+        fprintf(stderr, "  FAIL: internal prefetch hits are not counted (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_misses() < 1) {
+        fprintf(stderr, "  FAIL: top-level materialization records miss (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    if (lr_jit_materialize_cache_entries() < 4) {
+        fprintf(stderr, "  FAIL: transitive reachable chain populates cache (line %d)\n", __LINE__);
         goto done;
     }
 
