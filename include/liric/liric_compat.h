@@ -338,6 +338,8 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lr_type_t *ty, const char *name);
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block);
+/* Finalization is idempotent; lc_module_finalize_phis owns lc_phi_node_t
+   lifetime and releases nodes at module materialization time. */
 void lc_phi_finalize(lc_phi_node_t *phi);
 
 /* Select */
