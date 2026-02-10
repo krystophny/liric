@@ -456,6 +456,47 @@ int test_jit_alloca_load_store(void) {
     return 0;
 }
 
+int test_jit_typeless_load_defaults_to_ptr_width(void) {
+    const char *src =
+        "define i64 @load42() {\n"
+        "entry:\n"
+        "  %p = alloca i64\n"
+        "  store i64 42, ptr %p\n"
+        "  %v = load i64, ptr %p\n"
+        "  ret i64 %v\n"
+        "}\n";
+    int patched = 0;
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    for (lr_func_t *f = m->first_func; f && !patched; f = f->next) {
+        for (lr_block_t *b = f->first_block; b && !patched; b = b->next) {
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                if (inst->op == LR_OP_LOAD) {
+                    inst->type = NULL;
+                    patched = 1;
+                    break;
+                }
+            }
+        }
+    }
+    TEST_ASSERT_EQ(patched, 1, "patched one load to typeless");
+
+    lr_jit_t *jit = lr_jit_create();
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef long long (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "load42");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 42, "typeless load defaults to pointer width");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_alloca_many_static_slots(void) {
     enum { NUM_ALLOCA = 256 };
     char src[65536];
