@@ -58,6 +58,33 @@ static void restore_parallel_prefetch_env(char *old_value, int had_old_value) {
     free(old_value);
 }
 
+static int set_lazy_materialization_env(const char *value, char **old_value, int *had_old_value) {
+    const char *prev = getenv("LIRIC_JIT_LAZY");
+    *had_old_value = (prev != NULL);
+    *old_value = NULL;
+    if (prev) {
+        *old_value = strdup(prev);
+        if (!*old_value)
+            return -1;
+    }
+    if (setenv("LIRIC_JIT_LAZY", value, 1) != 0) {
+        free(*old_value);
+        *old_value = NULL;
+        *had_old_value = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static void restore_lazy_materialization_env(char *old_value, int had_old_value) {
+    if (had_old_value) {
+        (void)setenv("LIRIC_JIT_LAZY", old_value ? old_value : "0", 1);
+    } else {
+        (void)unsetenv("LIRIC_JIT_LAZY");
+    }
+    free(old_value);
+}
+
 static int append_ir(char *buf, size_t cap, size_t *pos, const char *fmt, ...) {
     if (*pos >= cap)
         return -1;
@@ -581,20 +608,52 @@ int test_jit_unresolved_symbol_fails(void) {
         "  %0 = call i32 @missing()\n"
         "  ret i32 %0\n"
         "}\n";
-    lr_arena_t *arena = lr_arena_create(0);
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena = NULL;
+    lr_jit_t *jit = NULL;
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_module_t *m = parse(src, arena);
-    TEST_ASSERT(m != NULL, "parse");
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
 
-    lr_jit_t *jit = lr_jit_create();
-    TEST_ASSERT(jit != NULL, "jit create");
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
     int rc = lr_jit_add_module(jit, m);
-    TEST_ASSERT_EQ(rc, 0, "jit add module succeeds before lazy materialization");
-    TEST_ASSERT(lr_jit_get_function(jit, "f") == NULL,
-                "function materialization fails for unresolved symbol");
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: jit add module succeeds before lazy materialization (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_get_function(jit, "f") != NULL) {
+        fprintf(stderr, "  FAIL: function materialization fails for unresolved symbol (line %d)\n", __LINE__);
+        goto done;
+    }
 
-    lr_jit_destroy(jit);
-    lr_arena_destroy(arena);
-    return 0;
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
+    return status;
 }
 
 int test_jit_lazy_materializes_reachable_functions_only(void) {
@@ -608,26 +667,65 @@ int test_jit_lazy_materializes_reachable_functions_only(void) {
         "  %v = call i32 @missing()\n"
         "  ret i32 %v\n"
         "}\n";
-    lr_arena_t *arena = lr_arena_create(0);
-    lr_module_t *m = parse(src, arena);
-    TEST_ASSERT(m != NULL, "parse");
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
 
-    lr_jit_t *jit = lr_jit_create();
-    TEST_ASSERT(jit != NULL, "jit create");
+    int status = 1;
+    lr_arena_t *arena = NULL;
+    lr_jit_t *jit = NULL;
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
+    lr_module_t *m = parse(src, arena);
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
     int rc = lr_jit_add_module(jit, m);
-    TEST_ASSERT_EQ(rc, 0, "jit add module");
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
 
     typedef int (*fn_t)(void);
-    fn_t ok_fn; LR_JIT_GET_FN(ok_fn, jit, "ok");
-    TEST_ASSERT(ok_fn != NULL, "ok materializes");
-    TEST_ASSERT_EQ(ok_fn(), 42, "ok() returns 42");
+    fn_t ok_fn = NULL;
+    LR_JIT_GET_FN(ok_fn, jit, "ok");
+    if (!ok_fn) {
+        fprintf(stderr, "  FAIL: ok materializes (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (ok_fn() != 42) {
+        fprintf(stderr, "  FAIL: ok() returns 42 (line %d)\n", __LINE__);
+        goto done;
+    }
 
-    TEST_ASSERT(lr_jit_get_function(jit, "bad") == NULL,
-                "bad materialization fails without breaking ok");
+    if (lr_jit_get_function(jit, "bad") != NULL) {
+        fprintf(stderr, "  FAIL: bad materialization fails without breaking ok (line %d)\n", __LINE__);
+        goto done;
+    }
 
-    lr_jit_destroy(jit);
-    lr_arena_destroy(arena);
-    return 0;
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
+    return status;
 }
 
 int test_jit_parallel_prefetch_replays_pending_functions(void) {
@@ -652,10 +750,18 @@ int test_jit_parallel_prefetch_replays_pending_functions(void) {
         "  ret i32 %r\n"
         "}\n";
 
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
     char *old_env = NULL;
     int had_old_env = 0;
     if (set_parallel_prefetch_env("4", &old_env, &had_old_env) != 0) {
         fprintf(stderr, "  FAIL: set parallel prefetch env (line %d)\n", __LINE__);
+        restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
         return 1;
     }
 
@@ -720,6 +826,7 @@ done:
     if (arena)
         lr_arena_destroy(arena);
     restore_parallel_prefetch_env(old_env, had_old_env);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
     return status;
 }
 
@@ -752,10 +859,18 @@ int test_jit_parallel_prefetch_caches_transitive_chain(void) {
         "  ret i32 7\n"
         "}\n";
 
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
     char *old_env = NULL;
     int had_old_env = 0;
     if (set_parallel_prefetch_env("4", &old_env, &had_old_env) != 0) {
         fprintf(stderr, "  FAIL: set parallel prefetch env (line %d)\n", __LINE__);
+        restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
         return 1;
     }
 
@@ -825,6 +940,7 @@ done:
     if (arena)
         lr_arena_destroy(arena);
     restore_parallel_prefetch_env(old_env, had_old_env);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
     return status;
 }
 
@@ -862,10 +978,18 @@ int test_jit_parallel_prefetch_stress_repeatable(void) {
         "  ret i32 %r\n"
         "}\n";
 
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
     char *old_env = NULL;
     int had_old_env = 0;
     if (set_parallel_prefetch_env("4", &old_env, &had_old_env) != 0) {
         fprintf(stderr, "  FAIL: set parallel prefetch env (line %d)\n", __LINE__);
+        restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
         return 1;
     }
 
@@ -930,6 +1054,7 @@ int test_jit_parallel_prefetch_stress_repeatable(void) {
 
 done:
     restore_parallel_prefetch_env(old_env, had_old_env);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
     return status;
 }
 
@@ -946,44 +1071,124 @@ int test_jit_materialization_cache_reuse_across_jits(void) {
         "  ret i32 %r\n"
         "}\n";
 
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena1 = NULL;
+    lr_jit_t *jit1 = NULL;
+    lr_arena_t *arena2 = NULL;
+    lr_jit_t *jit2 = NULL;
+    uint32_t epoch_before = 0;
+    typedef int (*fn_t)(void);
+
     lr_jit_materialize_cache_invalidate_all();
     lr_jit_materialize_cache_reset_stats();
-    uint32_t epoch_before = lr_jit_materialize_cache_epoch();
+    epoch_before = lr_jit_materialize_cache_epoch();
 
-    lr_arena_t *arena1 = lr_arena_create(0);
+    arena1 = lr_arena_create(0);
+    if (!arena1) {
+        fprintf(stderr, "  FAIL: arena1 create (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_module_t *m1 = parse(src, arena1);
-    TEST_ASSERT(m1 != NULL, "parse first module");
-    lr_jit_t *jit1 = lr_jit_create();
-    TEST_ASSERT(jit1 != NULL, "first jit create");
+    if (!m1) {
+        fprintf(stderr, "  FAIL: parse first module (line %d)\n", __LINE__);
+        goto done;
+    }
+    jit1 = lr_jit_create();
+    if (!jit1) {
+        fprintf(stderr, "  FAIL: first jit create (line %d)\n", __LINE__);
+        goto done;
+    }
     int rc = lr_jit_add_module(jit1, m1);
-    TEST_ASSERT_EQ(rc, 0, "first jit add module");
-    typedef int (*fn_t)(void);
-    fn_t f1; LR_JIT_GET_FN(f1, jit1, "f");
-    TEST_ASSERT(f1 != NULL, "first function lookup");
-    TEST_ASSERT_EQ(f1(), 42, "first f() returns 42");
-    TEST_ASSERT(lr_jit_materialize_cache_misses() >= 1, "first materialization has cache miss");
-    TEST_ASSERT_EQ(lr_jit_materialize_cache_hits(), 0, "no cache hits on first materialization");
-    TEST_ASSERT(lr_jit_materialize_cache_entries() >= 1, "cache stores first materialized function");
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: first jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+    fn_t f1 = NULL;
+    LR_JIT_GET_FN(f1, jit1, "f");
+    if (!f1) {
+        fprintf(stderr, "  FAIL: first function lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (f1() != 42) {
+        fprintf(stderr, "  FAIL: first f() returns 42 (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_misses() < 1) {
+        fprintf(stderr, "  FAIL: first materialization has cache miss (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_hits() != 0) {
+        fprintf(stderr, "  FAIL: no cache hits on first materialization (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_entries() < 1) {
+        fprintf(stderr, "  FAIL: cache stores first materialized function (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_jit_destroy(jit1);
+    jit1 = NULL;
     lr_arena_destroy(arena1);
+    arena1 = NULL;
 
-    lr_arena_t *arena2 = lr_arena_create(0);
+    arena2 = lr_arena_create(0);
+    if (!arena2) {
+        fprintf(stderr, "  FAIL: arena2 create (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_module_t *m2 = parse(src, arena2);
-    TEST_ASSERT(m2 != NULL, "parse second module");
-    lr_jit_t *jit2 = lr_jit_create();
-    TEST_ASSERT(jit2 != NULL, "second jit create");
+    if (!m2) {
+        fprintf(stderr, "  FAIL: parse second module (line %d)\n", __LINE__);
+        goto done;
+    }
+    jit2 = lr_jit_create();
+    if (!jit2) {
+        fprintf(stderr, "  FAIL: second jit create (line %d)\n", __LINE__);
+        goto done;
+    }
     rc = lr_jit_add_module(jit2, m2);
-    TEST_ASSERT_EQ(rc, 0, "second jit add module");
-    fn_t f2; LR_JIT_GET_FN(f2, jit2, "f");
-    TEST_ASSERT(f2 != NULL, "second function lookup");
-    TEST_ASSERT_EQ(f2(), 42, "second f() returns 42");
-    TEST_ASSERT(lr_jit_materialize_cache_hits() >= 1, "second materialization reuses cache");
-    TEST_ASSERT_EQ(lr_jit_materialize_cache_epoch(), epoch_before,
-                   "cache epoch unchanged without explicit invalidation");
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: second jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+    fn_t f2 = NULL;
+    LR_JIT_GET_FN(f2, jit2, "f");
+    if (!f2) {
+        fprintf(stderr, "  FAIL: second function lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (f2() != 42) {
+        fprintf(stderr, "  FAIL: second f() returns 42 (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_hits() < 1) {
+        fprintf(stderr, "  FAIL: second materialization reuses cache (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_epoch() != epoch_before) {
+        fprintf(stderr, "  FAIL: cache epoch unchanged without explicit invalidation (line %d)\n", __LINE__);
+        goto done;
+    }
 
-    lr_jit_destroy(jit2);
-    lr_arena_destroy(arena2);
-    return 0;
+    status = 0;
+
+done:
+    if (jit2)
+        lr_jit_destroy(jit2);
+    if (arena2)
+        lr_arena_destroy(arena2);
+    if (jit1)
+        lr_jit_destroy(jit1);
+    if (arena1)
+        lr_arena_destroy(arena1);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
+    return status;
 }
 
 int test_jit_materialization_cache_invalidation_epoch(void) {
@@ -993,49 +1198,128 @@ int test_jit_materialization_cache_invalidation_epoch(void) {
         "  ret i32 7\n"
         "}\n";
 
+    char *old_lazy_env = NULL;
+    int had_old_lazy_env = 0;
+    if (set_lazy_materialization_env("1", &old_lazy_env, &had_old_lazy_env) != 0) {
+        fprintf(stderr, "  FAIL: set lazy materialization env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena1 = NULL;
+    lr_jit_t *jit1 = NULL;
+    lr_arena_t *arena2 = NULL;
+    lr_jit_t *jit2 = NULL;
+    uint32_t epoch_before = 0;
+    typedef int (*fn_t)(void);
+
     lr_jit_materialize_cache_invalidate_all();
     lr_jit_materialize_cache_reset_stats();
-    uint32_t epoch_before = lr_jit_materialize_cache_epoch();
+    epoch_before = lr_jit_materialize_cache_epoch();
 
-    lr_arena_t *arena1 = lr_arena_create(0);
+    arena1 = lr_arena_create(0);
+    if (!arena1) {
+        fprintf(stderr, "  FAIL: arena1 create (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_module_t *m1 = parse(src, arena1);
-    TEST_ASSERT(m1 != NULL, "parse first module");
-    lr_jit_t *jit1 = lr_jit_create();
-    TEST_ASSERT(jit1 != NULL, "first jit create");
+    if (!m1) {
+        fprintf(stderr, "  FAIL: parse first module (line %d)\n", __LINE__);
+        goto done;
+    }
+    jit1 = lr_jit_create();
+    if (!jit1) {
+        fprintf(stderr, "  FAIL: first jit create (line %d)\n", __LINE__);
+        goto done;
+    }
     int rc = lr_jit_add_module(jit1, m1);
-    TEST_ASSERT_EQ(rc, 0, "first jit add module");
-    typedef int (*fn_t)(void);
-    fn_t f1; LR_JIT_GET_FN(f1, jit1, "f");
-    TEST_ASSERT(f1 != NULL, "first function lookup");
-    TEST_ASSERT_EQ(f1(), 7, "first f() returns 7");
-    TEST_ASSERT(lr_jit_materialize_cache_entries() >= 1, "cache contains entry before invalidate");
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: first jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+    fn_t f1 = NULL;
+    LR_JIT_GET_FN(f1, jit1, "f");
+    if (!f1) {
+        fprintf(stderr, "  FAIL: first function lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (f1() != 7) {
+        fprintf(stderr, "  FAIL: first f() returns 7 (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_entries() < 1) {
+        fprintf(stderr, "  FAIL: cache contains entry before invalidate (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_jit_destroy(jit1);
+    jit1 = NULL;
     lr_arena_destroy(arena1);
+    arena1 = NULL;
 
     lr_jit_materialize_cache_invalidate_all();
     uint32_t epoch_after = lr_jit_materialize_cache_epoch();
-    TEST_ASSERT(epoch_after != epoch_before, "explicit invalidation bumps cache epoch");
-    TEST_ASSERT_EQ(lr_jit_materialize_cache_entries(), 0, "explicit invalidation clears cache entries");
+    if (epoch_after == epoch_before) {
+        fprintf(stderr, "  FAIL: explicit invalidation bumps cache epoch (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_entries() != 0) {
+        fprintf(stderr, "  FAIL: explicit invalidation clears cache entries (line %d)\n", __LINE__);
+        goto done;
+    }
 
     lr_jit_materialize_cache_reset_stats();
-    lr_arena_t *arena2 = lr_arena_create(0);
+    arena2 = lr_arena_create(0);
+    if (!arena2) {
+        fprintf(stderr, "  FAIL: arena2 create (line %d)\n", __LINE__);
+        goto done;
+    }
     lr_module_t *m2 = parse(src, arena2);
-    TEST_ASSERT(m2 != NULL, "parse second module");
-    lr_jit_t *jit2 = lr_jit_create();
-    TEST_ASSERT(jit2 != NULL, "second jit create");
+    if (!m2) {
+        fprintf(stderr, "  FAIL: parse second module (line %d)\n", __LINE__);
+        goto done;
+    }
+    jit2 = lr_jit_create();
+    if (!jit2) {
+        fprintf(stderr, "  FAIL: second jit create (line %d)\n", __LINE__);
+        goto done;
+    }
     rc = lr_jit_add_module(jit2, m2);
-    TEST_ASSERT_EQ(rc, 0, "second jit add module");
-    fn_t f2; LR_JIT_GET_FN(f2, jit2, "f");
-    TEST_ASSERT(f2 != NULL, "second function lookup");
-    TEST_ASSERT_EQ(f2(), 7, "second f() returns 7");
-    TEST_ASSERT_EQ(lr_jit_materialize_cache_hits(), 0,
-                   "no cache hit immediately after explicit invalidation");
-    TEST_ASSERT(lr_jit_materialize_cache_misses() >= 1,
-                "cache miss occurs after explicit invalidation");
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: second jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+    fn_t f2 = NULL;
+    LR_JIT_GET_FN(f2, jit2, "f");
+    if (!f2) {
+        fprintf(stderr, "  FAIL: second function lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (f2() != 7) {
+        fprintf(stderr, "  FAIL: second f() returns 7 (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_hits() != 0) {
+        fprintf(stderr, "  FAIL: no cache hit immediately after explicit invalidation (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_misses() < 1) {
+        fprintf(stderr, "  FAIL: cache miss occurs after explicit invalidation (line %d)\n", __LINE__);
+        goto done;
+    }
 
-    lr_jit_destroy(jit2);
-    lr_arena_destroy(arena2);
-    return 0;
+    status = 0;
+
+done:
+    if (jit2)
+        lr_jit_destroy(jit2);
+    if (arena2)
+        lr_arena_destroy(arena2);
+    if (jit1)
+        lr_jit_destroy(jit1);
+    if (arena1)
+        lr_arena_destroy(arena1);
+    restore_lazy_materialization_env(old_lazy_env, had_old_lazy_env);
+    return status;
 }
 
 int test_jit_fadd_double_bits(void) {
