@@ -502,6 +502,42 @@ static int test_irbuilder_memory() {
     return 0;
 }
 
+static int test_alloca_casting_precision() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("alloca_cast", ctx);
+
+    llvm::Type *i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i64, false);
+    llvm::Function *fn = mod.createFunction("test_alloca_cast", ft, false);
+    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(fn);
+    builder.SetInsertPoint(bb);
+
+    llvm::Value *c1 = llvm::ConstantInt::get(i64, 1);
+    llvm::Value *c2 = llvm::ConstantInt::get(i64, 2);
+    llvm::Value *sum = builder.CreateAdd(c1, c2, "sum");
+    TEST_ASSERT(sum != nullptr, "sum created");
+    TEST_ASSERT(!llvm::isa<llvm::AllocaInst>(sum),
+                "non-alloca instruction must not be recognized as AllocaInst");
+    TEST_ASSERT(llvm::dyn_cast<llvm::AllocaInst>(sum) == nullptr,
+                "dyn_cast<AllocaInst> must reject non-alloca values");
+
+    llvm::AllocaInst *slot = builder.CreateAlloca(i64, nullptr, "slot");
+    TEST_ASSERT(slot != nullptr, "alloca created");
+    llvm::Value *as_value = slot;
+    TEST_ASSERT(llvm::isa<llvm::AllocaInst>(as_value),
+                "alloca value recognized as AllocaInst");
+    TEST_ASSERT(llvm::dyn_cast<llvm::AllocaInst>(as_value) == slot,
+                "dyn_cast<AllocaInst> returns original alloca");
+    TEST_ASSERT(slot->getAllocatedType() == i64, "alloca type preserved");
+
+    builder.CreateRet(sum);
+    return 0;
+}
+
 static int test_irbuilder_casts() {
     llvm::LLVMContext ctx;
     llvm::Module mod("casts", ctx);
@@ -1108,6 +1144,7 @@ int main() {
     RUN_TEST(test_irbuilder_arithmetic);
     RUN_TEST(test_irbuilder_control_flow);
     RUN_TEST(test_irbuilder_memory);
+    RUN_TEST(test_alloca_casting_precision);
     RUN_TEST(test_irbuilder_casts);
     RUN_TEST(test_irbuilder_fp_ops);
     RUN_TEST(test_irbuilder_gep_and_struct_gep);

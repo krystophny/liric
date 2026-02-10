@@ -13,6 +13,13 @@ public:
         return static_cast<AllocaInst *>(Value::wrap(v));
     }
 
+    static bool classof(const Value *V) {
+        if (!V) return false;
+        lc_value_t *impl = V->impl();
+        if (!impl || impl->kind != LC_VAL_VREG) return false;
+        return lc_value_get_alloca_type(impl) != nullptr;
+    }
+
     Type *getAllocatedType() const {
         lr_type_t *at = lc_value_get_alloca_type(impl());
         return at ? Type::wrap(at) : nullptr;
