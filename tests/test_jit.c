@@ -31,6 +31,33 @@ static lr_module_t *parse(const char *src, lr_arena_t *arena) {
     return m;
 }
 
+static int set_parallel_prefetch_env(const char *value, char **old_value, int *had_old_value) {
+    const char *prev = getenv("LIRIC_JIT_MAT_THREADS");
+    *had_old_value = (prev != NULL);
+    *old_value = NULL;
+    if (prev) {
+        *old_value = strdup(prev);
+        if (!*old_value)
+            return -1;
+    }
+    if (setenv("LIRIC_JIT_MAT_THREADS", value, 1) != 0) {
+        free(*old_value);
+        *old_value = NULL;
+        *had_old_value = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static void restore_parallel_prefetch_env(char *old_value, int had_old_value) {
+    if (had_old_value) {
+        (void)setenv("LIRIC_JIT_MAT_THREADS", old_value ? old_value : "1", 1);
+    } else {
+        (void)unsetenv("LIRIC_JIT_MAT_THREADS");
+    }
+    free(old_value);
+}
+
 static int append_ir(char *buf, size_t cap, size_t *pos, const char *fmt, ...) {
     if (*pos >= cap)
         return -1;
@@ -597,6 +624,204 @@ int test_jit_lazy_materializes_reachable_functions_only(void) {
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
     return 0;
+}
+
+int test_jit_parallel_prefetch_replays_pending_functions(void) {
+    const char *src =
+        "define i32 @g() {\n"
+        "entry:\n"
+        "  ret i32 40\n"
+        "}\n"
+        "define i32 @h() {\n"
+        "entry:\n"
+        "  ret i32 2\n"
+        "}\n"
+        "define i32 @unused() {\n"
+        "entry:\n"
+        "  ret i32 7\n"
+        "}\n"
+        "define i32 @f() {\n"
+        "entry:\n"
+        "  %a = call i32 @g()\n"
+        "  %b = call i32 @h()\n"
+        "  %r = add i32 %a, %b\n"
+        "  ret i32 %r\n"
+        "}\n";
+
+    char *old_env = NULL;
+    int had_old_env = 0;
+    if (set_parallel_prefetch_env("4", &old_env, &had_old_env) != 0) {
+        fprintf(stderr, "  FAIL: set parallel prefetch env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    lr_arena_t *arena = NULL;
+    lr_jit_t *jit = NULL;
+
+    lr_jit_materialize_cache_invalidate_all();
+    lr_jit_materialize_cache_reset_stats();
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
+    lr_module_t *m = parse(src, arena);
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_add_module(jit, m) != 0) {
+        fprintf(stderr, "  FAIL: jit add module (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    typedef int (*fn_t)(void);
+    fn_t f_fn = NULL;
+    LR_JIT_GET_FN(f_fn, jit, "f");
+    if (!f_fn) {
+        fprintf(stderr, "  FAIL: function f lookup (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (f_fn() != 42) {
+        fprintf(stderr, "  FAIL: f() result (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_hits() != 0) {
+        fprintf(stderr, "  FAIL: internal prefetch hits are not counted (line %d)\n", __LINE__);
+        goto done;
+    }
+    if (lr_jit_materialize_cache_misses() < 1) {
+        fprintf(stderr, "  FAIL: top-level materialization records miss (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    if (lr_jit_materialize_cache_entries() < 2) {
+        fprintf(stderr, "  FAIL: prefetched dependencies populate cache (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_parallel_prefetch_env(old_env, had_old_env);
+    return status;
+}
+
+int test_jit_parallel_prefetch_stress_repeatable(void) {
+    const char *src =
+        "define i32 @g() {\n"
+        "entry:\n"
+        "  ret i32 40\n"
+        "}\n"
+        "define i32 @h() {\n"
+        "entry:\n"
+        "  ret i32 2\n"
+        "}\n"
+        "define i32 @u0() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n"
+        "define i32 @u1() {\n"
+        "entry:\n"
+        "  ret i32 1\n"
+        "}\n"
+        "define i32 @u2() {\n"
+        "entry:\n"
+        "  ret i32 2\n"
+        "}\n"
+        "define i32 @u3() {\n"
+        "entry:\n"
+        "  ret i32 3\n"
+        "}\n"
+        "define i32 @f() {\n"
+        "entry:\n"
+        "  %a = call i32 @g()\n"
+        "  %b = call i32 @h()\n"
+        "  %r = add i32 %a, %b\n"
+        "  ret i32 %r\n"
+        "}\n";
+
+    char *old_env = NULL;
+    int had_old_env = 0;
+    if (set_parallel_prefetch_env("4", &old_env, &had_old_env) != 0) {
+        fprintf(stderr, "  FAIL: set parallel prefetch env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    int status = 1;
+    for (int iter = 0; iter < 12; iter++) {
+        lr_jit_materialize_cache_invalidate_all();
+        lr_jit_materialize_cache_reset_stats();
+
+        lr_arena_t *arena = lr_arena_create(0);
+        if (!arena) {
+            fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+            goto done;
+        }
+        lr_module_t *m = parse(src, arena);
+        if (!m) {
+            fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+            lr_arena_destroy(arena);
+            goto done;
+        }
+        lr_jit_t *jit = lr_jit_create();
+        if (!jit) {
+            fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+            lr_arena_destroy(arena);
+            goto done;
+        }
+
+        if (lr_jit_add_module(jit, m) != 0) {
+            fprintf(stderr, "  FAIL: jit add module (line %d)\n", __LINE__);
+            lr_jit_destroy(jit);
+            lr_arena_destroy(arena);
+            goto done;
+        }
+
+        typedef int (*fn_t)(void);
+        fn_t f_fn = NULL;
+        LR_JIT_GET_FN(f_fn, jit, "f");
+        if (!f_fn || f_fn() != 42) {
+            fprintf(stderr, "  FAIL: f() execution (line %d)\n", __LINE__);
+            lr_jit_destroy(jit);
+            lr_arena_destroy(arena);
+            goto done;
+        }
+        if (lr_jit_materialize_cache_hits() != 0) {
+            fprintf(stderr, "  FAIL: internal prefetch hits are hidden (line %d)\n", __LINE__);
+            lr_jit_destroy(jit);
+            lr_arena_destroy(arena);
+            goto done;
+        }
+
+        if (lr_jit_materialize_cache_entries() < 2) {
+            fprintf(stderr, "  FAIL: prefetched dependencies populate cache (line %d)\n", __LINE__);
+            lr_jit_destroy(jit);
+            lr_arena_destroy(arena);
+            goto done;
+        }
+
+        lr_jit_destroy(jit);
+        lr_arena_destroy(arena);
+    }
+
+    status = 0;
+
+done:
+    restore_parallel_prefetch_env(old_env, had_old_env);
+    return status;
 }
 
 int test_jit_materialization_cache_reuse_across_jits(void) {
