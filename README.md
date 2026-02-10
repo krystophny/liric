@@ -100,6 +100,9 @@ Command:
 
 ```bash
 ./build/bench_api --iters 3 --bench-dir /tmp/liric_bench --min-completed 1
+# Optional: feed profile-derived lookup/dispatch share (percent) for issue #233 tracker gating
+./build/bench_api --iters 3 --bench-dir /tmp/liric_bench --min-completed 1 \
+  --lookup-dispatch-share-pct 0.22
 ```
 
 Coverage: `2121` attempted, `2080` completed, `41` skipped.
@@ -118,6 +121,11 @@ Faster-case counts:
 - materialization: `2080/2080`
 - execution: `1609/2080`
 - skipped: `source_missing=1`, `llvm_jit_failed=40`
+
+`bench_api_summary.json` now includes a `phase_tracker` object with:
+- avg-median phase metrics for `LLVM IR creation`, `LLVM -> JIT`, and run speedup,
+- fixed targets from issue `#233`,
+- optional lookup/dispatch share gating when `--lookup-dispatch-share-pct` is provided.
 
 ## License
 

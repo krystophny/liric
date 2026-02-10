@@ -93,6 +93,7 @@ execute_process(
         --iters 1
         --timeout 5
         --min-completed 2
+        --lookup-dispatch-share-pct 0.2
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out
     ERROR_VARIABLE err
@@ -138,4 +139,16 @@ if(NOT summary_text MATCHES "\"skipped\": 0")
 endif()
 if(NOT summary_text MATCHES "\"completion_threshold_met\": true")
     message(FATAL_ERROR "summary missing completion gate status:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"phase_tracker\": \\{")
+    message(FATAL_ERROR "summary missing phase_tracker object:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"liric_llvm_ir_avg_median_ms\": 5.500000")
+    message(FATAL_ERROR "summary missing liric llvm ir metric:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"lookup_dispatch_share_pct\": 0.200000")
+    message(FATAL_ERROR "summary missing lookup_dispatch_share_pct metric:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"lookup_dispatch_met\": true")
+    message(FATAL_ERROR "summary missing lookup_dispatch_met criterion:\n${summary_text}")
 endif()
