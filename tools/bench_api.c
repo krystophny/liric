@@ -41,6 +41,7 @@ typedef struct {
     int iters;
     int timeout_sec;
     int min_completed;
+    double lookup_dispatch_share_pct;
 } cfg_t;
 
 typedef struct {
@@ -63,6 +64,8 @@ typedef struct {
     double llvm_compile_ms;
     double llvm_run_ms;
     double frontend_ms;
+    double liric_llvm_ir_ms;
+    double llvm_llvm_ir_ms;
 } row_t;
 
 typedef struct {
@@ -70,6 +73,24 @@ typedef struct {
     size_t n;
     size_t cap;
 } rowlist_t;
+
+typedef struct {
+    double file_read_ms;
+    double src_to_asr_ms;
+    double asr_passes_ms;
+    double asr_to_mod_ms;
+    double llvm_ir_ms;
+    double llvm_opt_ms;
+    double llvm_to_jit_ms;
+    double jit_run_ms;
+    double total_ms;
+} time_report_t;
+
+#define TRACKER_TARGET_LLVM_IR_CREATION_MS 0.350
+#define TRACKER_TARGET_LLVM_TO_JIT_MS 0.250
+#define TRACKER_TARGET_RUN_SPEEDUP_AVG 15.0
+#define TRACKER_TARGET_RUN_SPEEDUP_MIN 10.0
+#define TRACKER_TARGET_LOOKUP_DISPATCH_PCT 0.25
 
 static double now_ms(void) {
     struct timespec ts;
@@ -624,11 +645,12 @@ static int parse_time_component_ms(const char *clean_text, const char *key, doub
     return 0;
 }
 
-static int parse_lfortran_time_report(const char *stdout_text,
-                                      double *out_frontend_ms,
-                                      double *out_compile_ms,
-                                      double *out_run_ms,
-                                      double *out_wall_ms) {
+static double frontend_from_time_report(const time_report_t *r) {
+    return r->file_read_ms + r->src_to_asr_ms + r->asr_passes_ms +
+           r->asr_to_mod_ms + r->llvm_ir_ms + r->llvm_opt_ms;
+}
+
+static int parse_lfortran_time_report(const char *stdout_text, time_report_t *out) {
     char *clean = strip_ansi(stdout_text);
     double file_read = 0.0, src_to_asr = 0.0, asr_passes = 0.0;
     double asr_to_mod = 0.0, llvm_ir = 0.0, llvm_opt = 0.0;
@@ -644,10 +666,15 @@ static int parse_lfortran_time_report(const char *stdout_text,
         parse_time_component_ms(clean, "JIT run", &jit_run) &&
         parse_time_component_ms(clean, "Total time", &total);
     if (ok) {
-        *out_frontend_ms = file_read + src_to_asr + asr_passes + asr_to_mod + llvm_ir + llvm_opt;
-        *out_compile_ms = llvm_to_jit;
-        *out_run_ms = jit_run;
-        *out_wall_ms = total;
+        out->file_read_ms = file_read;
+        out->src_to_asr_ms = src_to_asr;
+        out->asr_passes_ms = asr_passes;
+        out->asr_to_mod_ms = asr_to_mod;
+        out->llvm_ir_ms = llvm_ir;
+        out->llvm_opt_ms = llvm_opt;
+        out->llvm_to_jit_ms = llvm_to_jit;
+        out->jit_run_ms = jit_run;
+        out->total_ms = total;
     }
     free(clean);
     return ok;
@@ -668,6 +695,8 @@ static void write_json_success_row(FILE *f,
                                    double lr,
                                    double er,
                                    double front,
+                                   double liric_llvm_ir,
+                                   double llvm_llvm_ir,
                                    double wall_sp,
                                    double compile_sp,
                                    double run_sp) {
@@ -675,11 +704,13 @@ static void write_json_success_row(FILE *f,
     fprintf(f,
             "{\"name\":\"%s\",\"status\":\"ok\",\"iters\":%zu,"
             "\"frontend_median_ms\":%.6f,"
+            "\"liric_llvm_ir_median_ms\":%.6f,\"llvm_llvm_ir_median_ms\":%.6f,"
             "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
             "\"liric_compile_median_ms\":%.6f,\"llvm_compile_median_ms\":%.6f,"
             "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
             "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
-            en, iters_done, front, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+            en, iters_done, front, liric_llvm_ir, llvm_llvm_ir,
+            lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
     free(en);
 }
 
@@ -743,6 +774,7 @@ static void usage(void) {
     printf("  --iters N            iterations per test (default: 3)\n");
     printf("  --timeout N          per-command timeout in seconds (default: 30)\n");
     printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
+    printf("  --lookup-dispatch-share-pct N  optional profile-derived lookup/dispatch share percentage\n");
 }
 
 static cfg_t parse_args(int argc, char **argv) {
@@ -758,6 +790,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.iters = 3;
     cfg.timeout_sec = 30;
     cfg.min_completed = 0;
+    cfg.lookup_dispatch_share_pct = -1.0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -784,6 +817,10 @@ static cfg_t parse_args(int argc, char **argv) {
         } else if (strcmp(argv[i], "--min-completed") == 0 && i + 1 < argc) {
             cfg.min_completed = atoi(argv[++i]);
             if (cfg.min_completed < 0) cfg.min_completed = 0;
+        } else if (strcmp(argv[i], "--lookup-dispatch-share-pct") == 0 && i + 1 < argc) {
+            cfg.lookup_dispatch_share_pct = atof(argv[++i]);
+            if (cfg.lookup_dispatch_share_pct < 0.0)
+                cfg.lookup_dispatch_share_pct = -1.0;
         } else {
             die("unknown argument", argv[i]);
         }
@@ -865,6 +902,9 @@ int main(int argc, char **argv) {
     printf("  compat_list:   %s\n", compat_path);
     printf("  options_jsonl: %s\n", opts_path);
     printf("  min_completed: %d\n", cfg.min_completed);
+    if (cfg.lookup_dispatch_share_pct >= 0.0) {
+        printf("  lookup_dispatch_share_pct: %.3f\n", cfg.lookup_dispatch_share_pct);
+    }
 
     {
         FILE *jf = fopen(jsonl_path, "w");
@@ -883,6 +923,8 @@ int main(int argc, char **argv) {
             double *llvm_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *frontend = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_llvm_ir = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *llvm_llvm_ir = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             const char *skip_reason = NULL;
             int nonzero_compat = 0;
@@ -922,6 +964,8 @@ int main(int argc, char **argv) {
                 char **liric_argv = NULL;
                 cmd_result_t llvm_r, liric_r;
                 size_t argc_jit, j;
+                time_report_t llvm_time;
+                time_report_t liric_time;
                 double llvm_front = 0.0, llvm_compile_ms = 0.0, llvm_run_ms = 0.0, llvm_wall_ms = 0.0;
                 double liric_front = 0.0, liric_compile_ms = 0.0, liric_run_ms = 0.0, liric_wall_ms = 0.0;
 
@@ -995,13 +1039,15 @@ int main(int argc, char **argv) {
                     break;
                 }
 
-                if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_front, &llvm_compile_ms, &llvm_run_ms, &llvm_wall_ms)) {
+                memset(&llvm_time, 0, sizeof(llvm_time));
+                if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
                     skip_reason = "llvm_jit_failed";
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
                 }
-                if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_front, &liric_compile_ms, &liric_run_ms, &liric_wall_ms)) {
+                memset(&liric_time, 0, sizeof(liric_time));
+                if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
                     skip_reason = "liric_jit_failed";
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
@@ -1010,6 +1056,15 @@ int main(int argc, char **argv) {
                 free_cmd_result(&llvm_r);
                 free_cmd_result(&liric_r);
 
+                llvm_front = frontend_from_time_report(&llvm_time);
+                llvm_compile_ms = llvm_time.llvm_to_jit_ms;
+                llvm_run_ms = llvm_time.jit_run_ms;
+                llvm_wall_ms = llvm_time.total_ms;
+                liric_front = frontend_from_time_report(&liric_time);
+                liric_compile_ms = liric_time.llvm_to_jit_ms;
+                liric_run_ms = liric_time.jit_run_ms;
+                liric_wall_ms = liric_time.total_ms;
+
                 frontend[ok_n] = 0.5 * (llvm_front + liric_front);
                 llvm_compile[ok_n] = llvm_compile_ms;
                 llvm_run[ok_n] = llvm_run_ms;
@@ -1017,6 +1072,8 @@ int main(int argc, char **argv) {
                 liric_compile[ok_n] = liric_compile_ms;
                 liric_run[ok_n] = liric_run_ms;
                 liric_wall[ok_n] = liric_wall_ms;
+                llvm_llvm_ir[ok_n] = llvm_time.llvm_ir_ms;
+                liric_llvm_ir[ok_n] = liric_time.llvm_ir_ms;
                 ok_n++;
             }
 
@@ -1040,9 +1097,12 @@ int main(int argc, char **argv) {
                 double lr = median(liric_run, ok_n);
                 double er = median(llvm_run, ok_n);
                 double fm = median(frontend, ok_n);
+                double liric_ir = median(liric_llvm_ir, ok_n);
+                double llvm_ir = median(llvm_llvm_ir, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
                 double compile_sp = lc > 0 ? ec / lc : 0.0;
                 double run_sp = lr > 0 ? er / lr : 0.0;
+                double ir_sp = liric_ir > 0 ? llvm_ir / liric_ir : 0.0;
                 row_t row;
 
                 row.name = xstrdup(name);
@@ -1053,11 +1113,14 @@ int main(int argc, char **argv) {
                 row.llvm_compile_ms = ec;
                 row.llvm_run_ms = er;
                 row.frontend_ms = fm;
+                row.liric_llvm_ir_ms = liric_ir;
+                row.llvm_llvm_ir_ms = llvm_ir;
                 rowlist_push(&rows, row);
 
-                write_json_success_row(jf, name, ok_n, lw, ew, lc, ec, lr, er, fm, wall_sp, compile_sp, run_sp);
-                printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), jit %.2fms vs %.2fms (%.2fx)\n",
-                       i + 1, tests.n, name, lw, ew, wall_sp, lc, ec, compile_sp);
+                write_json_success_row(jf, name, ok_n, lw, ew, lc, ec, lr, er, fm,
+                                       liric_ir, llvm_ir, wall_sp, compile_sp, run_sp);
+                printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), ir %.2fms vs %.2fms (%.2fx), jit %.2fms vs %.2fms (%.2fx)\n",
+                       i + 1, tests.n, name, lw, ew, wall_sp, liric_ir, llvm_ir, ir_sp, lc, ec, compile_sp);
             }
             goto next_test;
 
@@ -1079,13 +1142,31 @@ next_test:
             free(llvm_compile);
             free(llvm_run);
             free(frontend);
+            free(liric_llvm_ir);
+            free(llvm_llvm_ir);
             strlist_free(&opt_toks);
         }
 
         fclose(jf);
     }
 
-    if (rows.n > 0) {
+    {
+        double tracker_liric_llvm_ir_avg_median = 0.0;
+        double tracker_llvm_llvm_ir_avg_median = 0.0;
+        double tracker_liric_llvm_to_jit_avg_median = 0.0;
+        double tracker_llvm_llvm_to_jit_avg_median = 0.0;
+        double tracker_run_speedup_avg = 0.0;
+        double tracker_run_speedup_min = 0.0;
+        int tracker_has_data = 0;
+        int tracker_llvm_ir_creation_met = 0;
+        int tracker_llvm_to_jit_met = 0;
+        int tracker_run_speedup_avg_met = 0;
+        int tracker_run_speedup_each_met = 0;
+        int tracker_lookup_dispatch_available = (cfg.lookup_dispatch_share_pct >= 0.0);
+        int tracker_lookup_dispatch_met = 0;
+        int tracker_all_targets_met = 0;
+
+        if (rows.n > 0) {
         double *lw = (double *)malloc(rows.n * sizeof(double));
         double *ew = (double *)malloc(rows.n * sizeof(double));
         double *lc = (double *)malloc(rows.n * sizeof(double));
@@ -1093,6 +1174,9 @@ next_test:
         double *lr = (double *)malloc(rows.n * sizeof(double));
         double *er = (double *)malloc(rows.n * sizeof(double));
         double *fm = (double *)malloc(rows.n * sizeof(double));
+        double *li = (double *)malloc(rows.n * sizeof(double));
+        double *ei = (double *)malloc(rows.n * sizeof(double));
+        double *ir_sp = (double *)malloc(rows.n * sizeof(double));
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
         double *compile_sp = (double *)malloc(rows.n * sizeof(double));
         double *run_sp = (double *)malloc(rows.n * sizeof(double));
@@ -1100,10 +1184,13 @@ next_test:
         size_t wall_faster = 0;
         size_t compile_faster = 0;
         size_t run_faster = 0;
+        size_t ir_faster = 0;
         double sum_lw = 0.0, sum_ew = 0.0;
+        double sum_li = 0.0, sum_ei = 0.0;
         double sum_lc = 0.0, sum_ec = 0.0;
         double sum_lr = 0.0, sum_er = 0.0;
         double sum_fm = 0.0;
+        double sum_run_sp = 0.0;
 
         for (j = 0; j < rows.n; j++) {
             lw[j] = rows.items[j].liric_wall_ms;
@@ -1113,12 +1200,18 @@ next_test:
             lr[j] = rows.items[j].liric_run_ms;
             er[j] = rows.items[j].llvm_run_ms;
             fm[j] = rows.items[j].frontend_ms;
+            li[j] = rows.items[j].liric_llvm_ir_ms;
+            ei[j] = rows.items[j].llvm_llvm_ir_ms;
+            ir_sp[j] = li[j] > 0 ? ei[j] / li[j] : 0.0;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
             compile_sp[j] = lc[j] > 0 ? ec[j] / lc[j] : 0.0;
             run_sp[j] = lr[j] > 0 ? er[j] / lr[j] : 0.0;
+            if (ir_sp[j] > 1.0) ir_faster++;
             if (wall_sp[j] > 1.0) wall_faster++;
             if (compile_sp[j] > 1.0) compile_faster++;
             if (run_sp[j] > 1.0) run_faster++;
+            sum_li += li[j];
+            sum_ei += ei[j];
             sum_lw += lw[j];
             sum_ew += ew[j];
             sum_lc += lc[j];
@@ -1126,6 +1219,7 @@ next_test:
             sum_lr += lr[j];
             sum_er += er[j];
             sum_fm += fm[j];
+            sum_run_sp += run_sp[j];
         }
 
         printf("\n========================================================================\n");
@@ -1136,6 +1230,14 @@ next_test:
         printf("\n  FRONTEND (common to both)\n");
         printf("  Median:    %.3f ms\n", median(fm, rows.n));
         printf("  Aggregate: %.0f ms\n", sum_fm);
+
+        printf("\n  PHASE: LLVM IR CREATION\n");
+        printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
+               median(li, rows.n), median(ei, rows.n), median(ir_sp, rows.n));
+        printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
+               sum_li, sum_ei, (sum_li > 0 ? sum_ei / sum_li : 0.0));
+        printf("  Faster:    %zu/%zu (%.1f%%)\n",
+               ir_faster, rows.n, 100.0 * (double)ir_faster / (double)rows.n);
 
         printf("\n  WALL-CLOCK (frontend + jit-materialize + exec)\n");
         printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
@@ -1161,6 +1263,55 @@ next_test:
         printf("  Faster:    %zu/%zu (%.1f%%)\n",
                run_faster, rows.n, 100.0 * (double)run_faster / (double)rows.n);
 
+        tracker_has_data = 1;
+        tracker_liric_llvm_ir_avg_median = sum_li / (double)rows.n;
+        tracker_llvm_llvm_ir_avg_median = sum_ei / (double)rows.n;
+        tracker_liric_llvm_to_jit_avg_median = sum_lc / (double)rows.n;
+        tracker_llvm_llvm_to_jit_avg_median = sum_ec / (double)rows.n;
+        tracker_run_speedup_avg = sum_run_sp / (double)rows.n;
+        tracker_run_speedup_min = run_sp[0];
+        for (j = 1; j < rows.n; j++) {
+            if (run_sp[j] < tracker_run_speedup_min)
+                tracker_run_speedup_min = run_sp[j];
+        }
+        tracker_llvm_ir_creation_met =
+            tracker_liric_llvm_ir_avg_median <= TRACKER_TARGET_LLVM_IR_CREATION_MS;
+        tracker_llvm_to_jit_met =
+            tracker_liric_llvm_to_jit_avg_median <= TRACKER_TARGET_LLVM_TO_JIT_MS;
+        tracker_run_speedup_avg_met =
+            tracker_run_speedup_avg >= TRACKER_TARGET_RUN_SPEEDUP_AVG;
+        tracker_run_speedup_each_met =
+            tracker_run_speedup_min >= TRACKER_TARGET_RUN_SPEEDUP_MIN;
+        if (tracker_lookup_dispatch_available) {
+            tracker_lookup_dispatch_met =
+                cfg.lookup_dispatch_share_pct <= TRACKER_TARGET_LOOKUP_DISPATCH_PCT;
+        }
+        tracker_all_targets_met = tracker_llvm_ir_creation_met &&
+                                  tracker_llvm_to_jit_met &&
+                                  tracker_run_speedup_avg_met &&
+                                  tracker_run_speedup_each_met &&
+                                  tracker_lookup_dispatch_available &&
+                                  tracker_lookup_dispatch_met;
+
+        printf("\n  PHASE TRACKER (#233)\n");
+        printf("  LLVM IR creation avg median: %.3f ms (target <= %.3f ms): %s\n",
+               tracker_liric_llvm_ir_avg_median, TRACKER_TARGET_LLVM_IR_CREATION_MS,
+               tracker_llvm_ir_creation_met ? "met" : "not met");
+        printf("  LLVM -> JIT avg median:      %.3f ms (target <= %.3f ms): %s\n",
+               tracker_liric_llvm_to_jit_avg_median, TRACKER_TARGET_LLVM_TO_JIT_MS,
+               tracker_llvm_to_jit_met ? "met" : "not met");
+        printf("  JIT run speedup avg/min:     %.2fx / %.2fx (targets >= %.2fx avg, >= %.2fx each): %s\n",
+               tracker_run_speedup_avg, tracker_run_speedup_min,
+               TRACKER_TARGET_RUN_SPEEDUP_AVG, TRACKER_TARGET_RUN_SPEEDUP_MIN,
+               (tracker_run_speedup_avg_met && tracker_run_speedup_each_met) ? "met" : "not met");
+        if (tracker_lookup_dispatch_available) {
+            printf("  Lookup/dispatch share:       %.3f%% (target <= %.2f%%): %s\n",
+                   cfg.lookup_dispatch_share_pct, TRACKER_TARGET_LOOKUP_DISPATCH_PCT,
+                   tracker_lookup_dispatch_met ? "met" : "not met");
+        } else {
+            printf("  Lookup/dispatch share:       not provided (pass --lookup-dispatch-share-pct)\n");
+        }
+
         printf("\n  Results: %s\n", jsonl_path);
 
         free(lw);
@@ -1170,11 +1321,14 @@ next_test:
         free(lr);
         free(er);
         free(fm);
+        free(li);
+        free(ei);
+        free(ir_sp);
         free(wall_sp);
         free(compile_sp);
         free(run_sp);
-    }
-    {
+        }
+
         size_t attempted = tests.n;
         size_t completed_timed = rows.n;
         size_t completed = completed_timed + compat_nonzero_completed;
@@ -1200,6 +1354,39 @@ next_test:
             free(ec);
             free(eo);
         }
+        fprintf(sf, "  \"phase_tracker\": {\n");
+        fprintf(sf, "    \"has_data\": %s,\n", tracker_has_data ? "true" : "false");
+        fprintf(sf, "    \"targets\": {\n");
+        fprintf(sf, "      \"llvm_ir_creation_target_ms\": %.6f,\n", TRACKER_TARGET_LLVM_IR_CREATION_MS);
+        fprintf(sf, "      \"llvm_to_jit_target_ms\": %.6f,\n", TRACKER_TARGET_LLVM_TO_JIT_MS);
+        fprintf(sf, "      \"run_speedup_avg_target\": %.6f,\n", TRACKER_TARGET_RUN_SPEEDUP_AVG);
+        fprintf(sf, "      \"run_speedup_each_target\": %.6f,\n", TRACKER_TARGET_RUN_SPEEDUP_MIN);
+        fprintf(sf, "      \"lookup_dispatch_target_pct\": %.6f\n", TRACKER_TARGET_LOOKUP_DISPATCH_PCT);
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"metrics\": {\n");
+        fprintf(sf, "      \"liric_llvm_ir_avg_median_ms\": %.6f,\n", tracker_liric_llvm_ir_avg_median);
+        fprintf(sf, "      \"llvm_llvm_ir_avg_median_ms\": %.6f,\n", tracker_llvm_llvm_ir_avg_median);
+        fprintf(sf, "      \"liric_llvm_to_jit_avg_median_ms\": %.6f,\n", tracker_liric_llvm_to_jit_avg_median);
+        fprintf(sf, "      \"llvm_llvm_to_jit_avg_median_ms\": %.6f,\n", tracker_llvm_llvm_to_jit_avg_median);
+        fprintf(sf, "      \"run_speedup_avg\": %.6f,\n", tracker_run_speedup_avg);
+        fprintf(sf, "      \"run_speedup_min\": %.6f,\n", tracker_run_speedup_min);
+        if (tracker_lookup_dispatch_available)
+            fprintf(sf, "      \"lookup_dispatch_share_pct\": %.6f\n", cfg.lookup_dispatch_share_pct);
+        else
+            fprintf(sf, "      \"lookup_dispatch_share_pct\": null\n");
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"criteria\": {\n");
+        fprintf(sf, "      \"llvm_ir_creation_met\": %s,\n", tracker_llvm_ir_creation_met ? "true" : "false");
+        fprintf(sf, "      \"llvm_to_jit_met\": %s,\n", tracker_llvm_to_jit_met ? "true" : "false");
+        fprintf(sf, "      \"run_speedup_avg_met\": %s,\n", tracker_run_speedup_avg_met ? "true" : "false");
+        fprintf(sf, "      \"run_speedup_each_met\": %s,\n", tracker_run_speedup_each_met ? "true" : "false");
+        if (tracker_lookup_dispatch_available)
+            fprintf(sf, "      \"lookup_dispatch_met\": %s\n", tracker_lookup_dispatch_met ? "true" : "false");
+        else
+            fprintf(sf, "      \"lookup_dispatch_met\": null\n");
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"all_targets_met\": %s\n", tracker_all_targets_met ? "true" : "false");
+        fprintf(sf, "  },\n");
         fprintf(sf, "  \"skip_reasons\": {\n");
         for (i = 0; i < SKIP_REASON_COUNT; i++) {
             fprintf(sf, "    \"%s\": %zu%s\n",
