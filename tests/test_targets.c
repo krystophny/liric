@@ -1,6 +1,7 @@
 #include "../src/jit.h"
 #include "../src/liric.h"
 #include "../src/target.h"
+#include "../src/bc_decode.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -97,6 +98,20 @@ int test_parse_auto_selects_wasm_frontend(void) {
     TEST_ASSERT(m->first_func != NULL, "module has wasm function");
     TEST_ASSERT(strcmp(m->first_func->name, "f") == 0, "wasm export function name");
     lr_module_free(m);
+    return 0;
+}
+
+int test_parse_auto_selects_bc_frontend(void) {
+    const uint8_t bc_raw[] = {0x42, 0x43, 0xC0, 0xDE, 0x35, 0x14, 0x00, 0x00};
+    if (lr_bc_parser_available()) {
+        TEST_ASSERT(lr_bc_is_bitcode(bc_raw, sizeof(bc_raw)), "BC magic is detected");
+        return 0;
+    }
+
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_auto(bc_raw, sizeof(bc_raw), err, sizeof(err));
+    TEST_ASSERT(m == NULL, "invalid/truncated BC is rejected by BC frontend");
+    TEST_ASSERT(strstr(err, "decoder support") != NULL, "error reports decoder support is unavailable");
     return 0;
 }
 

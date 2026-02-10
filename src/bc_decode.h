@@ -1,0 +1,20 @@
+#ifndef LIRIC_BC_DECODE_H
+#define LIRIC_BC_DECODE_H
+
+#include "arena.h"
+#include "ir.h"
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+/* Recognizes raw LLVM bitcode and the LLVM bitcode wrapper container. */
+bool lr_bc_is_bitcode(const uint8_t *data, size_t len);
+
+/* Reports whether this build has direct in-process LLVM bitcode decoding. */
+bool lr_bc_parser_available(void);
+
+/* Parses LLVM bitcode directly (no textual .ll conversion path). */
+lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
+                               lr_arena_t *arena, char *err, size_t errlen);
+
+#endif

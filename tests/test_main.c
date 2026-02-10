@@ -78,6 +78,7 @@ int test_load_missing_runtime_library_fails(void);
 int test_target_alias_arm64_resolves(void);
 int test_parse_auto_selects_ll_frontend(void);
 int test_parse_auto_selects_wasm_frontend(void);
+int test_parse_auto_selects_bc_frontend(void);
 int test_symbol_provider_prefers_jit_table(void);
 int test_target_shared_static_alloca_table(void);
 int test_target_shared_prescan_filters_dynamic_alloca(void);
@@ -150,6 +151,8 @@ int test_wasm_jit_add_args(void);
 int test_wasm_jit_branch(void);
 int test_wasm_jit_loop(void);
 int test_wasm_jit_call(void);
+int test_bc_parse_api_ret_42(void);
+int test_bc_parse_auto_loop_phi(void);
 int test_builder_ret_42(void);
 int test_builder_add_args(void);
 int test_builder_arithmetic(void);
@@ -225,6 +228,7 @@ int main(void) {
     RUN_TEST(test_target_alias_arm64_resolves);
     RUN_TEST(test_parse_auto_selects_ll_frontend);
     RUN_TEST(test_parse_auto_selects_wasm_frontend);
+    RUN_TEST(test_parse_auto_selects_bc_frontend);
     RUN_TEST(test_symbol_provider_prefers_jit_table);
     RUN_TEST(test_target_shared_static_alloca_table);
     RUN_TEST(test_target_shared_prescan_filters_dynamic_alloca);
@@ -309,6 +313,10 @@ int main(void) {
     RUN_TEST(test_wasm_jit_branch);
     RUN_TEST(test_wasm_jit_loop);
     RUN_TEST(test_wasm_jit_call);
+
+    fprintf(stderr, "\nBC Parser tests:\n");
+    RUN_TEST(test_bc_parse_api_ret_42);
+    RUN_TEST(test_bc_parse_auto_loop_phi);
 
     fprintf(stderr, "\nBuilder API tests:\n");
     RUN_TEST(test_builder_ret_42);
