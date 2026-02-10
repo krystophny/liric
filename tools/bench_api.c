@@ -395,6 +395,49 @@ static void strlist_free(strlist_t *l) {
     l->n = l->cap = 0;
 }
 
+static void strlist_truncate(strlist_t *l, size_t keep_n) {
+    size_t i;
+    if (!l || keep_n >= l->n) return;
+    for (i = keep_n; i < l->n; i++) free(l->items[i]);
+    l->n = keep_n;
+}
+
+static void validate_compat_sources(const strlist_t *tests, const char *test_dir, const char *compat_path) {
+    size_t i;
+    size_t missing_count = 0;
+    const size_t sample_limit = 20;
+    for (i = 0; i < tests->n; i++) {
+        char fname[512];
+        int n = snprintf(fname, sizeof(fname), "%s.f90", tests->items[i]);
+        char *source_path;
+        if (n < 0 || (size_t)n >= sizeof(fname)) {
+            if (missing_count < sample_limit) {
+                fprintf(stderr, "compat entry too long (cannot resolve source): %s\n", tests->items[i]);
+            }
+            missing_count++;
+            continue;
+        }
+        source_path = path_join2(test_dir, fname);
+        if (!file_exists(source_path)) {
+            if (missing_count < sample_limit)
+                fprintf(stderr, "missing compat source: %s\n", source_path);
+            missing_count++;
+        }
+        free(source_path);
+    }
+    if (missing_count > 0) {
+        if (missing_count > sample_limit) {
+            fprintf(stderr, "... and %zu more missing entries\n", missing_count - sample_limit);
+        }
+        fprintf(stderr,
+                "compat list preflight failed: %zu stale entr%s under %s\n",
+                missing_count, (missing_count == 1) ? "y" : "ies", test_dir);
+        fprintf(stderr,
+                "Remediation: regenerate compat artifacts, e.g. ./build/bench_compat_check --timeout 15\n");
+        die("compat list contains stale entries; run bench_compat_check to refresh", compat_path);
+    }
+}
+
 static int cmp_double(const void *a, const void *b) {
     const double *da = (const double *)a;
     const double *db = (const double *)b;
@@ -1182,12 +1225,15 @@ int main(int argc, char **argv) {
             size_t n = strlen(line);
             while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
             if (n > 0) {
-                if (cfg.fail_sample_limit <= 0 || (int)tests.n < cfg.fail_sample_limit)
-                    strlist_push(&tests, line);
+                strlist_push(&tests, line);
             }
         }
     }
     fclose(f);
+
+    validate_compat_sources(&tests, cfg.test_dir, compat_path);
+    if (cfg.fail_sample_limit > 0 && tests.n > (size_t)cfg.fail_sample_limit)
+        strlist_truncate(&tests, (size_t)cfg.fail_sample_limit);
 
     opts = parse_options_jsonl(opts_path);
     ensure_dir(cfg.bench_dir);
