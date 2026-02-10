@@ -599,6 +599,111 @@ int test_jit_lazy_materializes_reachable_functions_only(void) {
     return 0;
 }
 
+int test_jit_materialization_cache_reuse_across_jits(void) {
+    const char *src =
+        "define i32 @g() {\n"
+        "entry:\n"
+        "  ret i32 40\n"
+        "}\n"
+        "define i32 @f() {\n"
+        "entry:\n"
+        "  %v = call i32 @g()\n"
+        "  %r = add i32 %v, 2\n"
+        "  ret i32 %r\n"
+        "}\n";
+
+    lr_jit_materialize_cache_invalidate_all();
+    lr_jit_materialize_cache_reset_stats();
+    uint32_t epoch_before = lr_jit_materialize_cache_epoch();
+
+    lr_arena_t *arena1 = lr_arena_create(0);
+    lr_module_t *m1 = parse(src, arena1);
+    TEST_ASSERT(m1 != NULL, "parse first module");
+    lr_jit_t *jit1 = lr_jit_create();
+    TEST_ASSERT(jit1 != NULL, "first jit create");
+    int rc = lr_jit_add_module(jit1, m1);
+    TEST_ASSERT_EQ(rc, 0, "first jit add module");
+    typedef int (*fn_t)(void);
+    fn_t f1; LR_JIT_GET_FN(f1, jit1, "f");
+    TEST_ASSERT(f1 != NULL, "first function lookup");
+    TEST_ASSERT_EQ(f1(), 42, "first f() returns 42");
+    TEST_ASSERT(lr_jit_materialize_cache_misses() >= 1, "first materialization has cache miss");
+    TEST_ASSERT_EQ(lr_jit_materialize_cache_hits(), 0, "no cache hits on first materialization");
+    TEST_ASSERT(lr_jit_materialize_cache_entries() >= 1, "cache stores first materialized function");
+    lr_jit_destroy(jit1);
+    lr_arena_destroy(arena1);
+
+    lr_arena_t *arena2 = lr_arena_create(0);
+    lr_module_t *m2 = parse(src, arena2);
+    TEST_ASSERT(m2 != NULL, "parse second module");
+    lr_jit_t *jit2 = lr_jit_create();
+    TEST_ASSERT(jit2 != NULL, "second jit create");
+    rc = lr_jit_add_module(jit2, m2);
+    TEST_ASSERT_EQ(rc, 0, "second jit add module");
+    fn_t f2; LR_JIT_GET_FN(f2, jit2, "f");
+    TEST_ASSERT(f2 != NULL, "second function lookup");
+    TEST_ASSERT_EQ(f2(), 42, "second f() returns 42");
+    TEST_ASSERT(lr_jit_materialize_cache_hits() >= 1, "second materialization reuses cache");
+    TEST_ASSERT_EQ(lr_jit_materialize_cache_epoch(), epoch_before,
+                   "cache epoch unchanged without explicit invalidation");
+
+    lr_jit_destroy(jit2);
+    lr_arena_destroy(arena2);
+    return 0;
+}
+
+int test_jit_materialization_cache_invalidation_epoch(void) {
+    const char *src =
+        "define i32 @f() {\n"
+        "entry:\n"
+        "  ret i32 7\n"
+        "}\n";
+
+    lr_jit_materialize_cache_invalidate_all();
+    lr_jit_materialize_cache_reset_stats();
+    uint32_t epoch_before = lr_jit_materialize_cache_epoch();
+
+    lr_arena_t *arena1 = lr_arena_create(0);
+    lr_module_t *m1 = parse(src, arena1);
+    TEST_ASSERT(m1 != NULL, "parse first module");
+    lr_jit_t *jit1 = lr_jit_create();
+    TEST_ASSERT(jit1 != NULL, "first jit create");
+    int rc = lr_jit_add_module(jit1, m1);
+    TEST_ASSERT_EQ(rc, 0, "first jit add module");
+    typedef int (*fn_t)(void);
+    fn_t f1; LR_JIT_GET_FN(f1, jit1, "f");
+    TEST_ASSERT(f1 != NULL, "first function lookup");
+    TEST_ASSERT_EQ(f1(), 7, "first f() returns 7");
+    TEST_ASSERT(lr_jit_materialize_cache_entries() >= 1, "cache contains entry before invalidate");
+    lr_jit_destroy(jit1);
+    lr_arena_destroy(arena1);
+
+    lr_jit_materialize_cache_invalidate_all();
+    uint32_t epoch_after = lr_jit_materialize_cache_epoch();
+    TEST_ASSERT(epoch_after != epoch_before, "explicit invalidation bumps cache epoch");
+    TEST_ASSERT_EQ(lr_jit_materialize_cache_entries(), 0, "explicit invalidation clears cache entries");
+
+    lr_jit_materialize_cache_reset_stats();
+    lr_arena_t *arena2 = lr_arena_create(0);
+    lr_module_t *m2 = parse(src, arena2);
+    TEST_ASSERT(m2 != NULL, "parse second module");
+    lr_jit_t *jit2 = lr_jit_create();
+    TEST_ASSERT(jit2 != NULL, "second jit create");
+    rc = lr_jit_add_module(jit2, m2);
+    TEST_ASSERT_EQ(rc, 0, "second jit add module");
+    fn_t f2; LR_JIT_GET_FN(f2, jit2, "f");
+    TEST_ASSERT(f2 != NULL, "second function lookup");
+    TEST_ASSERT_EQ(f2(), 7, "second f() returns 7");
+    TEST_ASSERT_EQ(lr_jit_materialize_cache_hits(), 0,
+                   "no cache hit immediately after explicit invalidation");
+    TEST_ASSERT(lr_jit_materialize_cache_misses() >= 1,
+                "cache miss occurs after explicit invalidation");
+
+    lr_jit_destroy(jit2);
+    lr_arena_destroy(arena2);
+    return 0;
+}
+
 int test_jit_fadd_double_bits(void) {
     const char *src =
         "define double @fadd64(double %a, double %b) {\n"
