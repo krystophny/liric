@@ -22,10 +22,15 @@ file(WRITE "${test_dir}/good_case.f90"
 "print *, 42\n"
 "end program\n")
 
+find_program(TRUE_BIN NAMES true)
+if(NOT TRUE_BIN)
+    message(FATAL_ERROR "Unable to locate `true` executable")
+endif()
+
 execute_process(
     COMMAND "${BENCH_API}"
-        --lfortran "/bin/true"
-        --lfortran-liric "/bin/true"
+        --lfortran "${TRUE_BIN}"
+        --lfortran-liric "${TRUE_BIN}"
         --test-dir "${test_dir}"
         --bench-dir "${bench_dir}"
         --iters 1
