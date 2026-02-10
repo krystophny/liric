@@ -201,6 +201,9 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
     if (!f || !a)
         return -1;
 
+    if (lr_func_is_finalized(f))
+        return 0;
+
     if (f->num_blocks == 0)
         return 0;
 
@@ -274,6 +277,36 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
     }
 
     return 0;
+}
+
+bool lr_func_is_finalized(const lr_func_t *f) {
+    bool has_insts = false;
+
+    if (!f)
+        return false;
+
+    if (f->num_blocks == 0)
+        return true;
+
+    if (!f->block_array || !f->block_inst_offsets)
+        return false;
+
+    for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+        lr_block_t *b = f->block_array[bi];
+        if (!b)
+            return false;
+        if (b->first && !b->inst_array)
+            return false;
+        if (b->first)
+            has_insts = true;
+    }
+
+    if (has_insts && !f->linear_inst_array)
+        return false;
+    if (!has_insts && f->num_linear_insts != 0)
+        return false;
+
+    return f->block_inst_offsets[f->num_blocks] == f->num_linear_insts;
 }
 
 lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
@@ -513,7 +546,7 @@ bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
 lr_block_phi_copies_t *lr_build_phi_copies(lr_arena_t *arena, lr_func_t *func) {
     if (!arena || !func)
         return NULL;
-    if (lr_func_finalize(func, arena) != 0)
+    if (!lr_func_is_finalized(func) && lr_func_finalize(func, arena) != 0)
         return NULL;
 
     lr_block_phi_copies_t *blocks =

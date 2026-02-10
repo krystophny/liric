@@ -562,6 +562,16 @@ static uint32_t find_func_index_by_name(lr_func_name_entry_t **buckets,
     return UINT32_MAX;
 }
 
+static int finalize_module_functions(lr_module_t *m, lr_func_t **funcs, uint32_t nfuncs,
+                                     lr_arena_t *fallback_arena) {
+    lr_arena_t *layout_arena = (m && m->arena) ? m->arena : fallback_arena;
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        if (lr_func_finalize(funcs[i], layout_arena) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfuncs,
                                lr_arena_t *arena, uint32_t *order, uint32_t *out_count) {
     if (!m || !funcs || !arena || !order || !out_count)
@@ -600,11 +610,8 @@ static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfunc
     if (!indegree || !outgoing)
         return -1;
 
-    lr_arena_t *layout_arena = m->arena ? m->arena : arena;
     for (uint32_t caller_idx = 0; caller_idx < nfuncs; caller_idx++) {
         lr_func_t *f = funcs[caller_idx];
-        if (lr_func_finalize(f, layout_arena) != 0)
-            return -1;
         for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
             lr_block_t *b = f->block_array[bi];
             for (uint32_t ii = 0; ii < b->num_insts; ii++) {
@@ -667,10 +674,6 @@ static int build_compile_order(lr_module_t *m, lr_func_t **funcs, uint32_t nfunc
  */
 static int resolve_global_operands(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
                                    void *self_addr, const char **missing_symbol) {
-    lr_arena_t *layout_arena = (m && m->arena) ? m->arena : j->arena;
-    if (lr_func_finalize(f, layout_arena) != 0)
-        return -1;
-
     for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
         lr_block_t *b = f->block_array[bi];
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
@@ -791,6 +794,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         if (!f->is_decl)
             funcs[fi++] = f;
     }
+    if (finalize_module_functions(m, funcs, nfuncs, j->arena) != 0)
+        goto done;
 
     for (uint32_t i = 0; i < nfuncs; i++) {
         const char *name = funcs[i]->name;

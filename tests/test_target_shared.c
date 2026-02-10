@@ -123,12 +123,14 @@ int test_ir_finalize_builds_dense_arrays(void) {
     TEST_ASSERT(func->linear_inst_array == NULL, "linear inst array starts null");
     TEST_ASSERT(func->block_inst_offsets == NULL, "block offsets start null");
     TEST_ASSERT(entry->inst_array == NULL, "inst array starts null");
+    TEST_ASSERT(!lr_func_is_finalized(func), "fresh function is not finalized");
 
     lr_block_append(entry, add_inst);
     lr_block_append(entry, br_inst);
     lr_block_append(exit, ret_inst);
 
     TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize succeeds");
+    TEST_ASSERT(lr_func_is_finalized(func), "function reports finalized after finalize");
     TEST_ASSERT(func->block_array != NULL, "block array populated");
     TEST_ASSERT(func->block_array[entry->id] == entry, "entry indexed by block id");
     TEST_ASSERT(func->block_array[exit->id] == exit, "exit indexed by block id");
@@ -155,8 +157,10 @@ int test_ir_finalize_builds_dense_arrays(void) {
     TEST_ASSERT(func->linear_inst_array == NULL, "append invalidates linear inst array");
     TEST_ASSERT(func->block_inst_offsets == NULL, "append invalidates block offsets");
     TEST_ASSERT_EQ(func->num_linear_insts, 0, "append resets linear inst count");
+    TEST_ASSERT(!lr_func_is_finalized(func), "append invalidates finalized state");
 
     TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "re-finalize succeeds");
+    TEST_ASSERT(lr_func_is_finalized(func), "re-finalize restores finalized state");
     TEST_ASSERT_EQ(exit->num_insts, 2, "re-finalize updates instruction count");
     TEST_ASSERT(exit->inst_array[1] == tail_ret, "new instruction appears in rebuilt cache");
     TEST_ASSERT_EQ(func->num_linear_insts, 4, "re-finalize updates linear inst count");
@@ -168,7 +172,9 @@ int test_ir_finalize_builds_dense_arrays(void) {
     TEST_ASSERT(func->block_array == NULL, "new block invalidates block array");
     TEST_ASSERT(func->linear_inst_array == NULL, "new block invalidates linear inst array");
     TEST_ASSERT(func->block_inst_offsets == NULL, "new block invalidates block offsets");
+    TEST_ASSERT(!lr_func_is_finalized(func), "new block invalidates finalized state");
     TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize rebuilds block array");
+    TEST_ASSERT(lr_func_is_finalized(func), "function is finalized after rebuild");
     TEST_ASSERT(func->block_array != NULL, "rebuilt block array is present");
     TEST_ASSERT_EQ(func->num_blocks, 3, "function now has three blocks");
     TEST_ASSERT_EQ(func->num_linear_insts, 4, "empty block does not change linear inst count");

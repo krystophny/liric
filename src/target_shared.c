@@ -52,7 +52,7 @@ void lr_target_prescan_static_alloca_offsets(lr_func_t *func,
         return;
     }
 
-    if (lr_func_finalize(func, arena) != 0) {
+    if (!lr_func_is_finalized(func) && lr_func_finalize(func, arena) != 0) {
         return;
     }
 
