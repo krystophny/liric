@@ -74,6 +74,10 @@ static int tests_failed = 0;
     } \
 } while (0)
 
+static int ret42_symbol_for_stringref_lookup(void) {
+    return 42;
+}
+
 static int test_llvm_version() {
     TEST_ASSERT_EQ(LLVM_VERSION_MAJOR, 21, "version major");
     return 0;
@@ -252,6 +256,32 @@ static int test_function_creation() {
 
     llvm::Function *decl = mod.createFunction("ext_func", ft, true);
     TEST_ASSERT(decl != nullptr, "declaration created");
+
+    return 0;
+}
+
+static int test_stringref_slice_module_symbol_lookup() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("slice_lookup", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = mod.createFunction("sum", ft, true);
+    TEST_ASSERT(fn != nullptr, "function declaration created");
+
+    const char fn_storage[] = {'s', 'u', 'm', 'X', '\0'};
+    llvm::StringRef fn_name(fn_storage, 3);
+    llvm::Function *resolved = mod.getFunction(fn_name);
+    TEST_ASSERT(resolved == fn, "StringRef slice resolves function symbol exactly");
+
+    const char global_storage[] = {'g', 'v', 'Z', '\0'};
+    llvm::StringRef global_name(global_storage, 2);
+    llvm::Constant *g1 = mod.getOrInsertGlobal(global_name, i32);
+    llvm::Constant *g2 = mod.getOrInsertGlobal("gv", i32);
+    TEST_ASSERT(g1 != nullptr, "global from StringRef slice");
+    TEST_ASSERT(g2 != nullptr, "global from c-string");
+    TEST_ASSERT_EQ(g1->impl()->global.id, g2->impl()->global.id,
+                   "StringRef slice and c-string resolve same global");
 
     return 0;
 }
@@ -1022,6 +1052,26 @@ static int test_jit_smoke_indirect_bitcast_external_fp_call() {
     return 0;
 }
 
+static int test_jit_stringref_slice_symbol_lookup() {
+    llvm::orc::LLJIT jit;
+
+    typedef int (*fn_t)(void);
+    fn_t native = ret42_symbol_for_stringref_lookup;
+    void *native_addr = nullptr;
+    memcpy(&native_addr, &native, sizeof(native_addr));
+
+    const char add_storage[] = {'r', 'e', 't', '4', '2', 'X', '\0'};
+    jit.addSymbol(llvm::StringRef(add_storage, 5), native_addr);
+
+    const char lookup_storage[] = {'r', 'e', 't', '4', '2', 'Y', '\0'};
+    void *resolved = jit.lookup(llvm::StringRef(lookup_storage, 5));
+    TEST_ASSERT(resolved != nullptr, "LLJIT lookup with StringRef slice");
+
+    fn_t fp = (fn_t)resolved;
+    TEST_ASSERT_EQ(fp(), 42, "resolved StringRef slice symbol executes");
+    return 0;
+}
+
 int main() {
     fprintf(stderr, "LLVM C++ compat test suite\n");
     fprintf(stderr, "==========================\n\n");
@@ -1049,6 +1099,7 @@ int main() {
 
     fprintf(stderr, "\nFunction tests:\n");
     RUN_TEST(test_function_creation);
+    RUN_TEST(test_stringref_slice_module_symbol_lookup);
     RUN_TEST(test_block_parent_tracking_across_decls);
     RUN_TEST(test_block_parent_recovery_from_ir_func_link);
     RUN_TEST(test_builder_syncs_module_from_insert_block);
@@ -1075,6 +1126,7 @@ int main() {
     RUN_TEST(test_jit_smoke_add_args);
     RUN_TEST(test_jit_smoke_branch);
     RUN_TEST(test_jit_smoke_indirect_bitcast_external_fp_call);
+    RUN_TEST(test_jit_stringref_slice_symbol_lookup);
 
     fprintf(stderr, "\n==========================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",
