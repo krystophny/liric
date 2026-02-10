@@ -538,6 +538,38 @@ static char *json_escape(const char *s) {
     return out;
 }
 
+static char *normalize_output(const char *s) {
+    size_t n, i = 0, t = 0;
+    char *tmp, *out;
+
+    if (!s) return xstrdup("");
+    n = strlen(s);
+    tmp = (char *)malloc(n + 1);
+    if (!tmp) die("out of memory", NULL);
+
+    while (i < n) {
+        size_t ls = i, le;
+        while (i < n && s[i] != '\n' && s[i] != '\r') i++;
+        le = i;
+        while (le > ls && (s[le - 1] == ' ' || s[le - 1] == '\t')) le--;
+        if (le > ls) {
+            memcpy(tmp + t, s + ls, le - ls);
+            t += (le - ls);
+        }
+        tmp[t++] = '\n';
+        if (i < n && s[i] == '\r') i++;
+        if (i < n && s[i] == '\n') i++;
+    }
+
+    while (t > 0 && tmp[t - 1] == '\n') t--;
+    out = (char *)malloc(t + 1);
+    if (!out) die("out of memory", NULL);
+    memcpy(out, tmp, t);
+    out[t] = '\0';
+    free(tmp);
+    return out;
+}
+
 static char *strip_ansi(const char *s) {
     size_t i, n = 0;
     char *out, *p;
@@ -648,6 +680,14 @@ static void write_json_success_row(FILE *f,
             "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
             "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
             en, iters_done, front, lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+    free(en);
+}
+
+static void write_json_nonzero_compat_row(FILE *f, const char *name, int rc) {
+    char *en = json_escape(name ? name : "");
+    fprintf(f,
+            "{\"name\":\"%s\",\"status\":\"ok_nonzero_compat\",\"rc\":%d}\n",
+            en, rc);
     free(en);
 }
 
@@ -776,6 +816,7 @@ int main(int argc, char **argv) {
     optlist_t opts;
     rowlist_t rows;
     size_t skip_reason_counts[SKIP_REASON_COUNT];
+    size_t compat_nonzero_completed = 0;
     size_t i;
     int exit_code = 0;
 
@@ -832,6 +873,8 @@ int main(int argc, char **argv) {
             double *frontend = (double *)calloc((size_t)cfg.iters, sizeof(double));
             size_t ok_n = 0;
             const char *skip_reason = NULL;
+            int nonzero_compat = 0;
+            int nonzero_compat_rc = 0;
             char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
 
@@ -886,17 +929,11 @@ int main(int argc, char **argv) {
 
                 llvm_r = run_cmd(llvm_argv, cfg.timeout_sec, NULL, work_dir);
                 free(llvm_argv);
-                if (llvm_r.rc != 0) {
-                    skip_reason = llvm_r.timed_out ? "llvm_jit_timeout" : "llvm_jit_failed";
+                if (llvm_r.timed_out) {
+                    skip_reason = "llvm_jit_timeout";
                     free_cmd_result(&llvm_r);
                     break;
                 }
-                if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_front, &llvm_compile_ms, &llvm_run_ms, &llvm_wall_ms)) {
-                    skip_reason = "llvm_jit_failed";
-                    free_cmd_result(&llvm_r);
-                    break;
-                }
-                free_cmd_result(&llvm_r);
 
                 liric_argv = (char **)calloc(argc_jit + 1, sizeof(char *));
                 if (!liric_argv) die("out of memory", NULL);
@@ -912,16 +949,53 @@ int main(int argc, char **argv) {
 
                 liric_r = run_cmd(liric_argv, cfg.timeout_sec, NULL, work_dir);
                 free(liric_argv);
-                if (liric_r.rc != 0) {
-                    skip_reason = liric_r.timed_out ? "liric_jit_timeout" : "liric_jit_failed";
+                if (liric_r.timed_out) {
+                    skip_reason = "liric_jit_timeout";
+                    free_cmd_result(&llvm_r);
+                    free_cmd_result(&liric_r);
+                    break;
+                }
+
+                if (llvm_r.rc != 0 || liric_r.rc != 0) {
+                    int same_nonzero = 0;
+                    if (llvm_r.rc != 0 && liric_r.rc != 0 && llvm_r.rc == liric_r.rc) {
+                        char *llvm_out = normalize_output(llvm_r.stdout_text);
+                        char *liric_out = normalize_output(liric_r.stdout_text);
+                        char *llvm_err = normalize_output(llvm_r.stderr_text);
+                        char *liric_err = normalize_output(liric_r.stderr_text);
+                        same_nonzero = (strcmp(llvm_out, liric_out) == 0) &&
+                                       (strcmp(llvm_err, liric_err) == 0);
+                        free(llvm_out);
+                        free(liric_out);
+                        free(llvm_err);
+                        free(liric_err);
+                    }
+                    if (same_nonzero) {
+                        nonzero_compat = 1;
+                        nonzero_compat_rc = llvm_r.rc;
+                    } else if (llvm_r.rc != 0) {
+                        skip_reason = "llvm_jit_failed";
+                    } else {
+                        skip_reason = "liric_jit_failed";
+                    }
+                    free_cmd_result(&llvm_r);
+                    free_cmd_result(&liric_r);
+                    break;
+                }
+
+                if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_front, &llvm_compile_ms, &llvm_run_ms, &llvm_wall_ms)) {
+                    skip_reason = "llvm_jit_failed";
+                    free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
                 }
                 if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_front, &liric_compile_ms, &liric_run_ms, &liric_wall_ms)) {
                     skip_reason = "liric_jit_failed";
+                    free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
                 }
+                free_cmd_result(&llvm_r);
                 free_cmd_result(&liric_r);
 
                 frontend[ok_n] = 0.5 * (llvm_front + liric_front);
@@ -935,6 +1009,13 @@ int main(int argc, char **argv) {
             }
 
             if (ok_n == 0) {
+                if (nonzero_compat) {
+                    compat_nonzero_completed++;
+                    write_json_nonzero_compat_row(jf, name, nonzero_compat_rc);
+                    printf("  [%zu/%zu] %s: compatible non-zero rc (%d)\n",
+                           i + 1, tests.n, name, nonzero_compat_rc);
+                    goto next_test;
+                }
                 if (!skip_reason) skip_reason = "llvm_jit_failed";
                 goto skip_test;
             }
@@ -1083,7 +1164,8 @@ next_test:
     }
     {
         size_t attempted = tests.n;
-        size_t completed = rows.n;
+        size_t completed_timed = rows.n;
+        size_t completed = completed_timed + compat_nonzero_completed;
         size_t skipped = (attempted >= completed) ? (attempted - completed) : 0;
         FILE *sf = fopen(summary_path, "w");
         if (!sf) die("failed to open output", summary_path);
@@ -1091,6 +1173,8 @@ next_test:
         fprintf(sf, "{\n");
         fprintf(sf, "  \"attempted\": %zu,\n", attempted);
         fprintf(sf, "  \"completed\": %zu,\n", completed);
+        fprintf(sf, "  \"completed_timed\": %zu,\n", completed_timed);
+        fprintf(sf, "  \"completed_nonzero_compat\": %zu,\n", compat_nonzero_completed);
         fprintf(sf, "  \"skipped\": %zu,\n", skipped);
         fprintf(sf, "  \"iters\": %d,\n", cfg.iters);
         fprintf(sf, "  \"min_completed\": %d,\n", cfg.min_completed);
@@ -1117,6 +1201,9 @@ next_test:
 
         printf("\n  Accounting: attempted=%zu completed=%zu skipped=%zu\n",
                attempted, completed, skipped);
+        if (compat_nonzero_completed > 0) {
+            printf("    completed_nonzero_compat=%zu\n", compat_nonzero_completed);
+        }
         for (i = 0; i < SKIP_REASON_COUNT; i++) {
             if (skip_reason_counts[i] > 0) {
                 printf("    skip[%s]=%zu\n", k_skip_reasons[i], skip_reason_counts[i]);
