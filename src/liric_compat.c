@@ -570,7 +570,7 @@ lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block) {
     v->kind = LC_VAL_BLOCK;
     v->type = NULL;
     v->block.block = block;
-    v->block.func = NULL;
+    v->block.func = block ? block->func : NULL;
     return v;
 }
 

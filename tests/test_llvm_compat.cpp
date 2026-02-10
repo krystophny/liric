@@ -268,6 +268,33 @@ static int test_block_parent_tracking_across_decls() {
     return 0;
 }
 
+static int test_block_parent_recovery_from_ir_func_link() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("parent_recovery", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = mod.createFunction("parent_fn", ft, false);
+    TEST_ASSERT(fn != nullptr, "function created");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(entry->impl_block() != nullptr, "entry block created");
+
+    llvm::detail::unregister_blocks_for_function(fn);
+    TEST_ASSERT(entry->getParent() == fn, "parent recovered via block->func");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPoint(entry);
+
+    llvm::BasicBlock *insert_block = builder.GetInsertBlock();
+    TEST_ASSERT(insert_block != nullptr, "insert block present");
+    TEST_ASSERT(insert_block->getParent() == fn, "insert block parent recovered");
+
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+    return 0;
+}
+
 static int test_builder_syncs_module_from_insert_block() {
     llvm::LLVMContext ctx;
     llvm::IRBuilder<> builder(ctx);
@@ -930,6 +957,7 @@ int main() {
     fprintf(stderr, "\nFunction tests:\n");
     RUN_TEST(test_function_creation);
     RUN_TEST(test_block_parent_tracking_across_decls);
+    RUN_TEST(test_block_parent_recovery_from_ir_func_link);
     RUN_TEST(test_builder_syncs_module_from_insert_block);
 
     fprintf(stderr, "\nIRBuilder tests:\n");
