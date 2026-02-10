@@ -9,6 +9,13 @@
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <math.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+#include <unistd.h>
+#define LR_HAS_PTHREADS 1
+#else
+#define LR_HAS_PTHREADS 0
+#endif
 
 #ifdef LR_JIT_PROFILE
 #ifdef __APPLE__
@@ -35,7 +42,6 @@ static double lr_jit_now_us(void) {
 #endif
 
 #if defined(__APPLE__) && defined(__aarch64__) && defined(MAP_JIT)
-#include <pthread.h>
 #define LR_CAN_USE_MAP_JIT 1
 #else
 #define LR_CAN_USE_MAP_JIT 0
@@ -48,6 +54,8 @@ static double lr_jit_now_us(void) {
 #define LAZY_FUNC_BUCKET_COUNT 8192u
 #define MATERIALIZE_CACHE_BUCKET_COUNT 4096u
 #define MATERIALIZE_CACHE_SCHEMA_VERSION 1u
+#define MATERIALIZE_PREFETCH_MAX_THREADS 16u
+#define MATERIALIZE_PREFETCH_MIN_PENDING 2u
 
 typedef enum lr_lazy_func_state {
     LR_LAZY_FUNC_PENDING = 0,
@@ -99,6 +107,25 @@ typedef struct lr_mat_cache_entry {
     struct lr_mat_cache_entry *next;
 } lr_mat_cache_entry_t;
 
+typedef struct lr_materialize_prefetch_task {
+    lr_lazy_func_entry_t *entry;
+    uint8_t *code;
+    size_t code_len;
+    lr_cached_reloc_t *relocs;
+    uint32_t num_relocs;
+    int rc;
+} lr_materialize_prefetch_task_t;
+
+#if LR_HAS_PTHREADS
+typedef struct lr_materialize_prefetch_worker {
+    const lr_target_t *target;
+    size_t code_cap;
+    lr_materialize_prefetch_task_t *tasks;
+    uint32_t begin;
+    uint32_t end;
+} lr_materialize_prefetch_worker_t;
+#endif
+
 /*
  * Cache correctness invariants:
  * - Reuse requires exact module/function signature byte equality.
@@ -121,6 +148,12 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name);
 static lr_lazy_func_entry_t *find_lazy_func_entry(lr_jit_t *j, const char *name, uint32_t hash);
 static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry);
 static int jit_ensure_module_symbols_interned(lr_module_t *m);
+static const lr_mat_cache_entry_t *materialize_cache_lookup(const lr_target_t *target,
+                                                            const uint8_t *module_sig,
+                                                            size_t module_sig_len,
+                                                            const uint8_t *func_sig,
+                                                            size_t func_sig_len,
+                                                            bool update_stats);
 
 static uint32_t symbol_hash(const char *name) {
     uint32_t h = 2166136261u;
@@ -582,9 +615,11 @@ static const lr_mat_cache_entry_t *materialize_cache_lookup(const lr_target_t *t
                                                             const uint8_t *module_sig,
                                                             size_t module_sig_len,
                                                             const uint8_t *func_sig,
-                                                            size_t func_sig_len) {
+                                                            size_t func_sig_len,
+                                                            bool update_stats) {
     if (!target || !module_sig || module_sig_len == 0 || !func_sig || func_sig_len == 0) {
-        g_mat_cache_miss_count++;
+        if (update_stats)
+            g_mat_cache_miss_count++;
         return NULL;
     }
 
@@ -596,11 +631,13 @@ static const lr_mat_cache_entry_t *materialize_cache_lookup(const lr_target_t *t
             continue;
         if (materialize_cache_key_matches(entry, target, module_sig, module_sig_len,
                                           func_sig, func_sig_len, g_mat_cache_epoch)) {
-            g_mat_cache_hit_count++;
+            if (update_stats)
+                g_mat_cache_hit_count++;
             return entry;
         }
     }
-    g_mat_cache_miss_count++;
+    if (update_stats)
+        g_mat_cache_miss_count++;
     return NULL;
 }
 
@@ -1617,6 +1654,375 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     return 0;
 }
 
+static uint32_t materialize_prefetch_thread_count(uint32_t pending_count) {
+#if !LR_HAS_PTHREADS
+    (void)pending_count;
+    return 1;
+#else
+    if (pending_count < MATERIALIZE_PREFETCH_MIN_PENDING)
+        return 1;
+
+    uint32_t max_threads = MATERIALIZE_PREFETCH_MAX_THREADS;
+    if (pending_count < max_threads)
+        max_threads = pending_count;
+
+    const char *env = getenv("LIRIC_JIT_MAT_THREADS");
+    if (!env || !env[0])
+        return 1;
+
+    char *end = NULL;
+    long parsed = strtol(env, &end, 10);
+    if (end == env || *end != '\0' || parsed <= 1)
+        return 1;
+
+    uint32_t requested = (uint32_t)parsed;
+    if (requested > max_threads)
+        requested = max_threads;
+    if (requested < 2)
+        return 1;
+    return requested;
+#endif
+}
+
+#if LR_HAS_PTHREADS
+static void *materialize_prefetch_worker_main(void *arg) {
+    lr_materialize_prefetch_worker_t *w = (lr_materialize_prefetch_worker_t *)arg;
+    if (!w || !w->target || !w->tasks)
+        return NULL;
+
+    for (uint32_t i = w->begin; i < w->end; i++) {
+        lr_materialize_prefetch_task_t *task = &w->tasks[i];
+        task->rc = -1;
+        task->code = NULL;
+        task->code_len = 0;
+        task->relocs = NULL;
+        task->num_relocs = 0;
+
+        if (!task->entry || !task->entry->module || !task->entry->func)
+            continue;
+
+        lr_arena_t *worker_arena = lr_arena_create(64 * 1024);
+        if (!worker_arena)
+            continue;
+
+        uint8_t *scratch_buf = (uint8_t *)malloc(w->code_cap);
+        if (!scratch_buf) {
+            lr_arena_destroy(worker_arena);
+            continue;
+        }
+
+        lr_objfile_ctx_t fixup_ctx;
+        memset(&fixup_ctx, 0, sizeof(fixup_ctx));
+        fixup_ctx.preserve_symbol_names = true;
+        if (jit_build_module_symbol_cache(&fixup_ctx, task->entry->module) != 0)
+            goto worker_done;
+
+        lr_module_t module_view = *task->entry->module;
+        module_view.obj_ctx = &fixup_ctx;
+
+        lr_jit_t worker_jit;
+        memset(&worker_jit, 0, sizeof(worker_jit));
+        worker_jit.target = w->target;
+        worker_jit.code_buf = scratch_buf;
+        worker_jit.code_cap = w->code_cap;
+        worker_jit.arena = worker_arena;
+
+        if (compile_one_function(&worker_jit, &module_view, task->entry->func,
+                                 &fixup_ctx, NULL) != 0)
+            goto worker_done;
+        if (worker_jit.code_size == 0)
+            goto worker_done;
+
+        task->code = (uint8_t *)malloc(worker_jit.code_size);
+        if (!task->code)
+            goto worker_done;
+        memcpy(task->code, scratch_buf, worker_jit.code_size);
+        task->code_len = worker_jit.code_size;
+
+        if (capture_function_relocs(&fixup_ctx, 0, 0, &task->relocs, &task->num_relocs) != 0)
+            goto worker_done;
+
+        task->rc = 0;
+
+worker_done:
+        if (task->rc != 0) {
+            free(task->code);
+            task->code = NULL;
+            task->code_len = 0;
+            free(task->relocs);
+            task->relocs = NULL;
+            task->num_relocs = 0;
+        }
+        jit_free_obj_ctx(&fixup_ctx);
+        free(scratch_buf);
+        lr_arena_destroy(worker_arena);
+    }
+    return NULL;
+}
+#endif
+
+static uint32_t materialize_prefetch_collect_targets(lr_jit_t *j,
+                                                     const lr_lazy_func_entry_t *trigger,
+                                                     lr_materialize_prefetch_task_t *tasks,
+                                                     uint32_t task_cap) {
+    if (!j || !trigger || !trigger->module || !trigger->func || !tasks || task_cap == 0)
+        return 0;
+
+    uint32_t count = 0;
+    lr_module_t *m = trigger->module;
+    lr_func_t *f = trigger->func;
+    if (f->block_array && f->num_blocks > 0) {
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            const lr_block_t *b = f->block_array[bi];
+            if (!b)
+                continue;
+
+            if (b->inst_array && b->num_insts > 0) {
+                for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+                    const lr_inst_t *inst = b->inst_array[ii];
+                    if (!inst || inst->op != LR_OP_CALL || inst->num_operands == 0)
+                        continue;
+                    const lr_operand_t *callee = &inst->operands[0];
+                    if (callee->kind != LR_VAL_GLOBAL)
+                        continue;
+                    const char *sym_name = lr_module_symbol_name(m, callee->global_id);
+                    if (!sym_name || !sym_name[0] || strcmp(sym_name, trigger->name) == 0)
+                        continue;
+
+                    uint32_t hash = symbol_hash(sym_name);
+                    lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
+                    if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
+                        continue;
+                    if (!entry->module_sig || entry->module_sig_len == 0 ||
+                        !entry->func_sig || entry->func_sig_len == 0)
+                        continue;
+                    if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
+                                                 entry->func_sig, entry->func_sig_len, false))
+                        continue;
+
+                    bool seen = false;
+                    for (uint32_t k = 0; k < count; k++) {
+                        if (tasks[k].entry == entry) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (seen)
+                        continue;
+
+                    tasks[count].entry = entry;
+                    count++;
+                    if (count == task_cap)
+                        return count;
+                }
+                continue;
+            }
+
+            for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                if (inst->op != LR_OP_CALL || inst->num_operands == 0)
+                    continue;
+                const lr_operand_t *callee = &inst->operands[0];
+                if (callee->kind != LR_VAL_GLOBAL)
+                    continue;
+                const char *sym_name = lr_module_symbol_name(m, callee->global_id);
+                if (!sym_name || !sym_name[0] || strcmp(sym_name, trigger->name) == 0)
+                    continue;
+
+                uint32_t hash = symbol_hash(sym_name);
+                lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
+                if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
+                    continue;
+                if (!entry->module_sig || entry->module_sig_len == 0 ||
+                    !entry->func_sig || entry->func_sig_len == 0)
+                    continue;
+                if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
+                                             entry->func_sig, entry->func_sig_len, false))
+                    continue;
+
+                bool seen = false;
+                for (uint32_t k = 0; k < count; k++) {
+                    if (tasks[k].entry == entry) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen)
+                    continue;
+
+                tasks[count].entry = entry;
+                count++;
+                if (count == task_cap)
+                    return count;
+            }
+        }
+        return count;
+    }
+
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op != LR_OP_CALL || inst->num_operands == 0)
+                continue;
+            const lr_operand_t *callee = &inst->operands[0];
+            if (callee->kind != LR_VAL_GLOBAL)
+                continue;
+            const char *sym_name = lr_module_symbol_name(m, callee->global_id);
+            if (!sym_name || !sym_name[0] || strcmp(sym_name, trigger->name) == 0)
+                continue;
+
+            uint32_t hash = symbol_hash(sym_name);
+            lr_lazy_func_entry_t *entry = find_lazy_func_entry(j, sym_name, hash);
+            if (!entry || entry->state != LR_LAZY_FUNC_PENDING)
+                continue;
+            if (!entry->module_sig || entry->module_sig_len == 0 ||
+                !entry->func_sig || entry->func_sig_len == 0)
+                continue;
+            if (materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
+                                         entry->func_sig, entry->func_sig_len, false))
+                continue;
+
+            bool seen = false;
+            for (uint32_t k = 0; k < count; k++) {
+                if (tasks[k].entry == entry) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen)
+                continue;
+
+            tasks[count].entry = entry;
+            count++;
+            if (count == task_cap)
+                return count;
+        }
+    }
+
+    return count;
+}
+
+static bool materialize_prefetch_module_functions(lr_jit_t *j,
+                                                  const lr_lazy_func_entry_t *trigger,
+                                                  lr_materialize_prefetch_task_t *out_trigger_task) {
+    /*
+     * Thread-safety model:
+     * - Worker threads compile into private arenas/code buffers/fixup contexts.
+     * - Shared JIT state (code buffer, symbol table, relocation patching) stays single-threaded.
+     * - Cache insertion is serialized in module order for deterministic replay behavior.
+     */
+    if (out_trigger_task)
+        memset(out_trigger_task, 0, sizeof(*out_trigger_task));
+    if (!j || !j->target || !trigger || !trigger->module)
+        return false;
+
+    uint32_t task_cap = 1; /* trigger + direct callees */
+    for (lr_func_t *f = trigger->module->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0] || f->is_decl)
+            continue;
+        if (strcmp(f->name, trigger->name) == 0)
+            continue;
+        task_cap++;
+    }
+    if (task_cap < MATERIALIZE_PREFETCH_MIN_PENDING)
+        return false;
+
+    lr_materialize_prefetch_task_t *tasks =
+        (lr_materialize_prefetch_task_t *)calloc(task_cap, sizeof(*tasks));
+    if (!tasks)
+        return false;
+
+    tasks[0].entry = (lr_lazy_func_entry_t *)trigger;
+    uint32_t pending = 1u + materialize_prefetch_collect_targets(j, trigger,
+                                                                 tasks + 1u, task_cap - 1u);
+    if (pending < MATERIALIZE_PREFETCH_MIN_PENDING) {
+        free(tasks);
+        return false;
+    }
+
+    uint32_t nthreads = materialize_prefetch_thread_count(pending);
+    if (nthreads <= 1) {
+        free(tasks);
+        return false;
+    }
+    if (nthreads > pending)
+        nthreads = pending;
+
+#if LR_HAS_PTHREADS
+    pthread_t *threads = (pthread_t *)calloc(nthreads, sizeof(*threads));
+    lr_materialize_prefetch_worker_t *workers =
+        (lr_materialize_prefetch_worker_t *)calloc(nthreads, sizeof(*workers));
+    uint8_t *started = (uint8_t *)calloc(nthreads, sizeof(*started));
+    if (!threads || !workers || !started) {
+        free(started);
+        free(workers);
+        free(threads);
+        free(tasks);
+        return false;
+    }
+
+    uint32_t chunk = (pending + nthreads - 1u) / nthreads;
+    for (uint32_t wi = 0; wi < nthreads; wi++) {
+        uint32_t begin = wi * chunk;
+        uint32_t end = begin + chunk;
+        if (begin >= pending)
+            break;
+        if (end > pending)
+            end = pending;
+
+        workers[wi].target = j->target;
+        workers[wi].code_cap = j->code_cap;
+        workers[wi].tasks = tasks;
+        workers[wi].begin = begin;
+        workers[wi].end = end;
+
+        if (pthread_create(&threads[wi], NULL,
+                           materialize_prefetch_worker_main, &workers[wi]) == 0) {
+            started[wi] = 1u;
+        } else {
+            (void)materialize_prefetch_worker_main(&workers[wi]);
+        }
+    }
+
+    for (uint32_t wi = 0; wi < nthreads; wi++) {
+        if (started[wi])
+            (void)pthread_join(threads[wi], NULL);
+    }
+
+    free(started);
+    free(workers);
+    free(threads);
+#endif
+
+    bool have_trigger = false;
+    if (out_trigger_task &&
+        tasks[0].rc == 0 &&
+        tasks[0].code && tasks[0].code_len > 0) {
+        *out_trigger_task = tasks[0];
+        memset(&tasks[0], 0, sizeof(tasks[0]));
+        have_trigger = true;
+    }
+
+    for (uint32_t i = 1; i < pending; i++) {
+        lr_materialize_prefetch_task_t *task = &tasks[i];
+        if (task->rc == 0 && task->entry && task->code && task->code_len > 0) {
+            (void)materialize_cache_insert(j->target,
+                                           task->entry->module_sig, task->entry->module_sig_len,
+                                           task->entry->func_sig, task->entry->func_sig_len,
+                                           task->code, task->code_len,
+                                           task->relocs, task->num_relocs);
+        }
+        free(task->code);
+        task->code = NULL;
+        free(task->relocs);
+        task->relocs = NULL;
+    }
+    free(tasks[0].code);
+    tasks[0].code = NULL;
+    free(tasks[0].relocs);
+    tasks[0].relocs = NULL;
+    free(tasks);
+    return have_trigger;
+}
+
 static int register_lazy_module_functions(lr_jit_t *j, lr_module_t *m,
                                           lr_func_t **funcs, uint32_t nfuncs) {
     if (!j || !m)
@@ -1682,6 +2088,8 @@ static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry) {
     uint8_t *compiled_code_copy = NULL;
     lr_cached_reloc_t *compiled_relocs = NULL;
     uint32_t compiled_num_relocs = 0;
+    lr_materialize_prefetch_task_t prefetched_self;
+    memset(&prefetched_self, 0, sizeof(prefetched_self));
 
     j->materialize_depth++;
 
@@ -1707,9 +2115,11 @@ static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry) {
     entry->pending_addr = NULL;
 
     void *func_addr = NULL;
+    bool record_cache_stats = (j->materialize_depth == 1u);
     const lr_mat_cache_entry_t *cached_entry =
         materialize_cache_lookup(j->target, entry->module_sig, entry->module_sig_len,
-                                 entry->func_sig, entry->func_sig_len);
+                                 entry->func_sig, entry->func_sig_len,
+                                 record_cache_stats);
 
     if (cached_entry) {
         JIT_PROF_START(compile_loop);
@@ -1721,32 +2131,64 @@ static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry) {
         }
     } else {
         compiled_from_scratch = true;
-        compiled_reloc_base = fixup_ctx.num_relocs;
-        compiled_code_base = (uint32_t)j->code_size;
+        bool used_prefetched_self = false;
+        if (j->materialize_depth == 1u) {
+            used_prefetched_self =
+                materialize_prefetch_module_functions(j, entry, &prefetched_self);
+        }
+        if (used_prefetched_self &&
+            prefetched_self.code && prefetched_self.code_len > 0) {
+            lr_mat_cache_entry_t prefetched_entry;
+            memset(&prefetched_entry, 0, sizeof(prefetched_entry));
+            prefetched_entry.code = prefetched_self.code;
+            prefetched_entry.code_len = prefetched_self.code_len;
+            prefetched_entry.relocs = prefetched_self.relocs;
+            prefetched_entry.num_relocs = prefetched_self.num_relocs;
 
-        JIT_PROF_START(compile_loop);
-        int func_rc = compile_one_function(j, entry->module, entry->func, &fixup_ctx, &func_addr);
-        JIT_PROF_END(compile_loop);
-        if (func_rc != 0) {
-            rc = func_rc;
-            goto done;
+            JIT_PROF_START(compile_loop);
+            int replay_rc = replay_cached_function(j, &fixup_ctx, entry, &prefetched_entry, &func_addr);
+            JIT_PROF_END(compile_loop);
+            if (replay_rc == 0) {
+                compiled_code_copy = prefetched_self.code;
+                compiled_code_len = prefetched_self.code_len;
+                compiled_relocs = prefetched_self.relocs;
+                compiled_num_relocs = prefetched_self.num_relocs;
+                prefetched_self.code = NULL;
+                prefetched_self.relocs = NULL;
+                used_prefetched_self = true;
+            } else {
+                used_prefetched_self = false;
+            }
         }
 
-        compiled_code_len = j->code_size - (size_t)compiled_code_base;
-        if (compiled_code_len == 0) {
-            rc = -1;
-            goto done;
-        }
-        compiled_code_copy = (uint8_t *)malloc(compiled_code_len);
-        if (!compiled_code_copy) {
-            rc = -1;
-            goto done;
-        }
-        memcpy(compiled_code_copy, j->code_buf + compiled_code_base, compiled_code_len);
-        if (capture_function_relocs(&fixup_ctx, compiled_reloc_base, compiled_code_base,
-                                    &compiled_relocs, &compiled_num_relocs) != 0) {
-            rc = -1;
-            goto done;
+        if (!used_prefetched_self) {
+            compiled_reloc_base = fixup_ctx.num_relocs;
+            compiled_code_base = (uint32_t)j->code_size;
+
+            JIT_PROF_START(compile_loop);
+            int func_rc = compile_one_function(j, entry->module, entry->func, &fixup_ctx, &func_addr);
+            JIT_PROF_END(compile_loop);
+            if (func_rc != 0) {
+                rc = func_rc;
+                goto done;
+            }
+
+            compiled_code_len = j->code_size - (size_t)compiled_code_base;
+            if (compiled_code_len == 0) {
+                rc = -1;
+                goto done;
+            }
+            compiled_code_copy = (uint8_t *)malloc(compiled_code_len);
+            if (!compiled_code_copy) {
+                rc = -1;
+                goto done;
+            }
+            memcpy(compiled_code_copy, j->code_buf + compiled_code_base, compiled_code_len);
+            if (capture_function_relocs(&fixup_ctx, compiled_reloc_base, compiled_code_base,
+                                        &compiled_relocs, &compiled_num_relocs) != 0) {
+                rc = -1;
+                goto done;
+            }
         }
     }
     entry->pending_addr = func_addr;
@@ -1822,6 +2264,10 @@ done:
     compiled_code_copy = NULL;
     free(compiled_relocs);
     compiled_relocs = NULL;
+    free(prefetched_self.code);
+    prefetched_self.code = NULL;
+    free(prefetched_self.relocs);
+    prefetched_self.relocs = NULL;
     if (j->update_active && j->code_size > code_size_before)
         j->update_dirty = true;
     if (own_wx_transition) {
