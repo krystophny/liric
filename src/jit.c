@@ -45,12 +45,32 @@ static double lr_jit_now_us(void) {
 #define DATA_PAGE_SIZE (256 * 1024)
 #define SYM_BUCKET_COUNT 8192u
 #define MISS_BUCKET_COUNT 4096u
+#define LAZY_FUNC_BUCKET_COUNT 8192u
+
+typedef enum lr_lazy_func_state {
+    LR_LAZY_FUNC_PENDING = 0,
+    LR_LAZY_FUNC_COMPILING = 1,
+    LR_LAZY_FUNC_READY = 2,
+} lr_lazy_func_state_t;
+
+struct lr_lazy_func_entry {
+    char *name;
+    uint32_t hash;
+    lr_module_t *module;
+    lr_func_t *func;
+    void *pending_addr;
+    lr_lazy_func_state_t state;
+    lr_lazy_func_entry_t *next;
+    lr_lazy_func_entry_t *bucket_next;
+};
 
 static void register_builtin_symbols(lr_jit_t *j);
 static int register_default_symbol_providers(lr_jit_t *j);
 static void *resolve_symbol_from_jit_table(lr_jit_t *j, const char *name);
 static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name);
 static void *resolve_symbol_from_process(lr_jit_t *j, const char *name);
+static lr_lazy_func_entry_t *find_lazy_func_entry(lr_jit_t *j, const char *name, uint32_t hash);
+static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry);
 
 static uint32_t symbol_hash(const char *name) {
     uint32_t h = 2166136261u;
@@ -183,9 +203,12 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     }
     j->sym_bucket_count = SYM_BUCKET_COUNT;
     j->miss_bucket_count = MISS_BUCKET_COUNT;
+    j->lazy_func_bucket_count = LAZY_FUNC_BUCKET_COUNT;
     j->sym_buckets = calloc(j->sym_bucket_count, sizeof(*j->sym_buckets));
     j->miss_buckets = calloc(j->miss_bucket_count, sizeof(*j->miss_buckets));
-    if (!j->sym_buckets || !j->miss_buckets) {
+    j->lazy_func_buckets = calloc(j->lazy_func_bucket_count, sizeof(*j->lazy_func_buckets));
+    if (!j->sym_buckets || !j->miss_buckets || !j->lazy_func_buckets) {
+        free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
         lr_arena_destroy(j->arena);
@@ -211,6 +234,7 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
         if (j->code_buf == MAP_FAILED)
 #endif
         {
+            free(j->lazy_func_buckets);
             free(j->miss_buckets);
             free(j->sym_buckets);
             lr_arena_destroy(j->arena);
@@ -229,6 +253,7 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (j->data_buf == MAP_FAILED) {
         munmap(j->code_buf, j->code_cap);
+        free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
         lr_arena_destroy(j->arena);
@@ -239,6 +264,7 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     if (make_executable(j) != 0) {
         munmap(j->data_buf, j->data_cap);
         munmap(j->code_buf, j->code_cap);
+        free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
         lr_arena_destroy(j->arena);
@@ -249,6 +275,7 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     if (register_default_symbol_providers(j) != 0) {
         munmap(j->data_buf, j->data_cap);
         munmap(j->code_buf, j->code_cap);
+        free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
         lr_arena_destroy(j->arena);
@@ -275,6 +302,53 @@ static lr_sym_entry_t *find_symbol_entry(lr_jit_t *j, const char *name, uint32_t
             return e;
     }
     return NULL;
+}
+
+static lr_lazy_func_entry_t *find_lazy_func_entry(lr_jit_t *j, const char *name, uint32_t hash) {
+    if (!j || !name || !name[0] || !j->lazy_func_buckets || j->lazy_func_bucket_count == 0)
+        return NULL;
+    uint32_t bucket = hash & (j->lazy_func_bucket_count - 1u);
+    for (lr_lazy_func_entry_t *e = j->lazy_func_buckets[bucket]; e; e = e->bucket_next) {
+        if (e->hash == hash && strcmp(e->name, name) == 0)
+            return e;
+    }
+    return NULL;
+}
+
+static lr_lazy_func_entry_t *upsert_lazy_func_entry(lr_jit_t *j, lr_module_t *m, lr_func_t *f) {
+    if (!j || !f || !f->name || !f->name[0] || !m)
+        return NULL;
+
+    uint32_t hash = symbol_hash(f->name);
+    lr_lazy_func_entry_t *existing = find_lazy_func_entry(j, f->name, hash);
+    if (existing) {
+        existing->module = m;
+        existing->func = f;
+        existing->pending_addr = NULL;
+        existing->state = LR_LAZY_FUNC_PENDING;
+        return existing;
+    }
+
+    lr_lazy_func_entry_t *entry = lr_arena_new(j->arena, lr_lazy_func_entry_t);
+    if (!entry)
+        return NULL;
+    entry->name = lr_arena_strdup(j->arena, f->name, strlen(f->name));
+    entry->hash = hash;
+    entry->module = m;
+    entry->func = f;
+    entry->pending_addr = NULL;
+    entry->state = LR_LAZY_FUNC_PENDING;
+    entry->next = j->lazy_funcs;
+    j->lazy_funcs = entry;
+
+    if (j->lazy_func_buckets && j->lazy_func_bucket_count > 0) {
+        uint32_t bucket = hash & (j->lazy_func_bucket_count - 1u);
+        entry->bucket_next = j->lazy_func_buckets[bucket];
+        j->lazy_func_buckets[bucket] = entry;
+    } else {
+        entry->bucket_next = NULL;
+    }
+    return entry;
 }
 
 static bool miss_cache_contains(lr_jit_t *j, const char *name, uint32_t hash) {
@@ -432,6 +506,14 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
         return NULL;
 
     uint32_t hash = symbol_hash(name);
+    lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+    if (lazy) {
+        if (lazy->state == LR_LAZY_FUNC_COMPILING)
+            return lazy->pending_addr;
+        if (lazy->state != LR_LAZY_FUNC_READY)
+            return NULL;
+    }
+
     bool miss_known = miss_cache_contains(j, name, hash);
 
     for (lr_symbol_provider_t *provider = j->symbol_providers;
@@ -453,6 +535,20 @@ static void *lookup_symbol(lr_jit_t *j, const char *name) {
     return NULL;
 }
 
+static void *lookup_symbol_materializing_lazy(lr_jit_t *j, const char *name) {
+    void *addr = lookup_symbol(j, name);
+    if (addr || !j || !name || !name[0])
+        return addr;
+
+    uint32_t hash = symbol_hash(name);
+    lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+    if (!lazy || lazy->state == LR_LAZY_FUNC_READY || lazy->state == LR_LAZY_FUNC_COMPILING)
+        return NULL;
+    if (materialize_lazy_function(j, lazy) != 0)
+        return NULL;
+    return lookup_symbol(j, name);
+}
+
 static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->relocs)
@@ -461,7 +557,7 @@ static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
         if (!base)
             continue;
         for (lr_reloc_t *r = g->relocs; r; r = r->next) {
-            void *target = lookup_symbol(j, r->symbol_name);
+            void *target = lookup_symbol_materializing_lazy(j, r->symbol_name);
             if (!target)
                 continue;
             uintptr_t addr = (uintptr_t)((intptr_t)target + r->addend);
@@ -792,17 +888,148 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     return 0;
 }
 
+static int register_lazy_module_functions(lr_jit_t *j, lr_module_t *m,
+                                          lr_func_t **funcs, uint32_t nfuncs) {
+    if (!j || !m)
+        return -1;
+    for (uint32_t i = 0; i < nfuncs; i++) {
+        lr_func_t *f = funcs[i];
+        if (!f || !f->name || !f->name[0])
+            continue;
+        if (!upsert_lazy_func_entry(j, m, f))
+            return -1;
+        uint32_t hash = symbol_hash(f->name);
+        if (!find_symbol_entry(j, f->name, hash))
+            miss_cache_add(j, f->name, hash);
+    }
+    return 0;
+}
+
+static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry) {
+    if (!j || !entry || !entry->module || !entry->func)
+        return -1;
+    if (entry->state == LR_LAZY_FUNC_READY)
+        return 0;
+    if (entry->state == LR_LAZY_FUNC_COMPILING)
+        return 0;
+
+    bool top_level_materialize = (j->materialize_depth == 0);
+    bool own_wx_transition = top_level_materialize && !j->update_active;
+    size_t code_size_before = j->code_size;
+    int rc = -1;
+    lr_objfile_ctx_t fixup_ctx;
+    memset(&fixup_ctx, 0, sizeof(fixup_ctx));
+    bool fixup_ctx_ready = false;
+    void *saved_obj_ctx = NULL;
+    bool obj_ctx_installed = false;
+
+    j->materialize_depth++;
+
+    if (own_wx_transition) {
+        JIT_PROF_START(make_writable);
+        if (make_writable(j) != 0) {
+            j->materialize_depth--;
+            return -1;
+        }
+        JIT_PROF_END(make_writable);
+    }
+
+    fixup_ctx.preserve_symbol_names = true;
+    if (jit_build_module_symbol_cache(&fixup_ctx, entry->module) != 0)
+        goto done;
+    fixup_ctx_ready = true;
+
+    saved_obj_ctx = entry->module->obj_ctx;
+    entry->module->obj_ctx = &fixup_ctx;
+    obj_ctx_installed = true;
+
+    entry->state = LR_LAZY_FUNC_COMPILING;
+    entry->pending_addr = NULL;
+
+    JIT_PROF_START(compile_loop);
+    void *func_addr = NULL;
+    int func_rc = compile_one_function(j, entry->module, entry->func, &fixup_ctx, &func_addr);
+    JIT_PROF_END(compile_loop);
+    if (func_rc != 0) {
+        rc = func_rc;
+        goto done;
+    }
+    entry->pending_addr = func_addr;
+
+    while (1) {
+        JIT_PROF_START(patch_fixups);
+        const char *missing_symbol = NULL;
+        if (apply_jit_relocs(j, &fixup_ctx, &missing_symbol) == 0) {
+            JIT_PROF_END(patch_fixups);
+            break;
+        }
+        JIT_PROF_END(patch_fixups);
+
+        if (!missing_symbol) {
+            rc = -1;
+            goto done;
+        }
+
+        uint32_t missing_hash = symbol_hash(missing_symbol);
+        lr_lazy_func_entry_t *dep = find_lazy_func_entry(j, missing_symbol, missing_hash);
+        if (!dep || dep->state == LR_LAZY_FUNC_READY) {
+            fprintf(stderr, "unresolved symbol: %s\n", missing_symbol);
+            rc = -1;
+            goto done;
+        }
+        if (dep->state == LR_LAZY_FUNC_COMPILING) {
+            fprintf(stderr, "unresolved symbol: %s\n", missing_symbol);
+            rc = -1;
+            goto done;
+        }
+        if (materialize_lazy_function(j, dep) != 0) {
+            rc = -1;
+            goto done;
+        }
+    }
+
+    lr_jit_add_symbol(j, entry->name, entry->pending_addr);
+    entry->state = LR_LAZY_FUNC_READY;
+    entry->pending_addr = NULL;
+
+    /* Re-apply relocations after function symbols exist. */
+    if (apply_module_global_relocs(j, entry->module) != 0)
+        goto done;
+
+    rc = 0;
+
+done:
+    if (j->materialize_depth > 0)
+        j->materialize_depth--;
+    if (rc != 0) {
+        entry->state = LR_LAZY_FUNC_PENDING;
+        entry->pending_addr = NULL;
+    }
+    if (obj_ctx_installed) {
+        entry->module->obj_ctx = saved_obj_ctx;
+        obj_ctx_installed = false;
+    }
+    if (fixup_ctx_ready) {
+        jit_free_obj_ctx(&fixup_ctx);
+        fixup_ctx_ready = false;
+    }
+    if (j->update_active && j->code_size > code_size_before)
+        j->update_dirty = true;
+    if (own_wx_transition) {
+        JIT_PROF_START(make_exec);
+        if (make_executable_from(j, code_size_before) != 0)
+            rc = -1;
+        JIT_PROF_END(make_exec);
+    }
+    return rc;
+}
+
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
 
     bool own_wx_transition = !j->update_active;
     int rc = -1;
     size_t code_size_before = j->code_size;
-    lr_objfile_ctx_t fixup_ctx;
-    memset(&fixup_ctx, 0, sizeof(fixup_ctx));
-    bool fixup_ctx_ready = false;
-    void *saved_obj_ctx = NULL;
-    bool obj_ctx_installed = false;
 
     if (own_wx_transition) {
         JIT_PROF_START(make_writable);
@@ -839,15 +1066,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
     if (finalize_module_functions(m, funcs, nfuncs, j->arena) != 0)
         goto done;
-
-    for (uint32_t i = 0; i < nfuncs; i++) {
-        const char *name = funcs[i]->name;
-        if (name && name[0]) {
-            uint32_t hash = symbol_hash(name);
-            if (!find_symbol_entry(j, name, hash))
-                miss_cache_add(j, name, hash);
-        }
-    }
+    if (register_lazy_module_functions(j, m, funcs, nfuncs) != 0)
+        goto done;
 
     /* Resolve function declarations eagerly — these are external symbols
        that will be needed during compilation (e.g., runtime functions). */
@@ -857,57 +1077,12 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
     JIT_PROF_END(pre_register);
 
-    fixup_ctx.preserve_symbol_names = true;
-    if (jit_build_module_symbol_cache(&fixup_ctx, m) != 0)
-        goto done;
-    fixup_ctx_ready = true;
-    saved_obj_ctx = m->obj_ctx;
-    m->obj_ctx = &fixup_ctx;
-    obj_ctx_installed = true;
-
-    JIT_PROF_START(compile_loop);
-    void **func_addrs = lr_arena_array(j->arena, void *, nfuncs);
-    if (!func_addrs)
-        goto done;
-    for (uint32_t i = 0; i < nfuncs; i++) {
-        int func_rc = compile_one_function(j, m, funcs[i], &fixup_ctx, &func_addrs[i]);
-        if (func_rc != 0) {
-            rc = func_rc;
-            goto done;
-        }
-    }
-    JIT_PROF_END(compile_loop);
-
-    JIT_PROF_START(patch_fixups);
-    const char *missing_symbol = NULL;
-    if (apply_jit_relocs(j, &fixup_ctx, &missing_symbol) != 0) {
-        if (missing_symbol)
-            fprintf(stderr, "unresolved symbol: %s\n", missing_symbol);
-        goto done;
-    }
-    JIT_PROF_END(patch_fixups);
-
-    for (uint32_t i = 0; i < nfuncs; i++) {
-        if (funcs[i]->name && funcs[i]->name[0] && func_addrs[i])
-            lr_jit_add_symbol(j, funcs[i]->name, func_addrs[i]);
-    }
-
-    /* Re-apply relocations after module-defined function symbols exist.
-       This fixes globals (e.g. vtables) referencing internal functions. */
+    /* Re-apply now for globals that only reference non-function symbols. */
     if (apply_module_global_relocs(j, m) != 0)
         goto done;
-
     rc = 0;
 
 done:
-    if (obj_ctx_installed) {
-        m->obj_ctx = saved_obj_ctx;
-        obj_ctx_installed = false;
-    }
-    if (fixup_ctx_ready) {
-        jit_free_obj_ctx(&fixup_ctx);
-        fixup_ctx_ready = false;
-    }
     if (j->update_active && j->code_size > code_size_before)
         j->update_dirty = true;
     if (own_wx_transition) {
@@ -940,6 +1115,14 @@ void lr_jit_end_update(lr_jit_t *j) {
 }
 
 void *lr_jit_get_function(lr_jit_t *j, const char *name) {
+    if (!j || !name || !name[0])
+        return NULL;
+    uint32_t hash = symbol_hash(name);
+    lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+    if (lazy && lazy->state != LR_LAZY_FUNC_READY) {
+        if (materialize_lazy_function(j, lazy) != 0)
+            return NULL;
+    }
     return lookup_symbol(j, name);
 }
 
@@ -953,6 +1136,7 @@ void lr_jit_destroy(lr_jit_t *j) {
         munmap(j->code_buf, j->code_cap);
     if (j->data_buf && j->data_buf != MAP_FAILED)
         munmap(j->data_buf, j->data_cap);
+    free(j->lazy_func_buckets);
     free(j->miss_buckets);
     free(j->sym_buckets);
     lr_arena_destroy(j->arena);
