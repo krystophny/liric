@@ -30,9 +30,10 @@ enum {
 
 static lr_operand_t desc_to_op(lr_operand_desc_t d) {
     lr_operand_t op;
-    memset(&op, 0, sizeof(op));
     op.kind = (lr_operand_kind_t)d.kind;
     op.type = d.type;
+    op.global_offset = 0;
+    op.imm_i64 = 0;
     switch (d.kind) {
     case LR_OP_KIND_VREG:    op.vreg = d.vreg; break;
     case LR_OP_KIND_IMM_I64: op.imm_i64 = d.imm_i64; break;
