@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
 
 #include <liric/liric_compat.h>
 
@@ -931,6 +932,53 @@ static int test_jit_smoke_branch() {
     return 0;
 }
 
+static int test_jit_smoke_indirect_bitcast_external_fp_call() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_indirect_ext_fp", ctx);
+    auto *dbl = llvm::Type::getDoubleTy(ctx);
+    auto *i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::Type *sin_params[] = {dbl};
+    auto *sin_ty = llvm::FunctionType::get(
+        dbl, llvm::ArrayRef<llvm::Type *>(sin_params, 1), false);
+    auto *sin_decl = llvm::Function::Create(
+        sin_ty, llvm::GlobalValue::ExternalLinkage, "sin", mod);
+    TEST_ASSERT(sin_decl != nullptr, "sin declaration");
+
+    auto *caller_ty = llvm::FunctionType::get(i64, false);
+    auto *caller = llvm::Function::Create(
+        caller_ty, llvm::GlobalValue::ExternalLinkage, "call_sin_bitcast", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", caller);
+    llvm::IRBuilder<> builder(entry);
+
+    llvm::Value *callee = builder.CreateBitCast(
+        sin_decl, llvm::Type::getInt8PtrTy(ctx), "sin_ptr");
+    TEST_ASSERT(callee != nullptr, "bitcasted callee");
+    llvm::Value *arg = llvm::ConstantFP::get(dbl, 1.5707963267948966);
+    llvm::Value *call_args[] = {arg};
+    llvm::Value *s = builder.CreateCall(
+        sin_ty, callee, llvm::ArrayRef<llvm::Value *>(call_args, 1), "s");
+    TEST_ASSERT(s != nullptr, "sin call");
+    llvm::Value *scaled = builder.CreateFMul(
+        s, llvm::ConstantFP::get(dbl, 1000.0), "scaled");
+    llvm::Value *as_i64 = builder.CreateFPToSI(scaled, i64, "as_i64");
+    builder.CreateRet(as_i64);
+
+    llvm::orc::LLJIT jit;
+    double (*sin_fn)(double) = std::sin;
+    void *sin_addr = nullptr;
+    memcpy(&sin_addr, &sin_fn, sizeof(sin_addr));
+    jit.addSymbol("sin", sin_addr);
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef long long (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("call_sin_bitcast");
+    TEST_ASSERT(fp != nullptr, "lookup call_sin_bitcast");
+    long long result = fp();
+    TEST_ASSERT(result >= 999 && result <= 1001,
+                "bitcasted external FP call uses correct ABI");
+    return 0;
+}
+
 int main() {
     fprintf(stderr, "LLVM C++ compat test suite\n");
     fprintf(stderr, "==========================\n\n");
@@ -981,6 +1029,7 @@ int main() {
     RUN_TEST(test_jit_smoke_ret_42);
     RUN_TEST(test_jit_smoke_add_args);
     RUN_TEST(test_jit_smoke_branch);
+    RUN_TEST(test_jit_smoke_indirect_bitcast_external_fp_call);
 
     fprintf(stderr, "\n==========================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",

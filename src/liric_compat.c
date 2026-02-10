@@ -1434,17 +1434,29 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
         ops[1 + i] = desc_to_op(ad);
     }
 
+    lr_inst_t *inst = NULL;
+    uint32_t dest = 0;
     if (is_void) {
-        lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_CALL,
-                                          m->type_void, 0, ops, nops);
-        lr_block_append(b, inst);
-        return NULL;
+        inst = lr_inst_create(m->arena, LR_OP_CALL,
+                               m->type_void, 0, ops, nops);
+    } else {
+        dest = lr_vreg_new(f);
+        inst = lr_inst_create(m->arena, LR_OP_CALL,
+                               ret_type, dest, ops, nops);
     }
+    if (!inst)
+        return safe_undef(mod);
 
-    uint32_t dest = lr_vreg_new(f);
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_CALL,
-                                      ret_type, dest, ops, nops);
+    if (func_type && func_type->kind == LR_TYPE_FUNC)
+        inst->call_vararg = func_type->func.vararg;
+
+    /* Indirect calls (e.g. bitcasted function values) should use C ABI. */
+    if (ops[0].kind != LR_VAL_GLOBAL)
+        inst->call_external_abi = true;
+
     lr_block_append(b, inst);
+    if (is_void)
+        return NULL;
     return wrap_vreg(mod, dest, ret_type, f);
 }
 
