@@ -33,7 +33,7 @@ class Module {
 public:
     Module(StringRef name, LLVMContext &ctx)
         : ctx_(ctx), name_(name.str()) {
-        compat_ = lc_module_create(ctx.impl(), name.data());
+        compat_ = lc_module_create(ctx.impl(), name_.c_str());
         current_ = compat_;
         detail::fallback_module = compat_;
     }
@@ -84,7 +84,7 @@ public:
     Function *getFunction(StringRef Name) const {
         lr_module_t *m = lc_module_get_ir(compat_);
         for (lr_func_t *f = m->first_func; f; f = f->next) {
-            if (std::strcmp(f->name, Name.data()) == 0) {
+            if (Name.equals(f->name)) {
                 for (auto &of : owned_functions_) {
                     lr_func_t *irf = of->getIRFunc();
                     if (irf == f) return of.get();
@@ -105,8 +105,9 @@ public:
     }
 
     Constant *getOrInsertGlobal(StringRef Name, Type *Ty) {
-        lc_value_t *gv = lc_global_lookup_or_create(compat_, Name.data(),
-                                                      Ty->impl());
+        std::string global_name = Name.str();
+        lc_value_t *gv = lc_global_lookup_or_create(compat_, global_name.c_str(),
+                                                    Ty->impl());
         return static_cast<Constant *>(Value::wrap(gv));
     }
 

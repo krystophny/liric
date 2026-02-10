@@ -4,6 +4,7 @@
 #include <liric/liric.h>
 #include <liric/liric_compat.h>
 #include "llvm/ADT/StringRef.h"
+#include <string>
 
 namespace llvm {
 
@@ -26,11 +27,13 @@ public:
     inline int addModule(Module &M);
 
     void *lookup(StringRef Name) {
-        return lr_jit_get_function(jit_, Name.data());
+        std::string symbol_name = Name.str();
+        return lr_jit_get_function(jit_, symbol_name.c_str());
     }
 
     void addSymbol(StringRef Name, void *Addr) {
-        lr_jit_add_symbol(jit_, Name.data(), Addr);
+        std::string symbol_name = Name.str();
+        lr_jit_add_symbol(jit_, symbol_name.c_str(), Addr);
     }
 
     static const char *getHostTargetName() {
