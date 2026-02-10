@@ -136,6 +136,13 @@ These do NOT depend on mass run results; they discover tests directly from CMake
    Outputs include completion/skip accounting and per-phase medians in
    `/tmp/liric_bench/bench_api_summary.json`.
 
+   For failure deep-dive triage:
+   ```bash
+   ./build/bench_api --iters 1 --timeout-ms 3000 \
+     --keep-fail-workdirs \
+     --fail-log-dir /tmp/liric_bench/fail_logs
+   ```
+
 4. **Optional per-file LLVM in-process phase timing**:
    ```bash
    ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
@@ -155,3 +162,6 @@ All artifacts in `/tmp/liric_bench/`:
 - `bench_ll_summary.json`: aggregate medians/sums including parser-vs-compile split
 - `bench_api.jsonl`: API benchmark timing/skip rows
 - `bench_api_summary.json`: API benchmark aggregate medians, skip reasons, phase tracker
+- `bench_api_failures.jsonl`: one row per skipped API case with reason/rc/signal/excerpts/log paths
+- `bench_api_fail_summary.json`: skipped-case aggregate counts + failing-side distribution
+- `fail_logs/`: per-failure stdout/stderr logs referenced by `bench_api_failures.jsonl`

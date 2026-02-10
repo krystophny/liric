@@ -1,6 +1,7 @@
 // API benchmark (direct-JIT mode): compare lfortran --jit execution
 // between LLVM build and WITH_LIRIC build (no object/link benchmark path).
 
+#include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -41,6 +42,9 @@ typedef struct {
     int iters;
     int timeout_ms;
     int min_completed;
+    int keep_fail_workdirs;
+    int fail_sample_limit;
+    const char *fail_log_dir;
     double lookup_dispatch_share_pct;
 } cfg_t;
 
@@ -85,6 +89,23 @@ typedef struct {
     double jit_run_ms;
     double total_ms;
 } time_report_t;
+
+typedef struct {
+    const char *reason;
+    const char *failing_side;
+    int rc;
+    int has_rc;
+    int signal;
+    int timed_out;
+    size_t iteration;
+    char *stdout_text;
+    char *stderr_text;
+    char *stdout_excerpt;
+    char *stderr_excerpt;
+    char *work_dir;
+    char *stdout_log_path;
+    char *stderr_log_path;
+} skip_diag_t;
 
 #define TRACKER_TARGET_LLVM_IR_CREATION_MS 0.350
 #define TRACKER_TARGET_LLVM_TO_JIT_MS 0.250
@@ -158,6 +179,40 @@ static char *path_join2(const char *a, const char *b) {
     memcpy(out + na, b, nb);
     out[na + nb] = '\0';
     return out;
+}
+
+static int remove_tree(const char *path) {
+    DIR *dir;
+    struct dirent *ent;
+    char child[PATH_MAX];
+    struct stat st;
+
+    if (!path || path[0] == '\0') return 0;
+    if (lstat(path, &st) != 0) {
+        if (errno == ENOENT) return 0;
+        return -1;
+    }
+
+    if (!S_ISDIR(st.st_mode))
+        return unlink(path);
+
+    dir = opendir(path);
+    if (!dir) return -1;
+    while ((ent = readdir(dir)) != NULL) {
+        int n;
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
+        if (n < 0 || (size_t)n >= sizeof(child)) {
+            closedir(dir);
+            return -1;
+        }
+        if (remove_tree(child) != 0) {
+            closedir(dir);
+            return -1;
+        }
+    }
+    closedir(dir);
+    return rmdir(path);
 }
 
 static char *read_all_file(const char *path) {
@@ -571,6 +626,159 @@ static char *normalize_output(const char *s) {
     return out;
 }
 
+static char *make_excerpt(const char *s, size_t max_len) {
+    char *norm = normalize_output(s);
+    size_t n = strlen(norm);
+    char *out;
+
+    if (n <= max_len) return norm;
+    if (max_len < 3) {
+        free(norm);
+        return xstrdup("");
+    }
+    out = (char *)malloc(max_len + 1);
+    if (!out) die("out of memory", NULL);
+    memcpy(out, norm, max_len);
+    out[max_len] = '\0';
+    out[max_len - 3] = '.';
+    out[max_len - 2] = '.';
+    out[max_len - 1] = '.';
+    free(norm);
+    return out;
+}
+
+static const char *signal_name_from_num(int sig) {
+    switch (sig) {
+        case SIGABRT: return "SIGABRT";
+        case SIGALRM: return "SIGALRM";
+        case SIGBUS: return "SIGBUS";
+        case SIGFPE: return "SIGFPE";
+        case SIGHUP: return "SIGHUP";
+        case SIGILL: return "SIGILL";
+        case SIGINT: return "SIGINT";
+        case SIGKILL: return "SIGKILL";
+        case SIGPIPE: return "SIGPIPE";
+        case SIGQUIT: return "SIGQUIT";
+        case SIGSEGV: return "SIGSEGV";
+        case SIGTERM: return "SIGTERM";
+        case SIGTRAP: return "SIGTRAP";
+        default: return "UNKNOWN";
+    }
+}
+
+static void skip_diag_reset(skip_diag_t *d) {
+    if (!d) return;
+    free(d->stdout_text);
+    free(d->stderr_text);
+    free(d->stdout_excerpt);
+    free(d->stderr_excerpt);
+    free(d->work_dir);
+    free(d->stdout_log_path);
+    free(d->stderr_log_path);
+    memset(d, 0, sizeof(*d));
+}
+
+static void skip_diag_set_basic(skip_diag_t *d,
+                                const char *reason,
+                                const char *failing_side,
+                                size_t iteration,
+                                const char *stderr_text) {
+    skip_diag_reset(d);
+    d->reason = reason;
+    d->failing_side = failing_side;
+    d->iteration = iteration;
+    d->stderr_text = xstrdup(stderr_text ? stderr_text : "");
+    d->stderr_excerpt = make_excerpt(d->stderr_text, 256);
+}
+
+static void skip_diag_from_cmd(skip_diag_t *d,
+                               const char *reason,
+                               const char *failing_side,
+                               size_t iteration,
+                               const cmd_result_t *r) {
+    skip_diag_reset(d);
+    d->reason = reason;
+    d->failing_side = failing_side;
+    d->iteration = iteration;
+    d->timed_out = r ? r->timed_out : 0;
+    if (r) {
+        d->has_rc = 1;
+        d->rc = r->rc;
+        if (r->rc < 0) d->signal = -r->rc;
+        d->stdout_text = xstrdup(r->stdout_text ? r->stdout_text : "");
+        d->stderr_text = xstrdup(r->stderr_text ? r->stderr_text : "");
+        d->stdout_excerpt = make_excerpt(d->stdout_text, 256);
+        d->stderr_excerpt = make_excerpt(d->stderr_text, 256);
+    }
+}
+
+static int write_text_file(const char *path, const char *text) {
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    if (text && text[0] != '\0')
+        fputs(text, f);
+    fclose(f);
+    return 0;
+}
+
+static void sanitize_token(const char *in, char *out, size_t out_sz) {
+    size_t i = 0;
+    if (out_sz == 0) return;
+    if (!in) {
+        out[0] = '\0';
+        return;
+    }
+    for (; in[i] && i + 1 < out_sz; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (isalnum(c) || c == '-' || c == '_')
+            out[i] = (char)c;
+        else
+            out[i] = '_';
+    }
+    out[i] = '\0';
+}
+
+static void maybe_write_failure_logs(const char *fail_log_dir, const char *name, skip_diag_t *diag) {
+    char name_tok[256], reason_tok[128];
+    char base[512];
+    char *stdout_path, *stderr_path;
+    int n;
+
+    if (!fail_log_dir || !name || !diag) return;
+    if (!diag->stdout_text && !diag->stderr_text) return;
+    ensure_dir(fail_log_dir);
+
+    sanitize_token(name, name_tok, sizeof(name_tok));
+    sanitize_token(diag->reason ? diag->reason : "unknown", reason_tok, sizeof(reason_tok));
+    n = snprintf(base, sizeof(base), "%s__%s__it%zu", name_tok, reason_tok, diag->iteration + 1);
+    if (n < 0 || (size_t)n >= sizeof(base)) return;
+
+    {
+        char tmp[640];
+        snprintf(tmp, sizeof(tmp), "%s.stdout.txt", base);
+        stdout_path = path_join2(fail_log_dir, tmp);
+    }
+    {
+        char tmp[640];
+        snprintf(tmp, sizeof(tmp), "%s.stderr.txt", base);
+        stderr_path = path_join2(fail_log_dir, tmp);
+    }
+
+    if (write_text_file(stdout_path, diag->stdout_text ? diag->stdout_text : "") == 0) {
+        free(diag->stdout_log_path);
+        diag->stdout_log_path = stdout_path;
+    } else {
+        free(stdout_path);
+    }
+
+    if (write_text_file(stderr_path, diag->stderr_text ? diag->stderr_text : "") == 0) {
+        free(diag->stderr_log_path);
+        diag->stderr_log_path = stderr_path;
+    } else {
+        free(stderr_path);
+    }
+}
+
 static char *strip_ansi(const char *s) {
     size_t i, n = 0;
     char *out, *p;
@@ -702,14 +910,98 @@ static void write_json_nonzero_compat_row(FILE *f, const char *name, int rc) {
     free(en);
 }
 
-static void write_json_skip_row(FILE *f, const char *name, const char *reason) {
+static void write_json_skip_row(FILE *f, const char *name, const skip_diag_t *diag) {
     char *en = json_escape(name ? name : "");
-    char *er = json_escape(reason ? reason : "unknown");
+    char *er = json_escape((diag && diag->reason) ? diag->reason : "unknown");
+    char *ef = json_escape((diag && diag->failing_side) ? diag->failing_side : "harness");
+    char *esout = json_escape((diag && diag->stdout_excerpt) ? diag->stdout_excerpt : "");
+    char *eserr = json_escape((diag && diag->stderr_excerpt) ? diag->stderr_excerpt : "");
+    const char *sig_name = "UNKNOWN";
+    if (diag && diag->signal > 0) sig_name = signal_name_from_num(diag->signal);
     fprintf(f,
-            "{\"name\":\"%s\",\"status\":\"skipped\",\"reason\":\"%s\"}\n",
-            en, er);
+            "{\"name\":\"%s\",\"status\":\"skipped\",\"reason\":\"%s\","
+            "\"failing_side\":\"%s\",\"iter\":%zu,\"timed_out\":%s,"
+            "\"rc\":%d,\"signal\":%d,\"signal_name\":\"%s\","
+            "\"stdout_excerpt\":\"%s\",\"stderr_excerpt\":\"%s\"",
+            en, er, ef,
+            (diag ? diag->iteration + 1 : 0),
+            (diag && diag->timed_out) ? "true" : "false",
+            (diag && diag->has_rc) ? diag->rc : 0,
+            (diag && diag->signal > 0) ? diag->signal : 0,
+            sig_name, esout, eserr);
+    if (diag && diag->work_dir) {
+        char *ework = json_escape(diag->work_dir);
+        fprintf(f, ",\"work_dir\":\"%s\"", ework);
+        free(ework);
+    }
+    if (diag && diag->stdout_log_path) {
+        char *ep = json_escape(diag->stdout_log_path);
+        fprintf(f, ",\"stdout_log\":\"%s\"", ep);
+        free(ep);
+    }
+    if (diag && diag->stderr_log_path) {
+        char *ep = json_escape(diag->stderr_log_path);
+        fprintf(f, ",\"stderr_log\":\"%s\"", ep);
+        free(ep);
+    }
+    fprintf(f, "}\n");
     free(en);
     free(er);
+    free(ef);
+    free(esout);
+    free(eserr);
+}
+
+static void write_json_failure_detail_row(FILE *f, const char *name, const skip_diag_t *diag) {
+    char *en, *er, *ef, *esout, *eserr;
+    const char *sig_name = "UNKNOWN";
+    if (!f) return;
+    en = json_escape(name ? name : "");
+    er = json_escape((diag && diag->reason) ? diag->reason : "unknown");
+    ef = json_escape((diag && diag->failing_side) ? diag->failing_side : "harness");
+    esout = json_escape((diag && diag->stdout_excerpt) ? diag->stdout_excerpt : "");
+    eserr = json_escape((diag && diag->stderr_excerpt) ? diag->stderr_excerpt : "");
+    if (diag && diag->signal > 0) sig_name = signal_name_from_num(diag->signal);
+
+    fprintf(f,
+            "{\"name\":\"%s\",\"reason\":\"%s\",\"failing_side\":\"%s\","
+            "\"iter\":%zu,\"timed_out\":%s,\"rc\":%d,\"signal\":%d,\"signal_name\":\"%s\","
+            "\"stdout_excerpt\":\"%s\",\"stderr_excerpt\":\"%s\"",
+            en, er, ef,
+            (diag ? diag->iteration + 1 : 0),
+            (diag && diag->timed_out) ? "true" : "false",
+            (diag && diag->has_rc) ? diag->rc : 0,
+            (diag && diag->signal > 0) ? diag->signal : 0,
+            sig_name, esout, eserr);
+    if (diag && diag->work_dir) {
+        char *ework = json_escape(diag->work_dir);
+        fprintf(f, ",\"work_dir\":\"%s\"", ework);
+        free(ework);
+    }
+    if (diag && diag->stdout_log_path) {
+        char *ep = json_escape(diag->stdout_log_path);
+        fprintf(f, ",\"stdout_log\":\"%s\"", ep);
+        free(ep);
+    }
+    if (diag && diag->stderr_log_path) {
+        char *ep = json_escape(diag->stderr_log_path);
+        fprintf(f, ",\"stderr_log\":\"%s\"", ep);
+        free(ep);
+    }
+    fprintf(f, "}\n");
+
+    free(en);
+    free(er);
+    free(ef);
+    free(esout);
+    free(eserr);
+}
+
+static int side_index(const char *side) {
+    if (!side) return 2;
+    if (strcmp(side, "llvm") == 0) return 0;
+    if (strcmp(side, "liric") == 0) return 1;
+    return 2;
 }
 
 #define SKIP_REASON_COUNT 10
@@ -754,6 +1046,9 @@ static void usage(void) {
     printf("  --iters N            iterations per test (default: 3)\n");
     printf("  --timeout N          per-command timeout in seconds (compat alias)\n");
     printf("  --timeout-ms N       per-command timeout in milliseconds (default: 3000)\n");
+    printf("  --keep-fail-workdirs keep workdirs for skipped tests (default: off)\n");
+    printf("  --fail-log-dir PATH  write detailed failure stdout/stderr logs here (default: <bench-dir>/fail_logs)\n");
+    printf("  --fail-sample-limit N limit number of compat tests processed (default: all)\n");
     printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
     printf("  --lookup-dispatch-share-pct N  optional profile-derived lookup/dispatch share percentage\n");
 }
@@ -770,6 +1065,9 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.options_jsonl = NULL;
     cfg.iters = 3;
     cfg.timeout_ms = 3000;
+    cfg.keep_fail_workdirs = 0;
+    cfg.fail_sample_limit = 0;
+    cfg.fail_log_dir = NULL;
     cfg.min_completed = 0;
     cfg.lookup_dispatch_share_pct = -1.0;
 
@@ -799,6 +1097,13 @@ static cfg_t parse_args(int argc, char **argv) {
         } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
             cfg.timeout_ms = atoi(argv[++i]);
             if (cfg.timeout_ms <= 0) cfg.timeout_ms = 3000;
+        } else if (strcmp(argv[i], "--keep-fail-workdirs") == 0) {
+            cfg.keep_fail_workdirs = 1;
+        } else if (strcmp(argv[i], "--fail-log-dir") == 0 && i + 1 < argc) {
+            cfg.fail_log_dir = argv[++i];
+        } else if (strcmp(argv[i], "--fail-sample-limit") == 0 && i + 1 < argc) {
+            cfg.fail_sample_limit = atoi(argv[++i]);
+            if (cfg.fail_sample_limit < 0) cfg.fail_sample_limit = 0;
         } else if (strcmp(argv[i], "--min-completed") == 0 && i + 1 < argc) {
             cfg.min_completed = atoi(argv[++i]);
             if (cfg.min_completed < 0) cfg.min_completed = 0;
@@ -820,6 +1125,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
     if (cfg.compat_list) cfg.compat_list = to_abs_path(cfg.compat_list);
     if (cfg.options_jsonl) cfg.options_jsonl = to_abs_path(cfg.options_jsonl);
+    if (cfg.fail_log_dir) cfg.fail_log_dir = to_abs_path(cfg.fail_log_dir);
 
     return cfg;
 }
@@ -828,6 +1134,7 @@ int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     char *compat_path = NULL;
     char *opts_path = NULL;
+    char *fail_log_dir = NULL;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -845,11 +1152,14 @@ int main(int argc, char **argv) {
 
     char *jsonl_path = path_join2(cfg.bench_dir, "bench_api.jsonl");
     char *summary_path = path_join2(cfg.bench_dir, "bench_api_summary.json");
+    char *fail_jsonl_path = path_join2(cfg.bench_dir, "bench_api_failures.jsonl");
+    char *fail_summary_path = path_join2(cfg.bench_dir, "bench_api_fail_summary.json");
     FILE *f;
     strlist_t tests;
     optlist_t opts;
     rowlist_t rows;
     size_t skip_reason_counts[SKIP_REASON_COUNT];
+    size_t skip_side_counts[3] = {0, 0, 0}; // llvm, liric, harness
     size_t compat_nonzero_completed = 0;
     size_t i;
     int exit_code = 0;
@@ -871,13 +1181,20 @@ int main(int argc, char **argv) {
         while (fgets(line, sizeof(line), f)) {
             size_t n = strlen(line);
             while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
-            if (n > 0) strlist_push(&tests, line);
+            if (n > 0) {
+                if (cfg.fail_sample_limit <= 0 || (int)tests.n < cfg.fail_sample_limit)
+                    strlist_push(&tests, line);
+            }
         }
     }
     fclose(f);
 
     opts = parse_options_jsonl(opts_path);
     ensure_dir(cfg.bench_dir);
+    if (cfg.fail_log_dir)
+        fail_log_dir = xstrdup(cfg.fail_log_dir);
+    else
+        fail_log_dir = path_join2(cfg.bench_dir, "fail_logs");
 
     printf("Benchmarking %zu tests, %d iterations each\n", tests.n, cfg.iters);
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
@@ -886,6 +1203,11 @@ int main(int argc, char **argv) {
     printf("  bench_dir:     %s\n", cfg.bench_dir);
     printf("  compat_list:   %s\n", compat_path);
     printf("  options_jsonl: %s\n", opts_path);
+    if (cfg.fail_sample_limit > 0) {
+        printf("  fail_sample_limit: %d\n", cfg.fail_sample_limit);
+    }
+    printf("  fail_log_dir:   %s\n", fail_log_dir);
+    printf("  keep_fail_workdirs: %s\n", cfg.keep_fail_workdirs ? "on" : "off");
     printf("  min_completed: %d\n", cfg.min_completed);
     if (cfg.lookup_dispatch_share_pct >= 0.0) {
         printf("  lookup_dispatch_share_pct: %.3f\n", cfg.lookup_dispatch_share_pct);
@@ -893,12 +1215,15 @@ int main(int argc, char **argv) {
 
     {
         FILE *jf = fopen(jsonl_path, "w");
+        FILE *ff = fopen(fail_jsonl_path, "w");
         if (!jf) die("failed to open output", jsonl_path);
+        if (!ff) die("failed to open output", fail_jsonl_path);
 
         for (i = 0; i < tests.n; i++) {
             const char *name = tests.items[i];
             const char *test_opts = optlist_find(&opts, name);
             strlist_t opt_toks;
+            skip_diag_t skip_diag;
             char *source_path = NULL;
             size_t it;
             double *liric_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
@@ -916,17 +1241,22 @@ int main(int argc, char **argv) {
             int nonzero_compat_rc = 0;
             char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
+            int keep_work_dir = 0;
+            memset(&skip_diag, 0, sizeof(skip_diag));
 
             strlist_init(&opt_toks);
             {
                 int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_jit_XXXXXX");
                 if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
                     skip_reason = "workdir_create_failed";
+                    skip_diag_set_basic(&skip_diag, skip_reason, "harness", 0,
+                                        "workdir template exceeded PATH_MAX");
                     goto skip_test;
                 }
             }
             if (!mkdtemp(work_tpl)) {
                 skip_reason = "workdir_create_failed";
+                skip_diag_set_basic(&skip_diag, skip_reason, "harness", 0, strerror(errno));
                 goto skip_test;
             }
             work_dir = work_tpl;
@@ -941,6 +1271,7 @@ int main(int argc, char **argv) {
 
             if (!file_exists(source_path)) {
                 skip_reason = "source_missing";
+                skip_diag_set_basic(&skip_diag, skip_reason, "harness", 0, "source file missing");
                 goto skip_test;
             }
 
@@ -972,6 +1303,7 @@ int main(int argc, char **argv) {
                 free(llvm_argv);
                 if (llvm_r.timed_out) {
                     skip_reason = "llvm_jit_timeout";
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r);
                     free_cmd_result(&llvm_r);
                     break;
                 }
@@ -992,6 +1324,7 @@ int main(int argc, char **argv) {
                 free(liric_argv);
                 if (liric_r.timed_out) {
                     skip_reason = "liric_jit_timeout";
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r);
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
@@ -1016,8 +1349,10 @@ int main(int argc, char **argv) {
                         nonzero_compat_rc = llvm_r.rc;
                     } else if (llvm_r.rc != 0) {
                         skip_reason = classify_jit_failure_reason(0, llvm_r.rc);
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r);
                     } else {
                         skip_reason = classify_jit_failure_reason(1, liric_r.rc);
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r);
                     }
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
@@ -1027,6 +1362,7 @@ int main(int argc, char **argv) {
                 memset(&llvm_time, 0, sizeof(llvm_time));
                 if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
                     skip_reason = "llvm_jit_failed";
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r);
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
@@ -1034,6 +1370,7 @@ int main(int argc, char **argv) {
                 memset(&liric_time, 0, sizeof(liric_time));
                 if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
                     skip_reason = "liric_jit_failed";
+                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r);
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
                     break;
@@ -1071,6 +1408,8 @@ int main(int argc, char **argv) {
                     goto next_test;
                 }
                 if (!skip_reason) skip_reason = "llvm_jit_failed";
+                if (!skip_diag.reason)
+                    skip_diag_set_basic(&skip_diag, skip_reason, "harness", 0, "unknown failure");
                 goto skip_test;
             }
 
@@ -1114,11 +1453,20 @@ skip_test:
                 int idx = skip_reason_index(skip_reason);
                 if (idx >= 0) skip_reason_counts[(size_t)idx]++;
             }
-            write_json_skip_row(jf, name, skip_reason ? skip_reason : "unknown");
+            if (!skip_diag.reason)
+                skip_diag_set_basic(&skip_diag, skip_reason ? skip_reason : "unknown", "harness", 0, "");
+            maybe_write_failure_logs(fail_log_dir, name, &skip_diag);
+            if (cfg.keep_fail_workdirs && work_dir) {
+                keep_work_dir = 1;
+                skip_diag.work_dir = xstrdup(work_dir);
+            }
+            skip_side_counts[(size_t)side_index(skip_diag.failing_side)]++;
+            write_json_skip_row(jf, name, &skip_diag);
+            write_json_failure_detail_row(ff, name, &skip_diag);
             printf("  [%zu/%zu] %s: skipped (%s)\n", i + 1, tests.n, name, skip_reason ? skip_reason : "unknown");
 
 next_test:
-            if (work_dir) rmdir(work_dir);
+            if (work_dir && !keep_work_dir) remove_tree(work_dir);
             free(source_path);
             free(liric_wall);
             free(llvm_wall);
@@ -1130,9 +1478,11 @@ next_test:
             free(liric_llvm_ir);
             free(llvm_llvm_ir);
             strlist_free(&opt_toks);
+            skip_diag_reset(&skip_diag);
         }
 
         fclose(jf);
+        fclose(ff);
     }
 
     {
@@ -1319,7 +1669,9 @@ next_test:
         size_t completed = completed_timed + compat_nonzero_completed;
         size_t skipped = (attempted >= completed) ? (attempted - completed) : 0;
         FILE *sf = fopen(summary_path, "w");
+        FILE *fsf = fopen(fail_summary_path, "w");
         if (!sf) die("failed to open output", summary_path);
+        if (!fsf) die("failed to open output", fail_summary_path);
 
         fprintf(sf, "{\n");
         fprintf(sf, "  \"attempted\": %zu,\n", attempted);
@@ -1334,10 +1686,19 @@ next_test:
         {
             char *ec = json_escape(compat_path);
             char *eo = json_escape(opts_path);
-            fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
-            fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
-            free(ec);
-            free(eo);
+        fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
+        fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
+        {
+            char *efj = json_escape(fail_jsonl_path);
+            char *efl = json_escape(fail_log_dir);
+            fprintf(sf, "  \"failure_jsonl\": \"%s\",\n", efj);
+            fprintf(sf, "  \"failure_log_dir\": \"%s\",\n", efl);
+            fprintf(sf, "  \"keep_fail_workdirs\": %s,\n", cfg.keep_fail_workdirs ? "true" : "false");
+            free(efj);
+            free(efl);
+        }
+        free(ec);
+        free(eo);
         }
         fprintf(sf, "  \"phase_tracker\": {\n");
         fprintf(sf, "    \"has_data\": %s,\n", tracker_has_data ? "true" : "false");
@@ -1383,6 +1744,34 @@ next_test:
         fprintf(sf, "}\n");
         fclose(sf);
 
+        fprintf(fsf, "{\n");
+        fprintf(fsf, "  \"attempted\": %zu,\n", attempted);
+        fprintf(fsf, "  \"completed\": %zu,\n", completed);
+        fprintf(fsf, "  \"failed\": %zu,\n", skipped);
+        {
+            char *efj = json_escape(fail_jsonl_path);
+            char *efd = json_escape(fail_log_dir);
+            fprintf(fsf, "  \"failure_jsonl\": \"%s\",\n", efj);
+            fprintf(fsf, "  \"failure_log_dir\": \"%s\",\n", efd);
+            free(efj);
+            free(efd);
+        }
+        fprintf(fsf, "  \"failing_side_counts\": {\n");
+        fprintf(fsf, "    \"llvm\": %zu,\n", skip_side_counts[0]);
+        fprintf(fsf, "    \"liric\": %zu,\n", skip_side_counts[1]);
+        fprintf(fsf, "    \"harness\": %zu\n", skip_side_counts[2]);
+        fprintf(fsf, "  },\n");
+        fprintf(fsf, "  \"skip_reasons\": {\n");
+        for (i = 0; i < SKIP_REASON_COUNT; i++) {
+            fprintf(fsf, "    \"%s\": %zu%s\n",
+                    k_skip_reasons[i],
+                    skip_reason_counts[i],
+                    (i + 1 == SKIP_REASON_COUNT) ? "" : ",");
+        }
+        fprintf(fsf, "  }\n");
+        fprintf(fsf, "}\n");
+        fclose(fsf);
+
         printf("\n  Accounting: attempted=%zu completed=%zu skipped=%zu\n",
                attempted, completed, skipped);
         if (compat_nonzero_completed > 0) {
@@ -1394,6 +1783,8 @@ next_test:
             }
         }
         printf("  Summary: %s\n", summary_path);
+        printf("  Failure details: %s\n", fail_jsonl_path);
+        printf("  Failure summary: %s\n", fail_summary_path);
 
         if (completed == 0) {
             fprintf(stderr, "no benchmark results completed\n");
@@ -1408,8 +1799,11 @@ next_test:
 
     free(compat_path);
     free(opts_path);
+    free(fail_log_dir);
     free(jsonl_path);
     free(summary_path);
+    free(fail_jsonl_path);
+    free(fail_summary_path);
     strlist_free(&tests);
     optlist_free(&opts);
     rowlist_free(&rows);
