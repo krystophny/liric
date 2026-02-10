@@ -113,6 +113,7 @@ int test_jit_phi_select_loop_carried(void);
 int test_jit_internal_global_load_store(void);
 int test_jit_internal_global_address_relocation(void);
 int test_jit_external_call_abs(void);
+int test_jit_external_call_abs_twice(void);
 int test_jit_varargs_printf_call(void);
 int test_jit_varargs_printf_double_call(void);
 int test_jit_const_gep_vtable_function_ptr(void);
@@ -273,6 +274,7 @@ int main(void) {
     RUN_TEST(test_jit_internal_global_load_store);
     RUN_TEST(test_jit_internal_global_address_relocation);
     RUN_TEST(test_jit_external_call_abs);
+    RUN_TEST(test_jit_external_call_abs_twice);
     RUN_TEST(test_jit_varargs_printf_call);
     RUN_TEST(test_jit_varargs_printf_double_call);
     RUN_TEST(test_jit_const_gep_vtable_function_ptr);
