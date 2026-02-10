@@ -732,6 +732,23 @@ static int test_stringref_twine() {
     return 0;
 }
 
+static int test_stringref_nullptr_zero_len_safety() {
+    llvm::StringRef empty_from_null(nullptr, 0);
+    TEST_ASSERT(empty_from_null.empty(), "nullptr+0 StringRef is empty");
+
+    std::string rendered = empty_from_null.str();
+    TEST_ASSERT(rendered.empty(), "nullptr+0 StringRef renders empty");
+
+    llvm::Twine tw(empty_from_null);
+    TEST_ASSERT(tw.str().empty(), "twine from nullptr+0 StringRef renders empty");
+
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << empty_from_null;
+    TEST_ASSERT(out.empty(), "raw_string_ostream ignores nullptr+0 StringRef");
+    return 0;
+}
+
 static int test_twine_abi_layout_and_concat() {
     size_t expected_size = sizeof(void *) == 8 ? 40u : 20u;
     TEST_ASSERT_EQ(sizeof(llvm::Twine), expected_size, "twine ABI size");
@@ -1115,6 +1132,7 @@ int main() {
     fprintf(stderr, "Infrastructure tests:\n");
     RUN_TEST(test_llvm_version);
     RUN_TEST(test_stringref_twine);
+    RUN_TEST(test_stringref_nullptr_zero_len_safety);
     RUN_TEST(test_twine_abi_layout_and_concat);
     RUN_TEST(test_arrayref);
     RUN_TEST(test_apint_apfloat);

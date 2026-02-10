@@ -94,7 +94,7 @@ class LIRIC_LLVM_HIDDEN Twine {
             return;
         case PtrAndLengthKind:
         case StringLiteralKind:
-            if (node.ptrAndLength.ptr != nullptr || node.ptrAndLength.length == 0) {
+            if (node.ptrAndLength.ptr != nullptr && node.ptrAndLength.length != 0) {
                 out.append(node.ptrAndLength.ptr, node.ptrAndLength.length);
             }
             return;
