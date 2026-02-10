@@ -701,14 +701,18 @@ static void write_json_skip_row(FILE *f, const char *name, const char *reason) {
     free(er);
 }
 
-#define SKIP_REASON_COUNT 6
+#define SKIP_REASON_COUNT 10
 static const char *k_skip_reasons[SKIP_REASON_COUNT] = {
     "workdir_create_failed",
     "source_missing",
     "llvm_jit_failed",
     "llvm_jit_timeout",
     "liric_jit_failed",
-    "liric_jit_timeout"
+    "liric_jit_timeout",
+    "llvm_jit_sigabrt",
+    "llvm_jit_sigsegv",
+    "liric_jit_sigabrt",
+    "liric_jit_sigsegv"
 };
 
 static int skip_reason_index(const char *reason) {
@@ -718,6 +722,14 @@ static int skip_reason_index(const char *reason) {
         if (strcmp(k_skip_reasons[i], reason) == 0) return (int)i;
     }
     return -1;
+}
+
+static const char *classify_jit_failure_reason(int is_liric, int rc) {
+    if (rc == -SIGABRT)
+        return is_liric ? "liric_jit_sigabrt" : "llvm_jit_sigabrt";
+    if (rc == -SIGSEGV)
+        return is_liric ? "liric_jit_sigsegv" : "llvm_jit_sigsegv";
+    return is_liric ? "liric_jit_failed" : "llvm_jit_failed";
 }
 
 static void usage(void) {
@@ -974,9 +986,9 @@ int main(int argc, char **argv) {
                         nonzero_compat = 1;
                         nonzero_compat_rc = llvm_r.rc;
                     } else if (llvm_r.rc != 0) {
-                        skip_reason = "llvm_jit_failed";
+                        skip_reason = classify_jit_failure_reason(0, llvm_r.rc);
                     } else {
-                        skip_reason = "liric_jit_failed";
+                        skip_reason = classify_jit_failure_reason(1, liric_r.rc);
                     }
                     free_cmd_result(&llvm_r);
                     free_cmd_result(&liric_r);
