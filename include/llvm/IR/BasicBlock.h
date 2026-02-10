@@ -35,7 +35,21 @@ public:
                               BasicBlock *InsertBefore = nullptr);
 
     Function *getParent() const {
-        return detail::lookup_block_parent(impl_block());
+        lr_block_t *block = impl_block();
+        if (!block) return nullptr;
+
+        Function *parent = detail::lookup_block_parent(block);
+        if (parent) return parent;
+
+        /* Recover from missing cache entries using the IR-owned block link. */
+        if (block->func) {
+            parent = detail::lookup_function_wrapper(block->func);
+            if (parent) {
+                detail::register_block_parent(block, parent);
+                return parent;
+            }
+        }
+        return nullptr;
     }
     Module *getModule() const { return nullptr; }
 
