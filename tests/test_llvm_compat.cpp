@@ -1071,6 +1071,52 @@ static int test_jit_smoke_branch() {
     return 0;
 }
 
+static int test_jit_smoke_branch_manual_phi_finalize() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_branch_manual_phi_finalize", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *params[] = {i32};
+    auto *fty = llvm::FunctionType::get(
+        i32, llvm::ArrayRef<llvm::Type *>(params, 1), false);
+    auto *fn = llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage,
+                                      "abs_val_manual_phi_finalize", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    auto *then_bb = llvm::BasicBlock::Create(ctx, "then", fn);
+    auto *else_bb = llvm::BasicBlock::Create(ctx, "else", fn);
+    auto *merge_bb = llvm::BasicBlock::Create(ctx, "merge", fn);
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *x = fn->getArg(0);
+    llvm::Value *zero = llvm::ConstantInt::get(i32, 0);
+    llvm::Value *cmp = builder.CreateICmpSLT(x, zero, "neg");
+    builder.CreateCondBr(cmp, then_bb, else_bb);
+
+    builder.SetInsertPoint(then_bb);
+    llvm::Value *negx = builder.CreateSub(zero, x, "negx");
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(else_bb);
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(merge_bb);
+    auto *phi = builder.CreatePHI(i32, 2, "result");
+    phi->addIncoming(negx, then_bb);
+    phi->addIncoming(x, else_bb);
+    phi->finalize();
+    builder.CreateRet(phi);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(int);
+    fn_t fp = (fn_t)jit.lookup("abs_val_manual_phi_finalize");
+    TEST_ASSERT(fp != nullptr, "lookup abs_val_manual_phi_finalize");
+    TEST_ASSERT_EQ(fp(5), 5, "abs_val_manual_phi_finalize(5) == 5");
+    TEST_ASSERT_EQ(fp(-7), 7, "abs_val_manual_phi_finalize(-7) == 7");
+    TEST_ASSERT_EQ(fp(0), 0, "abs_val_manual_phi_finalize(0) == 0");
+    return 0;
+}
+
 static int test_jit_smoke_indirect_bitcast_external_fp_call() {
     llvm::LLVMContext ctx;
     llvm::Module mod("jit_indirect_ext_fp", ctx);
@@ -1194,6 +1240,7 @@ int main() {
     RUN_TEST(test_jit_smoke_ret_42);
     RUN_TEST(test_jit_smoke_add_args);
     RUN_TEST(test_jit_smoke_branch);
+    RUN_TEST(test_jit_smoke_branch_manual_phi_finalize);
     RUN_TEST(test_jit_smoke_indirect_bitcast_external_fp_call);
     RUN_TEST(test_jit_stringref_slice_symbol_lookup);
 

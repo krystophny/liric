@@ -1537,7 +1537,7 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
 }
 
 void lc_phi_finalize(lc_phi_node_t *phi) {
-    if (phi->finalized) return;
+    if (!phi || phi->finalized) return;
     phi->finalized = true;
 
     lr_module_t *m = phi->mod;
@@ -1555,13 +1555,24 @@ void lc_phi_finalize(lc_phi_node_t *phi) {
     lr_block_append(phi->block, inst);
 
     free(phi->incoming_vals);
+    phi->incoming_vals = NULL;
     free(phi->incoming_block_ids);
-    free(phi);
+    phi->incoming_block_ids = NULL;
+    phi->num_incoming = 0;
+    phi->cap_incoming = 0;
+    if (phi->result)
+        phi->result->vreg.phi_node = NULL;
 }
 
 void lc_module_finalize_phis(lc_module_compat_t *mod) {
+    if (!mod) return;
     for (uint32_t i = 0; i < mod->phi_count; i++) {
-        lc_phi_finalize(mod->pending_phis[i]);
+        lc_phi_node_t *phi = mod->pending_phis[i];
+        lc_phi_finalize(phi);
+        if (!phi) continue;
+        free(phi->incoming_vals);
+        free(phi->incoming_block_ids);
+        free(phi);
     }
     free(mod->pending_phis);
     mod->pending_phis = NULL;
