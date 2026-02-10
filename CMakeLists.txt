@@ -241,6 +241,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_api_strict_mode
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_API=$<TARGET_FILE:bench_api>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_strict_mode.cmake
+)
+
+add_test(
     NAME nightly_mass_workflow_contract
     COMMAND ${CMAKE_COMMAND}
         -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/nightly_mass.yml
