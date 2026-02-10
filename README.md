@@ -14,6 +14,12 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+Enable direct `.bc` decoding support (requires LLVM C API libs) only when needed:
+
+```bash
+cmake -S . -B build -G Ninja -DLIRIC_ENABLE_LLVM_BITCODE=ON
+```
+
 ## Run
 
 ```bash

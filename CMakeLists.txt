@@ -25,6 +25,8 @@ if(LIRIC_ENABLE_LTO)
     endif()
 endif()
 
+option(LIRIC_ENABLE_LLVM_BITCODE "Enable in-process LLVM bitcode (.bc) decoding via LLVM C API" OFF)
+
 add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
 if(UNIX AND NOT APPLE)
@@ -115,21 +117,25 @@ if(LLVM_CONFIG_EXE)
         OUTPUT_VARIABLE LLVM_SYSTEM_LIBS
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
-    execute_process(
-        COMMAND ${LLVM_CONFIG_EXE} --libs core bitreader
-        OUTPUT_VARIABLE LLVM_BITCODE_LIBS
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
     separate_arguments(LLVM_LDFLAGS_LIST NATIVE_COMMAND "${LLVM_LDFLAGS}")
     separate_arguments(LLVM_LIBS_LIST NATIVE_COMMAND "${LLVM_LIBS}")
     separate_arguments(LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LLVM_SYSTEM_LIBS}")
-    separate_arguments(LLVM_BITCODE_LIBS_LIST NATIVE_COMMAND "${LLVM_BITCODE_LIBS}")
 
-    if(LLVM_BITCODE_LIBS_LIST)
-        set(LIRIC_HAVE_LLVM_BITCODE ON)
-        set(LIRIC_LLVM_BITCODE_LDFLAGS_LIST ${LLVM_LDFLAGS_LIST})
-        set(LIRIC_LLVM_BITCODE_LIBS_LIST ${LLVM_BITCODE_LIBS_LIST})
-        set(LIRIC_LLVM_BITCODE_SYSTEM_LIBS_LIST ${LLVM_SYSTEM_LIBS_LIST})
+    if(LIRIC_ENABLE_LLVM_BITCODE)
+        execute_process(
+            COMMAND ${LLVM_CONFIG_EXE} --libs core bitreader
+            OUTPUT_VARIABLE LLVM_BITCODE_LIBS
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        separate_arguments(LLVM_BITCODE_LIBS_LIST NATIVE_COMMAND "${LLVM_BITCODE_LIBS}")
+        if(LLVM_BITCODE_LIBS_LIST)
+            set(LIRIC_HAVE_LLVM_BITCODE ON)
+            set(LIRIC_LLVM_BITCODE_LDFLAGS_LIST ${LLVM_LDFLAGS_LIST})
+            set(LIRIC_LLVM_BITCODE_LIBS_LIST ${LLVM_BITCODE_LIBS_LIST})
+            set(LIRIC_LLVM_BITCODE_SYSTEM_LIBS_LIST ${LLVM_SYSTEM_LIBS_LIST})
+        else()
+            message(WARNING "LIRIC_ENABLE_LLVM_BITCODE=ON but llvm-config did not return bitcode libraries; disabling LLVM bitcode decoder")
+        endif()
     endif()
 
     add_executable(bench_lli_phases tools/bench_lli_phases.c)
@@ -144,6 +150,9 @@ if(LLVM_CONFIG_EXE)
     )
 else()
     message(STATUS "llvm-config not found: bench_lli_phases target will not be built")
+    if(LIRIC_ENABLE_LLVM_BITCODE)
+        message(WARNING "LIRIC_ENABLE_LLVM_BITCODE=ON but llvm-config was not found; disabling LLVM bitcode decoder")
+    endif()
 endif()
 
 if(LIRIC_HAVE_LLVM_BITCODE)
@@ -237,6 +246,17 @@ add_test(
         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_shell_runner.cmake
 )
+
+if(CMAKE_NM)
+    add_test(
+        NAME liric_static_archive_no_llvm_undef_when_bitcode_off
+        COMMAND ${CMAKE_COMMAND}
+            -DNM_EXE=${CMAKE_NM}
+            -DARCHIVE=$<TARGET_FILE:liric>
+            -DHAVE_LLVM_BITCODE=${LIRIC_HAVE_LLVM_BITCODE}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_static_archive_symbols.cmake
+    )
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
