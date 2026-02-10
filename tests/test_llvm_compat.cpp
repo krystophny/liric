@@ -749,6 +749,19 @@ static int test_stringref_nullptr_zero_len_safety() {
     return 0;
 }
 
+static int test_raw_ostream_null_cstr_safety() {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+
+    const char *null_cstr = nullptr;
+    os << null_cstr;
+    TEST_ASSERT(out.empty(), "raw_string_ostream ignores null c-string");
+
+    os.write(nullptr, 4);
+    TEST_ASSERT(out.empty(), "raw_string_ostream ignores null write pointer");
+    return 0;
+}
+
 static int test_twine_abi_layout_and_concat() {
     size_t expected_size = sizeof(void *) == 8 ? 40u : 20u;
     TEST_ASSERT_EQ(sizeof(llvm::Twine), expected_size, "twine ABI size");
@@ -1133,6 +1146,7 @@ int main() {
     RUN_TEST(test_llvm_version);
     RUN_TEST(test_stringref_twine);
     RUN_TEST(test_stringref_nullptr_zero_len_safety);
+    RUN_TEST(test_raw_ostream_null_cstr_safety);
     RUN_TEST(test_twine_abi_layout_and_concat);
     RUN_TEST(test_arrayref);
     RUN_TEST(test_apint_apfloat);

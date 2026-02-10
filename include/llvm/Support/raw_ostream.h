@@ -23,6 +23,7 @@ public:
     virtual raw_ostream &write(const char *ptr, size_t size) = 0;
 
     raw_ostream &operator<<(const char *s) {
+        if (s == nullptr || s[0] == '\0') return *this;
         return write(s, std::strlen(s));
     }
     raw_ostream &operator<<(char c) {
@@ -120,7 +121,7 @@ public:
     }
 
     raw_ostream &write(const char *ptr, size_t size) override {
-        if (size == 0) return *this;
+        if (ptr == nullptr || size == 0) return *this;
         fwrite(ptr, 1, size, f_);
         return *this;
     }
@@ -135,7 +136,7 @@ class LIRIC_LLVM_HIDDEN raw_string_ostream : public raw_pwrite_stream {
 public:
     explicit raw_string_ostream(std::string &s) : str_(s) {}
     raw_ostream &write(const char *ptr, size_t size) override {
-        if (size == 0) return *this;
+        if (ptr == nullptr || size == 0) return *this;
         str_.append(ptr, size);
         return *this;
     }
@@ -155,7 +156,7 @@ public:
     explicit raw_svector_ostream(VecT &) {}
 
     raw_ostream &write(const char *ptr, size_t size) override {
-        if (size == 0) return *this;
+        if (ptr == nullptr || size == 0) return *this;
         if (vec_)
             vec_->insert(vec_->end(), ptr, ptr + size);
         else
