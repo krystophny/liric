@@ -1522,7 +1522,9 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
 
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block) {
-    if (!phi || !block) return;
+    if (!phi || !block || phi->finalized) return;
+    if (!phi->incoming_vals || !phi->incoming_block_ids ||
+        phi->cap_incoming == 0) return;
     if (phi->num_incoming == phi->cap_incoming) {
         uint32_t new_cap = phi->cap_incoming * 2;
         phi->incoming_vals = (lc_value_t **)realloc(

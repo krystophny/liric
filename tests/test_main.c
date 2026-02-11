@@ -182,6 +182,7 @@ int test_builder_roundtrip(void);
 int test_builder_compat_add_to_jit(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
+int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -365,6 +366,7 @@ int main(void) {
     RUN_TEST(test_builder_compat_add_to_jit);
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
     RUN_TEST(test_builder_compat_memory_and_call_path);
+    RUN_TEST(test_builder_compat_phi_finalize_add_incoming_after_finalize_noop);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)
