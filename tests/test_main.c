@@ -184,6 +184,9 @@ int test_builder_compat_add_to_jit(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
 int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
+int test_compile_session_direct_ret_42(void);
+int test_compile_session_ir_print_and_opt(void);
+int test_compile_session_ll_compile_ret_42(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -370,6 +373,11 @@ int main(void) {
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
     RUN_TEST(test_builder_compat_memory_and_call_path);
     RUN_TEST(test_builder_compat_phi_finalize_add_incoming_after_finalize_noop);
+
+    fprintf(stderr, "\nCompile Session API tests:\n");
+    RUN_TEST(test_compile_session_direct_ret_42);
+    RUN_TEST(test_compile_session_ir_print_and_opt);
+    RUN_TEST(test_compile_session_ll_compile_ret_42);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)

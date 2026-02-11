@@ -11,6 +11,8 @@
 #endif
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
 #define OBJ_DATA_BUF_SIZE (1 * 1024 * 1024)
