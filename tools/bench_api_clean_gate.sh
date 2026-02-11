@@ -15,6 +15,8 @@ usage: bench_api_clean_gate.sh [options]
 Gate conditions (must all be true):
   - bench_api_summary.json: skipped == 0
   - bench_api_summary.json: attempted == completed
+  - bench_api_summary.json: timeout_ms == --timeout-ms
+  - bench_api_summary.json: skip_reasons.liric_jit_timeout == 0
   - bench_api_summary.json: zero_skip_gate_met == true
   - bench_api_fail_summary.json: failed == 0
 EOF
@@ -112,6 +114,8 @@ fail_summary_path="${bench_dir}/bench_api_fail_summary.json"
 attempted="$(json_int_field "$summary_path" "attempted")"
 completed="$(json_int_field "$summary_path" "completed")"
 skipped="$(json_int_field "$summary_path" "skipped")"
+timeout_ms_used="$(json_int_field "$summary_path" "timeout_ms")"
+liric_jit_timeout="$(json_int_field "$summary_path" "liric_jit_timeout")"
 zero_skip_gate_met="$(json_bool_field "$summary_path" "zero_skip_gate_met")"
 failed="$(json_int_field "$fail_summary_path" "failed")"
 
@@ -121,6 +125,12 @@ if [[ "$skipped" != "0" ]]; then
 fi
 if [[ "$attempted" != "$completed" ]]; then
     errors+=("attempted=${attempted} completed=${completed} (expected equality)")
+fi
+if [[ "$timeout_ms_used" != "$timeout_ms" ]]; then
+    errors+=("timeout_ms=${timeout_ms_used} (expected ${timeout_ms})")
+fi
+if [[ "$liric_jit_timeout" != "0" ]]; then
+    errors+=("skip_reasons.liric_jit_timeout=${liric_jit_timeout} (expected 0)")
 fi
 if [[ "$failed" != "0" ]]; then
     errors+=("failed=${failed} (expected 0)")
@@ -143,6 +153,7 @@ echo "bench_api_clean_gate: PASSED"
 echo "  attempted=${attempted}"
 echo "  completed=${completed}"
 echo "  skipped=${skipped}"
+echo "  timeout_ms=${timeout_ms_used}"
+echo "  skip_reasons.liric_jit_timeout=${liric_jit_timeout}"
 echo "  failed=${failed}"
 echo "  zero_skip_gate_met=${zero_skip_gate_met}"
-
