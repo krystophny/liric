@@ -297,6 +297,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_api_clean_gate_forwarding
+    COMMAND ${CMAKE_COMMAND}
+        -DGATE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/bench_api_clean_gate.sh
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_clean_gate_forwarding.cmake
+)
+
+add_test(
     NAME nightly_mass_workflow_contract
     COMMAND ${CMAKE_COMMAND}
         -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/nightly_mass.yml
