@@ -28,6 +28,9 @@ typedef struct lr_target {
 
 const lr_target_t *lr_target_x86_64(void);
 const lr_target_t *lr_target_aarch64(void);
+const lr_target_t *lr_target_riscv64(void);
+const lr_target_t *lr_target_riscv64gc(void);
+const lr_target_t *lr_target_riscv64im(void);
 const lr_target_t *lr_target_by_name(const char *name);
 const lr_target_t *lr_target_host(void);
 bool lr_target_is_host_compatible(const lr_target_t *t);

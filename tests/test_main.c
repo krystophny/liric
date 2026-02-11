@@ -76,6 +76,7 @@ int test_create_unknown_target_fails(void);
 int test_non_host_target_fails(void);
 int test_load_missing_runtime_library_fails(void);
 int test_target_alias_arm64_resolves(void);
+int test_target_riscv64_split_resolves(void);
 int test_parse_auto_selects_ll_frontend(void);
 int test_parse_auto_selects_wasm_frontend(void);
 int test_parse_auto_selects_bc_frontend(void);
@@ -245,6 +246,7 @@ int main(void) {
     RUN_TEST(test_non_host_target_fails);
     RUN_TEST(test_load_missing_runtime_library_fails);
     RUN_TEST(test_target_alias_arm64_resolves);
+    RUN_TEST(test_target_riscv64_split_resolves);
     RUN_TEST(test_parse_auto_selects_ll_frontend);
     RUN_TEST(test_parse_auto_selects_wasm_frontend);
     RUN_TEST(test_parse_auto_selects_bc_frontend);

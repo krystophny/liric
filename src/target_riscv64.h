@@ -1,0 +1,78 @@
+#ifndef LIRIC_TARGET_RISCV64_H
+#define LIRIC_TARGET_RISCV64_H
+
+#include "target.h"
+
+/* RV64 GPR numbering */
+enum {
+    RV_X0  = 0,
+    RV_RA  = 1,
+    RV_SP  = 2,
+    RV_GP  = 3,
+    RV_TP  = 4,
+    RV_T0  = 5,
+    RV_T1  = 6,
+    RV_T2  = 7,
+    RV_S0  = 8,
+    RV_S1  = 9,
+    RV_A0  = 10,
+    RV_A1  = 11,
+    RV_A2  = 12,
+    RV_A3  = 13,
+    RV_A4  = 14,
+    RV_A5  = 15,
+    RV_A6  = 16,
+    RV_A7  = 17,
+    RV_S2  = 18,
+    RV_S3  = 19,
+    RV_S4  = 20,
+    RV_S5  = 21,
+    RV_S6  = 22,
+    RV_S7  = 23,
+    RV_S8  = 24,
+    RV_S9  = 25,
+    RV_S10 = 26,
+    RV_S11 = 27,
+    RV_T3  = 28,
+    RV_T4  = 29,
+    RV_T5  = 30,
+    RV_T6  = 31,
+};
+
+/* RV64 FPR numbering */
+enum {
+    RV_FT0  = 0,
+    RV_FT1  = 1,
+    RV_FT2  = 2,
+    RV_FT3  = 3,
+    RV_FT4  = 4,
+    RV_FT5  = 5,
+    RV_FT6  = 6,
+    RV_FT7  = 7,
+    RV_FS0  = 8,
+    RV_FS1  = 9,
+    RV_FA0  = 10,
+    RV_FA1  = 11,
+    RV_FA2  = 12,
+    RV_FA3  = 13,
+    RV_FA4  = 14,
+    RV_FA5  = 15,
+    RV_FA6  = 16,
+    RV_FA7  = 17,
+    RV_FS2  = 18,
+    RV_FS3  = 19,
+    RV_FS4  = 20,
+    RV_FS5  = 21,
+    RV_FS6  = 22,
+    RV_FS7  = 23,
+    RV_FS8  = 24,
+    RV_FS9  = 25,
+    RV_FS10 = 26,
+    RV_FS11 = 27,
+    RV_FT8  = 28,
+    RV_FT9  = 29,
+    RV_FT10 = 30,
+    RV_FT11 = 31,
+};
+
+#endif
