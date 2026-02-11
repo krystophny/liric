@@ -44,6 +44,9 @@ For programmatic IR construction, use the C API in `include/liric/liric.h`.
 
 # 3) API benchmark (primary, direct JIT): lfortran --jit (WITH_LIRIC) vs lfortran --jit (LLVM)
 ./build/bench_api --iters 3 --timeout-ms 3000 --min-completed 1
+
+# 4) Clean-pass gate (required before claiming API-mode success)
+./tools/bench_api_clean_gate.sh
 ```
 
 Artifacts go to `/tmp/liric_bench/`.
@@ -91,6 +94,17 @@ Capture richer failure diagnostics while triaging:
   --keep-fail-workdirs --fail-log-dir /tmp/liric_bench/fail_logs
 cat /tmp/liric_bench/bench_api_fail_summary.json
 ```
+
+Definition of done for "API mode is fixed":
+```bash
+./tools/bench_api_clean_gate.sh
+```
+
+This command fails unless:
+- `skipped == 0`
+- `attempted == completed`
+- `failed == 0`
+- `zero_skip_gate_met == true`
 
 ## License
 

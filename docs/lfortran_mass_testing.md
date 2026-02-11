@@ -148,6 +148,16 @@ These do NOT depend on mass run results; they discover tests directly from CMake
    ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
    ```
 
+5. **API clean-pass gate** (required before closing API clean-pass tasks):
+   ```bash
+   ./tools/bench_api_clean_gate.sh
+   ```
+   This gate fails unless all are true:
+   - `attempted == completed`
+   - `skipped == 0`
+   - `failed == 0`
+   - `zero_skip_gate_met == true`
+
 ### Test Selection for Benchmarks
 - Integration tests with `llvm` label from CMakeLists.txt
 - Excluded: FAIL tests, EXTRAFILES, llvm_omp, llvm2, llvm_rtlib labels
