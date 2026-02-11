@@ -61,6 +61,9 @@ add_library(liric STATIC
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_x86_64_linux.S)
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_aarch64_linux.S)
+endif()
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
 
@@ -234,7 +237,7 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
 
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|aarch64|arm64")
     add_test(
         NAME liric_cli_exe_intrinsic_math
         COMMAND ${CMAKE_COMMAND}

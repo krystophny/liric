@@ -9,15 +9,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+          - os: macos-14
+            label: macos-arm64
     runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Print architecture
-        run: uname -m
+      - name: Print host info
+        run: |
+          uname -a
+          uname -m
 
       - name: Configure
         run: cmake -S . -B build -G Ninja
@@ -27,3 +35,27 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  platform-intrinsics-shape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate platform intrinsic matrix shape
+        run: |
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D__linux__ -D__x86_64__ src/platform/platform_intrinsics.c
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D__linux__ -D__aarch64__ src/platform/platform_intrinsics.c
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D__linux__ -D__riscv -D__riscv_xlen=64 src/platform/platform_intrinsics.c
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D__APPLE__ -D__MACH__ -D__x86_64__ src/platform/platform_intrinsics.c
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D__APPLE__ -D__MACH__ -D__aarch64__ src/platform/platform_intrinsics.c
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D_WIN32 -D_M_X64 src/platform/platform_intrinsics.c
+          cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -D_WIN32 -D_M_ARM64 src/platform/platform_intrinsics.c

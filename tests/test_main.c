@@ -188,6 +188,7 @@ int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
 int test_objfile_elf_call_relocation(void);
 int test_objfile_elf_readelf_validates(void);
+int test_objfile_elf_executable_aarch64_header(void);
 #else
 int test_objfile_macho_header(void);
 #endif
@@ -374,6 +375,7 @@ int main(void) {
     RUN_TEST(test_objfile_elf_symbols);
     RUN_TEST(test_objfile_elf_call_relocation);
     RUN_TEST(test_objfile_elf_readelf_validates);
+    RUN_TEST(test_objfile_elf_executable_aarch64_header);
 #else
     RUN_TEST(test_objfile_macho_header);
 #endif
