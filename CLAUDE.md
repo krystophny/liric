@@ -87,6 +87,16 @@ Uses `compat_ll.txt` and `compat_ll_options.jsonl` from Step 1.
 
 All outputs go to `/tmp/liric_bench/`.
 
+**Step 4: API clean-pass gate** (required before claiming API mode is fixed):
+```bash
+./tools/bench_api_clean_gate.sh
+```
+This command fails unless all are true:
+- `attempted == completed`
+- `skipped == 0`
+- `failed == 0`
+- `zero_skip_gate_met == true`
+
 **Focused corpus benchmark** (100 curated tests, fast iteration):
 ```bash
 ./build/bench_corpus                    # run all 100, print timing table
