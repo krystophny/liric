@@ -171,7 +171,20 @@ All artifacts in `/tmp/liric_bench/`:
 - `bench_ll.jsonl`: LL-file benchmark timing data
 - `bench_ll_summary.json`: aggregate medians/sums including parser-vs-compile split
 - `bench_api.jsonl`: API benchmark timing/skip rows
-- `bench_api_summary.json`: API benchmark aggregate medians, skip reasons, phase tracker
+- `bench_api_summary.json`: API benchmark aggregate medians, skip reasons, phase tracker, and
+  ownership split (`phase_split`) for:
+  - LFortran-only pre-backend phases (`File reading` .. `ASR -> mod`)
+  - LFortran/LLVM codegen phases (`LLVM IR creation` + `LLVM opt`)
+  - Backend-tunable phases (`LLVM -> JIT` + `JIT run`)
 - `bench_api_failures.jsonl`: one row per skipped API case with reason/rc/signal/excerpts/log paths
 - `bench_api_fail_summary.json`: skipped-case aggregate counts + failing-side distribution
 - `fail_logs/`: per-failure stdout/stderr logs referenced by `bench_api_failures.jsonl`
+
+Callgrind hotspot summarizer for API mode:
+```bash
+./build/bench_api_callgrind_hot \
+  --bench-jsonl /tmp/liric_bench_callgrind/bench_api.jsonl \
+  --liric-dir /tmp/liric_bench_callgrind/callgrind/liric \
+  --llvm-dir /tmp/liric_bench_callgrind/callgrind/llvm \
+  --out /tmp/liric_bench_callgrind/bench_api_callgrind_phase_hot.json
+```

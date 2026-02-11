@@ -87,6 +87,9 @@ target_link_libraries(bench_ll PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_api tools/bench_api.c)
 target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+add_executable(bench_api_callgrind_hot tools/bench_api_callgrind_hot.c)
+target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
+
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 

@@ -1,0 +1,50 @@
+\documentclass[aspectratio=169]{beamer}
+\usetheme{default}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+
+\title{API Mode: Callgrind Split}
+\date{}
+
+\begin{document}
+
+\begin{frame}
+\frametitle{Where Time Goes (Callgrind, 85 API-Passing Tests)}
+\small
+\begin{tabular}{lrr}
+\textbf{Bucket} & \textbf{liric ms} & \textbf{llvm ms} \\
+\hline
+LFortran before ASR$\rightarrow$mod & 370.051 & 787.654 \\
+LFortran/LLVM IR+opt & 45.915 & 103.440 \\
+Backend (JIT+run) & 32.386 & 1092.794 \\
+\hline
+Wall total & 570.898 & 2490.695 \\
+\end{tabular}
+
+\vspace{0.5em}
+\scriptsize
+Data source: \texttt{/tmp/liric\_bench\_callgrind/bench\_api\_summary.json}
+\end{frame}
+
+\begin{frame}
+\frametitle{Hot Paths (Callgrind)}
+\small
+\textbf{LFortran-before (both builds)}\\
+\scriptsize \texttt{yyparse}, \texttt{ASR::expr\_type0}, \texttt{UpdateDependenciesVisitor}
+
+\vspace{0.7em}
+\small
+\textbf{LFortran codegen/opt (LLVM build)}\\
+\scriptsize \texttt{llvm::sys::unicode::columnWidthUTF8}, \texttt{llvm::SelectionDAG::Combine}, \texttt{llvm::LLLexer::LexIdentifier}
+
+\vspace{0.7em}
+\small
+\textbf{Backend tunable (liric build)}\\
+\scriptsize \texttt{lr\_module\_intern\_symbol}, \texttt{lr\_inst\_create}, \texttt{lr\_obj\_ensure\_symbol}
+
+\vspace{0.5em}
+\scriptsize
+Hotspot source: \texttt{/tmp/liric\_bench\_callgrind/bench\_api\_callgrind\_phase\_hot.json}
+\end{frame}
+
+\end{document}

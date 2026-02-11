@@ -72,6 +72,14 @@ typedef struct {
     double frontend_ms;
     double liric_llvm_ir_ms;
     double llvm_llvm_ir_ms;
+    double liric_phase_ms[9];
+    double llvm_phase_ms[9];
+    double liric_before_asr_to_mod_ms;
+    double llvm_before_asr_to_mod_ms;
+    double liric_codegen_ms;
+    double llvm_codegen_ms;
+    double liric_backend_ms;
+    double llvm_backend_ms;
 } row_t;
 
 typedef struct {
@@ -91,6 +99,31 @@ typedef struct {
     double jit_run_ms;
     double total_ms;
 } time_report_t;
+
+enum {
+    PHASE_FILE_READ = 0,
+    PHASE_SRC_TO_ASR = 1,
+    PHASE_ASR_PASSES = 2,
+    PHASE_ASR_TO_MOD = 3,
+    PHASE_LLVM_IR_CREATION = 4,
+    PHASE_LLVM_OPT = 5,
+    PHASE_LLVM_TO_JIT = 6,
+    PHASE_JIT_RUN = 7,
+    PHASE_TOTAL = 8,
+    PHASE_COUNT = 9
+};
+
+static const char *k_phase_json_key[PHASE_COUNT] = {
+    "file_read",
+    "src_to_asr",
+    "asr_passes",
+    "asr_to_mod",
+    "llvm_ir_creation",
+    "llvm_opt",
+    "llvm_to_jit",
+    "jit_run",
+    "total"
+};
 
 typedef struct {
     const char *reason;
@@ -1204,6 +1237,21 @@ static double frontend_from_time_report(const time_report_t *r) {
            r->asr_to_mod_ms + r->llvm_ir_ms + r->llvm_opt_ms;
 }
 
+static double phase_value_from_time_report(const time_report_t *r, int phase_id) {
+    switch (phase_id) {
+    case PHASE_FILE_READ: return r->file_read_ms;
+    case PHASE_SRC_TO_ASR: return r->src_to_asr_ms;
+    case PHASE_ASR_PASSES: return r->asr_passes_ms;
+    case PHASE_ASR_TO_MOD: return r->asr_to_mod_ms;
+    case PHASE_LLVM_IR_CREATION: return r->llvm_ir_ms;
+    case PHASE_LLVM_OPT: return r->llvm_opt_ms;
+    case PHASE_LLVM_TO_JIT: return r->llvm_to_jit_ms;
+    case PHASE_JIT_RUN: return r->jit_run_ms;
+    case PHASE_TOTAL: return r->total_ms;
+    default: return 0.0;
+    }
+}
+
 static int parse_lfortran_time_report(const char *stdout_text, time_report_t *out) {
     char *clean = strip_ansi(stdout_text);
     double file_read = 0.0, src_to_asr = 0.0, asr_passes = 0.0;
@@ -1239,22 +1287,19 @@ static void resolve_default_compat_artifacts(const char *bench_dir, char **compa
     *opts_path = path_join2(bench_dir, "compat_ll_options.jsonl");
 }
 
-static void write_json_success_row(FILE *f,
-                                   const char *name,
-                                   size_t iters_done,
-                                   double lw,
-                                   double ew,
-                                   double lc,
-                                   double ec,
-                                   double lr,
-                                   double er,
-                                   double front,
-                                   double liric_llvm_ir,
-                                   double llvm_llvm_ir,
-                                   double wall_sp,
-                                   double compile_sp,
-                                   double run_sp) {
-    char *en = json_escape(name ? name : "");
+static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done) {
+    char *en;
+    double wall_sp;
+    double compile_sp;
+    double run_sp;
+    int p;
+
+    if (!f || !row) return;
+    en = json_escape(row->name ? row->name : "");
+    wall_sp = row->liric_wall_ms > 0 ? row->llvm_wall_ms / row->liric_wall_ms : 0.0;
+    compile_sp = row->liric_compile_ms > 0 ? row->llvm_compile_ms / row->liric_compile_ms : 0.0;
+    run_sp = row->liric_run_ms > 0 ? row->llvm_run_ms / row->liric_run_ms : 0.0;
+
     fprintf(f,
             "{\"name\":\"%s\",\"status\":\"ok\",\"iters\":%zu,"
             "\"frontend_median_ms\":%.6f,"
@@ -1262,9 +1307,36 @@ static void write_json_success_row(FILE *f,
             "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
             "\"liric_compile_median_ms\":%.6f,\"llvm_compile_median_ms\":%.6f,"
             "\"liric_run_median_ms\":%.6f,\"llvm_run_median_ms\":%.6f,"
-            "\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
-            en, iters_done, front, liric_llvm_ir, llvm_llvm_ir,
-            lw, ew, lc, ec, lr, er, wall_sp, compile_sp, run_sp);
+            "\"liric_before_asr_to_mod_median_ms\":%.6f,"
+            "\"llvm_before_asr_to_mod_median_ms\":%.6f,"
+            "\"liric_codegen_median_ms\":%.6f,\"llvm_codegen_median_ms\":%.6f,"
+            "\"liric_backend_median_ms\":%.6f,\"llvm_backend_median_ms\":%.6f",
+            en, iters_done,
+            row->frontend_ms,
+            row->liric_llvm_ir_ms, row->llvm_llvm_ir_ms,
+            row->liric_wall_ms, row->llvm_wall_ms,
+            row->liric_compile_ms, row->llvm_compile_ms,
+            row->liric_run_ms, row->llvm_run_ms,
+            row->liric_before_asr_to_mod_ms, row->llvm_before_asr_to_mod_ms,
+            row->liric_codegen_ms, row->llvm_codegen_ms,
+            row->liric_backend_ms, row->llvm_backend_ms);
+
+    fprintf(f, ",\"phase_median_ms\":{\"liric\":{");
+    for (p = 0; p < PHASE_COUNT; p++) {
+        fprintf(f, "\"%s\":%.6f%s",
+                k_phase_json_key[p],
+                row->liric_phase_ms[p],
+                (p + 1 == PHASE_COUNT) ? "" : ",");
+    }
+    fprintf(f, "},\"llvm\":{");
+    for (p = 0; p < PHASE_COUNT; p++) {
+        fprintf(f, "\"%s\":%.6f%s",
+                k_phase_json_key[p],
+                row->llvm_phase_ms[p],
+                (p + 1 == PHASE_COUNT) ? "" : ",");
+    }
+    fprintf(f, "}},\"wall_speedup\":%.6f,\"compile_speedup\":%.6f,\"run_speedup\":%.6f}\n",
+            wall_sp, compile_sp, run_sp);
     free(en);
 }
 
@@ -1737,6 +1809,14 @@ int main(int argc, char **argv) {
             double *frontend = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *liric_llvm_ir = (double *)calloc((size_t)cfg.iters, sizeof(double));
             double *llvm_llvm_ir = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_before_asr_to_mod = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *llvm_before_asr_to_mod = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_codegen = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *llvm_codegen = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_backend = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *llvm_backend = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_phase[PHASE_COUNT];
+            double *llvm_phase[PHASE_COUNT];
             size_t ok_n = 0;
             const char *skip_reason = NULL;
             int nonzero_compat = 0;
@@ -1745,7 +1825,13 @@ int main(int argc, char **argv) {
             const char *work_dir = NULL;
             const char *failure_work_dir = NULL;
             int keep_work_dir = 0;
+            int p;
             memset(&skip_diag, 0, sizeof(skip_diag));
+
+            for (p = 0; p < PHASE_COUNT; p++) {
+                liric_phase[p] = (double *)calloc((size_t)cfg.iters, sizeof(double));
+                llvm_phase[p] = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            }
 
             strlist_init(&opt_toks);
             {
@@ -1919,6 +2005,18 @@ int main(int argc, char **argv) {
                 liric_wall[ok_n] = liric_wall_ms;
                 llvm_llvm_ir[ok_n] = llvm_time.llvm_ir_ms;
                 liric_llvm_ir[ok_n] = liric_time.llvm_ir_ms;
+                llvm_before_asr_to_mod[ok_n] = llvm_time.file_read_ms + llvm_time.src_to_asr_ms +
+                                               llvm_time.asr_passes_ms + llvm_time.asr_to_mod_ms;
+                liric_before_asr_to_mod[ok_n] = liric_time.file_read_ms + liric_time.src_to_asr_ms +
+                                                liric_time.asr_passes_ms + liric_time.asr_to_mod_ms;
+                llvm_codegen[ok_n] = llvm_time.llvm_ir_ms + llvm_time.llvm_opt_ms;
+                liric_codegen[ok_n] = liric_time.llvm_ir_ms + liric_time.llvm_opt_ms;
+                llvm_backend[ok_n] = llvm_time.llvm_to_jit_ms + llvm_time.jit_run_ms;
+                liric_backend[ok_n] = liric_time.llvm_to_jit_ms + liric_time.jit_run_ms;
+                for (p = 0; p < PHASE_COUNT; p++) {
+                    llvm_phase[p][ok_n] = phase_value_from_time_report(&llvm_time, p);
+                    liric_phase[p][ok_n] = phase_value_from_time_report(&liric_time, p);
+                }
                 ok_n++;
             }
 
@@ -1946,9 +2044,15 @@ int main(int argc, char **argv) {
                 double fm = median(frontend, ok_n);
                 double liric_ir = median(liric_llvm_ir, ok_n);
                 double llvm_ir = median(llvm_llvm_ir, ok_n);
+                double liric_before = median(liric_before_asr_to_mod, ok_n);
+                double llvm_before = median(llvm_before_asr_to_mod, ok_n);
+                double liric_codegen_m = median(liric_codegen, ok_n);
+                double llvm_codegen_m = median(llvm_codegen, ok_n);
+                double liric_backend_m = median(liric_backend, ok_n);
+                double llvm_backend_m = median(llvm_backend, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
                 double compile_sp = lc > 0 ? ec / lc : 0.0;
-                double run_sp = lr > 0 ? er / lr : 0.0;
+                int p2;
                 double ir_sp = liric_ir > 0 ? llvm_ir / liric_ir : 0.0;
                 row_t row;
 
@@ -1962,10 +2066,19 @@ int main(int argc, char **argv) {
                 row.frontend_ms = fm;
                 row.liric_llvm_ir_ms = liric_ir;
                 row.llvm_llvm_ir_ms = llvm_ir;
+                row.liric_before_asr_to_mod_ms = liric_before;
+                row.llvm_before_asr_to_mod_ms = llvm_before;
+                row.liric_codegen_ms = liric_codegen_m;
+                row.llvm_codegen_ms = llvm_codegen_m;
+                row.liric_backend_ms = liric_backend_m;
+                row.llvm_backend_ms = llvm_backend_m;
+                for (p2 = 0; p2 < PHASE_COUNT; p2++) {
+                    row.liric_phase_ms[p2] = median(liric_phase[p2], ok_n);
+                    row.llvm_phase_ms[p2] = median(llvm_phase[p2], ok_n);
+                }
                 rowlist_push(&rows, row);
 
-                write_json_success_row(jf, name, ok_n, lw, ew, lc, ec, lr, er, fm,
-                                       liric_ir, llvm_ir, wall_sp, compile_sp, run_sp);
+                write_json_success_row(jf, &row, ok_n);
                 printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), ir %.2fms vs %.2fms (%.2fx), jit %.2fms vs %.2fms (%.2fx)\n",
                        i + 1, tests.n, name, lw, ew, wall_sp, liric_ir, llvm_ir, ir_sp, lc, ec, compile_sp);
             }
@@ -2006,6 +2119,16 @@ next_test:
             free(frontend);
             free(liric_llvm_ir);
             free(llvm_llvm_ir);
+            free(liric_before_asr_to_mod);
+            free(llvm_before_asr_to_mod);
+            free(liric_codegen);
+            free(llvm_codegen);
+            free(liric_backend);
+            free(llvm_backend);
+            for (p = 0; p < PHASE_COUNT; p++) {
+                free(liric_phase[p]);
+                free(llvm_phase[p]);
+            }
             strlist_free(&opt_toks);
             skip_diag_reset(&skip_diag);
         }
@@ -2029,6 +2152,31 @@ next_test:
         int tracker_lookup_dispatch_available = (cfg.lookup_dispatch_share_pct >= 0.0);
         int tracker_lookup_dispatch_met = 0;
         int tracker_all_targets_met = 0;
+        double split_liric_phase_median[PHASE_COUNT];
+        double split_llvm_phase_median[PHASE_COUNT];
+        double split_liric_phase_avg[PHASE_COUNT];
+        double split_llvm_phase_avg[PHASE_COUNT];
+        double split_liric_before_median = 0.0;
+        double split_llvm_before_median = 0.0;
+        double split_liric_codegen_median = 0.0;
+        double split_llvm_codegen_median = 0.0;
+        double split_liric_backend_median = 0.0;
+        double split_llvm_backend_median = 0.0;
+        double split_liric_before_avg = 0.0;
+        double split_llvm_before_avg = 0.0;
+        double split_liric_codegen_avg = 0.0;
+        double split_llvm_codegen_avg = 0.0;
+        double split_liric_backend_avg = 0.0;
+        double split_llvm_backend_avg = 0.0;
+        int split_has_data = 0;
+        int phase_idx;
+
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            split_liric_phase_median[phase_idx] = 0.0;
+            split_llvm_phase_median[phase_idx] = 0.0;
+            split_liric_phase_avg[phase_idx] = 0.0;
+            split_llvm_phase_avg[phase_idx] = 0.0;
+        }
 
         if (rows.n > 0) {
         double *lw = (double *)malloc(rows.n * sizeof(double));
@@ -2044,6 +2192,14 @@ next_test:
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
         double *compile_sp = (double *)malloc(rows.n * sizeof(double));
         double *run_sp = (double *)malloc(rows.n * sizeof(double));
+        double *lb = (double *)malloc(rows.n * sizeof(double));
+        double *eb = (double *)malloc(rows.n * sizeof(double));
+        double *lg = (double *)malloc(rows.n * sizeof(double));
+        double *eg = (double *)malloc(rows.n * sizeof(double));
+        double *lbe = (double *)malloc(rows.n * sizeof(double));
+        double *ebe = (double *)malloc(rows.n * sizeof(double));
+        double *li_phase[PHASE_COUNT];
+        double *ei_phase[PHASE_COUNT];
         size_t j;
         size_t wall_faster = 0;
         size_t compile_faster = 0;
@@ -2055,6 +2211,14 @@ next_test:
         double sum_lr = 0.0, sum_er = 0.0;
         double sum_fm = 0.0;
         double sum_run_sp = 0.0;
+        double sum_lb = 0.0, sum_eb = 0.0;
+        double sum_lg = 0.0, sum_eg = 0.0;
+        double sum_lbe = 0.0, sum_ebe = 0.0;
+
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            li_phase[phase_idx] = (double *)malloc(rows.n * sizeof(double));
+            ei_phase[phase_idx] = (double *)malloc(rows.n * sizeof(double));
+        }
 
         for (j = 0; j < rows.n; j++) {
             lw[j] = rows.items[j].liric_wall_ms;
@@ -2066,6 +2230,16 @@ next_test:
             fm[j] = rows.items[j].frontend_ms;
             li[j] = rows.items[j].liric_llvm_ir_ms;
             ei[j] = rows.items[j].llvm_llvm_ir_ms;
+            lb[j] = rows.items[j].liric_before_asr_to_mod_ms;
+            eb[j] = rows.items[j].llvm_before_asr_to_mod_ms;
+            lg[j] = rows.items[j].liric_codegen_ms;
+            eg[j] = rows.items[j].llvm_codegen_ms;
+            lbe[j] = rows.items[j].liric_backend_ms;
+            ebe[j] = rows.items[j].llvm_backend_ms;
+            for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+                li_phase[phase_idx][j] = rows.items[j].liric_phase_ms[phase_idx];
+                ei_phase[phase_idx][j] = rows.items[j].llvm_phase_ms[phase_idx];
+            }
             ir_sp[j] = li[j] > 0 ? ei[j] / li[j] : 0.0;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
             compile_sp[j] = lc[j] > 0 ? ec[j] / lc[j] : 0.0;
@@ -2084,6 +2258,12 @@ next_test:
             sum_er += er[j];
             sum_fm += fm[j];
             sum_run_sp += run_sp[j];
+            sum_lb += lb[j];
+            sum_eb += eb[j];
+            sum_lg += lg[j];
+            sum_eg += eg[j];
+            sum_lbe += lbe[j];
+            sum_ebe += ebe[j];
         }
 
         printf("\n========================================================================\n");
@@ -2126,6 +2306,40 @@ next_test:
                sum_lr, sum_er, (sum_lr > 0 ? sum_er / sum_lr : 0.0));
         printf("  Faster:    %zu/%zu (%.1f%%)\n",
                run_faster, rows.n, 100.0 * (double)run_faster / (double)rows.n);
+
+        split_has_data = 1;
+        split_liric_before_median = median(lb, rows.n);
+        split_llvm_before_median = median(eb, rows.n);
+        split_liric_codegen_median = median(lg, rows.n);
+        split_llvm_codegen_median = median(eg, rows.n);
+        split_liric_backend_median = median(lbe, rows.n);
+        split_llvm_backend_median = median(ebe, rows.n);
+        split_liric_before_avg = sum_lb / (double)rows.n;
+        split_llvm_before_avg = sum_eb / (double)rows.n;
+        split_liric_codegen_avg = sum_lg / (double)rows.n;
+        split_llvm_codegen_avg = sum_eg / (double)rows.n;
+        split_liric_backend_avg = sum_lbe / (double)rows.n;
+        split_llvm_backend_avg = sum_ebe / (double)rows.n;
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            split_liric_phase_median[phase_idx] = median(li_phase[phase_idx], rows.n);
+            split_llvm_phase_median[phase_idx] = median(ei_phase[phase_idx], rows.n);
+            split_liric_phase_avg[phase_idx] = 0.0;
+            split_llvm_phase_avg[phase_idx] = 0.0;
+            for (j = 0; j < rows.n; j++) {
+                split_liric_phase_avg[phase_idx] += li_phase[phase_idx][j];
+                split_llvm_phase_avg[phase_idx] += ei_phase[phase_idx][j];
+            }
+            split_liric_phase_avg[phase_idx] /= (double)rows.n;
+            split_llvm_phase_avg[phase_idx] /= (double)rows.n;
+        }
+
+        printf("\n  OWNERSHIP SPLIT\n");
+        printf("  LFortran-only (File->ASR->passes->mod): liric %.3f ms, llvm %.3f ms\n",
+               split_liric_before_median, split_llvm_before_median);
+        printf("  LFortran/LLVM codegen (IR+opt):         liric %.3f ms, llvm %.3f ms\n",
+               split_liric_codegen_median, split_llvm_codegen_median);
+        printf("  Backend-owned (JIT+run):                liric %.3f ms, llvm %.3f ms\n",
+               split_liric_backend_median, split_llvm_backend_median);
 
         tracker_has_data = 1;
         tracker_liric_llvm_ir_avg_median = sum_li / (double)rows.n;
@@ -2191,6 +2405,16 @@ next_test:
         free(wall_sp);
         free(compile_sp);
         free(run_sp);
+        free(lb);
+        free(eb);
+        free(lg);
+        free(eg);
+        free(lbe);
+        free(ebe);
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            free(li_phase[phase_idx]);
+            free(ei_phase[phase_idx]);
+        }
         }
 
         size_t attempted = tests.n;
@@ -2232,6 +2456,65 @@ next_test:
         free(ec);
         free(eo);
         }
+        fprintf(sf, "  \"phase_split\": {\n");
+        fprintf(sf, "    \"has_data\": %s,\n", split_has_data ? "true" : "false");
+        fprintf(sf, "    \"lfortran_requires_changes\": {\n");
+        fprintf(sf, "      \"before_asr_to_mod\": {\n");
+        fprintf(sf, "        \"liric_median_ms\": %.6f,\n", split_liric_before_median);
+        fprintf(sf, "        \"llvm_median_ms\": %.6f,\n", split_llvm_before_median);
+        fprintf(sf, "        \"liric_avg_ms\": %.6f,\n", split_liric_before_avg);
+        fprintf(sf, "        \"llvm_avg_ms\": %.6f\n", split_llvm_before_avg);
+        fprintf(sf, "      },\n");
+        fprintf(sf, "      \"codegen_llvm_ir_plus_opt\": {\n");
+        fprintf(sf, "        \"liric_median_ms\": %.6f,\n", split_liric_codegen_median);
+        fprintf(sf, "        \"llvm_median_ms\": %.6f,\n", split_llvm_codegen_median);
+        fprintf(sf, "        \"liric_avg_ms\": %.6f,\n", split_liric_codegen_avg);
+        fprintf(sf, "        \"llvm_avg_ms\": %.6f\n", split_llvm_codegen_avg);
+        fprintf(sf, "      }\n");
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"backend_tunable\": {\n");
+        fprintf(sf, "      \"llvm_to_jit_plus_run\": {\n");
+        fprintf(sf, "        \"liric_median_ms\": %.6f,\n", split_liric_backend_median);
+        fprintf(sf, "        \"llvm_median_ms\": %.6f,\n", split_llvm_backend_median);
+        fprintf(sf, "        \"liric_avg_ms\": %.6f,\n", split_liric_backend_avg);
+        fprintf(sf, "        \"llvm_avg_ms\": %.6f\n", split_llvm_backend_avg);
+        fprintf(sf, "      }\n");
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"per_phase\": {\n");
+        fprintf(sf, "      \"liric_median_ms\": {\n");
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            fprintf(sf, "        \"%s\": %.6f%s\n",
+                    k_phase_json_key[phase_idx],
+                    split_liric_phase_median[phase_idx],
+                    (phase_idx + 1 == PHASE_COUNT) ? "" : ",");
+        }
+        fprintf(sf, "      },\n");
+        fprintf(sf, "      \"llvm_median_ms\": {\n");
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            fprintf(sf, "        \"%s\": %.6f%s\n",
+                    k_phase_json_key[phase_idx],
+                    split_llvm_phase_median[phase_idx],
+                    (phase_idx + 1 == PHASE_COUNT) ? "" : ",");
+        }
+        fprintf(sf, "      },\n");
+        fprintf(sf, "      \"liric_avg_ms\": {\n");
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            fprintf(sf, "        \"%s\": %.6f%s\n",
+                    k_phase_json_key[phase_idx],
+                    split_liric_phase_avg[phase_idx],
+                    (phase_idx + 1 == PHASE_COUNT) ? "" : ",");
+        }
+        fprintf(sf, "      },\n");
+        fprintf(sf, "      \"llvm_avg_ms\": {\n");
+        for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
+            fprintf(sf, "        \"%s\": %.6f%s\n",
+                    k_phase_json_key[phase_idx],
+                    split_llvm_phase_avg[phase_idx],
+                    (phase_idx + 1 == PHASE_COUNT) ? "" : ",");
+        }
+        fprintf(sf, "      }\n");
+        fprintf(sf, "    }\n");
+        fprintf(sf, "  },\n");
         fprintf(sf, "  \"phase_tracker\": {\n");
         fprintf(sf, "    \"has_data\": %s,\n", tracker_has_data ? "true" : "false");
         fprintf(sf, "    \"targets\": {\n");
