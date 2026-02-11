@@ -200,13 +200,24 @@ add_test(
 )
 
 add_test(
-    NAME liric_cli_obj_disabled_by_default
+    NAME liric_cli_default_emits_exe
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_default_should_not_emit.o
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -DMODE=default
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_mode.cmake
+)
+
+add_test(
+    NAME liric_cli_output_flag_emits_exe
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:liric_bin>
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_custom_out
+        -DMODE=output
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_mode.cmake
 )
 
 add_test(

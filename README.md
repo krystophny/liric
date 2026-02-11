@@ -23,15 +23,14 @@ cmake -S . -B build -G Ninja -DLIRIC_ENABLE_LLVM_BITCODE=ON
 ## Run
 
 ```bash
-./build/liric --jit file.ll
+./build/liric file.ll                  # emits ./a.out
+./build/liric -o myprog file.ll        # emits ./myprog
 ./build/liric --dump-ir file.ll
 ./build/liric --emit-obj out.o file.ll
 ./build/liric --jit file.wasm --func add --args 2 3
 ```
 
 For programmatic IR construction, use the C API in `include/liric/liric.h`.
-
-`--emit-obj` is an explicit opt-in compatibility mode. The primary/first-class path is direct JIT for low-latency compilation.
 
 ## Benchmarks
 

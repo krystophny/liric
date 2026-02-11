@@ -1,4 +1,5 @@
 #include "objfile_elf.h"
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,9 +15,16 @@
 #define ELFOSABI_NONE   0
 
 #define ET_REL          1
+#define ET_EXEC         2
 
 #define EM_X86_64       62
 #define EM_AARCH64      183
+
+/* Program header constants */
+#define PT_LOAD         1
+#define PF_X            0x1
+#define PF_W            0x2
+#define PF_R            0x4
 
 /* Section header types */
 #define SHT_NULL        0
@@ -47,6 +55,32 @@
 
 #define ELF64_ST_INFO(bind, type) (((bind) << 4) | ((type) & 0xF))
 #define ELF64_R_INFO(sym, type) (((uint64_t)(sym) << 32) | (uint32_t)(type))
+
+static int write_u32_le(uint8_t *buf, size_t buflen, uint32_t off, uint32_t value) {
+    if ((size_t)off + 4 > buflen)
+        return -1;
+    buf[off] = (uint8_t)value;
+    buf[off + 1] = (uint8_t)(value >> 8);
+    buf[off + 2] = (uint8_t)(value >> 16);
+    buf[off + 3] = (uint8_t)(value >> 24);
+    return 0;
+}
+
+static int write_u64_le(uint8_t *buf, size_t buflen, uint32_t off, uint64_t value) {
+    if ((size_t)off + 8 > buflen)
+        return -1;
+    for (int i = 0; i < 8; i++)
+        buf[off + i] = (uint8_t)(value >> (i * 8));
+    return 0;
+}
+
+static int patch_rel32_vaddr(uint8_t *buf, size_t buflen, uint32_t off,
+                             uint64_t place_vaddr, uint64_t target_vaddr) {
+    int64_t disp = (int64_t)target_vaddr - (int64_t)(place_vaddr + 4u);
+    if (disp < INT32_MIN || disp > INT32_MAX)
+        return -1;
+    return write_u32_le(buf, buflen, off, (uint32_t)(int32_t)disp);
+}
 
 lr_reloc_mapped_t elf_reloc_x86_64(uint8_t liric_type) {
     lr_reloc_mapped_t m = {0};
@@ -378,5 +412,174 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
     free(buf);
     free(str_offsets);
 
+    return written == total_size ? 0 : -1;
+}
+
+int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size,
+                                const uint8_t *data, size_t data_size,
+                                const lr_objfile_ctx_t *oc,
+                                const char *entry_symbol) {
+    if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
+        return -1;
+
+    const uint64_t image_base = 0x400000ULL;
+    const size_t ehdr_size = 64;
+    const size_t phdr_size = 56;
+    const size_t file_align = 16;
+    const size_t page_align = 4096;
+
+    /* _start:
+     *   call <entry_symbol>
+     *   mov edi, eax
+     *   mov eax, 60
+     *   syscall
+     */
+    static const uint8_t start_stub_template[] = {
+        0xE8, 0x00, 0x00, 0x00, 0x00,
+        0x89, 0xC7,
+        0xB8, 0x3C, 0x00, 0x00, 0x00,
+        0x0F, 0x05
+    };
+    const size_t start_stub_size = sizeof(start_stub_template);
+
+    size_t text_off = obj_align_up(ehdr_size + phdr_size, file_align);
+    size_t code_off = text_off + start_stub_size;
+    size_t data_off = obj_align_up(code_off + code_size, file_align);
+    size_t total_size = data_off + data_size;
+
+    uint64_t entry_vaddr = image_base + text_off;
+    uint64_t code_vaddr = image_base + code_off;
+    uint64_t data_vaddr = image_base + data_off;
+
+    const lr_obj_symbol_t *entry_sym = NULL;
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        const lr_obj_symbol_t *sym = &oc->symbols[i];
+        if (sym->is_defined && sym->section == 1 &&
+            strcmp(sym->name, entry_symbol) == 0) {
+            entry_sym = sym;
+            break;
+        }
+    }
+    if (!entry_sym || (size_t)entry_sym->offset >= code_size)
+        return -1;
+
+    uint8_t *buf = (uint8_t *)calloc(1, total_size);
+    uint8_t *code_mut = (uint8_t *)malloc(code_size);
+    if (!buf || !code_mut) {
+        free(buf);
+        free(code_mut);
+        return -1;
+    }
+    memcpy(code_mut, code, code_size);
+
+    for (uint32_t i = 0; i < oc->num_relocs; i++) {
+        const lr_obj_reloc_t *rel = &oc->relocs[i];
+        if (rel->symbol_idx >= oc->num_symbols) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+        if ((size_t)rel->offset + 4 > code_size) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+
+        const lr_obj_symbol_t *sym = &oc->symbols[rel->symbol_idx];
+        if (!sym->is_defined) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+
+        uint64_t target_vaddr;
+        if (sym->section == 1) {
+            if ((size_t)sym->offset >= code_size) {
+                free(buf);
+                free(code_mut);
+                return -1;
+            }
+            target_vaddr = code_vaddr + sym->offset;
+        } else if (sym->section == 2) {
+            if ((size_t)sym->offset >= data_size) {
+                free(buf);
+                free(code_mut);
+                return -1;
+            }
+            target_vaddr = data_vaddr + sym->offset;
+        } else {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+
+        uint64_t place_vaddr = code_vaddr + rel->offset;
+        int rc = 0;
+        switch (rel->type) {
+        case LR_RELOC_X86_64_PC32:
+        case LR_RELOC_X86_64_PLT32:
+        case LR_RELOC_X86_64_GOTPCREL:
+            rc = patch_rel32_vaddr(code_mut, code_size, rel->offset,
+                                   place_vaddr, target_vaddr);
+            break;
+        case LR_RELOC_X86_64_64:
+            rc = write_u64_le(code_mut, code_size, rel->offset, target_vaddr);
+            break;
+        default:
+            rc = -1;
+            break;
+        }
+        if (rc != 0) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+    }
+
+    uint8_t *p = buf;
+    w8(&p, ELFMAG0); w8(&p, ELFMAG1); w8(&p, ELFMAG2); w8(&p, ELFMAG3);
+    w8(&p, ELFCLASS64);
+    w8(&p, ELFDATA2LSB);
+    w8(&p, EV_CURRENT);
+    w8(&p, ELFOSABI_NONE);
+    wpad(&p, 8);
+    w16(&p, ET_EXEC);
+    w16(&p, EM_X86_64);
+    w32(&p, EV_CURRENT);
+    w64(&p, entry_vaddr);
+    w64(&p, ehdr_size);
+    w64(&p, 0);
+    w32(&p, 0);
+    w16(&p, 64);
+    w16(&p, 56);
+    w16(&p, 1);
+    w16(&p, 0);
+    w16(&p, 0);
+    w16(&p, 0);
+
+    w32(&p, PT_LOAD);
+    w32(&p, PF_R | PF_W | PF_X);
+    w64(&p, 0);
+    w64(&p, image_base);
+    w64(&p, image_base);
+    w64(&p, total_size);
+    w64(&p, total_size);
+    w64(&p, page_align);
+
+    memcpy(buf + text_off, start_stub_template, start_stub_size);
+    memcpy(buf + code_off, code_mut, code_size);
+    if (data_size > 0 && data)
+        memcpy(buf + data_off, data, data_size);
+
+    if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + 1),
+                          entry_vaddr + 1, code_vaddr + entry_sym->offset) != 0) {
+        free(buf);
+        free(code_mut);
+        return -1;
+    }
+
+    size_t written = fwrite(buf, 1, total_size, out);
+    free(buf);
+    free(code_mut);
     return written == total_size ? 0 : -1;
 }

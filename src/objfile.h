@@ -63,6 +63,8 @@ typedef struct {
 typedef lr_reloc_mapped_t (*lr_reloc_mapper_fn)(uint8_t liric_type);
 
 int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out);
+int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
+                       const char *entry_symbol);
 
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                bool is_defined, uint8_t section,
