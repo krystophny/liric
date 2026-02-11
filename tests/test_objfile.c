@@ -238,15 +238,23 @@ int test_objfile_elf_call_relocation(void) {
     TEST_ASSERT(num_relas >= 1, "at least 1 relocation");
 
     bool found_expected_reloc = false;
+#if defined(__aarch64__)
+    bool found_a64_call26 = false;
+    bool found_a64_got_page = false;
+    bool found_a64_got_lo12 = false;
+#endif
     for (uint32_t i = 0; i < num_relas; i++) {
         uint8_t *rela = buf + rela_off + i * 24;
         uint64_t r_info = 0;
         memcpy(&r_info, rela + 8, 8);
         uint32_t r_type = (uint32_t)(r_info & 0xFFFFFFFF);
 #if defined(__aarch64__)
-        if (r_type == 283) { /* R_AARCH64_CALL26 */
-            found_expected_reloc = true;
-        }
+        if (r_type == 283)      /* R_AARCH64_CALL26 */
+            found_a64_call26 = true;
+        else if (r_type == 311) /* R_AARCH64_ADR_GOT_PAGE */
+            found_a64_got_page = true;
+        else if (r_type == 312) /* R_AARCH64_LD64_GOT_LO12_NC */
+            found_a64_got_lo12 = true;
 #else
         if (r_type == 4) { /* R_X86_64_PLT32 */
             found_expected_reloc = true;
@@ -257,7 +265,9 @@ int test_objfile_elf_call_relocation(void) {
 #endif
     }
 #if defined(__aarch64__)
-    TEST_ASSERT(found_expected_reloc, "found R_AARCH64_CALL26 relocation");
+    found_expected_reloc = found_a64_call26 || (found_a64_got_page && found_a64_got_lo12);
+    TEST_ASSERT(found_expected_reloc,
+                "found AArch64 call relocation (CALL26 or ADR_GOT_PAGE+LD64_GOT_LO12_NC)");
 #else
     TEST_ASSERT(found_expected_reloc, "found R_X86_64_PLT32 relocation");
 #endif
