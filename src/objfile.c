@@ -2,12 +2,14 @@
 #include "objfile_macho.h"
 #include "objfile_elf.h"
 #include "arena.h"
+#ifdef __APPLE__
 #include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+#include <stdlib.h>
+#include <string.h>
 
 #define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
 #define OBJ_DATA_BUF_SIZE (1 * 1024 * 1024)
@@ -284,6 +286,7 @@ static int write_object_payload(FILE *out, const lr_target_t *target,
 #endif
 }
 
+#ifdef __APPLE__
 static int run_process_quiet(char *const argv[]) {
     pid_t pid;
     int status = 0;
@@ -344,6 +347,7 @@ static int copy_file_to_stream(const char *path, FILE *out) {
     fclose(in);
     return fflush(out) == 0 ? 0 : -1;
 }
+#endif
 
 static int obj_build_module(lr_module_t *m, const lr_target_t *target,
                             bool preserve_symbol_names,
