@@ -30,12 +30,12 @@ public:
                    ThreadLocalMode TLMode = NotThreadLocal,
                    unsigned AddressSpace = 0);
 
-    bool isConstant() const { return false; }
-    void setConstant(bool v) { (void)v; }
+    bool isConstant() const;
+    void setConstant(bool v);
 
-    bool hasInitializer() const { return false; }
-    Constant *getInitializer() const { return nullptr; }
-    void setInitializer(Constant *InitVal) { (void)InitVal; }
+    bool hasInitializer() const;
+    Constant *getInitializer() const;
+    void setInitializer(Constant *InitVal);
 
     template <typename AlignTy>
     void setAlignment(AlignTy A) { (void)A; }

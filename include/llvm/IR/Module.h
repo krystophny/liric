@@ -96,8 +96,27 @@ public:
     }
 
     GlobalVariable *getGlobalVariable(StringRef Name, bool AllowInternal = false) const {
-        (void)Name; (void)AllowInternal;
-        return nullptr;
+        (void)AllowInternal;
+        Module::setCurrentModule(compat_);
+        std::string global_name = Name.str();
+
+        for (const auto &og : owned_globals_) {
+            lc_value_t *gv = detail::lookup_value_wrapper(og.get());
+            if (!gv || gv->kind != LC_VAL_GLOBAL || !gv->global.name)
+                continue;
+            if (global_name == gv->global.name)
+                return og.get();
+        }
+
+        lc_value_t *gv = lc_global_lookup(compat_, global_name.c_str());
+        if (!gv)
+            return nullptr;
+
+        auto g = std::make_unique<GlobalVariable>();
+        GlobalVariable *ptr = g.get();
+        detail::register_value_wrapper(ptr, gv);
+        const_cast<Module *>(this)->owned_globals_.push_back(std::move(g));
+        return ptr;
     }
 
     GlobalVariable *getNamedGlobal(StringRef Name) const {
@@ -165,6 +184,7 @@ public:
         GlobalValue::LinkageTypes linkage,
         const void *init_data = nullptr, size_t init_size = 0) {
         (void)linkage;
+        Module::setCurrentModule(compat_);
         lc_value_t *gv;
         if (init_data && init_size > 0) {
             gv = lc_global_create(compat_, name, ty->impl(), is_const,
@@ -394,13 +414,42 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
                                        ThreadLocalMode TLMode,
                                        unsigned AddressSpace) {
     (void)InsertBefore; (void)TLMode; (void)AddressSpace;
-    (void)Initializer;
     GlobalVariable *created =
         M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
     if (created) {
         detail::register_value_wrapper(this,
             detail::lookup_value_wrapper(created));
+        if (Initializer) {
+            Module::setCurrentModule(M.getCompat());
+            setInitializer(Initializer);
+        }
     }
+}
+
+inline bool GlobalVariable::isConstant() const {
+    return false;
+}
+
+inline void GlobalVariable::setConstant(bool v) {
+    (void)v;
+}
+
+inline bool GlobalVariable::hasInitializer() const {
+    lc_module_compat_t *mod = Module::getCurrentModule();
+    if (!mod)
+        return false;
+    return lc_global_has_initializer(mod, impl());
+}
+
+inline Constant *GlobalVariable::getInitializer() const {
+    return nullptr;
+}
+
+inline void GlobalVariable::setInitializer(Constant *InitVal) {
+    lc_module_compat_t *mod = Module::getCurrentModule();
+    if (!mod || !InitVal)
+        return;
+    (void)lc_global_set_initializer(mod, impl(), InitVal->impl());
 }
 
 inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,

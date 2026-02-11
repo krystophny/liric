@@ -55,6 +55,8 @@ typedef struct {
     lr_block_t *current_block;
     lr_inst_t *current_inst;
     uint32_t current_inst_index;
+    bool func_uses_internal_sret;
+    int32_t sret_ptr_off;
 } x86_compile_ctx_t;
 
 static void invalidate_cached_reg(x86_compile_ctx_t *ctx, uint8_t reg) {
@@ -193,6 +195,24 @@ static size_t align_up(size_t value, size_t align) {
     return ((value + align - 1) / align) * align;
 }
 
+static int32_t alloc_temp_slot(x86_compile_ctx_t *ctx, size_t size, size_t align) {
+    if (size < 8) size = 8;
+    if (align < 8) align = 8;
+    ctx->stack_size = (uint32_t)align_up(ctx->stack_size, align);
+    ctx->stack_size += (uint32_t)size;
+    return -(int32_t)ctx->stack_size;
+}
+
+static bool uses_internal_sret_abi(const lr_type_t *type) {
+    size_t sz;
+    if (!type)
+        return false;
+    if (type->kind != LR_TYPE_STRUCT && type->kind != LR_TYPE_ARRAY)
+        return false;
+    sz = lr_type_size(type);
+    return sz > 8;
+}
+
 /* Allocate a stack slot for a vreg, return rbp offset (negative). */
 static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg,
                           size_t size, size_t align) {
@@ -263,6 +283,19 @@ static uint8_t modrm(uint8_t mod, uint8_t reg, uint8_t rm) {
 static void encode_alu_rr(uint8_t *buf, size_t *pos, size_t len,
                            uint8_t opcode, uint8_t dst, uint8_t src, uint8_t size) {
     bool need_rex = (size == 8) || (dst >= 8) || (src >= 8);
+    if (size == 1) {
+        switch (opcode) {
+        case 0x01: opcode = 0x00; break; /* add r/m8, r8 */
+        case 0x09: opcode = 0x08; break; /* or r/m8, r8 */
+        case 0x21: opcode = 0x20; break; /* and r/m8, r8 */
+        case 0x29: opcode = 0x28; break; /* sub r/m8, r8 */
+        case 0x31: opcode = 0x30; break; /* xor r/m8, r8 */
+        case 0x39: opcode = 0x38; break; /* cmp r/m8, r8 */
+        case 0x85: opcode = 0x84; break; /* test r/m8, r8 */
+        case 0x89: opcode = 0x88; break; /* mov r/m8, r8 */
+        default: break;
+        }
+    }
     if (size == 2) emit_byte(buf, pos, len, 0x66);
     if (need_rex)
         emit_byte(buf, pos, len, rex(size == 8, src >= 8, false, dst >= 8));
@@ -515,6 +548,50 @@ static uint8_t fp_abi_size(const lr_type_t *type) {
     return (type && type->kind == LR_TYPE_FLOAT) ? 4 : 8;
 }
 
+static bool fp_abi_two_lane_aggregate(const lr_type_t *type,
+                                      uint8_t *lane_size_out,
+                                      uint8_t *lane_count_out) {
+    const lr_type_t *elem0 = NULL;
+    const lr_type_t *elem1 = NULL;
+    uint8_t lane_size = 0;
+    uint8_t lane_count = 0;
+    if (!type)
+        return false;
+
+    if (type->kind == LR_TYPE_STRUCT && type->struc.num_fields == 2) {
+        elem0 = type->struc.fields[0];
+        elem1 = type->struc.fields[1];
+    } else if (type->kind == LR_TYPE_ARRAY && type->array.count == 2) {
+        elem0 = type->array.elem;
+        elem1 = type->array.elem;
+    } else {
+        return false;
+    }
+
+    if (!is_fp_abi_type(elem0) || !is_fp_abi_type(elem1))
+        return false;
+    if (elem0->kind != elem1->kind)
+        return false;
+
+    lane_size = fp_abi_size(elem0);
+    if (lane_size == 8) {
+        /* {double,double}: two SSE eightbyte lanes */
+        lane_count = 2;
+    } else if (lane_size == 4) {
+        /* {float,float} / <2 x float>: packed in one 64-bit SSE lane */
+        lane_size = 8;
+        lane_count = 1;
+    } else {
+        return false;
+    }
+
+    if (lane_size_out)
+        *lane_size_out = lane_size;
+    if (lane_count_out)
+        *lane_count_out = lane_count;
+    return true;
+}
+
 static uint8_t int_type_width_bits(const lr_type_t *type) {
     size_t fallback_bits = 64;
     if (!type)
@@ -687,6 +764,20 @@ static void emit_store_fp_slot(x86_compile_ctx_t *ctx,
                    fpreg, X86_RBP, off);
 }
 
+static void emit_load_fp_mem_base(x86_compile_ctx_t *ctx, uint8_t base,
+                                   int32_t off, uint8_t fpreg, uint8_t fsize) {
+    uint8_t prefix = (fsize == 8) ? 0xF2 : 0xF3;
+    encode_sse_mem(ctx->buf, &ctx->pos, ctx->buflen, prefix, 0x10, 0,
+                   fpreg, base, off);
+}
+
+static void emit_store_fp_mem_base(x86_compile_ctx_t *ctx, uint8_t base,
+                                    int32_t off, uint8_t fpreg, uint8_t fsize) {
+    uint8_t prefix = (fsize == 8) ? 0xF2 : 0xF3;
+    encode_sse_mem(ctx->buf, &ctx->pos, ctx->buflen, prefix, 0x11, 0,
+                   fpreg, base, off);
+}
+
 static void emit_load_fp_operand(x86_compile_ctx_t *ctx,
                                   const lr_operand_t *op, uint8_t fpreg,
                                   uint8_t fsize) {
@@ -800,6 +891,53 @@ static void emit_movsx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (size == 1) ? 0xBE : 0xBF);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, dst, src));
     invalidate_cached_reg(ctx, dst);
+}
+
+static void emit_movsxd(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src);
+
+static void emit_sign_extend_value(x86_compile_ctx_t *ctx, uint8_t reg,
+                                   uint8_t bits) {
+    if (!ctx || bits == 0 || bits >= 64)
+        return;
+    if (bits == 1) {
+        emit_mov_imm(ctx, X86_R11, 1, false);
+        encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x21, reg, X86_R11, 8);
+        emit_mov_imm(ctx, X86_R11, 0, false);
+        encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x29, X86_R11, reg, 8);
+        encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x89, reg, X86_R11, 8);
+        invalidate_cached_reg(ctx, reg);
+        invalidate_cached_reg(ctx, X86_R11);
+        return;
+    }
+    if (bits <= 8) {
+        emit_movsx_rr(ctx, reg, reg, 1);
+        return;
+    }
+    if (bits <= 16) {
+        emit_movsx_rr(ctx, reg, reg, 2);
+        return;
+    }
+    if (bits <= 32) {
+        emit_movsxd(ctx, reg, reg);
+        return;
+    }
+    {
+        uint8_t sh = (uint8_t)(64 - bits);
+        if (reg != X86_RCX) {
+            emit_mov_imm(ctx, X86_RCX, (int64_t)sh, false);
+            emit_shift(ctx, 4, reg, 8);
+            emit_shift(ctx, 7, reg, 8);
+            return;
+        }
+        encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x89,
+                      X86_R11, X86_RCX, 8);
+        emit_mov_imm(ctx, X86_RCX, (int64_t)sh, false);
+        emit_shift(ctx, 4, X86_R11, 8);
+        emit_shift(ctx, 7, X86_R11, 8);
+        encode_alu_rr(ctx->buf, &ctx->pos, ctx->buflen, 0x89,
+                      X86_RCX, X86_R11, 8);
+        return;
+    }
 }
 
 /* Emit a movzx mem load for sub-dword sizes: movzx reg, byte/word [base+disp] */
@@ -1011,10 +1149,10 @@ static int32_t ensure_static_alloca_offset(x86_compile_ctx_t *ctx, const lr_inst
     if (off != 0)
         return off;
 
-    size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
+    size_t elem_sz = lr_target_alloca_elem_size(inst, 1);
     size_t elem_align = lr_type_align(inst->type);
-    if (elem_align < 8)
-        elem_align = 8;
+    if (elem_align == 0)
+        elem_align = 1;
     ctx->stack_size = (uint32_t)align_up(ctx->stack_size, elem_align);
     ctx->stack_size += (uint32_t)elem_sz;
     {
@@ -1080,6 +1218,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .current_block = NULL,
         .current_inst = NULL,
         .current_inst_index = 0,
+        .func_uses_internal_sret = false,
+        .sret_ptr_off = 0,
     };
 
     attach_obj_symbol_meta_cache(&ctx);
@@ -1097,12 +1237,20 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     /* Emit prologue and patch stack size once frame growth is complete. */
     size_t prologue_stack_patch_pos = emit_prologue(&ctx);
 
+    ctx.func_uses_internal_sret = uses_internal_sret_abi(func->ret_type);
+    if (ctx.func_uses_internal_sret) {
+        ctx.sret_ptr_off = alloc_temp_slot(&ctx, 8, 8);
+        emit_mem_store_sized(&ctx, X86_RDI, X86_RBP, ctx.sret_ptr_off, 8);
+    }
+
     /* Store parameters: first 6 from registers, rest from caller frame */
     static const uint8_t param_regs[] = { X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9 };
-    for (uint32_t i = 0; i < func->num_params && i < 6; i++)
-        emit_store_slot(&ctx, func->param_vregs[i], param_regs[i]);
-    for (uint32_t i = 6; i < func->num_params; i++) {
-        int32_t caller_off = 16 + (int32_t)(i - 6) * 8;
+    uint32_t param_gp_start = ctx.func_uses_internal_sret ? 1u : 0u;
+    uint32_t param_gp_cap = 6u - param_gp_start;
+    for (uint32_t i = 0; i < func->num_params && i < param_gp_cap; i++)
+        emit_store_slot(&ctx, func->param_vregs[i], param_regs[param_gp_start + i]);
+    for (uint32_t i = param_gp_cap; i < func->num_params; i++) {
+        int32_t caller_off = 16 + (int32_t)(i - param_gp_cap) * 8;
         encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8B, X86_RAX, X86_RBP, caller_off, 8);
         emit_store_slot(&ctx, func->param_vregs[i], X86_RAX);
     }
@@ -1121,7 +1269,37 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             switch (inst->op) {
             case LR_OP_RET: {
                 emit_phi_copies(&ctx, &phi_copies[bi]);
-                emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                if (ctx.func_uses_internal_sret) {
+                    size_t ret_sz = lr_type_size(func->ret_type);
+                    const lr_operand_t *retv = &inst->operands[0];
+                    emit_mem_load_sized(&ctx, X86_RDI, X86_RBP, ctx.sret_ptr_off, 8);
+                    if (ret_sz == 0)
+                        ret_sz = 8;
+                    if (retv->kind == LR_VAL_VREG) {
+                        uint32_t vreg = retv->vreg;
+                        size_t src_sz = 0;
+                        int32_t src_off = alloc_slot(&ctx, vreg, 8, 8);
+                        if (vreg < ctx.num_stack_slots)
+                            src_sz = ctx.stack_slot_sizes[vreg];
+                        if (src_sz > ret_sz)
+                            src_sz = ret_sz;
+                        if (src_sz > 0)
+                            emit_mem_copy_base_to_base(&ctx, X86_RDI, 0, X86_RBP, src_off, src_sz);
+                        if (src_sz < ret_sz)
+                            emit_mem_zero_base(&ctx, X86_RDI, (int32_t)src_sz, ret_sz - src_sz);
+                    } else if (retv->kind == LR_VAL_UNDEF || retv->kind == LR_VAL_NULL) {
+                        emit_mem_zero_base(&ctx, X86_RDI, 0, ret_sz);
+                    } else if (ret_sz <= 8) {
+                        emit_load_operand(&ctx, retv, X86_RAX);
+                        emit_mem_store_sized(&ctx, X86_RAX, X86_RDI, 0, (uint8_t)ret_sz);
+                    } else {
+                        emit_mem_zero_base(&ctx, X86_RDI, 0, ret_sz);
+                    }
+                    encode_alu_rr(ctx.buf, &ctx.pos, ctx.buflen, 0x89,
+                                  X86_RAX, X86_RDI, 8);
+                } else {
+                    emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                }
                 emit_epilogue(&ctx);
                 break;
             }
@@ -1188,17 +1366,22 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             case LR_OP_SDIV: case LR_OP_SREM: {
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
                 emit_load_operand(&ctx, &inst->operands[1], X86_RCX);
-                uint8_t sz = (uint8_t)lr_type_size(inst->type);
-                if (sz <= 4) {
-                    /* cdq */
-                    emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x99);
-                } else {
-                    /* cqo: REX.W 0x99 */
-                    emit_byte(ctx.buf, &ctx.pos, ctx.buflen, rex(true, false, false, false));
-                    emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x99);
+                {
+                    uint8_t bits = int_type_width_bits(inst->type);
+                    emit_sign_extend_value(&ctx, X86_RAX, bits);
+                    emit_sign_extend_value(&ctx, X86_RCX, bits);
+                    emit_byte(ctx.buf, &ctx.pos, ctx.buflen,
+                              rex(true, false, false, false));
+                    emit_byte(ctx.buf, &ctx.pos, ctx.buflen, 0x99); /* cqo */
+                    emit_idiv_r(&ctx, X86_RCX, 8);
+                    if (bits < 64) {
+                        uint8_t narrow_res = (inst->op == LR_OP_SREM) ?
+                                             X86_RDX : X86_RAX;
+                        emit_sign_extend_value(&ctx, narrow_res, bits);
+                    }
                 }
-                emit_idiv_r(&ctx, X86_RCX, sz);
-                uint8_t res_reg = (inst->op == LR_OP_SREM) ? X86_RDX : X86_RAX;
+                uint8_t res_reg = (inst->op == LR_OP_SREM) ?
+                                  X86_RDX : X86_RAX;
                 emit_store_slot(&ctx, inst->dest, res_reg);
                 break;
             }
@@ -1257,7 +1440,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 break;
             }
             case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
+                size_t elem_sz = lr_target_alloca_elem_size(inst, 1);
 
                 bool use_static = lr_target_alloca_uses_static_storage(inst);
 
@@ -1640,6 +1823,9 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 lr_func_t *callee_func = NULL;
                 bool use_external_sysv_fp = false;
                 bool callee_vararg = false;
+                bool internal_sret = false;
+                uint32_t internal_gp_start = 0;
+                uint32_t internal_gp_cap = 6;
 
                 if (inst->operands[0].kind == LR_VAL_GLOBAL) {
                     use_external_sysv_fp =
@@ -1650,11 +1836,26 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                     callee_vararg = inst->call_vararg;
                 }
 
+                internal_sret = !use_external_sysv_fp &&
+                                uses_internal_sret_abi(inst->type);
+                if (internal_sret) {
+                    internal_gp_start = 1;
+                    internal_gp_cap = 5;
+                }
+
                 if (use_external_sysv_fp) {
                     for (uint32_t i = 0; i < nargs; i++) {
                         const lr_type_t *arg_type = inst->operands[i + 1].type;
+                        uint8_t agg_lane_size = 0;
+                        uint8_t agg_lane_count = 0;
                         if (is_fp_abi_type(arg_type)) {
                             if (fp_used < 8) fp_used++;
+                            else stack_args++;
+                        } else if (fp_abi_two_lane_aggregate(arg_type,
+                                                               &agg_lane_size,
+                                                               &agg_lane_count)) {
+                            if (fp_used + agg_lane_count <= 8)
+                                fp_used += agg_lane_count;
                             else stack_args++;
                         } else {
                             if (gp_used < 6) gp_used++;
@@ -1662,7 +1863,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                         }
                     }
                 } else {
-                    stack_args = nargs > 6 ? nargs - 6 : 0;
+                    stack_args = nargs > internal_gp_cap ? nargs - internal_gp_cap : 0;
                 }
 
                 stack_bytes = ((stack_args * 8 + 15) & ~15u);
@@ -1676,10 +1877,29 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                     fp_used = 0;
                     for (uint32_t i = 0; i < nargs; i++) {
                         const lr_operand_t *arg = &inst->operands[i + 1];
+                        uint8_t agg_lane_size = 0;
+                        uint8_t agg_lane_count = 0;
                         if (is_fp_abi_type(arg->type) && fp_used < 8) {
                             emit_load_fp_operand(&ctx, arg, call_fp_regs[fp_used],
                                                  fp_abi_size(arg->type));
                             fp_used++;
+                            continue;
+                        }
+                        if (fp_abi_two_lane_aggregate(arg->type, &agg_lane_size,
+                                                      &agg_lane_count) &&
+                            arg->kind == LR_VAL_VREG &&
+                            fp_used + agg_lane_count <= 8) {
+                            int32_t src_off = alloc_slot(&ctx, arg->vreg, 8, 8);
+                            emit_load_fp_mem_base(&ctx, X86_RBP, src_off,
+                                                  call_fp_regs[fp_used],
+                                                  agg_lane_size);
+                            if (agg_lane_count > 1) {
+                                emit_load_fp_mem_base(&ctx, X86_RBP,
+                                                      src_off + (int32_t)agg_lane_size,
+                                                      call_fp_regs[fp_used + 1],
+                                                      agg_lane_size);
+                            }
+                            fp_used += agg_lane_count;
                             continue;
                         }
                         if (!is_fp_abi_type(arg->type) && gp_used < 6) {
@@ -1695,15 +1915,28 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                     fp_used_for_call = fp_used;
                 } else {
                     /* Legacy internal-call convention: first 6 args in GPRs, rest on stack. */
-                    uint32_t nstack = nargs > 6 ? nargs - 6 : 0;
+                    uint32_t nstack = nargs > internal_gp_cap ? nargs - internal_gp_cap : 0;
+                    if (internal_sret) {
+                        size_t dst_sz = lr_type_size(inst->type);
+                        size_t dst_align = lr_type_align(inst->type);
+                        int32_t dst_off;
+                        if (dst_align < 8)
+                            dst_align = 8;
+                        if (dst_sz < 8)
+                            dst_sz = 8;
+                        dst_off = alloc_slot(&ctx, inst->dest, dst_sz, dst_align);
+                        encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8D,
+                                   X86_RDI, X86_RBP, dst_off, 8);
+                    }
                     for (uint32_t i = 0; i < nstack; i++) {
-                        uint32_t arg_idx = 6 + i;
+                        uint32_t arg_idx = internal_gp_cap + i;
                         emit_load_operand(&ctx, &inst->operands[arg_idx + 1], X86_RAX);
                         encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RAX,
                                    X86_RSP, (int32_t)(i * 8), 8);
                     }
-                    for (uint32_t i = 0; i < nargs && i < 6; i++)
-                        emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
+                    for (uint32_t i = 0; i < nargs && i < internal_gp_cap; i++)
+                        emit_load_operand(&ctx, &inst->operands[i + 1],
+                                          call_regs[internal_gp_start + i]);
                 }
 
                 if (callee_vararg)
@@ -1753,7 +1986,30 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
 
                 invalidate_cached_gprs(&ctx);
                 if (inst->type && inst->type->kind != LR_TYPE_VOID) {
-                    if (use_external_sysv_fp && is_fp_abi_type(inst->type))
+                    uint8_t ret_lane_size = 0;
+                    uint8_t ret_lane_count = 0;
+                    bool ret_fp_agg = use_external_sysv_fp &&
+                        fp_abi_two_lane_aggregate(inst->type, &ret_lane_size,
+                                                  &ret_lane_count);
+                    if (internal_sret) {
+                        /* Return value already materialized through hidden sret pointer. */
+                    } else if (ret_fp_agg) {
+                        size_t dst_sz = lr_type_size(inst->type);
+                        size_t dst_align = lr_type_align(inst->type);
+                        int32_t dst_off;
+                        if (dst_align < 8)
+                            dst_align = 8;
+                        if (dst_sz < 8)
+                            dst_sz = 8;
+                        dst_off = alloc_slot(&ctx, inst->dest, dst_sz, dst_align);
+                        emit_store_fp_mem_base(&ctx, X86_RBP, dst_off, X86_XMM0,
+                                               ret_lane_size);
+                        if (ret_lane_count > 1 && dst_sz >= (size_t)(2 * ret_lane_size)) {
+                            emit_store_fp_mem_base(&ctx, X86_RBP,
+                                                   dst_off + (int32_t)ret_lane_size,
+                                                   X86_XMM1, ret_lane_size);
+                        }
+                    } else if (use_external_sysv_fp && is_fp_abi_type(inst->type))
                         emit_store_fp_slot(&ctx, inst->dest, X86_XMM0,
                                            fp_abi_size(inst->type));
                     else

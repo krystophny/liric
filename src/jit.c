@@ -47,8 +47,8 @@ static double lr_jit_now_us(void) {
 #define LR_CAN_USE_MAP_JIT 0
 #endif
 
-#define CODE_PAGE_SIZE (1024 * 1024)
-#define DATA_PAGE_SIZE (256 * 1024)
+#define CODE_PAGE_SIZE (16 * 1024 * 1024)
+#define DATA_PAGE_SIZE (16 * 1024 * 1024)
 #define SYM_BUCKET_COUNT 8192u
 #define MISS_BUCKET_COUNT 4096u
 #define LAZY_FUNC_BUCKET_COUNT 8192u
@@ -766,10 +766,50 @@ static double llvm_sqrt_f64(double x) { return sqrt(x); }
 static double llvm_exp_f64(double x) { return exp(x); }
 static double llvm_pow_f64(double x, double y) { return pow(x, y); }
 static double llvm_copysign_f64(double x, double y) { return copysign(x, y); }
-static float llvm_powi_f32(float x, int32_t e) { return powf(x, (float)e); }
-static double llvm_powi_f64(double x, int32_t e) { return pow(x, (double)e); }
-static float llvm_powi_f32_i64(float x, int64_t e) { return powf(x, (float)e); }
-static double llvm_powi_f64_i64(double x, int64_t e) { return pow(x, (double)e); }
+
+static uint64_t llvm_abs_exp_i64(int64_t e) {
+    if (e >= 0)
+        return (uint64_t)e;
+    return (uint64_t)(-(e + 1)) + 1u;
+}
+
+static float llvm_powi_f32_i64(float x, int64_t e) {
+    uint64_t exp = llvm_abs_exp_i64(e);
+    float base = x;
+    float out = 1.0f;
+    if (e < 0)
+        base = 1.0f / base;
+    while (exp != 0) {
+        if (exp & 1u)
+            out *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return out;
+}
+
+static double llvm_powi_f64_i64(double x, int64_t e) {
+    uint64_t exp = llvm_abs_exp_i64(e);
+    double base = x;
+    double out = 1.0;
+    if (e < 0)
+        base = 1.0 / base;
+    while (exp != 0) {
+        if (exp & 1u)
+            out *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return out;
+}
+
+static float llvm_powi_f32(float x, int32_t e) {
+    return llvm_powi_f32_i64(x, (int64_t)e);
+}
+
+static double llvm_powi_f64(double x, int32_t e) {
+    return llvm_powi_f64_i64(x, (int64_t)e);
+}
 
 static void llvm_memset_p0i8_i64(void *dst, uint64_t val, int64_t len, uint64_t is_volatile) {
     (void)is_volatile;

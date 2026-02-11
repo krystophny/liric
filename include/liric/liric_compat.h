@@ -115,6 +115,11 @@ lc_value_t *lc_value_argument(lc_module_compat_t *mod, uint32_t param_idx,
 lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block);
 lc_value_t *lc_value_const_aggregate(lc_module_compat_t *mod, lr_type_t *type,
                                       const void *data, size_t size);
+int lc_value_const_aggregate_add_reloc(lc_module_compat_t *mod,
+                                        lc_value_t *aggregate,
+                                        size_t offset,
+                                        const char *symbol_name,
+                                        int64_t addend);
 
 /* Convert lc_value_t to lr_operand_desc_t for passing to builder functions */
 lr_operand_desc_t lc_value_to_desc(lc_value_t *val);
@@ -168,6 +173,10 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
                               const void *init_data, size_t init_size);
 lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
                                lr_type_t *type);
+lc_value_t *lc_global_lookup(lc_module_compat_t *mod, const char *name);
+int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
+                               lc_value_t *init_val);
+bool lc_global_has_initializer(lc_module_compat_t *mod, lc_value_t *global_val);
 lr_global_t *lc_value_get_global(lc_value_t *val);
 
 /* ---- IRBuilder operations ---- */

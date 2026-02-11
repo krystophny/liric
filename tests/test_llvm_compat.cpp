@@ -252,6 +252,59 @@ static int test_constants() {
     return 0;
 }
 
+static int test_constant_data_array_addnull() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("const_data_array", ctx);
+
+    llvm::Constant *c = llvm::ConstantDataArray::getString(ctx, "AB", true);
+    TEST_ASSERT(c != nullptr, "ConstantDataArray::getString");
+    TEST_ASSERT(c->impl()->kind == LC_VAL_CONST_AGGREGATE, "aggregate kind");
+    TEST_ASSERT_EQ(c->impl()->aggregate.size, 3, "includes null terminator");
+    const uint8_t *p = static_cast<const uint8_t *>(c->impl()->aggregate.data);
+    TEST_ASSERT(p != nullptr, "aggregate data");
+    TEST_ASSERT_EQ(p[0], 'A', "byte 0");
+    TEST_ASSERT_EQ(p[1], 'B', "byte 1");
+    TEST_ASSERT_EQ(p[2], 0, "byte 2 null");
+    return 0;
+}
+
+static int test_global_lookup_set_initializer_and_jit() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("global_init", ctx);
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+
+    llvm::Constant *inserted = mod.getOrInsertGlobal("g", i32);
+    TEST_ASSERT(inserted != nullptr, "getOrInsertGlobal");
+
+    llvm::GlobalVariable *g = mod.getNamedGlobal("g");
+    TEST_ASSERT(g != nullptr, "getNamedGlobal");
+    TEST_ASSERT(!g->hasInitializer(), "no initializer initially");
+
+    g->setInitializer(llvm::ConstantInt::get(i32, 123));
+    TEST_ASSERT(g->hasInitializer(), "initializer applied");
+
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = llvm::Function::Create(
+        ft, llvm::GlobalValue::ExternalLinkage, "read_g", mod);
+    TEST_ASSERT(fn != nullptr, "function created");
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(entry != nullptr, "entry block");
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *v = builder.CreateLoad(i32, g, "v");
+    TEST_ASSERT(v != nullptr, "load global");
+    builder.CreateRet(v);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("read_g");
+    TEST_ASSERT(fp != nullptr, "lookup read_g");
+    TEST_ASSERT_EQ(fp(), 123, "global initializer value");
+    return 0;
+}
+
 static int test_function_creation() {
     llvm::LLVMContext ctx;
     llvm::Module mod("funcs", ctx);
@@ -1267,6 +1320,8 @@ int main() {
 
     fprintf(stderr, "\nConstant tests:\n");
     RUN_TEST(test_constants);
+    RUN_TEST(test_constant_data_array_addnull);
+    RUN_TEST(test_global_lookup_set_initializer_and_jit);
 
     fprintf(stderr, "\nFunction tests:\n");
     RUN_TEST(test_function_creation);

@@ -5,13 +5,13 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define VREG_MAP_CAP 16384u
+#define VREG_MAP_CAP 65536u
 #define BLOCK_MAP_CAP 4096u
 #define GLOBAL_MAP_CAP 4096u
 #define FUNC_MAP_CAP 1024u
 #define TYPE_MAP_CAP 256u
 
-#define VREG_INDEX_CAP 32768u
+#define VREG_INDEX_CAP 131072u
 #define BLOCK_INDEX_CAP 8192u
 #define GLOBAL_INDEX_CAP 8192u
 #define VREG_NUMERIC_CAP VREG_MAP_CAP
@@ -620,6 +620,24 @@ static void skip_attrs(lr_parser_t *p) {
     }
 }
 
+static bool token_equals(const lr_token_t *tok, const char *s) {
+    size_t n = strlen(s);
+    if (!tok || tok->len != n)
+        return false;
+    return memcmp(tok->start, s, n) == 0;
+}
+
+static void skip_memory_qualifiers(lr_parser_t *p) {
+    while (check(p, LR_TOK_LOCAL_ID)) {
+        if (token_equals(&p->cur, "volatile") ||
+            token_equals(&p->cur, "atomic")) {
+            next(p);
+            continue;
+        }
+        break;
+    }
+}
+
 static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty) {
     bool wrapped = false;
     bool offset_ok = true;
@@ -1093,6 +1111,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             }
 
             case LR_TOK_LOAD: {
+                skip_memory_qualifiers(p);
                 lr_type_t *ty = parse_type(p);
                 expect(p, LR_TOK_COMMA);
                 lr_operand_t src = parse_typed_operand(p);
@@ -1256,6 +1275,35 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 break;
             }
 
+            case LR_TOK_LOCAL_ID: {
+                if (!token_equals(&p->prev, "extractelement")) {
+                    error(p, "unknown instruction '%.*s'", (int)p->prev.len, p->prev.start);
+                    break;
+                }
+                lr_operand_t src = parse_typed_operand(p);
+                uint32_t idx = 0;
+                lr_type_t *result_ty = p->module->type_i64;
+                expect(p, LR_TOK_COMMA);
+                {
+                    lr_operand_t idx_op = parse_typed_operand(p);
+                    if (idx_op.kind == LR_VAL_IMM_I64) {
+                        idx = (uint32_t)idx_op.imm_i64;
+                    } else {
+                        error(p, "extractelement currently requires constant index");
+                    }
+                }
+                if (src.type && src.type->kind == LR_TYPE_ARRAY)
+                    result_ty = src.type->array.elem;
+                lr_operand_t ops[1] = {src};
+                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_EXTRACTVALUE,
+                    result_ty, dest, ops, 1);
+                inst->indices = lr_arena_array(p->arena, uint32_t, 1);
+                inst->indices[0] = idx;
+                inst->num_indices = 1;
+                lr_block_append(block, inst);
+                break;
+            }
+
             case LR_TOK_INSERTVALUE: {
                 lr_operand_t agg = parse_typed_operand(p);
                 expect(p, LR_TOK_COMMA);
@@ -1385,6 +1433,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
     if (op_tok == LR_TOK_STORE) {
         next(p);
+        skip_memory_qualifiers(p);
         lr_type_t *val_ty = parse_type(p);
         skip_attrs(p);
 
@@ -1678,6 +1727,16 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
         next(p);
         if (field_off + field_sz <= buf_size)
             memcpy(buf + field_off, &val, field_sz < 8 ? field_sz : 8);
+    } else if (check(p, LR_TOK_TRUE)) {
+        uint8_t v = 1u;
+        next(p);
+        if (field_off + field_sz <= buf_size && field_sz > 0)
+            memcpy(buf + field_off, &v, field_sz < 1 ? field_sz : 1);
+    } else if (check(p, LR_TOK_FALSE)) {
+        uint8_t v = 0u;
+        next(p);
+        if (field_off + field_sz <= buf_size && field_sz > 0)
+            memcpy(buf + field_off, &v, field_sz < 1 ? field_sz : 1);
     } else if (check(p, LR_TOK_FLOAT_LIT)) {
         double val = p->cur.float_val;
         next(p);
