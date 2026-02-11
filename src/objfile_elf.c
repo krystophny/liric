@@ -442,10 +442,39 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
     };
     const size_t start_stub_size = sizeof(start_stub_template);
 
+    uint32_t *got_slot_off = NULL;
+    if (oc->num_symbols > 0) {
+        got_slot_off = (uint32_t *)malloc(sizeof(uint32_t) * oc->num_symbols);
+        if (!got_slot_off)
+            return -1;
+        for (uint32_t i = 0; i < oc->num_symbols; i++)
+            got_slot_off[i] = UINT32_MAX;
+    }
+
+    size_t data_runtime_size = data_size;
+    data_runtime_size = obj_align_up(data_runtime_size, 8);
+    for (uint32_t i = 0; i < oc->num_relocs; i++) {
+        const lr_obj_reloc_t *rel = &oc->relocs[i];
+        if (rel->type != LR_RELOC_X86_64_GOTPCREL)
+            continue;
+        if (rel->symbol_idx >= oc->num_symbols) {
+            free(got_slot_off);
+            return -1;
+        }
+        if (got_slot_off[rel->symbol_idx] != UINT32_MAX)
+            continue;
+        if (data_runtime_size > UINT32_MAX - 8u) {
+            free(got_slot_off);
+            return -1;
+        }
+        got_slot_off[rel->symbol_idx] = (uint32_t)data_runtime_size;
+        data_runtime_size += 8u;
+    }
+
     size_t text_off = obj_align_up(ehdr_size + phdr_size, file_align);
     size_t code_off = text_off + start_stub_size;
     size_t data_off = obj_align_up(code_off + code_size, file_align);
-    size_t total_size = data_off + data_size;
+    size_t total_size = data_off + data_runtime_size;
 
     uint64_t entry_vaddr = image_base + text_off;
     uint64_t code_vaddr = image_base + code_off;
@@ -465,23 +494,32 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
 
     uint8_t *buf = (uint8_t *)calloc(1, total_size);
     uint8_t *code_mut = (uint8_t *)malloc(code_size);
-    if (!buf || !code_mut) {
+    uint8_t *data_mut = (uint8_t *)calloc(1, data_runtime_size > 0 ? data_runtime_size : 1u);
+    if (!buf || !code_mut || !data_mut) {
         free(buf);
         free(code_mut);
+        free(data_mut);
+        free(got_slot_off);
         return -1;
     }
     memcpy(code_mut, code, code_size);
+    if (data && data_size > 0)
+        memcpy(data_mut, data, data_size);
 
     for (uint32_t i = 0; i < oc->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->relocs[i];
         if (rel->symbol_idx >= oc->num_symbols) {
             free(buf);
             free(code_mut);
+            free(data_mut);
+            free(got_slot_off);
             return -1;
         }
         if ((size_t)rel->offset + 4 > code_size) {
             free(buf);
             free(code_mut);
+            free(data_mut);
+            free(got_slot_off);
             return -1;
         }
 
@@ -489,6 +527,8 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
         if (!sym->is_defined) {
             free(buf);
             free(code_mut);
+            free(data_mut);
+            free(got_slot_off);
             return -1;
         }
 
@@ -497,19 +537,25 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
             if ((size_t)sym->offset >= code_size) {
                 free(buf);
                 free(code_mut);
+                free(data_mut);
+                free(got_slot_off);
                 return -1;
             }
             target_vaddr = code_vaddr + sym->offset;
         } else if (sym->section == 2) {
-            if ((size_t)sym->offset >= data_size) {
+            if ((size_t)sym->offset >= data_runtime_size) {
                 free(buf);
                 free(code_mut);
+                free(data_mut);
+                free(got_slot_off);
                 return -1;
             }
             target_vaddr = data_vaddr + sym->offset;
         } else {
             free(buf);
             free(code_mut);
+            free(data_mut);
+            free(got_slot_off);
             return -1;
         }
 
@@ -518,10 +564,25 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
         switch (rel->type) {
         case LR_RELOC_X86_64_PC32:
         case LR_RELOC_X86_64_PLT32:
-        case LR_RELOC_X86_64_GOTPCREL:
             rc = patch_rel32_vaddr(code_mut, code_size, rel->offset,
                                    place_vaddr, target_vaddr);
             break;
+        case LR_RELOC_X86_64_GOTPCREL: {
+            if (!got_slot_off || rel->symbol_idx >= oc->num_symbols ||
+                got_slot_off[rel->symbol_idx] == UINT32_MAX) {
+                rc = -1;
+                break;
+            }
+            uint32_t slot_off = got_slot_off[rel->symbol_idx];
+            uint64_t slot_vaddr = data_vaddr + (uint64_t)slot_off;
+            if (write_u64_le(data_mut, data_runtime_size, slot_off, target_vaddr) != 0) {
+                rc = -1;
+                break;
+            }
+            rc = patch_rel32_vaddr(code_mut, code_size, rel->offset,
+                                   place_vaddr, slot_vaddr);
+            break;
+        }
         case LR_RELOC_X86_64_64:
             rc = write_u64_le(code_mut, code_size, rel->offset, target_vaddr);
             break;
@@ -532,6 +593,8 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
         if (rc != 0) {
             free(buf);
             free(code_mut);
+            free(data_mut);
+            free(got_slot_off);
             return -1;
         }
     }
@@ -568,18 +631,22 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
 
     memcpy(buf + text_off, start_stub_template, start_stub_size);
     memcpy(buf + code_off, code_mut, code_size);
-    if (data_size > 0 && data)
-        memcpy(buf + data_off, data, data_size);
+    if (data_runtime_size > 0)
+        memcpy(buf + data_off, data_mut, data_runtime_size);
 
     if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + 1),
                           entry_vaddr + 1, code_vaddr + entry_sym->offset) != 0) {
         free(buf);
         free(code_mut);
+        free(data_mut);
+        free(got_slot_off);
         return -1;
     }
 
     size_t written = fwrite(buf, 1, total_size, out);
     free(buf);
     free(code_mut);
+    free(data_mut);
+    free(got_slot_off);
     return written == total_size ? 0 : -1;
 }

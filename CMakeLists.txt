@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(liric VERSION 0.1.0 LANGUAGES C)
+project(liric VERSION 0.1.0 LANGUAGES C ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -56,7 +56,11 @@ add_library(liric STATIC
     src/objfile_macho.c
     src/objfile_elf.c
     src/llvm_stubs.c
+    src/platform/platform_intrinsics.c
 )
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_x86_64_linux.S)
+endif()
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
 
@@ -229,6 +233,28 @@ add_test(
         -DMODE=conflict
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    add_test(
+        NAME liric_cli_exe_intrinsic_math
+        COMMAND ${CMAKE_COMMAND}
+            -DCLI=$<TARGET_FILE:liric_bin>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_math.ll
+            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DEXPECT_RC=20
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
+    )
+
+    add_test(
+        NAME liric_cli_exe_intrinsic_mem
+        COMMAND ${CMAKE_COMMAND}
+            -DCLI=$<TARGET_FILE:liric_bin>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_mem.ll
+            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DEXPECT_RC=130
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
+    )
+endif()
 
 add_test(
     NAME bench_compat_check_freeze_artifacts
