@@ -44,6 +44,7 @@ typedef struct {
     int min_completed;
     int keep_fail_workdirs;
     int fail_sample_limit;
+    int require_zero_skips;
     const char *fail_log_dir;
     double lookup_dispatch_share_pct;
 } cfg_t;
@@ -1366,6 +1367,7 @@ static void usage(void) {
     printf("  --fail-log-dir PATH  write detailed failure stdout/stderr logs here (default: <bench-dir>/fail_logs)\n");
     printf("  --fail-sample-limit N limit number of compat tests processed (default: all)\n");
     printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
+    printf("  --require-zero-skips fail if any test is skipped (default: off)\n");
     printf("  --lookup-dispatch-share-pct N  optional profile-derived lookup/dispatch share percentage\n");
 }
 
@@ -1383,6 +1385,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.timeout_ms = 3000;
     cfg.keep_fail_workdirs = 0;
     cfg.fail_sample_limit = 0;
+    cfg.require_zero_skips = 0;
     cfg.fail_log_dir = NULL;
     cfg.min_completed = 0;
     cfg.lookup_dispatch_share_pct = -1.0;
@@ -1423,6 +1426,8 @@ static cfg_t parse_args(int argc, char **argv) {
         } else if (strcmp(argv[i], "--min-completed") == 0 && i + 1 < argc) {
             cfg.min_completed = atoi(argv[++i]);
             if (cfg.min_completed < 0) cfg.min_completed = 0;
+        } else if (strcmp(argv[i], "--require-zero-skips") == 0) {
+            cfg.require_zero_skips = 1;
         } else if (strcmp(argv[i], "--lookup-dispatch-share-pct") == 0 && i + 1 < argc) {
             cfg.lookup_dispatch_share_pct = atof(argv[++i]);
             if (cfg.lookup_dispatch_share_pct < 0.0)
@@ -1528,6 +1533,7 @@ int main(int argc, char **argv) {
     printf("  fail_log_dir:   %s\n", fail_log_dir);
     printf("  keep_fail_workdirs: %s\n", cfg.keep_fail_workdirs ? "on" : "off");
     printf("  min_completed: %d\n", cfg.min_completed);
+    printf("  require_zero_skips: %s\n", cfg.require_zero_skips ? "on" : "off");
     if (cfg.lookup_dispatch_share_pct >= 0.0) {
         printf("  lookup_dispatch_share_pct: %.3f\n", cfg.lookup_dispatch_share_pct);
     }
@@ -2031,6 +2037,8 @@ next_test:
         fprintf(sf, "  \"min_completed\": %d,\n", cfg.min_completed);
         fprintf(sf, "  \"completion_threshold_met\": %s,\n",
                 completed >= (size_t)cfg.min_completed ? "true" : "false");
+        fprintf(sf, "  \"require_zero_skips\": %s,\n", cfg.require_zero_skips ? "true" : "false");
+        fprintf(sf, "  \"zero_skip_gate_met\": %s,\n", skipped == 0 ? "true" : "false");
         {
             char *ec = json_escape(compat_path);
             char *eo = json_escape(opts_path);
@@ -2141,6 +2149,10 @@ next_test:
         if (completed < (size_t)cfg.min_completed) {
             fprintf(stderr, "completion gate failed: completed=%zu < min_completed=%d\n",
                     completed, cfg.min_completed);
+            exit_code = 1;
+        }
+        if (cfg.require_zero_skips && skipped > 0) {
+            fprintf(stderr, "zero-skip gate failed: skipped=%zu > 0\n", skipped);
             exit_code = 1;
         }
     }
