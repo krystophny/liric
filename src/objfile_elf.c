@@ -19,6 +19,7 @@
 
 #define EM_X86_64       62
 #define EM_AARCH64      183
+#define EM_RISCV        243
 
 /* Program header constants */
 #define PT_LOAD         1
@@ -59,6 +60,10 @@
 #define R_AARCH64_ADD_ABS_LO12_NC   277
 #define R_AARCH64_ADR_GOT_PAGE      311
 #define R_AARCH64_LD64_GOT_LO12_NC  312
+
+/* ELF riscv relocation types */
+#define R_RISCV_NONE  0
+#define R_RISCV_JAL   17
 
 #define ELF64_ST_INFO(bind, type) (((bind) << 4) | ((type) & 0xF))
 #define ELF64_R_INFO(sym, type) (((uint64_t)(sym) << 32) | (uint32_t)(type))
@@ -140,6 +145,28 @@ static int patch_aarch64_pageoff12_vaddr(uint8_t *buf, size_t buflen, uint32_t o
     return write_u32_le(buf, buflen, off, insn);
 }
 
+static int patch_riscv_jal_vaddr(uint8_t *buf, size_t buflen, uint32_t off,
+                                 uint64_t place_vaddr, uint64_t target_vaddr) {
+    if ((size_t)off + 4 > buflen)
+        return -1;
+    int64_t disp = (int64_t)target_vaddr - (int64_t)place_vaddr;
+    if ((disp & 1LL) != 0)
+        return -1;
+    if (disp < -(1LL << 20) * 2LL || disp > (((1LL << 20) - 1LL) * 2LL))
+        return -1;
+
+    int32_t imm = (int32_t)(disp >> 1);
+    uint32_t uimm = (uint32_t)imm;
+    uint32_t insn = read_u32_le(buf, off);
+    uint32_t low = insn & 0x00000FFFu; /* rd + opcode */
+    uint32_t high = 0;
+    high |= ((uimm >> 20) & 0x1u) << 31;
+    high |= ((uimm >> 1) & 0x3FFu) << 21;
+    high |= ((uimm >> 11) & 0x1u) << 20;
+    high |= ((uimm >> 12) & 0xFFu) << 12;
+    return write_u32_le(buf, buflen, off, low | high);
+}
+
 lr_reloc_mapped_t elf_reloc_x86_64(uint8_t liric_type) {
     lr_reloc_mapped_t m = {0};
     switch (liric_type) {
@@ -204,6 +231,18 @@ lr_reloc_mapped_t elf_reloc_aarch64(uint8_t liric_type) {
         m.native_type = R_AARCH64_CALL26;
         m.addend = 0;
         m.is_pcrel = true;
+        break;
+    }
+    return m;
+}
+
+lr_reloc_mapped_t elf_reloc_riscv64(uint8_t liric_type) {
+    lr_reloc_mapped_t m = {0};
+    switch (liric_type) {
+    default:
+        m.native_type = R_RISCV_NONE;
+        m.addend = 0;
+        m.is_pcrel = false;
         break;
     }
     return m;
@@ -991,5 +1030,110 @@ int write_elf_executable_aarch64(FILE *out, const uint8_t *code, size_t code_siz
     free(code_mut);
     free(data_mut);
     free(got_slot_off);
+    return written == total_size ? 0 : -1;
+}
+
+int write_elf_executable_riscv64(FILE *out, const uint8_t *code, size_t code_size,
+                                 const uint8_t *data, size_t data_size,
+                                 const lr_objfile_ctx_t *oc,
+                                 const char *entry_symbol) {
+    if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
+        return -1;
+
+    if (oc->num_relocs != 0)
+        return -1;
+
+    const uint64_t image_base = 0x400000ULL;
+    const size_t ehdr_size = 64;
+    const size_t phdr_size = 56;
+    const size_t file_align = 16;
+    const size_t page_align = 4096;
+
+    /* _start:
+     *   jal ra, <entry_symbol>
+     *   addi a7, x0, 93
+     *   ecall
+     */
+    static const uint8_t start_stub_template[] = {
+        0xEF, 0x00, 0x00, 0x00,
+        0x93, 0x08, 0xD0, 0x05,
+        0x73, 0x00, 0x00, 0x00
+    };
+    const size_t start_stub_size = sizeof(start_stub_template);
+
+    size_t text_off = obj_align_up(ehdr_size + phdr_size, file_align);
+    size_t code_off = text_off + start_stub_size;
+    size_t data_off = obj_align_up(code_off + code_size, file_align);
+    size_t total_size = data_off + data_size;
+
+    uint64_t entry_vaddr = image_base + text_off;
+    uint64_t code_vaddr = image_base + code_off;
+
+    const lr_obj_symbol_t *entry_sym = NULL;
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        const lr_obj_symbol_t *sym = &oc->symbols[i];
+        if (sym->is_defined && sym->section == 1 &&
+            strcmp(sym->name, entry_symbol) == 0) {
+            entry_sym = sym;
+            break;
+        }
+    }
+    if (!entry_sym || (size_t)entry_sym->offset >= code_size)
+        return -1;
+
+    uint8_t *buf = (uint8_t *)calloc(1, total_size);
+    uint8_t *code_mut = (uint8_t *)malloc(code_size);
+    if (!buf || !code_mut) {
+        free(buf);
+        free(code_mut);
+        return -1;
+    }
+    memcpy(code_mut, code, code_size);
+
+    uint8_t *p = buf;
+    w8(&p, ELFMAG0); w8(&p, ELFMAG1); w8(&p, ELFMAG2); w8(&p, ELFMAG3);
+    w8(&p, ELFCLASS64);
+    w8(&p, ELFDATA2LSB);
+    w8(&p, EV_CURRENT);
+    w8(&p, ELFOSABI_NONE);
+    wpad(&p, 8);
+    w16(&p, ET_EXEC);
+    w16(&p, EM_RISCV);
+    w32(&p, EV_CURRENT);
+    w64(&p, entry_vaddr);
+    w64(&p, ehdr_size);
+    w64(&p, 0);
+    w32(&p, 0);
+    w16(&p, 64);
+    w16(&p, 56);
+    w16(&p, 1);
+    w16(&p, 0);
+    w16(&p, 0);
+    w16(&p, 0);
+
+    w32(&p, PT_LOAD);
+    w32(&p, PF_R | PF_W | PF_X);
+    w64(&p, 0);
+    w64(&p, image_base);
+    w64(&p, image_base);
+    w64(&p, total_size);
+    w64(&p, total_size);
+    w64(&p, page_align);
+
+    memcpy(buf + text_off, start_stub_template, start_stub_size);
+    memcpy(buf + code_off, code_mut, code_size);
+    if (data_size > 0 && data)
+        memcpy(buf + data_off, data, data_size);
+
+    if (patch_riscv_jal_vaddr(buf, total_size, (uint32_t)text_off,
+                              entry_vaddr, code_vaddr + entry_sym->offset) != 0) {
+        free(buf);
+        free(code_mut);
+        return -1;
+    }
+
+    size_t written = fwrite(buf, 1, total_size, out);
+    free(buf);
+    free(code_mut);
     return written == total_size ? 0 : -1;
 }

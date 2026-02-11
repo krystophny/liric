@@ -48,6 +48,7 @@ add_library(liric STATIC
     src/target_shared.c
     src/target_x86_64.c
     src/target_aarch64.c
+    src/target_riscv64.c
     src/jit.c
     src/liric.c
     src/builder.c
@@ -256,6 +257,57 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
             -DEXPECT_RC=130
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
+    )
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_program(QEMU_RISCV64_EXE qemu-riscv64)
+    if(QEMU_RISCV64_EXE)
+        add_test(
+            NAME liric_cli_exe_riscv64im_qemu_ret42
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DTARGET=riscv64im
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_exe_riscv64im_qemu_add_immediates
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_add_imm_42.ll
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DTARGET=riscv64im
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_exe_riscv64gc_qemu_fp
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_fp_ret_9.ll
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DTARGET=riscv64gc
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=9
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+    endif()
+
+    add_test(
+        NAME liric_cli_exe_riscv64im_rejects_fp
+        COMMAND ${CMAKE_COMMAND}
+            -DCLI=$<TARGET_FILE:liric_bin>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_fp_ret_9.ll
+            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DTARGET=riscv64im
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_emit_fail.cmake
     )
 endif()
 

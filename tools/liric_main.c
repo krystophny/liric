@@ -48,6 +48,7 @@ int main(int argc, char **argv) {
     bool dump_ir = false;
     const char *emit_obj_path = NULL;
     const char *emit_exe_path = NULL;
+    const char *target_name = NULL;
     const char *input_file = NULL;
     const char *func_name = "main";
     const char *load_libs[64];
@@ -57,6 +58,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--jit") == 0) jit_mode = true;
         else if (strcmp(argv[i], "--dump-ir") == 0) dump_ir = true;
         else if (strcmp(argv[i], "--emit-obj") == 0 && i + 1 < argc) emit_obj_path = argv[++i];
+        else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) target_name = argv[++i];
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) emit_exe_path = argv[++i];
         else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) func_name = argv[++i];
         else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
@@ -113,9 +115,9 @@ int main(int argc, char **argv) {
     }
 
     if (emit_obj_path) {
-        const lr_target_t *target = lr_target_host();
+        const lr_target_t *target = target_name ? lr_target_by_name(target_name) : lr_target_host();
         if (!target) {
-            fprintf(stderr, "failed to detect host target\n");
+            fprintf(stderr, "unknown target: %s\n", target_name ? target_name : "<host>");
             lr_module_free(m);
             free(src);
             return 1;
@@ -144,9 +146,9 @@ int main(int argc, char **argv) {
     }
 
     if (jit_mode) {
-        lr_jit_t *jit = lr_jit_create();
+        lr_jit_t *jit = target_name ? lr_jit_create_for_target(target_name) : lr_jit_create();
         if (!jit) {
-            fprintf(stderr, "failed to create JIT\n");
+            fprintf(stderr, "failed to create JIT for target %s\n", target_name ? target_name : "<host>");
             lr_module_free(m);
             free(src);
             return 1;
@@ -190,9 +192,9 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    const lr_target_t *target = lr_target_host();
+    const lr_target_t *target = target_name ? lr_target_by_name(target_name) : lr_target_host();
     if (!target) {
-        fprintf(stderr, "failed to detect host target\n");
+        fprintf(stderr, "unknown target: %s\n", target_name ? target_name : "<host>");
         lr_module_free(m);
         free(src);
         return 1;

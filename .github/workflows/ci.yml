@@ -27,6 +27,12 @@ jobs:
           uname -a
           uname -m
 
+      - name: Install QEMU user-mode (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+
       - name: Configure
         run: cmake -S . -B build -G Ninja
 

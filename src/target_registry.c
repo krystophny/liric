@@ -10,6 +10,12 @@ static const lr_target_entry_t g_targets[] = {
     { "x86_64", lr_target_x86_64 },
     { "aarch64", lr_target_aarch64 },
     { "arm64", lr_target_aarch64 },
+    { "riscv64", lr_target_riscv64 },
+    { "riscv", lr_target_riscv64 },
+    { "riscv64gc", lr_target_riscv64gc },
+    { "rv64gc", lr_target_riscv64gc },
+    { "riscv64im", lr_target_riscv64im },
+    { "rv64im", lr_target_riscv64im },
 };
 
 const lr_target_t *lr_target_by_name(const char *name) {
@@ -29,6 +35,12 @@ const lr_target_t *lr_target_host(void) {
     return lr_target_by_name("x86_64");
 #elif defined(__aarch64__) || defined(_M_ARM64)
     return lr_target_by_name("aarch64");
+#elif defined(__riscv) && __riscv_xlen == 64
+#if defined(__riscv_flen) && (__riscv_flen >= 64)
+    return lr_target_by_name("riscv64gc");
+#else
+    return lr_target_by_name("riscv64im");
+#endif
 #else
     return NULL;
 #endif

@@ -17,7 +17,10 @@ int test_host_target_name(void) {
     const char *name = lr_jit_host_target_name();
     TEST_ASSERT(name != NULL, "host target name exists");
     TEST_ASSERT(name[0] != '\0', "host target name non-empty");
-    TEST_ASSERT(strcmp(name, "x86_64") == 0 || strcmp(name, "aarch64") == 0,
+    TEST_ASSERT(strcmp(name, "x86_64") == 0 ||
+                strcmp(name, "aarch64") == 0 ||
+                strcmp(name, "riscv64gc") == 0 ||
+                strcmp(name, "riscv64im") == 0,
                 "host target is known");
     return 0;
 }
@@ -65,6 +68,26 @@ int test_target_alias_arm64_resolves(void) {
     TEST_ASSERT(canonical != NULL, "aarch64 target exists");
     TEST_ASSERT(alias != NULL, "arm64 alias exists");
     TEST_ASSERT(strcmp(canonical->name, alias->name) == 0, "arm64 alias maps to aarch64");
+    return 0;
+}
+
+int test_target_riscv64_split_resolves(void) {
+    const lr_target_t *def = lr_target_by_name("riscv64");
+    const lr_target_t *gc = lr_target_by_name("riscv64gc");
+    const lr_target_t *im = lr_target_by_name("riscv64im");
+    const lr_target_t *rv64gc = lr_target_by_name("rv64gc");
+    const lr_target_t *rv64im = lr_target_by_name("rv64im");
+
+    TEST_ASSERT(def != NULL, "riscv64 target exists");
+    TEST_ASSERT(gc != NULL, "riscv64gc target exists");
+    TEST_ASSERT(im != NULL, "riscv64im target exists");
+    TEST_ASSERT(rv64gc != NULL, "rv64gc alias exists");
+    TEST_ASSERT(rv64im != NULL, "rv64im alias exists");
+
+    TEST_ASSERT(strcmp(gc->name, "riscv64gc") == 0, "gc canonical target name");
+    TEST_ASSERT(strcmp(im->name, "riscv64im") == 0, "im canonical target name");
+    TEST_ASSERT(strcmp(rv64gc->name, gc->name) == 0, "rv64gc alias maps to riscv64gc");
+    TEST_ASSERT(strcmp(rv64im->name, im->name) == 0, "rv64im alias maps to riscv64im");
     return 0;
 }
 
