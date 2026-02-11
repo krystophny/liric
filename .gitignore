@@ -35,12 +35,7 @@ cscope.files
 .idea/
 .vscode/
 .DS_Store
-
-# architecture generation artifacts
-architecture/generated/
-architecture/export/
-architecture/site/
-.cache/structurizr-cli/
+.cache/
 
 # profiling/debug artifacts
 *.prof

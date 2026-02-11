@@ -11,19 +11,6 @@ JIT where full LLVM overhead is unacceptable.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed architecture diagrams and data structures.
 See [STATUS.md](STATUS.md) for current feature completion and LFortran integration progress.
 
-## Architecture Workflow (Required)
-
-- Curated C4 source of truth lives in `architecture/workspace.dsl`.
-- Generated architecture outputs are **not** committed (`architecture/generated/`, `architecture/export/`, `architecture/site/`).
-- After **any** code change, regenerate architecture artifacts locally:
-
-```bash
-./tools/arch_regen.sh
-```
-
-- If a change affects architecture (new subsystem, changed data flow, major interface move), update `architecture/workspace.dsl` in the same change.
-- CI enforces architecture generation/validation on every push and PR via `./tools/arch_check.sh`.
-
 ## Build and Test
 
 ```bash
