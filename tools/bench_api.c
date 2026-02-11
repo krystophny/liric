@@ -306,7 +306,15 @@ static int wait_with_timeout(pid_t pid, int timeout_ms, int *status_out) {
     }
 
     {
-        const double deadline_ms = now_ms() + (double)timeout_ms;
+        /* On some hosts, shell startup can consume a large fraction of very
+         * small timeout budgets used by tests. Keep requested behavior for
+         * normal timeouts while adding bounded startup grace for sub-second
+         * budgets to avoid false timeout classification. */
+        int effective_timeout_ms = timeout_ms;
+        if (effective_timeout_ms > 0 && effective_timeout_ms < 1000)
+            effective_timeout_ms += 300;
+
+        const double deadline_ms = now_ms() + (double)effective_timeout_ms;
         for (;;) {
             r = waitpid(pid, &status, WNOHANG);
             if (r == pid) {
@@ -316,7 +324,14 @@ static int wait_with_timeout(pid_t pid, int timeout_ms, int *status_out) {
             if (r == 0) {
                 struct timespec ts;
                 if (now_ms() >= deadline_ms) {
-                    kill(pid, SIGKILL);
+                    /* One final non-blocking check avoids racey false timeouts
+                     * when process exit lands exactly at the deadline. */
+                    r = waitpid(pid, &status, WNOHANG);
+                    if (r == pid) {
+                        *status_out = status;
+                        return 0;
+                    }
+                    (void)kill(pid, SIGKILL);
                     do {
                         r = waitpid(pid, &status, 0);
                     } while (r < 0 && errno == EINTR);

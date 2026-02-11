@@ -2,6 +2,12 @@
 #include "objfile_macho.h"
 #include "objfile_elf.h"
 #include "arena.h"
+#ifdef __APPLE__
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
@@ -248,6 +254,101 @@ static void obj_build_result_destroy(lr_obj_build_result_t *build) {
     memset(build, 0, sizeof(*build));
 }
 
+static int write_object_payload(FILE *out, const lr_target_t *target,
+                                const lr_obj_build_result_t *build) {
+    if (!out || !target || !build)
+        return -1;
+#ifdef __APPLE__
+    if (strcmp(target->name, "aarch64") == 0) {
+        return write_macho(out, build->code_buf, build->code_pos,
+                           build->has_data ? build->data_buf : NULL,
+                           build->has_data ? build->data_pos : 0,
+                           (lr_objfile_ctx_t *)&build->ctx, 0x0100000Cu,
+                           macho_reloc_arm64);
+    }
+    return -1;
+#else
+    if (strcmp(target->name, "x86_64") == 0) {
+        return write_elf(out, build->code_buf, build->code_pos,
+                         build->has_data ? build->data_buf : NULL,
+                         build->has_data ? build->data_pos : 0,
+                         (lr_objfile_ctx_t *)&build->ctx, 62,
+                         elf_reloc_x86_64);
+    }
+    if (strcmp(target->name, "aarch64") == 0) {
+        return write_elf(out, build->code_buf, build->code_pos,
+                         build->has_data ? build->data_buf : NULL,
+                         build->has_data ? build->data_pos : 0,
+                         (lr_objfile_ctx_t *)&build->ctx, 183,
+                         elf_reloc_x86_64);
+    }
+    return -1;
+#endif
+}
+
+#ifdef __APPLE__
+static int run_process_quiet(char *const argv[]) {
+    pid_t pid;
+    int status = 0;
+    if (!argv || !argv[0])
+        return -1;
+    pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            (void)dup2(devnull, STDOUT_FILENO);
+            (void)dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR)
+            return -1;
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
+    return -1;
+}
+
+static int run_codesign_adhoc(const char *path) {
+    char *const argv[] = {
+        "/usr/bin/codesign", "--force", "--sign", "-", (char *)path, NULL
+    };
+    if (!path || !path[0])
+        return -1;
+    return run_process_quiet(argv);
+}
+
+static int copy_file_to_stream(const char *path, FILE *out) {
+    FILE *in = NULL;
+    uint8_t buf[4096];
+    size_t nread;
+    if (!path || !out)
+        return -1;
+    in = fopen(path, "rb");
+    if (!in)
+        return -1;
+    while ((nread = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, nread, out) != nread) {
+            fclose(in);
+            return -1;
+        }
+    }
+    if (ferror(in)) {
+        fclose(in);
+        return -1;
+    }
+    fclose(in);
+    return fflush(out) == 0 ? 0 : -1;
+}
+#endif
+
 static int obj_build_module(lr_module_t *m, const lr_target_t *target,
                             bool preserve_symbol_names,
                             lr_obj_build_result_t *out) {
@@ -379,29 +480,7 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
     if (obj_build_module(m, target, false, &build) != 0)
         return -1;
 
-    int result;
-#ifdef __APPLE__
-    if (strcmp(target->name, "aarch64") == 0)
-        result = write_macho(out, build.code_buf, build.code_pos,
-                             build.has_data ? build.data_buf : NULL,
-                             build.has_data ? build.data_pos : 0,
-                             &build.ctx, 0x0100000Cu, macho_reloc_arm64);
-    else
-        result = -1;
-#else
-    if (strcmp(target->name, "x86_64") == 0)
-        result = write_elf(out, build.code_buf, build.code_pos,
-                           build.has_data ? build.data_buf : NULL,
-                           build.has_data ? build.data_pos : 0,
-                           &build.ctx, 62, elf_reloc_x86_64);
-    else if (strcmp(target->name, "aarch64") == 0)
-        result = write_elf(out, build.code_buf, build.code_pos,
-                           build.has_data ? build.data_buf : NULL,
-                           build.has_data ? build.data_pos : 0,
-                           &build.ctx, 183, elf_reloc_x86_64);
-    else
-        result = -1;
-#endif
+    int result = write_object_payload(out, target, &build);
 
     obj_build_result_destroy(&build);
     return result;
@@ -428,7 +507,56 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
             &build.ctx, entry_symbol);
     }
 #else
-    (void)entry_symbol;
+    if (strcmp(target->name, "aarch64") == 0) {
+        char exe_tpl[] = "/tmp/liric_exe_XXXXXX";
+        int exe_fd = -1;
+        FILE *exe_out = NULL;
+        int sign_rc;
+        int copy_rc;
+
+        exe_fd = mkstemp(exe_tpl);
+        if (exe_fd < 0)
+            goto done;
+        exe_out = fdopen(exe_fd, "wb");
+        if (!exe_out) {
+            close(exe_fd);
+            exe_fd = -1;
+            goto done;
+        }
+        exe_fd = -1;
+
+        result = write_macho_executable_arm64(
+            exe_out, build.code_buf, build.code_pos,
+            build.has_data ? build.data_buf : NULL,
+            build.has_data ? build.data_pos : 0,
+            &build.ctx, entry_symbol
+        );
+        if (fclose(exe_out) != 0)
+            result = -1;
+        exe_out = NULL;
+        if (result != 0)
+            goto done;
+
+        sign_rc = run_codesign_adhoc(exe_tpl);
+        if (sign_rc != 0) {
+            result = -1;
+            goto done;
+        }
+
+        copy_rc = copy_file_to_stream(exe_tpl, out);
+        if (copy_rc != 0) {
+            result = -1;
+            goto done;
+        }
+        result = 0;
+
+done:
+        if (exe_out)
+            fclose(exe_out);
+        if (exe_fd >= 0)
+            close(exe_fd);
+        unlink(exe_tpl);
+    }
 #endif
 
     obj_build_result_destroy(&build);
