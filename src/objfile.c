@@ -219,83 +219,116 @@ void lr_obj_add_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
     oc->relocs[i].type = type;
 }
 
-int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
+typedef struct {
+    uint8_t *code_buf;
+    uint8_t *data_buf;
+    size_t code_pos;
+    size_t data_pos;
+    bool has_data;
+    lr_objfile_ctx_t ctx;
+} lr_obj_build_result_t;
+
+static void obj_ctx_destroy(lr_objfile_ctx_t *ctx) {
+    if (!ctx)
+        return;
+    free(ctx->relocs);
+    free(ctx->symbols);
+    free(ctx->symbol_index);
+    free(ctx->module_sym_defined);
+    free(ctx->module_sym_funcs);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static void obj_build_result_destroy(lr_obj_build_result_t *build) {
+    if (!build)
+        return;
+    obj_ctx_destroy(&build->ctx);
+    free(build->code_buf);
+    free(build->data_buf);
+    memset(build, 0, sizeof(*build));
+}
+
+static int obj_build_module(lr_module_t *m, const lr_target_t *target,
+                            bool preserve_symbol_names,
+                            lr_obj_build_result_t *out) {
     if (!m || !target || !out)
         return -1;
 
-    uint8_t *code_buf = calloc(1, OBJ_CODE_BUF_SIZE);
-    uint8_t *data_buf = calloc(1, OBJ_DATA_BUF_SIZE);
-    if (!code_buf || !data_buf) {
-        free(code_buf);
-        free(data_buf);
+    memset(out, 0, sizeof(*out));
+    out->code_buf = (uint8_t *)calloc(1, OBJ_CODE_BUF_SIZE);
+    out->data_buf = (uint8_t *)calloc(1, OBJ_DATA_BUF_SIZE);
+    if (!out->code_buf || !out->data_buf) {
+        obj_build_result_destroy(out);
         return -1;
     }
 
     lr_arena_t *arena = lr_arena_create(0);
     if (!arena) {
-        free(code_buf);
-        free(data_buf);
+        obj_build_result_destroy(out);
         return -1;
     }
 
-    lr_objfile_ctx_t ctx;
-    memset(&ctx, 0, sizeof(ctx));
-
-    m->obj_ctx = &ctx;
-    if (obj_build_module_symbol_cache(&ctx, m) != 0) {
+    out->ctx.preserve_symbol_names = preserve_symbol_names;
+    m->obj_ctx = &out->ctx;
+    if (obj_build_module_symbol_cache(&out->ctx, m) != 0) {
         m->obj_ctx = NULL;
-        free(ctx.module_sym_defined);
-        free(ctx.module_sym_funcs);
         lr_arena_destroy(arena);
-        free(code_buf);
-        free(data_buf);
+        obj_build_result_destroy(out);
         return -1;
     }
-
-    size_t code_pos = 0;
-    size_t data_pos = 0;
-    bool has_data = false;
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (f->is_decl || !f->first_block)
             continue;
 
-        uint32_t sym_idx = lr_obj_ensure_symbol(&ctx, f->name, true, 1,
-                                                 (uint32_t)code_pos);
-        (void)sym_idx;
-
-        uint32_t reloc_base = ctx.num_relocs;
-
-        size_t func_len = 0;
-        int rc = target->compile_func(f, m,
-                                       code_buf + code_pos,
-                                       OBJ_CODE_BUF_SIZE - code_pos,
-                                       &func_len, arena);
-        if (rc != 0) {
+        uint32_t sym_idx = lr_obj_ensure_symbol(&out->ctx, f->name, true, 1,
+                                                (uint32_t)out->code_pos);
+        if (sym_idx == UINT32_MAX) {
             m->obj_ctx = NULL;
-            free(ctx.module_sym_defined);
-            free(ctx.module_sym_funcs);
             lr_arena_destroy(arena);
-            free(code_buf);
-            free(data_buf);
+            obj_build_result_destroy(out);
             return -1;
         }
 
-        for (uint32_t ri = reloc_base; ri < ctx.num_relocs; ri++)
-            ctx.relocs[ri].offset += (uint32_t)code_pos;
+        uint32_t reloc_base = out->ctx.num_relocs;
 
-        code_pos += func_len;
+        size_t func_len = 0;
+        int rc = target->compile_func(f, m,
+                                      out->code_buf + out->code_pos,
+                                      OBJ_CODE_BUF_SIZE - out->code_pos,
+                                      &func_len, arena);
+        if (rc != 0) {
+            m->obj_ctx = NULL;
+            lr_arena_destroy(arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
+
+        for (uint32_t ri = reloc_base; ri < out->ctx.num_relocs; ri++)
+            out->ctx.relocs[ri].offset += (uint32_t)out->code_pos;
+
+        out->code_pos += func_len;
     }
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (!f->is_decl && f->first_block)
             continue;
-        lr_obj_ensure_symbol(&ctx, f->name, false, 0, 0);
+        if (lr_obj_ensure_symbol(&out->ctx, f->name, false, 0, 0) == UINT32_MAX) {
+            m->obj_ctx = NULL;
+            lr_arena_destroy(arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
     }
 
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (g->is_external) {
-            lr_obj_ensure_symbol(&ctx, g->name, false, 0, 0);
+            if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) == UINT32_MAX) {
+                m->obj_ctx = NULL;
+                lr_arena_destroy(arena);
+                obj_build_result_destroy(out);
+                return -1;
+            }
             continue;
         }
 
@@ -307,64 +340,97 @@ int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
         if (galign == 0)
             galign = 8;
 
-        data_pos = obj_align_up(data_pos, galign);
+        out->data_pos = obj_align_up(out->data_pos, galign);
 
-        if (data_pos + gsize > OBJ_DATA_BUF_SIZE) {
+        if (out->data_pos + gsize > OBJ_DATA_BUF_SIZE) {
             m->obj_ctx = NULL;
-            free(ctx.module_sym_defined);
-            free(ctx.module_sym_funcs);
             lr_arena_destroy(arena);
-            free(code_buf);
-            free(data_buf);
+            obj_build_result_destroy(out);
             return -1;
         }
 
         if (g->init_data && g->init_size > 0) {
             size_t copy_n = g->init_size < gsize ? g->init_size : gsize;
-            memcpy(data_buf + data_pos, g->init_data, copy_n);
+            memcpy(out->data_buf + out->data_pos, g->init_data, copy_n);
         }
 
-        lr_obj_ensure_symbol(&ctx, g->name, true, 2,
-                              (uint32_t)data_pos);
+        if (lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
+                                 (uint32_t)out->data_pos) == UINT32_MAX) {
+            m->obj_ctx = NULL;
+            lr_arena_destroy(arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
 
-        data_pos += gsize;
-        has_data = true;
+        out->data_pos += gsize;
+        out->has_data = true;
     }
 
     m->obj_ctx = NULL;
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
+    if (!m || !target || !out)
+        return -1;
+
+    lr_obj_build_result_t build;
+    if (obj_build_module(m, target, false, &build) != 0)
+        return -1;
 
     int result;
 #ifdef __APPLE__
     if (strcmp(target->name, "aarch64") == 0)
-        result = write_macho(out, code_buf, code_pos,
-                              has_data ? data_buf : NULL,
-                              has_data ? data_pos : 0,
-                              &ctx, 0x0100000Cu, macho_reloc_arm64);
+        result = write_macho(out, build.code_buf, build.code_pos,
+                             build.has_data ? build.data_buf : NULL,
+                             build.has_data ? build.data_pos : 0,
+                             &build.ctx, 0x0100000Cu, macho_reloc_arm64);
     else
         result = -1;
 #else
     if (strcmp(target->name, "x86_64") == 0)
-        result = write_elf(out, code_buf, code_pos,
-                            has_data ? data_buf : NULL,
-                            has_data ? data_pos : 0,
-                            &ctx, 62, elf_reloc_x86_64);
+        result = write_elf(out, build.code_buf, build.code_pos,
+                           build.has_data ? build.data_buf : NULL,
+                           build.has_data ? build.data_pos : 0,
+                           &build.ctx, 62, elf_reloc_x86_64);
     else if (strcmp(target->name, "aarch64") == 0)
-        result = write_elf(out, code_buf, code_pos,
-                            has_data ? data_buf : NULL,
-                            has_data ? data_pos : 0,
-                            &ctx, 183, elf_reloc_x86_64);
+        result = write_elf(out, build.code_buf, build.code_pos,
+                           build.has_data ? build.data_buf : NULL,
+                           build.has_data ? build.data_pos : 0,
+                           &build.ctx, 183, elf_reloc_x86_64);
     else
         result = -1;
 #endif
 
-    free(ctx.relocs);
-    free(ctx.symbols);
-    free(ctx.symbol_index);
-    free(ctx.module_sym_defined);
-    free(ctx.module_sym_funcs);
-    lr_arena_destroy(arena);
-    free(code_buf);
-    free(data_buf);
+    obj_build_result_destroy(&build);
+    return result;
+}
 
+int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
+                       const char *entry_symbol) {
+    if (!m || !target || !out)
+        return -1;
+    if (!entry_symbol || !entry_symbol[0])
+        entry_symbol = "main";
+
+    lr_obj_build_result_t build;
+    if (obj_build_module(m, target, true, &build) != 0)
+        return -1;
+
+    int result = -1;
+#if defined(__linux__)
+    if (strcmp(target->name, "x86_64") == 0) {
+        result = write_elf_executable_x86_64(
+            out, build.code_buf, build.code_pos,
+            build.has_data ? build.data_buf : NULL,
+            build.has_data ? build.data_pos : 0,
+            &build.ctx, entry_symbol);
+    }
+#else
+    (void)entry_symbol;
+#endif
+
+    obj_build_result_destroy(&build);
     return result;
 }

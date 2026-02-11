@@ -138,16 +138,16 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
                 }
             }
 
-            obj_emit = container "Object Emission" "Object generation path for ELF/Mach-O files from liric IR." "C11" {
+            obj_emit = container "Object + Executable Emission" "Emission path for relocatable objects and standalone executables from liric IR." "C11" {
                 tags "ObjEmit"
                 url "https://github.com/krystophny/liric/blob/main/src/objfile.c"
 
-                obj_orchestrator = component "Objfile Orchestrator" "Coordinates backend compile output and object writer sections/relocations." "src/objfile.c" {
+                obj_orchestrator = component "Objfile Orchestrator" "Coordinates backend compile output and object/executable writer sections/relocations." "src/objfile.c" {
                     tags "ObjEmit"
                     url "https://github.com/krystophny/liric/blob/main/src/objfile.c"
                 }
 
-                obj_elf = component "ELF Writer" "Linux ELF relocatable object emission." "src/objfile_elf.c" {
+                obj_elf = component "ELF Writer" "Linux ELF relocatable and standalone executable emission." "src/objfile_elf.c" {
                     tags "ObjEmit"
                     url "https://github.com/krystophny/liric/blob/main/src/objfile_elf.c"
                 }
@@ -197,7 +197,7 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
         api_frontdoor -> wasm_frontend "Routes .wasm parsing" "frontend dispatch"
         api_frontdoor -> core_ir "Owns module lifecycle and builder entrypoints" "C API calls"
         api_frontdoor -> jit_runtime "Creates JIT, adds modules, resolves functions" "C API calls"
-        api_frontdoor -> obj_emit "Emits object files from liric modules" "C API calls"
+        api_frontdoor -> obj_emit "Emits object files and standalone executables from liric modules" "C API calls"
 
         ll_frontend -> core_ir "Builds lr_module_t from text IR" "IR builder calls"
         bc_frontend -> core_ir "Builds lr_module_t from LLVM bitcode decode path" "IR builder calls"
@@ -211,14 +211,14 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
 
         core_ir -> backends "Supplies target-independent SSA for codegen" "compile interface"
         backends -> jit_runtime "Produces machine code for in-memory execution" "code buffer"
-        backends -> obj_emit "Produces machine code/relocations for object files" "object code sections"
+        backends -> obj_emit "Produces machine code/relocations for object/executable output" "code sections + relocations"
 
-        obj_emit -> host_runtime "Objects are linked and resolved by host linker/runtime" "ELF/Mach-O and linker"
+        obj_emit -> host_runtime "Objects are linked by host linker/runtime; standalone executables run directly" "ELF/Mach-O and runtime"
 
         jit_runtime -> host_runtime "Loads shared libraries and resolves symbols" "dlopen/dlsym"
         jit_runtime -> backends "Invokes host-compatible target compiler" "compile interface"
 
-        tools -> api_frontdoor "CLI parse/dump/jit workflows" "direct API usage"
+        tools -> api_frontdoor "CLI parse/dump/jit/object/executable workflows" "direct API usage"
         tools -> jit_runtime "Probe runner and JIT execution harness" "JIT invocation"
         tools -> lli "Benchmarks compare liric against lli baseline" "subprocess benchmark harness"
 
@@ -250,7 +250,7 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
 
         obj_orchestrator -> target_registry "Selects host backend" "target lookup"
         obj_orchestrator -> target_shared "Compiles IR for object emission" "compile interface"
-        obj_orchestrator -> obj_elf "Writes ELF relocatable output" "ELF writer API"
+        obj_orchestrator -> obj_elf "Writes ELF relocatable/executable output" "ELF writer API"
         obj_orchestrator -> obj_macho "Writes Mach-O object output" "Mach-O writer API"
 
         compat_cpp -> compat_c "Maps LLVM C++ APIs to lc_* calls" "header wrappers"
@@ -271,7 +271,7 @@ workspace "Liric Architecture" "Curated C4 model for liric with clickable links 
             include *
             autolayout lr
             title "Liric Container View"
-            description "Primary subsystems and major internal flow: parse/build -> IR -> backend -> JIT/object output."
+            description "Primary subsystems and major internal flow: parse/build -> IR -> backend -> JIT/object/executable output."
         }
 
         component ll_frontend "LLFrontendComponents" {
