@@ -2150,6 +2150,95 @@ int test_jit_gep_negative_i32_index(void) {
     return 0;
 }
 
+int test_jit_cast_i1_sign_and_zero_extend(void) {
+    const char *src =
+        "define i64 @cast_i1(i64 %x) {\n"
+        "entry:\n"
+        "  %b = trunc i64 %x to i1\n"
+        "  %sx = sext i1 %b to i64\n"
+        "  %zx = zext i1 %b to i64\n"
+        "  %zs = shl i64 %zx, 8\n"
+        "  %out = add i64 %zs, %sx\n"
+        "  ret i64 %out\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(int64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "cast_i1");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(2), 0, "i1=0 -> sext=0 zext=0");
+    TEST_ASSERT_EQ(fn(3), 255, "i1=1 -> sext=-1 zext=1");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_trunc_i64_to_i16_then_zext(void) {
+    const char *src =
+        "define i32 @trunc_i16(i64 %x) {\n"
+        "entry:\n"
+        "  %t = trunc i64 %x to i16\n"
+        "  %z = zext i16 %t to i32\n"
+        "  ret i32 %z\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(int64_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "trunc_i16");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(74565), 9029, "trunc keeps low 16 bits before zext");
+    TEST_ASSERT_EQ(fn(-1), 65535, "trunc i64 -1 to i16 then zext");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_sext_i8_to_i64(void) {
+    const char *src =
+        "define i64 @sext_i8(i8 %x) {\n"
+        "entry:\n"
+        "  %s = sext i8 %x to i64\n"
+        "  ret i64 %s\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(int8_t);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "sext_i8");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn((int8_t)-5), -5, "sext i8 preserves negative sign");
+    TEST_ASSERT_EQ(fn((int8_t)120), 120, "sext i8 preserves positive value");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_global_string_constant(void) {
     const char *src =
         "@hello = private unnamed_addr constant [5 x i8] c\"Hello\", align 1\n"

@@ -515,6 +515,26 @@ static uint8_t fp_abi_size(const lr_type_t *type) {
     return (type && type->kind == LR_TYPE_FLOAT) ? 4 : 8;
 }
 
+static uint8_t int_type_width_bits(const lr_type_t *type) {
+    size_t fallback_bits = 64;
+    if (!type)
+        return (uint8_t)fallback_bits;
+    switch (type->kind) {
+    case LR_TYPE_I1:  return 1;
+    case LR_TYPE_I8:  return 8;
+    case LR_TYPE_I16: return 16;
+    case LR_TYPE_I32: return 32;
+    case LR_TYPE_I64: return 64;
+    case LR_TYPE_PTR: return 64;
+    default:
+        break;
+    }
+    fallback_bits = lr_type_size(type) * 8;
+    if (fallback_bits == 0 || fallback_bits > 64)
+        fallback_bits = 64;
+    return (uint8_t)fallback_bits;
+}
+
 static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
     if (!mod || !name) return NULL;
     for (lr_func_t *f = mod->first_func; f; f = f->next) {
@@ -1358,12 +1378,43 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
             case LR_OP_SEXT: {
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
-                emit_movsxd(&ctx, X86_RAX, X86_RAX);
+                uint8_t src_bits = int_type_width_bits(inst->operands[0].type);
+                if (src_bits > 0 && src_bits < 64) {
+                    uint8_t shift = (uint8_t)(64 - src_bits);
+                    emit_mov_imm(&ctx, X86_RCX, (int64_t)shift, false);
+                    emit_shift(&ctx, 4, X86_RAX, 8); /* shl rax, cl */
+                    emit_shift(&ctx, 7, X86_RAX, 8); /* sar rax, cl */
+                }
                 emit_store_slot(&ctx, inst->dest, X86_RAX);
                 break;
             }
-            case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
-            case LR_OP_PTRTOINT: case LR_OP_INTTOPTR: {
+            case LR_OP_ZEXT: {
+                emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                uint8_t src_bits = int_type_width_bits(inst->operands[0].type);
+                if (src_bits > 0 && src_bits < 64) {
+                    uint8_t shift = (uint8_t)(64 - src_bits);
+                    emit_mov_imm(&ctx, X86_RCX, (int64_t)shift, false);
+                    emit_shift(&ctx, 4, X86_RAX, 8); /* shl rax, cl */
+                    emit_shift(&ctx, 5, X86_RAX, 8); /* shr rax, cl */
+                }
+                emit_store_slot(&ctx, inst->dest, X86_RAX);
+                break;
+            }
+            case LR_OP_TRUNC: {
+                emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                uint8_t dst_bits = int_type_width_bits(inst->type);
+                if (dst_bits > 0 && dst_bits < 64) {
+                    uint8_t shift = (uint8_t)(64 - dst_bits);
+                    emit_mov_imm(&ctx, X86_RCX, (int64_t)shift, false);
+                    emit_shift(&ctx, 4, X86_RAX, 8); /* shl rax, cl */
+                    emit_shift(&ctx, 5, X86_RAX, 8); /* shr rax, cl */
+                }
+                emit_store_slot(&ctx, inst->dest, X86_RAX);
+                break;
+            }
+            case LR_OP_BITCAST:
+            case LR_OP_PTRTOINT:
+            case LR_OP_INTTOPTR: {
                 emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
                 emit_store_slot(&ctx, inst->dest, X86_RAX);
                 break;
