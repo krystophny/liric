@@ -642,3 +642,72 @@ int test_builder_compat_memory_and_call_path(void) {
     lc_context_destroy(ctx);
     return 0;
 }
+
+int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_phi_finalize");
+    TEST_ASSERT(mod != NULL, "compat module create");
+
+    lr_module_t *ir = lc_module_get_ir(mod);
+    TEST_ASSERT(ir != NULL, "compat module ir");
+    lr_type_t *i32 = lc_get_int_type(mod, 32);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    lr_type_t *params[1] = { i32 };
+    lr_type_t *fn_ty = lr_type_func_new(ir, i32, params, 1, false);
+    TEST_ASSERT(fn_ty != NULL, "function type");
+
+    lc_value_t *fn_val = lc_func_create(mod, "compat_abs_phi_finalize", fn_ty);
+    TEST_ASSERT(fn_val != NULL, "function create");
+    lr_func_t *fn = lc_value_get_func(fn_val);
+    TEST_ASSERT(fn != NULL, "function unwrap");
+    lc_value_t *arg = lc_func_get_arg(mod, fn_val, 0);
+    TEST_ASSERT(arg != NULL, "function arg");
+
+    lr_block_t *entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
+    lr_block_t *then_bb = lc_value_get_block(lc_block_create(mod, fn, "then"));
+    lr_block_t *else_bb = lc_value_get_block(lc_block_create(mod, fn, "else"));
+    lr_block_t *merge_bb = lc_value_get_block(lc_block_create(mod, fn, "merge"));
+    TEST_ASSERT(entry && then_bb && else_bb && merge_bb, "block create");
+
+    lc_value_t *c0 = lc_value_const_int(mod, i32, 0, 32);
+    TEST_ASSERT(c0 != NULL, "const zero");
+    lc_value_t *is_neg = lc_create_icmp_slt(mod, entry, fn, arg, c0, "is_neg");
+    TEST_ASSERT(is_neg != NULL, "icmp slt");
+    lc_create_cond_br(mod, entry, is_neg, then_bb, else_bb);
+
+    lc_value_t *neg = lc_create_sub(mod, then_bb, fn, c0, arg, "neg");
+    TEST_ASSERT(neg != NULL, "neg value");
+    lc_create_br(mod, then_bb, merge_bb);
+    lc_create_br(mod, else_bb, merge_bb);
+
+    lc_phi_node_t *phi = lc_create_phi(mod, merge_bb, fn, i32, "result");
+    TEST_ASSERT(phi != NULL, "phi create");
+    lc_phi_add_incoming(phi, neg, then_bb);
+    lc_phi_add_incoming(phi, arg, else_bb);
+    lc_phi_finalize(phi);
+    /* Regression guard: this must remain a no-op after finalize. */
+    lc_phi_add_incoming(phi, c0, entry);
+    lc_phi_finalize(phi);
+    TEST_ASSERT(phi->result != NULL, "phi result");
+    lc_create_ret(mod, merge_bb, phi->result);
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lc_module_add_to_jit(mod, jit);
+    TEST_ASSERT_EQ(rc, 0, "lc_module_add_to_jit");
+
+    typedef int (*fn_t)(int);
+    fn_t fp;
+    GET_FN(fp, jit, "compat_abs_phi_finalize");
+    TEST_ASSERT(fp != NULL, "compat_abs_phi_finalize lookup");
+    TEST_ASSERT_EQ(fp(5), 5, "compat_abs_phi_finalize(5) == 5");
+    TEST_ASSERT_EQ(fp(-7), 7, "compat_abs_phi_finalize(-7) == 7");
+    TEST_ASSERT_EQ(fp(0), 0, "compat_abs_phi_finalize(0) == 0");
+
+    lr_jit_destroy(jit);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
