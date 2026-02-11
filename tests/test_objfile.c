@@ -8,7 +8,10 @@
  * between public liric.h and internal ir.h (both define LR_FCMP_*) */
 typedef struct lr_target lr_target_t;
 const lr_target_t *lr_target_host(void);
+const lr_target_t *lr_target_by_name(const char *name);
 int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out);
+int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
+                       const char *entry_symbol);
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -96,7 +99,11 @@ int test_objfile_elf_header(void) {
     TEST_ASSERT_EQ(e_type, 1, "ET_REL");
 
     uint16_t e_machine = (uint16_t)(hdr[18] | (hdr[19] << 8));
+#if defined(__aarch64__)
+    TEST_ASSERT_EQ(e_machine, 183, "EM_AARCH64");
+#else
     TEST_ASSERT_EQ(e_machine, 62, "EM_X86_64");
+#endif
 
     fclose(fp);
     lr_module_free(m);
@@ -230,20 +237,29 @@ int test_objfile_elf_call_relocation(void) {
     uint32_t num_relas = (uint32_t)(rela_size / 24);
     TEST_ASSERT(num_relas >= 1, "at least 1 relocation");
 
-    bool found_plt32 = false;
+    bool found_expected_reloc = false;
     for (uint32_t i = 0; i < num_relas; i++) {
         uint8_t *rela = buf + rela_off + i * 24;
         uint64_t r_info = 0;
         memcpy(&r_info, rela + 8, 8);
         uint32_t r_type = (uint32_t)(r_info & 0xFFFFFFFF);
+#if defined(__aarch64__)
+        if (r_type == 283) { /* R_AARCH64_CALL26 */
+            found_expected_reloc = true;
+#else
         if (r_type == 4) { /* R_X86_64_PLT32 */
-            found_plt32 = true;
+            found_expected_reloc = true;
             int64_t r_addend = 0;
             memcpy(&r_addend, rela + 16, 8);
             TEST_ASSERT_EQ(r_addend, -4, "PLT32 addend = -4");
         }
+#endif
     }
-    TEST_ASSERT(found_plt32, "found R_X86_64_PLT32 relocation");
+#if defined(__aarch64__)
+    TEST_ASSERT(found_expected_reloc, "found R_AARCH64_CALL26 relocation");
+#else
+    TEST_ASSERT(found_expected_reloc, "found R_X86_64_PLT32 relocation");
+#endif
 
     free(buf);
     lr_module_free(m);
@@ -279,6 +295,40 @@ int test_objfile_elf_readelf_validates(void) {
     TEST_ASSERT_EQ(rc, 0, "readelf -S validates");
 
     remove(path);
+    lr_module_free(m);
+    return 0;
+}
+
+int test_objfile_elf_executable_aarch64_header(void) {
+    lr_module_t *m = build_ret42_module();
+    TEST_ASSERT(m != NULL, "module create");
+
+    const lr_target_t *target = lr_target_by_name("aarch64");
+    TEST_ASSERT(target != NULL, "aarch64 target");
+
+    FILE *fp = tmpfile();
+    TEST_ASSERT(fp != NULL, "tmpfile");
+
+    int rc = lr_emit_executable(m, target, fp, "f");
+    TEST_ASSERT_EQ(rc, 0, "emit aarch64 executable");
+
+    fseek(fp, 0, SEEK_SET);
+    uint8_t hdr[64];
+    size_t rd = fread(hdr, 1, 64, fp);
+    TEST_ASSERT_EQ(rd, 64, "read 64 bytes");
+
+    TEST_ASSERT_EQ(hdr[0], 0x7F, "ELF magic byte 0");
+    TEST_ASSERT_EQ(hdr[1], 'E', "ELF magic byte 1");
+    TEST_ASSERT_EQ(hdr[2], 'L', "ELF magic byte 2");
+    TEST_ASSERT_EQ(hdr[3], 'F', "ELF magic byte 3");
+
+    uint16_t e_type = (uint16_t)(hdr[16] | (hdr[17] << 8));
+    TEST_ASSERT_EQ(e_type, 2, "ET_EXEC");
+
+    uint16_t e_machine = (uint16_t)(hdr[18] | (hdr[19] << 8));
+    TEST_ASSERT_EQ(e_machine, 183, "EM_AARCH64");
+
+    fclose(fp);
     lr_module_free(m);
     return 0;
 }

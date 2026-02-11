@@ -32,8 +32,8 @@ cmake -S . -B build -G Ninja -DLIRIC_ENABLE_LLVM_BITCODE=ON
 
 Direct executable mode now embeds liric-owned intrinsic helpers for the core
 LLVM intrinsic set used by JIT builtins (`llvm.fabs/sqrt/exp/pow/powi`,
-`llvm.memset/memcpy/memmove`) on Linux x86_64, so these calls no longer depend
-on JIT process symbol namespace lookup.
+`llvm.memset/memcpy/memmove`) on Linux x86_64 and Linux arm64, so these calls
+no longer depend on JIT process symbol namespace lookup.
 
 For programmatic IR construction, use the C API in `include/liric/liric.h`.
 
