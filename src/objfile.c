@@ -1,6 +1,7 @@
 #include "objfile.h"
 #include "objfile_macho.h"
 #include "objfile_elf.h"
+#include "platform/platform.h"
 #include "arena.h"
 #ifdef __APPLE__
 #include <errno.h>
@@ -234,6 +235,39 @@ typedef struct {
     lr_objfile_ctx_t ctx;
 } lr_obj_build_result_t;
 
+static int obj_define_intrinsic_stubs(lr_obj_build_result_t *out,
+                                      const lr_target_t *target) {
+    if (!out || !target)
+        return -1;
+
+    for (uint32_t i = 0; i < out->ctx.num_symbols; i++) {
+        lr_obj_symbol_t *sym = &out->ctx.symbols[i];
+        if (sym->is_defined || !sym->name || !sym->name[0])
+            continue;
+        if (!lr_platform_intrinsic_supported(sym->name))
+            continue;
+
+        const uint8_t *blob_begin = NULL;
+        const uint8_t *blob_end = NULL;
+        if (!lr_platform_intrinsic_blob_lookup(sym->name, &blob_begin, &blob_end))
+            return -1;
+        if (!blob_begin || !blob_end || blob_end <= blob_begin)
+            return -1;
+
+        out->code_pos = obj_align_up(out->code_pos, 16);
+        size_t blob_n = (size_t)(blob_end - blob_begin);
+        if (out->code_pos + blob_n > OBJ_CODE_BUF_SIZE)
+            return -1;
+
+        memcpy(out->code_buf + out->code_pos, blob_begin, blob_n);
+        sym->is_defined = true;
+        sym->section = 1;
+        sym->offset = (uint32_t)out->code_pos;
+        out->code_pos += blob_n;
+    }
+    return 0;
+}
+
 static void obj_ctx_destroy(lr_objfile_ctx_t *ctx) {
     if (!ctx)
         return;
@@ -415,6 +449,15 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
         if (!f->is_decl && f->first_block)
             continue;
         if (lr_obj_ensure_symbol(&out->ctx, f->name, false, 0, 0) == UINT32_MAX) {
+            m->obj_ctx = NULL;
+            lr_arena_destroy(arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
+    }
+
+    if (preserve_symbol_names) {
+        if (obj_define_intrinsic_stubs(out, target) != 0) {
             m->obj_ctx = NULL;
             lr_arena_destroy(arena);
             obj_build_result_destroy(out);
