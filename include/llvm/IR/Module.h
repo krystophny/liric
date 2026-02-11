@@ -451,7 +451,12 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         }
     }
     if (!mod || !f) return BasicBlock::wrap(nullptr);
-    lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
+    lc_value_t *bv = nullptr;
+    if (!Parent && !InsertBefore && !f->first_block) {
+        bv = lc_block_create_detached(mod, f, Name.c_str());
+    } else {
+        bv = lc_block_create(mod, f, Name.c_str());
+    }
     if (fn) {
         detail::register_block_parent(lc_value_get_block(bv), fn);
     }

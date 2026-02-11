@@ -70,6 +70,9 @@ public:
             return;
         }
         block_ = BB->impl_block();
+        if (block_ && M()) {
+            lc_block_attach(M(), block_);
+        }
         lr_func_t *f = lc_value_get_block_func(BB->impl());
         if (!f) {
             Function *parent = detail::lookup_block_parent(block_);
@@ -539,6 +542,9 @@ public:
 
     BranchInst *CreateBr(BasicBlock *Dest) {
         if (!B()) return nullptr;
+        if (Dest && Dest->impl_block() && M()) {
+            lc_block_attach(M(), Dest->impl_block());
+        }
         if (!Dest || !Dest->impl_block()) {
             lc_create_unreachable(M(), B());
             return nullptr;
@@ -550,6 +556,12 @@ public:
     BranchInst *CreateCondBr(Value *Cond, BasicBlock *True,
                              BasicBlock *False) {
         if (!B()) return nullptr;
+        if (True && True->impl_block() && M()) {
+            lc_block_attach(M(), True->impl_block());
+        }
+        if (False && False->impl_block() && M()) {
+            lc_block_attach(M(), False->impl_block());
+        }
         if (!Cond || !True || !False || !True->impl_block() || !False->impl_block()) {
             lc_create_unreachable(M(), B());
             return nullptr;

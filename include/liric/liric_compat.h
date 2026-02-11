@@ -153,6 +153,9 @@ unsigned lc_func_arg_count(lc_value_t *func_val);
 /* ---- Basic block ---- */
 lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
                              const char *name);
+lc_value_t *lc_block_create_detached(lc_module_compat_t *mod, lr_func_t *func,
+                                      const char *name);
+int lc_block_attach(lc_module_compat_t *mod, lr_block_t *block);
 lr_block_t *lc_value_get_block(lc_value_t *val);
 lr_func_t *lc_value_get_block_func(lc_value_t *val);
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val);

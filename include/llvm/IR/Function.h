@@ -136,7 +136,13 @@ public:
 
     BasicBlock &getEntryBlock() const {
         static BasicBlock dummy;
-        return dummy;
+        lr_func_t *f = getIRFunc();
+        if (!f || !f->first_block || !compat_mod_) return dummy;
+        lc_value_t *bv = lc_value_block_ref(compat_mod_, f->first_block);
+        if (!bv) return dummy;
+        detail::register_block_parent(f->first_block,
+            const_cast<Function *>(this));
+        return *BasicBlock::wrap(bv);
     }
 
     class BasicBlockListType {

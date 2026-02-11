@@ -87,6 +87,9 @@ typedef struct lc_module_compat {
     lc_phi_node_t **pending_phis;
     uint32_t phi_count;
     uint32_t phi_cap;
+    lr_block_t **detached_blocks;
+    uint32_t detached_count;
+    uint32_t detached_cap;
     lr_module_t *cache_owner_mod;
     lr_func_t **func_by_sym;
     lr_global_t **global_by_sym;
@@ -500,6 +503,7 @@ void lc_module_destroy(lc_module_compat_t *mod) {
     lr_arena_destroy(mod->mod->arena);
     value_pool_free(mod);
     free(mod->func_values);
+    free(mod->detached_blocks);
     free(mod->func_by_sym);
     free(mod->global_by_sym);
     free((void *)mod->name);
@@ -847,6 +851,88 @@ lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
     lc_value_t *v = lc_value_block_ref(mod, b);
     if (v) v->block.func = func;
     return v ? v : safe_undef(mod);
+}
+
+static int detached_block_index(lc_module_compat_t *mod, lr_block_t *block) {
+    if (!mod || !block) return -1;
+    for (uint32_t i = 0; i < mod->detached_count; i++) {
+        if (mod->detached_blocks[i] == block)
+            return (int)i;
+    }
+    return -1;
+}
+
+static int detached_block_add(lc_module_compat_t *mod, lr_block_t *block) {
+    if (!mod || !block) return -1;
+    if (detached_block_index(mod, block) >= 0)
+        return 0;
+    if (mod->detached_count == mod->detached_cap) {
+        uint32_t new_cap = mod->detached_cap ? mod->detached_cap * 2u : 16u;
+        lr_block_t **new_blocks = (lr_block_t **)realloc(
+            mod->detached_blocks, sizeof(*new_blocks) * new_cap);
+        if (!new_blocks)
+            return -1;
+        mod->detached_blocks = new_blocks;
+        mod->detached_cap = new_cap;
+    }
+    mod->detached_blocks[mod->detached_count++] = block;
+    return 0;
+}
+
+static void detached_block_remove_idx(lc_module_compat_t *mod, uint32_t idx) {
+    if (!mod || idx >= mod->detached_count)
+        return;
+    mod->detached_blocks[idx] =
+        mod->detached_blocks[mod->detached_count - 1u];
+    mod->detached_count--;
+}
+
+lc_value_t *lc_block_create_detached(lc_module_compat_t *mod, lr_func_t *func,
+                                      const char *name) {
+    if (!mod || !func) return safe_undef(mod);
+    if (!name) name = "";
+    lr_arena_t *arena = mod->mod->arena;
+    lr_block_t *b = lr_arena_new(arena, lr_block_t);
+    if (!b) return safe_undef(mod);
+    b->name = lr_arena_strdup(arena, name, strlen(name));
+    b->id = func->num_blocks++;
+    b->func = func;
+    b->next = NULL;
+    func->block_array = NULL;
+    func->linear_inst_array = NULL;
+    func->block_inst_offsets = NULL;
+    func->num_linear_insts = 0;
+    if (detached_block_add(mod, b) != 0)
+        return safe_undef(mod);
+    lc_value_t *v = lc_value_block_ref(mod, b);
+    if (v) v->block.func = func;
+    return v ? v : safe_undef(mod);
+}
+
+int lc_block_attach(lc_module_compat_t *mod, lr_block_t *block) {
+    if (!mod || !block) return -1;
+    int idx = detached_block_index(mod, block);
+    if (idx < 0)
+        return 0;
+    lr_func_t *func = block->func;
+    if (!func) {
+        detached_block_remove_idx(mod, (uint32_t)idx);
+        return -1;
+    }
+    block->next = NULL;
+    if (!func->first_block) {
+        func->first_block = block;
+        func->is_decl = false;
+    } else {
+        func->last_block->next = block;
+    }
+    func->last_block = block;
+    func->block_array = NULL;
+    func->linear_inst_array = NULL;
+    func->block_inst_offsets = NULL;
+    func->num_linear_insts = 0;
+    detached_block_remove_idx(mod, (uint32_t)idx);
+    return 0;
 }
 
 lr_block_t *lc_value_get_block(lc_value_t *val) {
