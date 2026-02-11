@@ -10,6 +10,12 @@ class Function;
 class LLVMContext;
 
 namespace detail {
+    struct vector_type_info {
+        const lr_type_t *element = nullptr;
+        unsigned num_elements = 0;
+        bool scalable = false;
+    };
+
     inline thread_local lc_module_compat_t *fallback_module = nullptr;
     inline thread_local Function *current_function = nullptr;
     inline thread_local std::unordered_map<const void *, lc_value_t *>
@@ -20,6 +26,8 @@ namespace detail {
         block_parents;
     inline thread_local std::unordered_map<const lr_type_t *, const LLVMContext *>
         type_contexts;
+    inline thread_local std::unordered_map<const lr_type_t *, vector_type_info>
+        vector_types;
 
     inline void register_value_wrapper(const void *obj, lc_value_t *v) {
         if (obj && v) value_wrappers[obj] = v;
@@ -76,10 +84,24 @@ namespace detail {
         return it == type_contexts.end() ? nullptr : it->second;
     }
 
+    inline void register_vector_type(const lr_type_t *ty,
+                                     const lr_type_t *element,
+                                     unsigned num_elements,
+                                     bool scalable) {
+        if (!ty || !element || num_elements == 0) return;
+        vector_types[ty] = vector_type_info{element, num_elements, scalable};
+    }
+
+    inline const vector_type_info *lookup_vector_type(const lr_type_t *ty) {
+        auto it = vector_types.find(ty);
+        return it == vector_types.end() ? nullptr : &it->second;
+    }
+
     inline void unregister_type_contexts(const LLVMContext *ctx) {
         if (!ctx) return;
         for (auto it = type_contexts.begin(); it != type_contexts.end();) {
             if (it->second == ctx) {
+                vector_types.erase(it->first);
                 it = type_contexts.erase(it);
             } else {
                 ++it;

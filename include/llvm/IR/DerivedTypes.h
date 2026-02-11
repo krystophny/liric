@@ -157,8 +157,20 @@ class VectorType : public Type {
 public:
     static VectorType *get(Type *ElementTy, unsigned NumElts,
                            bool Scalable = false) {
-        (void)ElementTy; (void)NumElts; (void)Scalable;
-        return nullptr;
+        if (!ElementTy || NumElts == 0 || Scalable)
+            return nullptr;
+
+        LLVMContext &C = ElementTy->getContext();
+        lc_module_compat_t *mod = C.getDefaultModule();
+        if (!mod) return nullptr;
+
+        lr_module_t *m = lc_module_get_ir(mod);
+        std::vector<lr_type_t *> fields(NumElts, ElementTy->impl());
+        lr_type_t *vec = lr_type_struct_new(
+            m, fields.data(), static_cast<uint32_t>(NumElts), true);
+        detail::register_type_context(vec, &C);
+        detail::register_vector_type(vec, ElementTy->impl(), NumElts, false);
+        return VectorType::wrap(vec);
     }
 
     static VectorType *wrap(lr_type_t *t) {
@@ -175,8 +187,8 @@ public:
 class FixedVectorType : public VectorType {
 public:
     static FixedVectorType *get(Type *ElementTy, unsigned NumElts) {
-        (void)ElementTy; (void)NumElts;
-        return nullptr;
+        return static_cast<FixedVectorType *>(
+            VectorType::get(ElementTy, NumElts, false));
     }
 
     static FixedVectorType *wrap(lr_type_t *t) {

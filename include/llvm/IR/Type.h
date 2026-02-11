@@ -58,6 +58,8 @@ public:
     TypeID getTypeID() const {
         lr_type_t *t = impl();
         if (!t) return VoidTyID;
+        if (const auto *vi = detail::lookup_vector_type(t))
+            return vi->scalable ? ScalableVectorTyID : FixedVectorTyID;
         switch (t->kind) {
         case LR_TYPE_VOID:   return VoidTyID;
         case LR_TYPE_I1:
@@ -115,7 +117,10 @@ public:
         lr_type_t *t = impl();
         return t && t->kind == LR_TYPE_FUNC;
     }
-    bool isVectorTy() const { return false; }
+    bool isVectorTy() const {
+        lr_type_t *t = impl();
+        return t && detail::lookup_vector_type(t) != nullptr;
+    }
 
     unsigned getIntegerBitWidth() const {
         lr_type_t *t = impl();
@@ -137,7 +142,13 @@ public:
         return t ? lc_type_primitive_size_bits(t) : 0;
     }
 
-    Type *getScalarType() { return this; }
+    Type *getScalarType() {
+        lr_type_t *t = impl();
+        if (!t) return this;
+        if (const auto *vi = detail::lookup_vector_type(t))
+            return Type::wrap(const_cast<lr_type_t *>(vi->element));
+        return this;
+    }
 
     Type *getPointerElementType() const;
 
