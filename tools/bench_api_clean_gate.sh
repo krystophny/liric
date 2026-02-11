@@ -6,6 +6,13 @@ usage() {
 usage: bench_api_clean_gate.sh [options]
   --build-dir PATH        build dir containing bench tools (default: ./build)
   --bench-dir PATH        benchmark output dir (default: /tmp/liric_bench)
+  --lfortran PATH         path to lfortran+LLVM binary (forwarded to tools)
+  --lfortran-liric PATH   path to lfortran+WITH_LIRIC binary (forwarded to bench_api)
+  --test-dir PATH         path to integration_tests dir (forwarded to bench_api)
+  --probe-runner PATH     path to liric_probe_runner (forwarded to bench_compat_check)
+  --runtime-lib PATH      path to liblfortran_runtime (forwarded to bench_compat_check)
+  --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
+  --workers N             worker count hint (forwarded to bench_compat_check)
   --iters N               bench_api iterations (default: 1)
   --timeout-ms N          bench_api timeout in ms (default: 3000)
   --compat-timeout N      bench_compat_check timeout in seconds (default: 15)
@@ -47,6 +54,13 @@ json_bool_field() {
 
 build_dir="./build"
 bench_dir="/tmp/liric_bench"
+lfortran_path=""
+lfortran_liric_path=""
+test_dir=""
+probe_runner=""
+runtime_lib=""
+cmake_path=""
+workers=""
 iters="1"
 timeout_ms="3000"
 compat_timeout="15"
@@ -62,6 +76,41 @@ while [[ $# -gt 0 ]]; do
         --bench-dir)
             [[ $# -ge 2 ]] || die "missing value for $1"
             bench_dir="$2"
+            shift 2
+            ;;
+        --lfortran)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            lfortran_path="$2"
+            shift 2
+            ;;
+        --lfortran-liric)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            lfortran_liric_path="$2"
+            shift 2
+            ;;
+        --test-dir)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            test_dir="$2"
+            shift 2
+            ;;
+        --probe-runner)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            probe_runner="$2"
+            shift 2
+            ;;
+        --runtime-lib)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            runtime_lib="$2"
+            shift 2
+            ;;
+        --cmake)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            cmake_path="$2"
+            shift 2
+            ;;
+        --workers)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            workers="$2"
             shift 2
             ;;
         --iters)
@@ -94,15 +143,45 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$no_run" == "0" ]]; then
+    compat_args=(
+        --timeout "$compat_timeout"
+        --bench-dir "$bench_dir"
+    )
+    api_args=(
+        --iters "$iters"
+        --timeout-ms "$timeout_ms"
+        --bench-dir "$bench_dir"
+        --require-zero-skips
+    )
+
+    if [[ -n "$lfortran_path" ]]; then
+        compat_args+=(--lfortran "$lfortran_path")
+        api_args+=(--lfortran "$lfortran_path")
+    fi
+    if [[ -n "$lfortran_liric_path" ]]; then
+        api_args+=(--lfortran-liric "$lfortran_liric_path")
+    fi
+    if [[ -n "$test_dir" ]]; then
+        api_args+=(--test-dir "$test_dir")
+    fi
+    if [[ -n "$probe_runner" ]]; then
+        compat_args+=(--probe-runner "$probe_runner")
+    fi
+    if [[ -n "$runtime_lib" ]]; then
+        compat_args+=(--runtime-lib "$runtime_lib")
+    fi
+    if [[ -n "$cmake_path" ]]; then
+        compat_args+=(--cmake "$cmake_path")
+    fi
+    if [[ -n "$workers" ]]; then
+        compat_args+=(--workers "$workers")
+    fi
+
     [[ -x "${build_dir}/bench_compat_check" ]] || die "missing executable: ${build_dir}/bench_compat_check"
     [[ -x "${build_dir}/bench_api" ]] || die "missing executable: ${build_dir}/bench_api"
 
-    "${build_dir}/bench_compat_check" --timeout "$compat_timeout" --bench-dir "$bench_dir"
-    "${build_dir}/bench_api" \
-        --iters "$iters" \
-        --timeout-ms "$timeout_ms" \
-        --bench-dir "$bench_dir" \
-        --require-zero-skips
+    "${build_dir}/bench_compat_check" "${compat_args[@]}"
+    "${build_dir}/bench_api" "${api_args[@]}"
 fi
 
 summary_path="${bench_dir}/bench_api_summary.json"

@@ -24,6 +24,7 @@ jobs:
     env:
       LFORTRAN_ROOT: ${{ github.workspace }}/lfortran
       LFORTRAN_BUILD: ${{ github.workspace }}/lfortran/build
+      LFORTRAN_BUILD_LIRIC: ${{ github.workspace }}/lfortran/build-liric
       LIRIC_BUILD: ${{ github.workspace }}/build
       MASS_OUT: ${{ runner.temp }}/liric_lfortran_mass
       BASELINE_DIR: ${{ runner.temp }}/liric_lfortran_mass_baseline/${{ matrix.os }}
@@ -71,6 +72,15 @@ jobs:
           cmake -S . -B "${LIRIC_BUILD}" -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build "${LIRIC_BUILD}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
+      - name: Build lfortran WITH_LIRIC
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S "${LFORTRAN_ROOT}" -B "${LFORTRAN_BUILD_LIRIC}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DWITH_LIRIC=yes \
+            -DLIRIC_DIR="${GITHUB_WORKSPACE}"
+          cmake --build "${LFORTRAN_BUILD_LIRIC}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
       - name: Run full mass campaign with regression gate
         run: |
           set -euo pipefail
@@ -87,6 +97,24 @@ jobs:
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
             --diag-fail-logs \
             "${BASELINE_ARGS[@]}"
+
+      - name: Run API clean-pass gate (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          ./tools/bench_api_clean_gate.sh \
+            --build-dir "${LIRIC_BUILD}" \
+            --bench-dir "${MASS_OUT}/bench_api_clean_gate" \
+            --iters 1 \
+            --timeout-ms 3000 \
+            --compat-timeout 15 \
+            --lfortran "${LFORTRAN_BUILD}/src/bin/lfortran" \
+            --lfortran-liric "${LFORTRAN_BUILD_LIRIC}/src/bin/lfortran" \
+            --test-dir "${LFORTRAN_ROOT}/integration_tests" \
+            --probe-runner "${LIRIC_BUILD}/liric_probe_runner" \
+            --runtime-lib "${LFORTRAN_BUILD}/src/runtime/liblfortran_runtime.so" \
+            --cmake "${LFORTRAN_ROOT}/integration_tests/CMakeLists.txt" \
+            --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Publish trend summary
         run: |
@@ -135,3 +163,10 @@ jobs:
             ${{ env.MASS_OUT }}/summary.json
             ${{ env.MASS_OUT }}/summary.md
             ${{ env.MASS_OUT }}/failures.csv
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/compat_check.jsonl
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/compat_api.txt
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/compat_ll.txt
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/bench_api.jsonl
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/bench_api_summary.json
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/bench_api_failures.jsonl
+            ${{ env.MASS_OUT }}/bench_api_clean_gate/bench_api_fail_summary.json
