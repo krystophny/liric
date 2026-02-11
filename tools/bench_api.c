@@ -52,6 +52,7 @@ typedef struct {
 typedef struct {
     char *name;
     char *options;
+    char *source;
 } name_opt_t;
 
 typedef struct {
@@ -444,29 +445,112 @@ static void strlist_truncate(strlist_t *l, size_t keep_n) {
     l->n = keep_n;
 }
 
-static void validate_compat_sources(const strlist_t *tests, const char *test_dir, const char *compat_path) {
+static const name_opt_t *optlist_find_entry(const optlist_t *l, const char *name) {
+    size_t i;
+    if (!l || !name) return NULL;
+    for (i = 0; i < l->n; i++) {
+        if (strcmp(l->items[i].name, name) == 0)
+            return &l->items[i];
+    }
+    return NULL;
+}
+
+static size_t optlist_count_name(const optlist_t *l, const char *name) {
+    size_t i, count = 0;
+    if (!l || !name) return 0;
+    for (i = 0; i < l->n; i++) {
+        if (strcmp(l->items[i].name, name) == 0)
+            count++;
+    }
+    return count;
+}
+
+static int testlist_contains_name(const strlist_t *tests, const char *name) {
+    size_t i;
+    if (!tests || !name) return 0;
+    for (i = 0; i < tests->n; i++) {
+        if (strcmp(tests->items[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+static char *compat_source_path_for_entry(const char *test_dir,
+                                          const char *name,
+                                          const name_opt_t *opt_entry,
+                                          const char **source_token_out) {
+    char default_name[512];
+    const char *source_token = NULL;
+
+    if (opt_entry && opt_entry->source && opt_entry->source[0] != '\0') {
+        source_token = opt_entry->source;
+    } else {
+        int n = snprintf(default_name, sizeof(default_name), "%s.f90", name ? name : "");
+        if (n < 0 || (size_t)n >= sizeof(default_name))
+            return NULL;
+        source_token = default_name;
+    }
+
+    if (source_token_out) *source_token_out = source_token;
+    if (source_token[0] == '/') return xstrdup(source_token);
+    return path_join2(test_dir, source_token);
+}
+
+static void validate_compat_artifacts(const strlist_t *tests,
+                                      const optlist_t *opts,
+                                      const char *test_dir,
+                                      const char *compat_path,
+                                      const char *opts_path) {
     size_t i;
     size_t missing_count = 0;
+    size_t missing_opts_count = 0;
+    size_t duplicate_opts_count = 0;
+    size_t stale_opts_count = 0;
     const size_t sample_limit = 20;
+
     for (i = 0; i < tests->n; i++) {
-        char fname[512];
-        int n = snprintf(fname, sizeof(fname), "%s.f90", tests->items[i]);
+        const char *name = tests->items[i];
+        const name_opt_t *opt_entry = optlist_find_entry(opts, name);
+        size_t opt_count = optlist_count_name(opts, name);
         char *source_path;
-        if (n < 0 || (size_t)n >= sizeof(fname)) {
+        const char *source_token = NULL;
+
+        if (opt_count == 0) {
+            if (missing_opts_count < sample_limit)
+                fprintf(stderr, "missing compat options entry for test: %s\n", name);
+            missing_opts_count++;
+        } else if (opt_count > 1) {
+            if (duplicate_opts_count < sample_limit)
+                fprintf(stderr, "duplicate compat options entries for test: %s (%zu rows)\n",
+                        name, opt_count);
+            duplicate_opts_count++;
+        }
+
+        source_path = compat_source_path_for_entry(test_dir, name, opt_entry, &source_token);
+        if (!source_path) {
             if (missing_count < sample_limit) {
-                fprintf(stderr, "compat entry too long (cannot resolve source): %s\n", tests->items[i]);
+                fprintf(stderr, "compat entry too long (cannot resolve source): %s\n", name);
             }
             missing_count++;
             continue;
         }
-        source_path = path_join2(test_dir, fname);
         if (!file_exists(source_path)) {
             if (missing_count < sample_limit)
-                fprintf(stderr, "missing compat source: %s\n", source_path);
+                fprintf(stderr, "missing compat source: %s (name=%s, source=%s)\n",
+                        source_path, name, source_token ? source_token : "");
             missing_count++;
         }
         free(source_path);
     }
+
+    for (i = 0; opts && i < opts->n; i++) {
+        const char *name = opts->items[i].name;
+        if (!testlist_contains_name(tests, name)) {
+            if (stale_opts_count < sample_limit)
+                fprintf(stderr, "stale compat options row: %s (not present in compat list)\n", name);
+            stale_opts_count++;
+        }
+    }
+
     if (missing_count > 0) {
         if (missing_count > sample_limit) {
             fprintf(stderr, "... and %zu more missing entries\n", missing_count - sample_limit);
@@ -477,6 +561,15 @@ static void validate_compat_sources(const strlist_t *tests, const char *test_dir
         fprintf(stderr,
                 "Remediation: regenerate compat artifacts, e.g. ./build/bench_compat_check --timeout 15\n");
         die("compat list contains stale entries; run bench_compat_check to refresh", compat_path);
+    }
+
+    if (missing_opts_count > 0 || duplicate_opts_count > 0 || stale_opts_count > 0) {
+        fprintf(stderr,
+                "compat options preflight failed: missing=%zu duplicate=%zu stale=%zu\n",
+                missing_opts_count, duplicate_opts_count, stale_opts_count);
+        fprintf(stderr,
+                "Remediation: regenerate compat artifacts, e.g. ./build/bench_compat_check --timeout 15\n");
+        die("compat options/list mismatch; run bench_compat_check to refresh", opts_path);
     }
 }
 
@@ -555,18 +648,56 @@ static void optlist_free(optlist_t *l) {
     for (i = 0; i < l->n; i++) {
         free(l->items[i].name);
         free(l->items[i].options);
+        free(l->items[i].source);
     }
     free(l->items);
     l->items = NULL;
     l->n = l->cap = 0;
 }
 
-static const char *optlist_find(const optlist_t *l, const char *name) {
-    size_t i;
-    for (i = 0; i < l->n; i++) {
-        if (strcmp(l->items[i].name, name) == 0)
-            return l->items[i].options;
+static char *jsonl_extract_string_field(const char *line, const char *field) {
+    char key[64];
+    const char *start;
+    const char *p;
+    char *out;
+    size_t t = 0;
+    int escaped = 0;
+    int n;
+
+    if (!line || !field) return NULL;
+    n = snprintf(key, sizeof(key), "\"%s\":\"", field);
+    if (n < 0 || (size_t)n >= sizeof(key)) return NULL;
+    start = strstr(line, key);
+    if (!start) return NULL;
+    p = start + (size_t)n;
+
+    out = (char *)malloc(strlen(p) + 1);
+    if (!out) die("out of memory", NULL);
+
+    while (*p) {
+        char c = *p++;
+        if (escaped) {
+            switch (c) {
+                case 'n': out[t++] = '\n'; break;
+                case 'r': out[t++] = '\r'; break;
+                case 't': out[t++] = '\t'; break;
+                default: out[t++] = c; break;
+            }
+            escaped = 0;
+            continue;
+        }
+        if (c == '\\') {
+            escaped = 1;
+            continue;
+        }
+        if (c == '"') {
+            out[t] = '\0';
+            return out;
+        }
+        out[t++] = c;
     }
+
+    free(out);
     return NULL;
 }
 
@@ -582,26 +713,17 @@ static optlist_t parse_options_jsonl(const char *path) {
     if (!f) return out;
 
     while (fgets(line, sizeof(line), f)) {
-        const char *np, *op;
-        char *name_start, *name_end, *opts_start, *opts_end;
         name_opt_t entry;
-
-        np = strstr(line, "\"name\":\"");
-        if (!np) continue;
-        name_start = (char *)np + 8;
-        name_end = strchr(name_start, '"');
-        if (!name_end) continue;
-
-        op = strstr(line, "\"options\":\"");
-        if (!op) continue;
-        opts_start = (char *)op + 11;
-        opts_end = strchr(opts_start, '"');
-        if (!opts_end) continue;
-
-        *name_end = '\0';
-        *opts_end = '\0';
-        entry.name = xstrdup(name_start);
-        entry.options = xstrdup(opts_start);
+        memset(&entry, 0, sizeof(entry));
+        entry.name = jsonl_extract_string_field(line, "name");
+        entry.options = jsonl_extract_string_field(line, "options");
+        entry.source = jsonl_extract_string_field(line, "source");
+        if (!entry.name || !entry.options) {
+            free(entry.name);
+            free(entry.options);
+            free(entry.source);
+            continue;
+        }
         optlist_push(&out, entry);
     }
 
@@ -1323,6 +1445,52 @@ static const char *classify_jit_failure_reason(int is_liric, int rc) {
     return is_liric ? "liric_jit_failed" : "llvm_jit_failed";
 }
 
+static unsigned char ascii_tolower_uc(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return (unsigned char)(c + ('a' - 'A'));
+    return c;
+}
+
+static int text_has_ci(const char *text, const char *needle) {
+    size_t nl, i, j;
+    if (!text || !needle) return 0;
+    nl = strlen(needle);
+    if (nl == 0) return 1;
+    for (i = 0; text[i]; i++) {
+        for (j = 0; j < nl; j++) {
+            unsigned char tc = (unsigned char)text[i + j];
+            if (!tc) break;
+            if (ascii_tolower_uc(tc) != ascii_tolower_uc((unsigned char)needle[j])) break;
+        }
+        if (j == nl) return 1;
+        if (!text[i + j]) return 0;
+    }
+    return 0;
+}
+
+static int text_has_word_ci(const char *text, const char *word) {
+    size_t wl, i, j;
+    if (!text || !word) return 0;
+    wl = strlen(word);
+    if (wl == 0) return 0;
+    for (i = 0; text[i]; i++) {
+        if (i > 0) {
+            unsigned char prev = (unsigned char)text[i - 1];
+            if (isalnum(prev) || prev == '_') continue;
+        }
+        for (j = 0; j < wl; j++) {
+            unsigned char tc = (unsigned char)text[i + j];
+            if (!tc) break;
+            if (ascii_tolower_uc(tc) != ascii_tolower_uc((unsigned char)word[j])) break;
+        }
+        if (j == wl) {
+            unsigned char after = (unsigned char)text[i + wl];
+            if (!after || (!isalnum(after) && after != '_'))
+                return 1;
+        }
+    }
+    return 0;
+}
+
 static int text_has(const char *text, const char *needle) {
     return text && needle && strstr(text, needle) != NULL;
 }
@@ -1330,6 +1498,16 @@ static int text_has(const char *text, const char *needle) {
 static int cmd_output_has(const cmd_result_t *r, const char *needle) {
     if (!r || !needle) return 0;
     return text_has(r->stdout_text, needle) || text_has(r->stderr_text, needle);
+}
+
+static int cmd_output_has_ci(const cmd_result_t *r, const char *needle) {
+    if (!r || !needle) return 0;
+    return text_has_ci(r->stdout_text, needle) || text_has_ci(r->stderr_text, needle);
+}
+
+static int cmd_output_has_word_ci(const cmd_result_t *r, const char *word) {
+    if (!r || !word) return 0;
+    return text_has_word_ci(r->stdout_text, word) || text_has_word_ci(r->stderr_text, word);
 }
 
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
@@ -1343,10 +1521,8 @@ static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
         cmd_output_has(r, "Error: Failed to read") ||
         cmd_output_has(r, "Error: Invalid input for"))
         return "llvm_jit_runtime_io_error";
-    if (cmd_output_has(r, "Error stop") ||
-        cmd_output_has(r, "ERROR STOP") ||
-        cmd_output_has(r, "\nSTOP") ||
-        cmd_output_has(r, "\nSTOP ")) {
+    if (cmd_output_has_ci(r, "error stop") ||
+        cmd_output_has_word_ci(r, "stop")) {
         return "llvm_jit_expected_nonzero_or_stop";
     }
     return "llvm_jit_failed";
@@ -1509,11 +1685,11 @@ int main(int argc, char **argv) {
     }
     fclose(f);
 
-    validate_compat_sources(&tests, cfg.test_dir, compat_path);
+    opts = parse_options_jsonl(opts_path);
+    validate_compat_artifacts(&tests, &opts, cfg.test_dir, compat_path, opts_path);
     if (cfg.fail_sample_limit > 0 && tests.n > (size_t)cfg.fail_sample_limit)
         strlist_truncate(&tests, (size_t)cfg.fail_sample_limit);
 
-    opts = parse_options_jsonl(opts_path);
     ensure_dir(cfg.bench_dir);
     if (cfg.fail_log_dir)
         fail_log_dir = xstrdup(cfg.fail_log_dir);
@@ -1546,7 +1722,8 @@ int main(int argc, char **argv) {
 
         for (i = 0; i < tests.n; i++) {
             const char *name = tests.items[i];
-            const char *test_opts = optlist_find(&opts, name);
+            const name_opt_t *opt_entry = optlist_find_entry(&opts, name);
+            const char *test_opts = opt_entry ? opt_entry->options : NULL;
             strlist_t opt_toks;
             skip_diag_t skip_diag;
             char *source_path = NULL;
@@ -1591,12 +1768,10 @@ int main(int argc, char **argv) {
             opt_toks = tokenize_options(test_opts);
 
             {
-                char fname[512];
-                snprintf(fname, sizeof(fname), "%s.f90", name);
-                source_path = path_join2(cfg.test_dir, fname);
+                source_path = compat_source_path_for_entry(cfg.test_dir, name, opt_entry, NULL);
             }
 
-            if (!file_exists(source_path)) {
+            if (!source_path || !file_exists(source_path)) {
                 skip_reason = "source_missing";
                 skip_diag_set_basic(&skip_diag, skip_reason, "harness", 0, "source file missing");
                 goto skip_test;

@@ -64,6 +64,7 @@ typedef struct {
 typedef struct {
     char *name;
     char *options;
+    char *source;
 } name_opt_t;
 
 static double now_ms(void) {
@@ -779,17 +780,17 @@ static int cmp_name_opt(const void *a, const void *b) {
     return strcmp(na->name, nb->name);
 }
 
-static const char *find_option_by_name(const name_opt_t *opts, size_t n, const char *name) {
+static const name_opt_t *find_option_by_name(const name_opt_t *opts, size_t n, const char *name) {
     size_t lo = 0;
     size_t hi = n;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
         int cmp = strcmp(opts[mid].name, name);
-        if (cmp == 0) return opts[mid].options;
+        if (cmp == 0) return &opts[mid];
         if (cmp < 0) lo = mid + 1;
         else hi = mid;
     }
-    return "";
+    return NULL;
 }
 
 static void usage(void) {
@@ -1135,6 +1136,11 @@ int main(int argc, char **argv) {
             }
             opts_api[opts_api_n].name = xstrdup(t->name);
             opts_api[opts_api_n].options = xstrdup(t->options_joined ? t->options_joined : "");
+            {
+                const char *src = t->source ? t->source : "";
+                const char *slash = strrchr(src, '/');
+                opts_api[opts_api_n].source = xstrdup(slash ? slash + 1 : src);
+            }
             opts_api_n++;
         }
 
@@ -1157,6 +1163,11 @@ int main(int argc, char **argv) {
             }
             opts_ll[opts_ll_n].name = xstrdup(t->name);
             opts_ll[opts_ll_n].options = xstrdup(t->options_joined ? t->options_joined : "");
+            {
+                const char *src = t->source ? t->source : "";
+                const char *slash = strrchr(src, '/');
+                opts_ll[opts_ll_n].source = xstrdup(slash ? slash + 1 : src);
+            }
             opts_ll_n++;
         }
 
@@ -1193,9 +1204,11 @@ int main(int argc, char **argv) {
         for (i = 0; i < opts_api_n; i++) {
             char *en = json_escape(opts_api[i].name);
             char *eo = json_escape(opts_api[i].options);
-            fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\"}\n", en, eo);
+            char *es = json_escape(opts_api[i].source ? opts_api[i].source : "");
+            fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\",\"source\":\"%s\"}\n", en, eo, es);
             free(en);
             free(eo);
+            free(es);
         }
         fclose(f);
     }
@@ -1204,9 +1217,11 @@ int main(int argc, char **argv) {
         for (i = 0; i < opts_ll_n; i++) {
             char *en = json_escape(opts_ll[i].name);
             char *eo = json_escape(opts_ll[i].options);
-            fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\"}\n", en, eo);
+            char *es = json_escape(opts_ll[i].source ? opts_ll[i].source : "");
+            fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\",\"source\":\"%s\"}\n", en, eo, es);
             free(en);
             free(eo);
+            free(es);
         }
         fclose(f);
     }
@@ -1226,12 +1241,16 @@ int main(int argc, char **argv) {
             if (!f) die("failed to open %s", frozen_opts_path);
             for (i = 0; i < frozen_n; i++) {
                 const char *name = compat_api[i];
-                const char *opts = find_option_by_name(opts_api, opts_api_n, name);
+                const name_opt_t *entry = find_option_by_name(opts_api, opts_api_n, name);
+                const char *opts = entry ? entry->options : "";
+                const char *src = entry ? entry->source : "";
                 char *en = json_escape(name);
                 char *eo = json_escape(opts);
-                fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\"}\n", en, eo);
+                char *es = json_escape(src);
+                fprintf(f, "{\"name\":\"%s\",\"options\":\"%s\",\"source\":\"%s\"}\n", en, eo, es);
                 free(en);
                 free(eo);
+                free(es);
             }
             fclose(f);
         }
@@ -1257,10 +1276,12 @@ int main(int argc, char **argv) {
     for (i = 0; i < opts_api_n; i++) {
         free(opts_api[i].name);
         free(opts_api[i].options);
+        free(opts_api[i].source);
     }
     for (i = 0; i < opts_ll_n; i++) {
         free(opts_ll[i].name);
         free(opts_ll[i].options);
+        free(opts_ll[i].source);
     }
 
     free(compat_api);
