@@ -169,6 +169,16 @@ static int test_function_type() {
     TEST_ASSERT(fv != nullptr, "void func type");
     TEST_ASSERT(fv->getReturnType()->isVoidTy(), "returns void");
 
+    llvm::Type *f32 = llvm::Type::getFloatTy(ctx);
+    llvm::FixedVectorType *vec2 = llvm::FixedVectorType::get(f32, 2);
+    TEST_ASSERT(vec2 != nullptr, "fixed vector type created");
+    TEST_ASSERT(vec2->isVectorTy(), "fixed vector reports vector type");
+
+    llvm::FunctionType *fv_ret = llvm::FunctionType::get(vec2, false);
+    TEST_ASSERT(fv_ret != nullptr, "vector return func type");
+    TEST_ASSERT(!fv_ret->getReturnType()->isVoidTy(), "vector return preserved");
+    TEST_ASSERT(fv_ret->getReturnType()->isVectorTy(), "return type remains vector");
+
     return 0;
 }
 
@@ -1027,6 +1037,53 @@ static int test_jit_smoke_add_args() {
     return 0;
 }
 
+static int test_jit_smoke_vector_return_call() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_vec_ret", ctx);
+
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    auto *vec2 = llvm::FixedVectorType::get(i32, 2);
+    TEST_ASSERT(vec2 != nullptr, "fixed vector type");
+
+    auto *pair_ty = llvm::FunctionType::get(vec2, false);
+    auto *pair_fn = llvm::Function::Create(
+        pair_ty, llvm::GlobalValue::ExternalLinkage, "make_pair_v", mod);
+    auto *pair_entry = llvm::BasicBlock::Create(ctx, "entry", pair_fn);
+    llvm::IRBuilder<> pair_builder(pair_entry);
+    llvm::Value *pair_undef = llvm::UndefValue::get(vec2);
+    unsigned idx0_data[] = {0};
+    unsigned idx1_data[] = {1};
+    llvm::ArrayRef<unsigned> idx0(idx0_data, 1);
+    llvm::ArrayRef<unsigned> idx1(idx1_data, 1);
+    llvm::Value *pair_v0 = pair_builder.CreateInsertValue(
+        pair_undef, llvm::ConstantInt::get(i32, 19), idx0, "v0");
+    llvm::Value *pair_v1 = pair_builder.CreateInsertValue(
+        pair_v0, llvm::ConstantInt::get(i32, 23), idx1, "v1");
+    pair_builder.CreateRet(pair_v1);
+
+    auto *sum_ty = llvm::FunctionType::get(i32, false);
+    auto *sum_fn = llvm::Function::Create(
+        sum_ty, llvm::GlobalValue::ExternalLinkage, "sum_pair_v", mod);
+    auto *sum_entry = llvm::BasicBlock::Create(ctx, "entry", sum_fn);
+    llvm::IRBuilder<> sum_builder(sum_entry);
+    llvm::Value *pair = sum_builder.CreateCall(pair_fn, {}, "pair");
+    llvm::Value *e0 = sum_builder.CreateExtractValue(pair, idx0, "e0");
+    llvm::Value *e1 = sum_builder.CreateExtractValue(pair, idx1, "e1");
+    llvm::Value *sum = sum_builder.CreateAdd(e0, e1, "sum");
+    sum_builder.CreateRet(sum);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("sum_pair_v");
+    TEST_ASSERT(fp != nullptr, "lookup sum_pair_v");
+    int result = fp();
+    TEST_ASSERT_EQ(result, 42, "sum_pair_v() == 42");
+    return 0;
+}
+
 static int test_jit_smoke_branch() {
     llvm::LLVMContext ctx;
     llvm::Module mod("jit_branch", ctx);
@@ -1239,6 +1296,7 @@ int main() {
     fprintf(stderr, "\nJIT smoke tests:\n");
     RUN_TEST(test_jit_smoke_ret_42);
     RUN_TEST(test_jit_smoke_add_args);
+    RUN_TEST(test_jit_smoke_vector_return_call);
     RUN_TEST(test_jit_smoke_branch);
     RUN_TEST(test_jit_smoke_branch_manual_phi_finalize);
     RUN_TEST(test_jit_smoke_indirect_bitcast_external_fp_call);
