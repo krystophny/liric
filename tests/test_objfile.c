@@ -220,6 +220,7 @@ int test_objfile_elf_call_relocation(void) {
 
     uint64_t rela_off = 0;
     uint64_t rela_size = 0;
+    uint32_t rela_link = 0;
     for (uint16_t i = 0; i < e_shnum; i++) {
         uint8_t *sh = buf + e_shoff + i * e_shentsize;
         uint32_t sh_type = 0;
@@ -227,30 +228,67 @@ int test_objfile_elf_call_relocation(void) {
         if (sh_type == 4) { /* SHT_RELA */
             memcpy(&rela_off, sh + 24, 8);
             memcpy(&rela_size, sh + 32, 8);
+            memcpy(&rela_link, sh + 40, 4);
             break;
         }
     }
 
     TEST_ASSERT(rela_off > 0, "found .rela.text");
     TEST_ASSERT(rela_size > 0, "has relocations");
+    TEST_ASSERT(rela_link < e_shnum, "valid .rela.text sh_link");
+
+    uint8_t *symtab_sh = buf + e_shoff + rela_link * e_shentsize;
+    uint64_t symtab_off = 0;
+    uint64_t symtab_size = 0;
+    uint32_t symtab_link = 0;
+    memcpy(&symtab_off, symtab_sh + 24, 8);
+    memcpy(&symtab_size, symtab_sh + 32, 8);
+    memcpy(&symtab_link, symtab_sh + 40, 4);
+    TEST_ASSERT(symtab_off > 0, "symtab offset");
+    TEST_ASSERT(symtab_size >= 24, "symtab size");
+    TEST_ASSERT(symtab_link < e_shnum, "valid symtab sh_link");
+
+    uint8_t *strtab_sh = buf + e_shoff + symtab_link * e_shentsize;
+    uint64_t strtab_off = 0;
+    memcpy(&strtab_off, strtab_sh + 24, 8);
+    TEST_ASSERT(strtab_off > 0, "strtab offset");
 
     uint32_t num_relas = (uint32_t)(rela_size / 24);
     TEST_ASSERT(num_relas >= 1, "at least 1 relocation");
 
+    uint32_t num_syms = (uint32_t)(symtab_size / 24);
     bool found_expected_reloc = false;
+    bool found_external_func_reloc = false;
 #if defined(__aarch64__)
     bool found_a64_call26 = false;
     bool found_a64_got_page = false;
     bool found_a64_got_lo12 = false;
+    bool found_a64_page = false;
+    bool found_a64_pageoff = false;
 #endif
     for (uint32_t i = 0; i < num_relas; i++) {
         uint8_t *rela = buf + rela_off + i * 24;
         uint64_t r_info = 0;
         memcpy(&r_info, rela + 8, 8);
+        uint32_t r_sym = (uint32_t)(r_info >> 32);
         uint32_t r_type = (uint32_t)(r_info & 0xFFFFFFFF);
+        if (r_sym < num_syms) {
+            uint8_t *sym = buf + symtab_off + (size_t)r_sym * 24u;
+            uint32_t st_name = 0;
+            memcpy(&st_name, sym, 4);
+            if (st_name > 0) {
+                const char *name = (const char *)(buf + strtab_off + st_name);
+                if (strcmp(name, "external_func") == 0)
+                    found_external_func_reloc = true;
+            }
+        }
 #if defined(__aarch64__)
         if (r_type == 283)      /* R_AARCH64_CALL26 */
             found_a64_call26 = true;
+        else if (r_type == 275) /* R_AARCH64_ADR_PREL_PG_HI21 */
+            found_a64_page = true;
+        else if (r_type == 277) /* R_AARCH64_ADD_ABS_LO12_NC */
+            found_a64_pageoff = true;
         else if (r_type == 311) /* R_AARCH64_ADR_GOT_PAGE */
             found_a64_got_page = true;
         else if (r_type == 312) /* R_AARCH64_LD64_GOT_LO12_NC */
@@ -265,12 +303,15 @@ int test_objfile_elf_call_relocation(void) {
 #endif
     }
 #if defined(__aarch64__)
-    found_expected_reloc = found_a64_call26 || (found_a64_got_page && found_a64_got_lo12);
+    found_expected_reloc = found_a64_call26 ||
+                           (found_a64_page && found_a64_pageoff) ||
+                           (found_a64_got_page && found_a64_got_lo12);
     TEST_ASSERT(found_expected_reloc,
-                "found AArch64 call relocation (CALL26 or ADR_GOT_PAGE+LD64_GOT_LO12_NC)");
+                "found AArch64 call relocation (CALL26 or ADRP+ADD/GOT pair)");
 #else
     TEST_ASSERT(found_expected_reloc, "found R_X86_64_PLT32 relocation");
 #endif
+    TEST_ASSERT(found_external_func_reloc, "relocation targets external_func");
 
     free(buf);
     lr_module_free(m);
