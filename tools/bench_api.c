@@ -2209,6 +2209,7 @@ next_test:
         fprintf(sf, "  \"completed_nonzero_compat\": %zu,\n", compat_nonzero_completed);
         fprintf(sf, "  \"skipped\": %zu,\n", skipped);
         fprintf(sf, "  \"iters\": %d,\n", cfg.iters);
+        fprintf(sf, "  \"timeout_ms\": %d,\n", cfg.timeout_ms);
         fprintf(sf, "  \"min_completed\": %d,\n", cfg.min_completed);
         fprintf(sf, "  \"completion_threshold_met\": %s,\n",
                 completed >= (size_t)cfg.min_completed ? "true" : "false");
