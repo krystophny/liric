@@ -568,6 +568,26 @@ static void attach_obj_symbol_defined_cache(a64_compile_ctx_t *ctx) {
     ctx->sym_count = ctx->obj_ctx->module_sym_count;
 }
 
+static uint8_t int_type_width_bits(const lr_type_t *type) {
+    size_t fallback_bits = 64;
+    if (!type)
+        return (uint8_t)fallback_bits;
+    switch (type->kind) {
+    case LR_TYPE_I1:  return 1;
+    case LR_TYPE_I8:  return 8;
+    case LR_TYPE_I16: return 16;
+    case LR_TYPE_I32: return 32;
+    case LR_TYPE_I64: return 64;
+    case LR_TYPE_PTR: return 64;
+    default:
+        break;
+    }
+    fallback_bits = lr_type_size(type) * 8;
+    if (fallback_bits == 0 || fallback_bits > 64)
+        fallback_bits = 64;
+    return (uint8_t)fallback_bits;
+}
+
 static bool emit_copy_from_cached_scratch_a64(a64_compile_ctx_t *ctx,
                                               uint32_t vreg, uint8_t dst_reg) {
     uint8_t src_reg;
@@ -1250,15 +1270,49 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
             }
             case LR_OP_SEXT: {
                 emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                bool is64 = lr_type_size(inst->type) > 4;
-                if (is64)
+                uint8_t src_bits = int_type_width_bits(inst->operands[0].type);
+                if (src_bits > 0 && src_bits < 64) {
+                    uint8_t shift = (uint8_t)(64 - src_bits);
+                    emit_move_imm_ctx(&ctx, A64_X10, (int64_t)shift, true);
                     emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             0x93407C00u | ((uint32_t)A64_X9 << 5) | A64_X9); /* sxtw */
+                             enc_lslv(true, A64_X9, A64_X9, A64_X10));
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_asrv(true, A64_X9, A64_X9, A64_X10));
+                }
                 emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
             }
-            case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
-            case LR_OP_PTRTOINT: case LR_OP_INTTOPTR: {
+            case LR_OP_ZEXT: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                uint8_t src_bits = int_type_width_bits(inst->operands[0].type);
+                if (src_bits > 0 && src_bits < 64) {
+                    uint8_t shift = (uint8_t)(64 - src_bits);
+                    emit_move_imm_ctx(&ctx, A64_X10, (int64_t)shift, true);
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_lslv(true, A64_X9, A64_X9, A64_X10));
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_lsrv(true, A64_X9, A64_X9, A64_X10));
+                }
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_TRUNC: {
+                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
+                uint8_t dst_bits = int_type_width_bits(inst->type);
+                if (dst_bits > 0 && dst_bits < 64) {
+                    uint8_t shift = (uint8_t)(64 - dst_bits);
+                    emit_move_imm_ctx(&ctx, A64_X10, (int64_t)shift, true);
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_lslv(true, A64_X9, A64_X9, A64_X10));
+                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
+                             enc_lsrv(true, A64_X9, A64_X9, A64_X10));
+                }
+                emit_store_slot(&ctx, inst->dest, A64_X9);
+                break;
+            }
+            case LR_OP_BITCAST:
+            case LR_OP_PTRTOINT:
+            case LR_OP_INTTOPTR: {
                 emit_load_operand(&ctx, &inst->operands[0], A64_X9);
                 emit_store_slot(&ctx, inst->dest, A64_X9);
                 break;
