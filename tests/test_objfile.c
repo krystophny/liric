@@ -246,6 +246,7 @@ int test_objfile_elf_call_relocation(void) {
 #if defined(__aarch64__)
         if (r_type == 283) { /* R_AARCH64_CALL26 */
             found_expected_reloc = true;
+        }
 #else
         if (r_type == 4) { /* R_X86_64_PLT32 */
             found_expected_reloc = true;
