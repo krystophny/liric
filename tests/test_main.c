@@ -170,23 +170,21 @@ int test_wasm_jit_loop(void);
 int test_wasm_jit_call(void);
 int test_bc_parse_api_ret_42(void);
 int test_bc_parse_auto_loop_phi(void);
-int test_builder_ret_42(void);
-int test_builder_add_args(void);
-int test_builder_arithmetic(void);
-int test_builder_icmp_branch(void);
-int test_builder_loop_phi(void);
-int test_builder_alloca_load_store(void);
-int test_builder_gep_runtime_index_canonicalized_i64(void);
-int test_builder_call(void);
-int test_builder_select(void);
-int test_builder_roundtrip(void);
+int test_session_direct_ret_42(void);
+int test_session_add_args(void);
+int test_session_arithmetic_chain(void);
+int test_session_icmp_branch(void);
+int test_session_alloca_load_store(void);
+int test_session_loop_phi(void);
+int test_session_call(void);
+int test_session_select(void);
+int test_session_ir_print(void);
+int test_session_ll_compile(void);
+int test_session_multiple_functions(void);
 int test_builder_compat_add_to_jit(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
 int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
-int test_compile_session_direct_ret_42(void);
-int test_compile_session_ir_print_and_opt(void);
-int test_compile_session_ll_compile_ret_42(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -358,26 +356,24 @@ int main(void) {
     RUN_TEST(test_bc_parse_api_ret_42);
     RUN_TEST(test_bc_parse_auto_loop_phi);
 
-    fprintf(stderr, "\nBuilder API tests:\n");
-    RUN_TEST(test_builder_ret_42);
-    RUN_TEST(test_builder_add_args);
-    RUN_TEST(test_builder_arithmetic);
-    RUN_TEST(test_builder_icmp_branch);
-    RUN_TEST(test_builder_loop_phi);
-    RUN_TEST(test_builder_alloca_load_store);
-    RUN_TEST(test_builder_gep_runtime_index_canonicalized_i64);
-    RUN_TEST(test_builder_call);
-    RUN_TEST(test_builder_select);
-    RUN_TEST(test_builder_roundtrip);
+    fprintf(stderr, "\nSession API tests:\n");
+    RUN_TEST(test_session_direct_ret_42);
+    RUN_TEST(test_session_add_args);
+    RUN_TEST(test_session_arithmetic_chain);
+    RUN_TEST(test_session_icmp_branch);
+    RUN_TEST(test_session_alloca_load_store);
+    RUN_TEST(test_session_loop_phi);
+    RUN_TEST(test_session_call);
+    RUN_TEST(test_session_select);
+    RUN_TEST(test_session_ir_print);
+    RUN_TEST(test_session_ll_compile);
+    RUN_TEST(test_session_multiple_functions);
+
+    fprintf(stderr, "\nCompat API tests:\n");
     RUN_TEST(test_builder_compat_add_to_jit);
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
     RUN_TEST(test_builder_compat_memory_and_call_path);
     RUN_TEST(test_builder_compat_phi_finalize_add_incoming_after_finalize_noop);
-
-    fprintf(stderr, "\nCompile Session API tests:\n");
-    RUN_TEST(test_compile_session_direct_ret_42);
-    RUN_TEST(test_compile_session_ir_print_and_opt);
-    RUN_TEST(test_compile_session_ll_compile_ret_42);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)

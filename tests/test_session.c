@@ -1,0 +1,475 @@
+#include <liric/liric_session.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define TEST_ASSERT(cond, msg) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "  FAIL: %s (line %d)\n", msg, __LINE__); \
+        return 1; \
+    } \
+} while (0)
+
+#define TEST_ASSERT_EQ(a, b, msg) do { \
+    long long _a = (long long)(a), _b = (long long)(b); \
+    if (_a != _b) { \
+        fprintf(stderr, "  FAIL: %s: got %lld, expected %lld (line %d)\n", \
+                msg, _a, _b, __LINE__); \
+        return 1; \
+    } \
+} while (0)
+
+static inline void fn_ptr_cast(void *dst, void *src) {
+    memcpy(dst, &src, sizeof(src));
+}
+
+int test_session_direct_ret_42(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    int rc = lr_session_func_begin(s, "session_ret_42", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t b0 = lr_session_block(s);
+    rc = lr_session_set_block(s, b0, &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    lr_emit_ret(s, LR_IMM(42, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 42, "session_ret_42() == 42");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_add_args(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *params[] = {i32, i32};
+
+    int rc = lr_session_func_begin(s, "session_add", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t va = lr_session_param(s, 0);
+    uint32_t vb = lr_session_param(s, 1);
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t vc = lr_emit_add(s, i32, LR_VREG(va, i32), LR_VREG(vb, i32));
+    lr_emit_ret(s, LR_VREG(vc, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(10, 32), 42, "add(10,32) == 42");
+    TEST_ASSERT_EQ(fn(-5, 5), 0, "add(-5,5) == 0");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_arithmetic_chain(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *params[] = {i32, i32};
+
+    int rc = lr_session_func_begin(s, "session_arith", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t va = lr_session_param(s, 0);
+    uint32_t vb = lr_session_param(s, 1);
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t sum = lr_emit_add(s, i32, LR_VREG(va, i32), LR_VREG(vb, i32));
+    uint32_t prod = lr_emit_mul(s, i32, LR_VREG(sum, i32), LR_VREG(vb, i32));
+    uint32_t diff = lr_emit_sub(s, i32, LR_VREG(prod, i32), LR_VREG(va, i32));
+    lr_emit_ret(s, LR_VREG(diff, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(3, 4), 25, "arith(3,4) == 25");
+    TEST_ASSERT_EQ(fn(10, 2), 14, "arith(10,2) == 14");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_icmp_branch(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+    lr_type_t *params[] = {i32, i32};
+
+    int rc = lr_session_func_begin(s, "session_max", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t va = lr_session_param(s, 0);
+    uint32_t vb = lr_session_param(s, 1);
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t then_id = lr_session_block(s);
+    uint32_t else_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    uint32_t cmp = lr_emit_icmp(s, LR_CMP_SGT, LR_VREG(va, i32), LR_VREG(vb, i32));
+    lr_emit_condbr(s, LR_VREG(cmp, i1), then_id, else_id);
+
+    lr_session_set_block(s, then_id, &err);
+    lr_emit_ret(s, LR_VREG(va, i32));
+
+    lr_session_set_block(s, else_id, &err);
+    lr_emit_ret(s, LR_VREG(vb, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(10, 5), 10, "max(10,5) == 10");
+    TEST_ASSERT_EQ(fn(3, 7), 7, "max(3,7) == 7");
+    TEST_ASSERT_EQ(fn(4, 4), 4, "max(4,4) == 4");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_alloca_load_store(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+
+    int rc = lr_session_func_begin(s, "session_als", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t slot = lr_emit_alloca(s, i32);
+    lr_emit_store(s, LR_IMM(99, i32), LR_VREG(slot, ptr));
+    uint32_t val = lr_emit_load(s, i32, LR_VREG(slot, ptr));
+    lr_emit_ret(s, LR_VREG(val, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 99, "als() == 99");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_loop_phi(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+
+    int rc = lr_session_func_begin(s, "session_sum10", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t loop_id = lr_session_block(s);
+    uint32_t exit_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    lr_emit_br(s, loop_id);
+
+    lr_session_set_block(s, loop_id, &err);
+
+    /* PHIs: i starts at 0, sum starts at 0.
+       After body: next = i+1, sum_next = sum+next.
+       PHIs reference forward vregs. With 0 params:
+       phi_i = vreg 0, phi_s = vreg 1, next = vreg 2, sum_next = vreg 3 */
+    lr_operand_desc_t phi_i_v[] = {LR_IMM(0, i32), LR_VREG(2, i32)};
+    uint32_t phi_i_b[] = {entry_id, loop_id};
+    uint32_t vi = lr_emit_phi(s, i32, phi_i_v, phi_i_b, 2);
+
+    lr_operand_desc_t phi_s_v[] = {LR_IMM(0, i32), LR_VREG(3, i32)};
+    uint32_t phi_s_b[] = {entry_id, loop_id};
+    uint32_t vs = lr_emit_phi(s, i32, phi_s_v, phi_s_b, 2);
+
+    uint32_t vnext = lr_emit_add(s, i32, LR_VREG(vi, i32), LR_IMM(1, i32));
+    uint32_t vsum_next = lr_emit_add(s, i32, LR_VREG(vs, i32), LR_VREG(vnext, i32));
+
+    uint32_t vdone = lr_emit_icmp(s, LR_CMP_EQ, LR_VREG(vnext, i32), LR_IMM(10, i32));
+    lr_emit_condbr(s, LR_VREG(vdone, i1), exit_id, loop_id);
+
+    lr_session_set_block(s, exit_id, &err);
+    lr_emit_ret(s, LR_VREG(vsum_next, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 55, "sum10() == 55");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_call(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+
+    /* define i32 @helper(i32 %x) { ret i32 %x + 10 } */
+    lr_type_t *h_params[] = {i32};
+    int rc = lr_session_func_begin(s, "session_helper", i32, h_params, 1, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "helper func begin");
+    uint32_t hx = lr_session_param(s, 0);
+    uint32_t hb = lr_session_block(s);
+    lr_session_set_block(s, hb, &err);
+    uint32_t hr = lr_emit_add(s, i32, LR_VREG(hx, i32), LR_IMM(10, i32));
+    lr_emit_ret(s, LR_VREG(hr, i32));
+    void *helper_addr = NULL;
+    rc = lr_session_func_end(s, &helper_addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "helper func end");
+
+    /* define i32 @caller(i32 %a) { %r = call @helper(%a); ret i32 %r } */
+    lr_type_t *c_params[] = {i32};
+    rc = lr_session_func_begin(s, "session_caller", i32, c_params, 1, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "caller func begin");
+    uint32_t ca = lr_session_param(s, 0);
+    uint32_t cb = lr_session_block(s);
+    lr_session_set_block(s, cb, &err);
+
+    uint32_t helper_sym = lr_session_intern(s, "session_helper");
+    lr_operand_desc_t args[] = {LR_VREG(ca, i32)};
+    uint32_t cr = lr_emit_call(s, i32, LR_GLOBAL(helper_sym, ptr), args, 1);
+    lr_emit_ret(s, LR_VREG(cr, i32));
+
+    void *caller_addr = NULL;
+    rc = lr_session_func_end(s, &caller_addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "caller func end");
+
+    typedef int (*fn_t)(int);
+    fn_t fn;
+    fn_ptr_cast(&fn, caller_addr);
+    TEST_ASSERT_EQ(fn(32), 42, "caller(32) == 42");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_select(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+    lr_type_t *params[] = {i32, i32};
+
+    int rc = lr_session_func_begin(s, "session_sel_max", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t va = lr_session_param(s, 0);
+    uint32_t vb = lr_session_param(s, 1);
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t cmp = lr_emit_icmp(s, LR_CMP_SGT, LR_VREG(va, i32), LR_VREG(vb, i32));
+    uint32_t sel = lr_emit_select(s, i32, LR_VREG(cmp, i1),
+                                  LR_VREG(va, i32), LR_VREG(vb, i32));
+    lr_emit_ret(s, LR_VREG(sel, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(10, 5), 10, "sel_max(10,5) == 10");
+    TEST_ASSERT_EQ(fn(3, 7), 7, "sel_max(3,7) == 7");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_ir_print(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+
+    int rc = lr_session_func_begin(s, "session_ir_ret_7", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(7, i32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    FILE *tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile");
+    rc = lr_session_dump_ir(s, tmp, &err);
+    TEST_ASSERT_EQ(rc, 0, "ir dump");
+
+    fseek(tmp, 0, SEEK_END);
+    long len = ftell(tmp);
+    TEST_ASSERT(len > 0, "ir dump produced output");
+    fseek(tmp, 0, SEEK_SET);
+    char *buf = (char *)malloc((size_t)len + 1);
+    TEST_ASSERT(buf != NULL, "alloc dump buf");
+    size_t nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read dump");
+    buf[len] = '\0';
+    fclose(tmp);
+
+    TEST_ASSERT(strstr(buf, "define i32 @session_ir_ret_7") != NULL,
+                "ir output contains function");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 7, "session_ir_ret_7() == 7");
+
+    free(buf);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_ll_compile(void) {
+    static const char *src =
+        "define i32 @session_ll_ret_42() {\n"
+        "entry:\n"
+        "  ret i32 42\n"
+        "}\n";
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    void *addr = NULL;
+    int rc = lr_session_compile_ll(s, src, strlen(src), &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "compile ll");
+    TEST_ASSERT(addr != NULL, "ll compiled address");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 42, "session_ll_ret_42() == 42");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_multiple_functions(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+
+    /* First function: ret 1 */
+    int rc = lr_session_func_begin(s, "session_f1", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "f1 begin");
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(1, i32));
+    void *addr1 = NULL;
+    rc = lr_session_func_end(s, &addr1, &err);
+    TEST_ASSERT_EQ(rc, 0, "f1 end");
+
+    /* Second function: ret 2 */
+    rc = lr_session_func_begin(s, "session_f2", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "f2 begin");
+    b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(2, i32));
+    void *addr2 = NULL;
+    rc = lr_session_func_end(s, &addr2, &err);
+    TEST_ASSERT_EQ(rc, 0, "f2 end");
+
+    /* Third function: ret 3 */
+    rc = lr_session_func_begin(s, "session_f3", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "f3 begin");
+    b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(3, i32));
+    void *addr3 = NULL;
+    rc = lr_session_func_end(s, &addr3, &err);
+    TEST_ASSERT_EQ(rc, 0, "f3 end");
+
+    typedef int (*fn_t)(void);
+    fn_t fn1, fn2, fn3;
+    fn_ptr_cast(&fn1, addr1);
+    fn_ptr_cast(&fn2, addr2);
+    fn_ptr_cast(&fn3, addr3);
+    TEST_ASSERT_EQ(fn1(), 1, "f1() == 1");
+    TEST_ASSERT_EQ(fn2(), 2, "f2() == 2");
+    TEST_ASSERT_EQ(fn3(), 3, "f3() == 3");
+
+    lr_session_destroy(s);
+    return 0;
+}

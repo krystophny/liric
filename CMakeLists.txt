@@ -51,9 +51,8 @@ add_library(liric STATIC
     src/target_riscv64.c
     src/jit.c
     src/liric.c
-    src/builder.c
     src/liric_compat.c
-    src/compile_session.c
+    src/session.c
     src/objfile.c
     src/objfile_macho.c
     src/objfile_elf.c
@@ -192,7 +191,7 @@ add_executable(test_liric
     tests/test_bc.c
     tests/test_wasm.c
     tests/test_builder.c
-    tests/test_compile_session.c
+    tests/test_session.c
     tests/test_objfile.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
