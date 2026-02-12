@@ -130,7 +130,7 @@ typedef struct lc_alloca_inst {
     lr_type_t *alloc_type;
 } lc_alloca_inst_t;
 
-/* ---- Internal desc_to_op (same as builder.c) ---- */
+/* ---- Internal desc_to_op (same as session.c) ---- */
 
 /* Forward declaration for safe_undef */
 lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);

@@ -79,16 +79,8 @@ void lr_global_add_reloc(lr_module_t *m, lr_global_t *g, size_t offset,
 
 uint32_t lr_symbol_intern(lr_module_t *m, const char *name);
 
-/* ---- Instruction builder ----------------------------------------------- */
-/*
- * All build_* functions append an instruction to the given block and return
- * the destination vreg (or 0 for void instructions like store/br/ret).
- *
- * Operands are passed as (kind, value, type) tuples via the LR_VREG / LR_IMM
- * / LR_BLOCK / LR_GLOBAL / LR_NULL helper macros.
- */
+/* ---- Operand descriptors ----------------------------------------------- */
 
-/* Operand descriptor for the builder API */
 typedef struct lr_operand_desc {
     int kind;
     union {
@@ -101,7 +93,6 @@ typedef struct lr_operand_desc {
     lr_type_t *type;
 } lr_operand_desc_t;
 
-/* Operand kind constants (match internal lr_operand_kind_t values) */
 enum {
     LR_OP_KIND_VREG    = 0,
     LR_OP_KIND_IMM_I64 = 1,
@@ -112,7 +103,6 @@ enum {
     LR_OP_KIND_UNDEF   = 6,
 };
 
-/* Convenience macros to construct operand descriptors */
 #define LR_VREG(v, t)    ((lr_operand_desc_t){ .kind = LR_OP_KIND_VREG, .vreg = (v), .type = (t) })
 #define LR_IMM(v, t)     ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t) })
 #define LR_IMM_F(v, t)   ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t) })
@@ -121,36 +111,12 @@ enum {
 #define LR_NULL(t)       ((lr_operand_desc_t){ .kind = LR_OP_KIND_NULL, .type = (t) })
 #define LR_UNDEF(t)      ((lr_operand_desc_t){ .kind = LR_OP_KIND_UNDEF, .type = (t) })
 
-/* Arithmetic */
-uint32_t lr_build_add(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_sub(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_mul(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_sdiv(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_srem(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-
-/* Bitwise */
-uint32_t lr_build_and(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_or(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_xor(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_shl(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_lshr(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_ashr(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-
-/* Floating-point arithmetic */
-uint32_t lr_build_fadd(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_fsub(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_fmul(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_fdiv(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_fneg(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t val);
-
-/* Comparison */
-/* icmp predicates */
+/* Comparison predicates */
 enum {
     LR_CMP_EQ = 0, LR_CMP_NE,
     LR_CMP_SGT, LR_CMP_SGE, LR_CMP_SLT, LR_CMP_SLE,
     LR_CMP_UGT, LR_CMP_UGE, LR_CMP_ULT, LR_CMP_ULE,
 };
-/* fcmp predicates */
 enum {
     LR_FCMP_FALSE = 0,
     LR_FCMP_OEQ, LR_FCMP_OGT, LR_FCMP_OGE, LR_FCMP_OLT, LR_FCMP_OLE,
@@ -159,46 +125,6 @@ enum {
     LR_FCMP_UNE, LR_FCMP_UNO,
     LR_FCMP_TRUE,
 };
-uint32_t lr_build_icmp(lr_module_t *m, lr_block_t *b, lr_func_t *f, int pred, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-uint32_t lr_build_fcmp(lr_module_t *m, lr_block_t *b, lr_func_t *f, int pred, lr_operand_desc_t lhs, lr_operand_desc_t rhs);
-
-/* Memory */
-uint32_t lr_build_alloca(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *elem_type);
-uint32_t lr_build_alloca_array(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *elem_type, lr_operand_desc_t count);
-uint32_t lr_build_load(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t addr);
-void lr_build_store(lr_module_t *m, lr_block_t *b, lr_operand_desc_t val, lr_operand_desc_t addr);
-uint32_t lr_build_gep(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *base_type, lr_operand_desc_t base_ptr, lr_operand_desc_t *indices, uint32_t num_indices);
-
-/* Control flow */
-void lr_build_ret(lr_module_t *m, lr_block_t *b, lr_operand_desc_t val);
-void lr_build_ret_void(lr_module_t *m, lr_block_t *b);
-void lr_build_br(lr_module_t *m, lr_block_t *b, uint32_t target_block_id);
-void lr_build_condbr(lr_module_t *m, lr_block_t *b, lr_operand_desc_t cond, uint32_t true_id, uint32_t false_id);
-void lr_build_unreachable(lr_module_t *m, lr_block_t *b);
-
-/* Calls */
-uint32_t lr_build_call(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ret_type, lr_operand_desc_t callee, lr_operand_desc_t *args, uint32_t num_args);
-void lr_build_call_void(lr_module_t *m, lr_block_t *b, lr_operand_desc_t callee, lr_operand_desc_t *args, uint32_t num_args);
-
-/* PHI / select */
-uint32_t lr_build_phi(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t *incoming_vals, uint32_t *incoming_block_ids, uint32_t num_incoming);
-uint32_t lr_build_select(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t cond, lr_operand_desc_t true_val, lr_operand_desc_t false_val);
-
-/* Type conversions */
-uint32_t lr_build_sext(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_zext(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_trunc(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_bitcast(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_ptrtoint(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_inttoptr(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_sitofp(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_fptosi(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_fpext(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-uint32_t lr_build_fptrunc(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *to_type, lr_operand_desc_t val);
-
-/* Aggregate */
-uint32_t lr_build_extractvalue(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t agg, uint32_t *indices, uint32_t num_indices);
-uint32_t lr_build_insertvalue(lr_module_t *m, lr_block_t *b, lr_func_t *f, lr_type_t *ty, lr_operand_desc_t agg, lr_operand_desc_t val, uint32_t *indices, uint32_t num_indices);
 
 /* ---- JIT --------------------------------------------------------------- */
 

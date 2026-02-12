@@ -3,14 +3,16 @@
 #include "objfile_elf.h"
 #include "platform/platform.h"
 #include "arena.h"
+#include <stdlib.h>
+#include <string.h>
 #ifdef __APPLE__
 #include <errno.h>
 #include <fcntl.h>
+#endif
+#if !defined(_WIN32)
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
-#include <stdlib.h>
-#include <string.h>
 
 #define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
 #define OBJ_DATA_BUF_SIZE (1 * 1024 * 1024)
@@ -314,7 +316,7 @@ static int write_object_payload(FILE *out, const lr_target_t *target,
                          build->has_data ? build->data_buf : NULL,
                          build->has_data ? build->data_pos : 0,
                          (lr_objfile_ctx_t *)&build->ctx, 183,
-                         elf_reloc_x86_64);
+                         elf_reloc_aarch64);
     }
     return -1;
 #endif

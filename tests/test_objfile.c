@@ -1,11 +1,9 @@
-#include <liric/liric.h>
+#include <liric/liric_session.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-/* Forward-declare internal types and functions to avoid enum clash
- * between public liric.h and internal ir.h (both define LR_FCMP_*) */
 typedef struct lr_target lr_target_t;
 const lr_target_t *lr_target_host(void);
 const lr_target_t *lr_target_by_name(const char *name);
@@ -29,45 +27,78 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
     } \
 } while (0)
 
-static lr_module_t *build_ret42_module(void) {
-    lr_module_t *m = lr_module_create_new();
-    if (!m) return NULL;
-    lr_type_t *i32 = lr_type_i32_get(m);
-    lr_func_t *f = lr_func_define(m, "f", i32, NULL, 0, false);
-    if (!f) { lr_module_free(m); return NULL; }
-    lr_block_t *entry = lr_block_new(f, m, "entry");
-    lr_build_ret(m, entry, LR_IMM(42, i32));
-    return m;
+typedef struct {
+    lr_session_t *session;
+    lr_module_t *module;
+} built_module_t;
+
+static built_module_t build_ret42_module(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    if (lr_session_func_begin(s, "f", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
 }
 
 #if !defined(__APPLE__)
 
-static lr_module_t *build_call_module(void) {
-    lr_module_t *m = lr_module_create_new();
-    if (!m) return NULL;
-    lr_type_t *i32 = lr_type_i32_get(m);
+static built_module_t build_call_module(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
 
-    lr_type_t *ext_params[] = { i32 };
-    lr_func_declare_ext(m, "external_func", i32, ext_params, 1, false);
-    uint32_t ext_gid = lr_symbol_intern(m, "external_func");
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
 
-    lr_type_t *params[] = { i32 };
-    lr_func_t *f = lr_func_define(m, "caller", i32, params, 1, false);
-    lr_block_t *entry = lr_block_new(f, m, "entry");
-    uint32_t va = lr_func_param_vreg(f, 0);
+    lr_session_declare(s, "external_func", i32,
+                       (lr_type_t *[]){i32}, 1, false, &err);
 
-    lr_type_t *ptr = lr_type_ptr_get(m);
-    lr_operand_desc_t call_args[] = { LR_VREG(va, i32) };
-    uint32_t result = lr_build_call(m, entry, f, i32,
-                                     LR_GLOBAL(ext_gid, ptr),
-                                     call_args, 1);
-    lr_build_ret(m, entry, LR_VREG(result, i32));
-    return m;
+    if (lr_session_func_begin(s, "caller", i32,
+                              (lr_type_t *[]){i32}, 1, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t va = lr_session_param(s, 0);
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t ext_gid = lr_session_intern(s, "external_func");
+    lr_operand_desc_t args[] = {LR_VREG(va, i32)};
+    uint32_t cr = lr_emit_call(s, i32, LR_GLOBAL(ext_gid, ptr), args, 1);
+    lr_emit_ret(s, LR_VREG(cr, i32));
+
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
 }
 
 int test_objfile_elf_header(void) {
-    lr_module_t *m = build_ret42_module();
-    TEST_ASSERT(m != NULL, "module create");
+    built_module_t bm = build_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
@@ -75,7 +106,7 @@ int test_objfile_elf_header(void) {
     FILE *fp = tmpfile();
     TEST_ASSERT(fp != NULL, "tmpfile");
 
-    int rc = lr_emit_object(m, target, fp);
+    int rc = lr_emit_object(bm.module, target, fp);
     TEST_ASSERT_EQ(rc, 0, "emit object");
 
     fseek(fp, 0, SEEK_END);
@@ -106,13 +137,13 @@ int test_objfile_elf_header(void) {
 #endif
 
     fclose(fp);
-    lr_module_free(m);
+    lr_session_destroy(bm.session);
     return 0;
 }
 
 int test_objfile_elf_symbols(void) {
-    lr_module_t *m = build_ret42_module();
-    TEST_ASSERT(m != NULL, "module create");
+    built_module_t bm = build_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
@@ -120,7 +151,7 @@ int test_objfile_elf_symbols(void) {
     FILE *fp = tmpfile();
     TEST_ASSERT(fp != NULL, "tmpfile");
 
-    int rc = lr_emit_object(m, target, fp);
+    int rc = lr_emit_object(bm.module, target, fp);
     TEST_ASSERT_EQ(rc, 0, "emit object");
 
     fseek(fp, 0, SEEK_END);
@@ -184,13 +215,13 @@ int test_objfile_elf_symbols(void) {
     TEST_ASSERT(found_f, "symbol 'f' found in .symtab");
 
     free(buf);
-    lr_module_free(m);
+    lr_session_destroy(bm.session);
     return 0;
 }
 
 int test_objfile_elf_call_relocation(void) {
-    lr_module_t *m = build_call_module();
-    TEST_ASSERT(m != NULL, "module create");
+    built_module_t bm = build_call_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
@@ -198,7 +229,7 @@ int test_objfile_elf_call_relocation(void) {
     FILE *fp = tmpfile();
     TEST_ASSERT(fp != NULL, "tmpfile");
 
-    int rc = lr_emit_object(m, target, fp);
+    int rc = lr_emit_object(bm.module, target, fp);
     TEST_ASSERT_EQ(rc, 0, "emit object");
 
     fseek(fp, 0, SEEK_END);
@@ -296,13 +327,13 @@ int test_objfile_elf_call_relocation(void) {
     TEST_ASSERT(found_external_func_reloc, "relocation targets external_func");
 
     free(buf);
-    lr_module_free(m);
+    lr_session_destroy(bm.session);
     return 0;
 }
 
 int test_objfile_elf_readelf_validates(void) {
-    lr_module_t *m = build_ret42_module();
-    TEST_ASSERT(m != NULL, "module create");
+    built_module_t bm = build_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
@@ -311,7 +342,7 @@ int test_objfile_elf_readelf_validates(void) {
     FILE *fp = fopen(path, "wb");
     TEST_ASSERT(fp != NULL, "fopen");
 
-    int rc = lr_emit_object(m, target, fp);
+    int rc = lr_emit_object(bm.module, target, fp);
     fclose(fp);
     TEST_ASSERT_EQ(rc, 0, "emit object");
 
@@ -329,13 +360,13 @@ int test_objfile_elf_readelf_validates(void) {
     TEST_ASSERT_EQ(rc, 0, "readelf -S validates");
 
     remove(path);
-    lr_module_free(m);
+    lr_session_destroy(bm.session);
     return 0;
 }
 
 int test_objfile_elf_executable_aarch64_header(void) {
-    lr_module_t *m = build_ret42_module();
-    TEST_ASSERT(m != NULL, "module create");
+    built_module_t bm = build_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_by_name("aarch64");
     TEST_ASSERT(target != NULL, "aarch64 target");
@@ -343,7 +374,7 @@ int test_objfile_elf_executable_aarch64_header(void) {
     FILE *fp = tmpfile();
     TEST_ASSERT(fp != NULL, "tmpfile");
 
-    int rc = lr_emit_executable(m, target, fp, "f");
+    int rc = lr_emit_executable(bm.module, target, fp, "f");
     TEST_ASSERT_EQ(rc, 0, "emit aarch64 executable");
 
     fseek(fp, 0, SEEK_SET);
@@ -363,15 +394,15 @@ int test_objfile_elf_executable_aarch64_header(void) {
     TEST_ASSERT_EQ(e_machine, 183, "EM_AARCH64");
 
     fclose(fp);
-    lr_module_free(m);
+    lr_session_destroy(bm.session);
     return 0;
 }
 
 #else /* __APPLE__ */
 
 int test_objfile_macho_header(void) {
-    lr_module_t *m = build_ret42_module();
-    TEST_ASSERT(m != NULL, "module create");
+    built_module_t bm = build_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
@@ -379,7 +410,7 @@ int test_objfile_macho_header(void) {
     FILE *fp = tmpfile();
     TEST_ASSERT(fp != NULL, "tmpfile");
 
-    int rc = lr_emit_object(m, target, fp);
+    int rc = lr_emit_object(bm.module, target, fp);
     TEST_ASSERT_EQ(rc, 0, "emit object");
 
     fseek(fp, 0, SEEK_SET);
@@ -391,7 +422,7 @@ int test_objfile_macho_header(void) {
     TEST_ASSERT_EQ(magic, 0xFEEDFACFu, "Mach-O magic");
 
     fclose(fp);
-    lr_module_free(m);
+    lr_session_destroy(bm.session);
     return 0;
 }
 
