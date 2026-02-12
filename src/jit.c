@@ -1,5 +1,6 @@
 #include "jit.h"
 #include "bc_decode.h"
+#include "compile_mode.h"
 #include "ir.h"
 #include "objfile.h"
 #include "target.h"
@@ -819,16 +820,7 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
 
     j->target = target;
 
-    j->mode = LR_COMPILE_ISEL;
-    const char *mode_env = getenv("LIRIC_COMPILE_MODE");
-    if (mode_env) {
-        if (strcmp(mode_env, "copy_patch") == 0)
-            j->mode = LR_COMPILE_COPY_PATCH;
-        else if (strcmp(mode_env, "isel") == 0)
-            j->mode = LR_COMPILE_ISEL;
-        else if (strcmp(mode_env, "llvm") == 0)
-            j->mode = LR_COMPILE_LLVM;
-    }
+    j->mode = lr_compile_mode_from_env();
 
     j->arena = lr_arena_create(0);
     if (!j->arena) {
@@ -1691,7 +1683,9 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     size_t code_len = 0;
     JIT_PROF_START(compile);
     int rc;
-    if (j->mode == LR_COMPILE_COPY_PATCH && j->target->compile_func_cp)
+    if (j->mode == LR_COMPILE_LLVM) {
+        rc = -1; /* JIT mode-c is intentionally unsupported for now. */
+    } else if (j->mode == LR_COMPILE_COPY_PATCH && j->target->compile_func_cp)
         rc = j->target->compile_func_cp(f, m, func_start, free_space, &code_len, j->arena);
     else
         rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);

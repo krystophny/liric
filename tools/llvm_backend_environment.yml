@@ -1,0 +1,11 @@
+name: liric-llvm-backend
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - cmake>=3.29
+  - ninja
+  - make
+  - c-compiler
+  - cxx-compiler
+  - zlib

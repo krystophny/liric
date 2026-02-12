@@ -181,6 +181,7 @@ int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_ll_compile(void);
 int test_session_multiple_functions(void);
+int test_session_emit_object_llvm_mode_contract(void);
 int test_merge_two_independent_functions(void);
 int test_merge_declaration_replaced_by_definition(void);
 int test_merge_global_definition(void);
@@ -396,6 +397,7 @@ int main(void) {
     RUN_TEST(test_session_ir_print);
     RUN_TEST(test_session_ll_compile);
     RUN_TEST(test_session_multiple_functions);
+    RUN_TEST(test_session_emit_object_llvm_mode_contract);
 
 #if defined(__linux__)
     fprintf(stderr, "\nSession IR exe tests:\n");

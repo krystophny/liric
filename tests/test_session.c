@@ -28,6 +28,22 @@ static inline void fn_ptr_cast(void *dst, void *src) {
     memcpy(dst, &src, sizeof(src));
 }
 
+static void set_compile_mode_env(const char *value) {
+#if defined(_WIN32)
+    if (value) {
+        (void)_putenv_s("LIRIC_COMPILE_MODE", value);
+    } else {
+        (void)_putenv_s("LIRIC_COMPILE_MODE", "");
+    }
+#else
+    if (value) {
+        (void)setenv("LIRIC_COMPILE_MODE", value, 1);
+    } else {
+        (void)unsetenv("LIRIC_COMPILE_MODE");
+    }
+#endif
+}
+
 int test_session_direct_ret_42(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
@@ -476,6 +492,77 @@ int test_session_multiple_functions(void) {
 
     lr_session_destroy(s);
     return 0;
+}
+
+int test_session_emit_object_llvm_mode_contract(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    int rc = -1;
+    int result = 1;
+    const char *path = "/tmp/liric_test_session_emit_obj_llvm.o";
+    char prev_mode[64] = {0};
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    if (old_mode) {
+        (void)snprintf(prev_mode, sizeof(prev_mode), "%s", old_mode);
+    }
+
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) {
+        fprintf(stderr, "  FAIL: session create (%s)\n", err.msg);
+        goto cleanup;
+    }
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    if (!i32) {
+        fprintf(stderr, "  FAIL: i32 type\n");
+        goto cleanup;
+    }
+
+    rc = lr_session_func_begin(s, "main", i32, NULL, 0, false, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: func begin (%s)\n", err.msg);
+        goto cleanup;
+    }
+    uint32_t b0 = lr_session_block(s);
+    rc = lr_session_set_block(s, b0, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: set block (%s)\n", err.msg);
+        goto cleanup;
+    }
+    lr_emit_ret(s, LR_IMM(42, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: func end (%s)\n", err.msg);
+        goto cleanup;
+    }
+
+    set_compile_mode_env("llvm");
+    rc = lr_session_emit_object(s, path, &err);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: llvm mode object emission expected success (%s)\n", err.msg);
+        goto cleanup;
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode object emission expected failure when backend disabled\n");
+        goto cleanup;
+    }
+#endif
+
+    result = 0;
+
+cleanup:
+    if (old_mode && old_mode[0]) {
+        set_compile_mode_env(prev_mode);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    remove(path);
+    if (s)
+        lr_session_destroy(s);
+    return result;
 }
 
 #if defined(__linux__)
