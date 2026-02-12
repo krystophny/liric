@@ -192,6 +192,7 @@ add_executable(test_liric
     tests/test_wasm.c
     tests/test_builder.c
     tests/test_session.c
+    tests/test_merge.c
     tests/test_objfile.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})

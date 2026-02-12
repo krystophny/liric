@@ -262,6 +262,8 @@ bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
 lr_operand_t lr_canonicalize_gep_index(lr_module_t *m, lr_block_t *b,
                                        lr_func_t *f, lr_operand_t idx_op);
 
+int lr_module_merge(lr_module_t *dest, lr_module_t *src);
+
 void lr_module_dump(lr_module_t *m, FILE *out);
 
 #endif

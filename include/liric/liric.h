@@ -29,6 +29,7 @@ lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t er
 
 lr_module_t *lr_module_create_new(void);
 void lr_module_free(lr_module_t *m);
+int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 void lr_module_dump_to(lr_module_t *m, void *file_handle);
 
 /* ---- Type constructors ------------------------------------------------- */

@@ -181,6 +181,10 @@ int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_ll_compile(void);
 int test_session_multiple_functions(void);
+int test_merge_two_independent_functions(void);
+int test_merge_declaration_replaced_by_definition(void);
+int test_merge_global_definition(void);
+int test_merge_jit_runs_merged_function(void);
 int test_builder_compat_add_to_jit(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
@@ -387,6 +391,12 @@ int main(void) {
     RUN_TEST(test_session_ir_exe_call);
     RUN_TEST(test_session_ir_exe_loop);
 #endif
+
+    fprintf(stderr, "\nModule merge tests:\n");
+    RUN_TEST(test_merge_two_independent_functions);
+    RUN_TEST(test_merge_declaration_replaced_by_definition);
+    RUN_TEST(test_merge_global_definition);
+    RUN_TEST(test_merge_jit_runs_merged_function);
 
     fprintf(stderr, "\nCompat API tests:\n");
     RUN_TEST(test_builder_compat_add_to_jit);
