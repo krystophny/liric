@@ -1360,6 +1360,55 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 break;
             }
 
+            case LR_TOK_INVOKE: {
+                lr_type_t *ret_ty = call_result_type(parse_type(p));
+                skip_attrs(p);
+                skip_optional_callee_signature(p);
+                lr_operand_t callee = parse_operand(p, p->module->type_ptr);
+                expect(p, LR_TOK_LPAREN);
+                lr_operand_t args[64];
+                uint32_t nargs = 0;
+                if (!check(p, LR_TOK_RPAREN)) {
+                    args[nargs++] = parse_typed_operand(p);
+                    while (match(p, LR_TOK_COMMA)) {
+                        skip_attrs(p);
+                        args[nargs++] = parse_typed_operand(p);
+                    }
+                }
+                expect(p, LR_TOK_RPAREN);
+                lr_operand_t all_ops[65];
+                all_ops[0] = callee;
+                for (uint32_t i = 0; i < nargs; i++)
+                    all_ops[i + 1] = args[i];
+                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
+                    ret_ty, dest, all_ops, nargs + 1);
+                lr_block_append(block, inst);
+                skip_attrs(p);
+                /* to label %normal unwind label %except */
+                expect(p, LR_TOK_TO);
+                expect(p, LR_TOK_LABEL);
+                name_view_t nname = tok_name_view(&p->cur);
+                next(p);
+                uint32_t normal_id = resolve_block_n(p, nname.s, nname.len);
+                /* skip "unwind label %except" */
+                while (!check(p, LR_TOK_NEWLINE) && !check(p, LR_TOK_EOF) &&
+                       !p->had_error)
+                    next(p);
+                lr_operand_t br_ops[1] = {lr_op_block(normal_id)};
+                lr_inst_t *br = lr_inst_create(p->arena, LR_OP_BR,
+                    p->module->type_void, 0, br_ops, 1);
+                lr_block_append(block, br);
+                break;
+            }
+
+            case LR_TOK_LANDINGPAD: {
+                /* skip to end of line — dead code from invoke lowering */
+                while (!check(p, LR_TOK_NEWLINE) && !check(p, LR_TOK_EOF) &&
+                       !p->had_error)
+                    next(p);
+                break;
+            }
+
             default:
                 error(p, "unknown instruction '%.*s'", (int)p->prev.len, p->prev.start);
                 break;
@@ -1493,6 +1542,85 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         return;
     }
 
+    if (op_tok == LR_TOK_SWITCH) {
+        next(p);
+        lr_type_t *val_ty = parse_type(p);
+        lr_operand_t val = parse_operand(p, val_ty);
+        expect(p, LR_TOK_COMMA);
+        expect(p, LR_TOK_LABEL);
+        name_view_t dname = tok_name_view(&p->cur);
+        next(p);
+        uint32_t default_id = resolve_block_n(p, dname.s, dname.len);
+
+        struct { int64_t case_val; uint32_t block_id; } cases[256];
+        uint32_t ncases = 0;
+        expect(p, LR_TOK_LBRACKET);
+        while (!check(p, LR_TOK_RBRACKET) && !check(p, LR_TOK_EOF) &&
+               !p->had_error) {
+            parse_type(p);
+            int64_t cv = p->cur.int_val;
+            expect(p, LR_TOK_INT_LIT);
+            expect(p, LR_TOK_COMMA);
+            expect(p, LR_TOK_LABEL);
+            name_view_t cname = tok_name_view(&p->cur);
+            next(p);
+            uint32_t cid = resolve_block_n(p, cname.s, cname.len);
+            if (ncases < 256) {
+                cases[ncases].case_val = cv;
+                cases[ncases].block_id = cid;
+                ncases++;
+            }
+        }
+        expect(p, LR_TOK_RBRACKET);
+
+        if (ncases == 0) {
+            lr_operand_t ops[1] = {lr_op_block(default_id)};
+            lr_inst_t *br = lr_inst_create(p->arena, LR_OP_BR,
+                p->module->type_void, 0, ops, 1);
+            lr_block_append(block, br);
+        } else {
+            for (uint32_t ci = 0; ci < ncases; ci++) {
+                uint32_t cmp_dest = lr_vreg_new(func);
+                lr_operand_t cmp_ops[2] = {
+                    val, lr_op_imm_i64(cases[ci].case_val, val_ty)
+                };
+                lr_inst_t *cmp = lr_inst_create(p->arena, LR_OP_ICMP,
+                    p->module->type_i1, cmp_dest, cmp_ops, 2);
+                cmp->icmp_pred = LR_ICMP_EQ;
+                lr_block_append(block, cmp);
+
+                uint32_t next_id;
+                if (ci + 1 < ncases) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "switch.%u.%u", block->id, ci);
+                    lr_block_t *nb = lr_block_create(func, p->arena, buf);
+                    next_id = nb->id;
+                } else {
+                    next_id = default_id;
+                }
+
+                lr_operand_t br_ops[3] = {
+                    lr_op_vreg(cmp_dest, p->module->type_i1),
+                    lr_op_block(cases[ci].block_id),
+                    lr_op_block(next_id)
+                };
+                lr_inst_t *br = lr_inst_create(p->arena, LR_OP_CONDBR,
+                    p->module->type_void, 0, br_ops, 3);
+                lr_block_append(block, br);
+
+                if (ci + 1 < ncases) {
+                    block = func->block_array ? NULL :
+                        func->last_block;
+                    if (!block) {
+                        error(p, "switch lowering lost block");
+                        return;
+                    }
+                }
+            }
+        }
+        return;
+    }
+
     /* void call */
     if (op_tok == LR_TOK_CALL) {
         next(p);
@@ -1519,6 +1647,56 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             ret_ty, 0, all_ops, nargs + 1);
         lr_block_append(block, inst);
         skip_attrs(p);
+        return;
+    }
+
+    /* void invoke → lower to call + br to normal label */
+    if (op_tok == LR_TOK_INVOKE) {
+        next(p);
+        lr_type_t *ret_ty = call_result_type(parse_type(p));
+        skip_attrs(p);
+        skip_optional_callee_signature(p);
+        lr_operand_t callee = parse_operand(p, p->module->type_ptr);
+        expect(p, LR_TOK_LPAREN);
+        lr_operand_t args[64];
+        uint32_t nargs = 0;
+        if (!check(p, LR_TOK_RPAREN)) {
+            args[nargs++] = parse_typed_operand(p);
+            while (match(p, LR_TOK_COMMA)) {
+                skip_attrs(p);
+                args[nargs++] = parse_typed_operand(p);
+            }
+        }
+        expect(p, LR_TOK_RPAREN);
+        lr_operand_t all_ops[65];
+        all_ops[0] = callee;
+        for (uint32_t i = 0; i < nargs; i++)
+            all_ops[i + 1] = args[i];
+        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
+            ret_ty, 0, all_ops, nargs + 1);
+        lr_block_append(block, inst);
+        skip_attrs(p);
+        expect(p, LR_TOK_TO);
+        expect(p, LR_TOK_LABEL);
+        name_view_t nname = tok_name_view(&p->cur);
+        next(p);
+        uint32_t normal_id = resolve_block_n(p, nname.s, nname.len);
+        /* skip "unwind label %except" */
+        while (!check(p, LR_TOK_NEWLINE) && !check(p, LR_TOK_EOF) &&
+               !p->had_error)
+            next(p);
+        lr_operand_t br_ops[1] = {lr_op_block(normal_id)};
+        lr_inst_t *br = lr_inst_create(p->arena, LR_OP_BR,
+            p->module->type_void, 0, br_ops, 1);
+        lr_block_append(block, br);
+        return;
+    }
+
+    /* landingpad/resume — skip (dead code from invoke lowering) */
+    if (op_tok == LR_TOK_LANDINGPAD || op_tok == LR_TOK_RESUME) {
+        while (!check(p, LR_TOK_NEWLINE) && !check(p, LR_TOK_EOF) &&
+               !p->had_error)
+            next(p);
         return;
     }
 
@@ -1554,7 +1732,8 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
 
     while (!check(p, LR_TOK_RBRACE) && !check(p, LR_TOK_EOF) && !p->had_error) {
         /* Check for label: name followed by colon */
-        if (check(p, LR_TOK_LOCAL_ID) || check(p, LR_TOK_STRING_LIT)) {
+        if (check(p, LR_TOK_LOCAL_ID) || check(p, LR_TOK_STRING_LIT)
+            || check(p, LR_TOK_INT_LIT)) {
             /* peek: is next token a colon? */
             lr_token_t saved_tok = p->cur;
             size_t saved_pos = p->lex.pos;
@@ -1581,6 +1760,22 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
         }
 
         parse_instruction(p, func, cur_block);
+
+        /* skip trailing metadata attachments: , !name !num */
+        while (check(p, LR_TOK_COMMA)) {
+            lr_token_t saved = p->cur;
+            size_t saved_pos = p->lex.pos;
+            next(p);
+            if (check(p, LR_TOK_METADATA_ID) || check(p, LR_TOK_EXCLAIM)) {
+                while (check(p, LR_TOK_METADATA_ID) || check(p, LR_TOK_EXCLAIM))
+                    next(p);
+                continue;
+            }
+            /* not metadata, restore comma and stop */
+            p->cur = saved;
+            p->lex.pos = saved_pos;
+            break;
+        }
     }
 
     expect(p, LR_TOK_RBRACE);
@@ -1643,6 +1838,12 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
     skip_attrs(p);
     while (check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) next(p);
     skip_attrs(p);
+    /* skip personality clause: personality ptr @__gxx_personality_v0 */
+    if (check(p, LR_TOK_PERSONALITY)) {
+        while (!check(p, LR_TOK_LBRACE) && !check(p, LR_TOK_NEWLINE) &&
+               !check(p, LR_TOK_EOF) && !p->had_error)
+            next(p);
+    }
 
     uint32_t sym_id = UINT32_MAX;
     lr_func_t *func = lr_frontend_create_function(p->module, name, ret_type,
