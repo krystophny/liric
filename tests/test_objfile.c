@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#if defined(__linux__)
+#include <sys/stat.h>
+#include <sys/wait.h>
+#endif
 
 typedef struct lr_target lr_target_t;
 const lr_target_t *lr_target_host(void);
@@ -397,6 +401,92 @@ int test_objfile_elf_executable_aarch64_header(void) {
     lr_session_destroy(bm.session);
     return 0;
 }
+
+#if defined(__linux__)
+
+int test_objfile_elf_exe_runs(void) {
+    built_module_t bm = build_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+
+    const char *path = "/tmp/liric_test_elf_exe";
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_executable(bm.module, target, fp, "f");
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit executable");
+
+    chmod(path, 0755);
+    int status = system(path);
+    TEST_ASSERT(WIFEXITED(status), "exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 42, "exit code 42");
+
+    remove(path);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+static built_module_t build_main_ret42_module(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    if (lr_session_func_begin(s, "main", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
+int test_objfile_link_and_run(void) {
+    built_module_t bm = build_main_ret42_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+
+    const char *obj_path = "/tmp/liric_test_link.o";
+    FILE *fp = fopen(obj_path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_object(bm.module, target, fp);
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit object");
+
+    const char *exe_path = "/tmp/liric_test_linked";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "cc -o %s %s 2>/dev/null", exe_path, obj_path);
+    rc = system(cmd);
+    remove(obj_path);
+    TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0, "cc link succeeded");
+
+    chmod(exe_path, 0755);
+    int status = system(exe_path);
+    TEST_ASSERT(WIFEXITED(status), "exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 42, "exit code 42");
+
+    remove(exe_path);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+#endif /* __linux__ */
 
 #else /* __APPLE__ */
 

@@ -191,8 +191,19 @@ int test_objfile_elf_symbols(void);
 int test_objfile_elf_call_relocation(void);
 int test_objfile_elf_readelf_validates(void);
 int test_objfile_elf_executable_aarch64_header(void);
+#if defined(__linux__)
+int test_objfile_elf_exe_runs(void);
+int test_objfile_link_and_run(void);
+#endif
 #else
 int test_objfile_macho_header(void);
+#endif
+
+#if defined(__linux__)
+int test_session_ir_exe_ret_42(void);
+int test_session_ir_exe_branch(void);
+int test_session_ir_exe_call(void);
+int test_session_ir_exe_loop(void);
 #endif
 
 int main(void) {
@@ -369,6 +380,14 @@ int main(void) {
     RUN_TEST(test_session_ll_compile);
     RUN_TEST(test_session_multiple_functions);
 
+#if defined(__linux__)
+    fprintf(stderr, "\nSession IR exe tests:\n");
+    RUN_TEST(test_session_ir_exe_ret_42);
+    RUN_TEST(test_session_ir_exe_branch);
+    RUN_TEST(test_session_ir_exe_call);
+    RUN_TEST(test_session_ir_exe_loop);
+#endif
+
     fprintf(stderr, "\nCompat API tests:\n");
     RUN_TEST(test_builder_compat_add_to_jit);
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
@@ -382,6 +401,10 @@ int main(void) {
     RUN_TEST(test_objfile_elf_call_relocation);
     RUN_TEST(test_objfile_elf_readelf_validates);
     RUN_TEST(test_objfile_elf_executable_aarch64_header);
+#if defined(__linux__)
+    RUN_TEST(test_objfile_elf_exe_runs);
+    RUN_TEST(test_objfile_link_and_run);
+#endif
 #else
     RUN_TEST(test_objfile_macho_header);
 #endif
