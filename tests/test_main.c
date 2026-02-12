@@ -86,6 +86,7 @@ int test_target_shared_prescan_filters_dynamic_alloca(void);
 int test_ir_finalize_builds_dense_arrays(void);
 int test_ir_inst_create_packs_operands_in_single_allocation(void);
 int test_ir_phi_copies_flat_arrays_preserve_emission_order(void);
+int test_headers_share_opcode_and_operand_types(void);
 int test_jit_add_symbol_updates_cached_lookup(void);
 int test_jit_ret_42(void);
 int test_jit_lazy_repeated_lookup_returns_ready_symbol(void);
@@ -287,6 +288,7 @@ int main(void) {
     RUN_TEST(test_ir_finalize_builds_dense_arrays);
     RUN_TEST(test_ir_inst_create_packs_operands_in_single_allocation);
     RUN_TEST(test_ir_phi_copies_flat_arrays_preserve_emission_order);
+    RUN_TEST(test_headers_share_opcode_and_operand_types);
 
     fprintf(stderr, "\nJIT tests:\n");
     RUN_TEST(test_jit_add_symbol_updates_cached_lookup);

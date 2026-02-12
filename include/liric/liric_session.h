@@ -45,54 +45,9 @@ enum {
     LR_ERR_PARSE,
 };
 
-/* ---- Opcodes (public mirror of internal lr_opcode_t) ------------------- */
+/* ---- Opcodes ------------------------------------------------------------ */
 
-typedef enum lr_op {
-    LR_OP_RET,
-    LR_OP_RET_VOID,
-    LR_OP_BR,
-    LR_OP_CONDBR,
-    LR_OP_UNREACHABLE,
-    LR_OP_ADD,
-    LR_OP_SUB,
-    LR_OP_MUL,
-    LR_OP_SDIV,
-    LR_OP_SREM,
-    LR_OP_AND,
-    LR_OP_OR,
-    LR_OP_XOR,
-    LR_OP_SHL,
-    LR_OP_LSHR,
-    LR_OP_ASHR,
-    LR_OP_FADD,
-    LR_OP_FSUB,
-    LR_OP_FMUL,
-    LR_OP_FDIV,
-    LR_OP_FNEG,
-    LR_OP_ICMP,
-    LR_OP_FCMP,
-    LR_OP_ALLOCA,
-    LR_OP_LOAD,
-    LR_OP_STORE,
-    LR_OP_GEP,
-    LR_OP_CALL,
-    LR_OP_PHI,
-    LR_OP_SELECT,
-    LR_OP_SEXT,
-    LR_OP_ZEXT,
-    LR_OP_TRUNC,
-    LR_OP_BITCAST,
-    LR_OP_PTRTOINT,
-    LR_OP_INTTOPTR,
-    LR_OP_SITOFP,
-    LR_OP_UITOFP,
-    LR_OP_FPTOSI,
-    LR_OP_FPTOUI,
-    LR_OP_FPEXT,
-    LR_OP_FPTRUNC,
-    LR_OP_EXTRACTVALUE,
-    LR_OP_INSERTVALUE,
-} lr_op_t;
+typedef lr_opcode_t lr_op_t;
 
 /* ---- Instruction descriptor -------------------------------------------- */
 

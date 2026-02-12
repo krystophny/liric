@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <liric/liric_ir_shared.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,30 +40,6 @@ lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
                               lr_type_t **params, uint32_t num_params,
                               bool vararg);
 
-/* ---- Operand descriptors ----------------------------------------------- */
-
-typedef struct lr_operand_desc {
-    int kind;
-    union {
-        uint32_t vreg;
-        int64_t imm_i64;
-        double imm_f64;
-        uint32_t block_id;
-        uint32_t global_id;
-    };
-    lr_type_t *type;
-} lr_operand_desc_t;
-
-enum {
-    LR_OP_KIND_VREG    = 0,
-    LR_OP_KIND_IMM_I64 = 1,
-    LR_OP_KIND_IMM_F64 = 2,
-    LR_OP_KIND_BLOCK   = 3,
-    LR_OP_KIND_GLOBAL  = 4,
-    LR_OP_KIND_NULL    = 5,
-    LR_OP_KIND_UNDEF   = 6,
-};
-
 #define LR_VREG(v, t)    ((lr_operand_desc_t){ .kind = LR_OP_KIND_VREG, .vreg = (v), .type = (t) })
 #define LR_IMM(v, t)     ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t) })
 #define LR_IMM_F(v, t)   ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t) })
@@ -76,14 +53,6 @@ enum {
     LR_CMP_EQ = 0, LR_CMP_NE,
     LR_CMP_SGT, LR_CMP_SGE, LR_CMP_SLT, LR_CMP_SLE,
     LR_CMP_UGT, LR_CMP_UGE, LR_CMP_ULT, LR_CMP_ULE,
-};
-enum {
-    LR_FCMP_FALSE = 0,
-    LR_FCMP_OEQ, LR_FCMP_OGT, LR_FCMP_OGE, LR_FCMP_OLT, LR_FCMP_OLE,
-    LR_FCMP_ONE, LR_FCMP_ORD,
-    LR_FCMP_UEQ, LR_FCMP_UGT, LR_FCMP_UGE, LR_FCMP_ULT, LR_FCMP_ULE,
-    LR_FCMP_UNE, LR_FCMP_UNO,
-    LR_FCMP_TRUE,
 };
 
 /* ---- JIT --------------------------------------------------------------- */
