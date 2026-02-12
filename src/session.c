@@ -11,6 +11,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Guard: lr_opcode_t (ir.h) must stay in sync with lr_op_t (liric_session.h).
+   If this fires, a new opcode was added to ir.h without updating the session header. */
+_Static_assert(LR_OP_INSERTVALUE == 43,
+               "lr_opcode_t changed: update lr_op_t in liric_session.h");
+
 /* Replicate public operand descriptor to avoid ir.h/liric.h enum clashes. */
 typedef struct lr_operand_desc {
     int kind;

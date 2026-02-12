@@ -177,7 +177,6 @@ lc_value_t *lc_global_lookup(lc_module_compat_t *mod, const char *name);
 int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
                                lc_value_t *init_val);
 bool lc_global_has_initializer(lc_module_compat_t *mod, lc_value_t *global_val);
-lr_global_t *lc_value_get_global(lc_value_t *val);
 
 /* ---- IRBuilder operations ---- */
 

@@ -6,6 +6,10 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Guard: lr_opcode_t (ir.h) must stay in sync with lr_op_t (liric_session.h). */
+_Static_assert(LR_OP_INSERTVALUE == 43,
+               "lr_opcode_t changed: update lr_op_t in liric_session.h");
+
 /* Replicate the public operand descriptor type and kind constants.
    We cannot include liric.h alongside ir.h due to enum redeclarations. */
 typedef struct lr_operand_desc {
@@ -1257,11 +1261,6 @@ bool lc_global_has_initializer(lc_module_compat_t *mod, lc_value_t *global_val) 
     if (!g)
         return false;
     return g->init_data != NULL && g->init_size > 0;
-}
-
-lr_global_t *lc_value_get_global(lc_value_t *val) {
-    (void)val;
-    return NULL;
 }
 
 /* ---- Internal builder helpers ---- */

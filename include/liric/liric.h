@@ -27,58 +27,17 @@ lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t er
 
 /* ---- Module lifecycle -------------------------------------------------- */
 
-lr_module_t *lr_module_create_new(void);
 void lr_module_free(lr_module_t *m);
 int lr_module_merge(lr_module_t *dest, lr_module_t *src);
-void lr_module_dump_to(lr_module_t *m, void *file_handle);
 
-/* ---- Type constructors ------------------------------------------------- */
+/* ---- Composite type constructors --------------------------------------- */
 
-lr_type_t *lr_type_void_get(lr_module_t *m);
-lr_type_t *lr_type_i1_get(lr_module_t *m);
-lr_type_t *lr_type_i8_get(lr_module_t *m);
-lr_type_t *lr_type_i16_get(lr_module_t *m);
-lr_type_t *lr_type_i32_get(lr_module_t *m);
-lr_type_t *lr_type_i64_get(lr_module_t *m);
-lr_type_t *lr_type_float_get(lr_module_t *m);
-lr_type_t *lr_type_double_get(lr_module_t *m);
-lr_type_t *lr_type_ptr_get(lr_module_t *m);
 lr_type_t *lr_type_array_new(lr_module_t *m, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_struct_new(lr_module_t *m, lr_type_t **fields,
                                uint32_t num_fields, bool packed);
 lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
                               lr_type_t **params, uint32_t num_params,
                               bool vararg);
-
-/* ---- Function / block / vreg ------------------------------------------- */
-
-lr_func_t *lr_func_define(lr_module_t *m, const char *name, lr_type_t *ret,
-                           lr_type_t **params, uint32_t num_params, bool vararg);
-lr_func_t *lr_func_declare_ext(lr_module_t *m, const char *name, lr_type_t *ret,
-                                lr_type_t **params, uint32_t num_params,
-                                bool vararg);
-uint32_t lr_func_param_vreg(lr_func_t *f, uint32_t param_idx);
-uint32_t lr_func_num_params(lr_func_t *f);
-
-lr_block_t *lr_block_new(lr_func_t *f, lr_module_t *m, const char *name);
-uint32_t lr_block_id(lr_block_t *b);
-
-uint32_t lr_vreg_alloc(lr_func_t *f);
-
-/* ---- Global variables -------------------------------------------------- */
-
-lr_global_t *lr_global_define(lr_module_t *m, const char *name, lr_type_t *type,
-                               bool is_const, const void *init_data,
-                               size_t init_size);
-lr_global_t *lr_global_declare_ext(lr_module_t *m, const char *name,
-                                    lr_type_t *type);
-uint32_t lr_global_id(lr_global_t *g);
-void lr_global_add_reloc(lr_module_t *m, lr_global_t *g, size_t offset,
-                          const char *symbol_name);
-
-/* ---- Symbol interning (for global/function references) ----------------- */
-
-uint32_t lr_symbol_intern(lr_module_t *m, const char *name);
 
 /* ---- Operand descriptors ----------------------------------------------- */
 

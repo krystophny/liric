@@ -85,7 +85,9 @@ typedef enum lr_op {
     LR_OP_PTRTOINT,
     LR_OP_INTTOPTR,
     LR_OP_SITOFP,
+    LR_OP_UITOFP,
     LR_OP_FPTOSI,
+    LR_OP_FPTOUI,
     LR_OP_FPEXT,
     LR_OP_FPTRUNC,
     LR_OP_EXTRACTVALUE,
@@ -540,11 +542,27 @@ static inline uint32_t lr_emit_sitofp(lr_session_t *s, lr_type_t *to,
     return lr_session_emit(s, &d, NULL);
 }
 
+static inline uint32_t lr_emit_uitofp(lr_session_t *s, lr_type_t *to,
+                                      lr_operand_desc_t val) {
+    lr_inst_desc_t d = {0};
+    lr_operand_desc_t ops[1] = {val};
+    d.op = LR_OP_UITOFP; d.type = to; d.operands = ops; d.num_operands = 1;
+    return lr_session_emit(s, &d, NULL);
+}
+
 static inline uint32_t lr_emit_fptosi(lr_session_t *s, lr_type_t *to,
                                       lr_operand_desc_t val) {
     lr_inst_desc_t d = {0};
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_FPTOSI; d.type = to; d.operands = ops; d.num_operands = 1;
+    return lr_session_emit(s, &d, NULL);
+}
+
+static inline uint32_t lr_emit_fptoui(lr_session_t *s, lr_type_t *to,
+                                      lr_operand_desc_t val) {
+    lr_inst_desc_t d = {0};
+    lr_operand_desc_t ops[1] = {val};
+    d.op = LR_OP_FPTOUI; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
 }
 
