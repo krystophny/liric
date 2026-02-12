@@ -13,34 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Guard: lr_opcode_t (ir.h) must stay in sync with lr_op_t (liric_session.h).
-   If this fires, a new opcode was added to ir.h without updating the session header. */
-_Static_assert(LR_OP_INSERTVALUE == 43,
-               "lr_opcode_t changed: update lr_op_t in liric_session.h");
-
-/* Replicate public operand descriptor to avoid ir.h/liric.h enum clashes. */
-typedef struct lr_operand_desc {
-    int kind;
-    union {
-        uint32_t vreg;
-        int64_t imm_i64;
-        double imm_f64;
-        uint32_t block_id;
-        uint32_t global_id;
-    };
-    lr_type_t *type;
-} lr_operand_desc_t;
-
-enum {
-    LR_OP_KIND_VREG = 0,
-    LR_OP_KIND_IMM_I64 = 1,
-    LR_OP_KIND_IMM_F64 = 2,
-    LR_OP_KIND_BLOCK = 3,
-    LR_OP_KIND_GLOBAL = 4,
-    LR_OP_KIND_NULL = 5,
-    LR_OP_KIND_UNDEF = 6,
-};
-
 /* Session mode mirrors the public lr_session_mode_t. */
 typedef enum session_mode {
     SESSION_MODE_DIRECT = 0,

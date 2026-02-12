@@ -270,6 +270,7 @@ add_executable(test_liric
     tests/test_codegen.c
     tests/test_targets.c
     tests/test_target_shared.c
+    tests/test_header_shared.c
     tests/test_jit.c
     tests/test_e2e.c
     tests/test_bc.c
