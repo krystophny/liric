@@ -1,6 +1,7 @@
 #include "../src/arena.h"
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -935,6 +936,16 @@ int test_parser_cast_expr_in_aggregate_init(void) {
 
     TEST_ASSERT(typeint != NULL, "inttoptr struct global parsed");
     TEST_ASSERT(typeint->init_data != NULL, "inttoptr struct has init data");
+    TEST_ASSERT(typeint->init_size >= 2 * sizeof(uintptr_t),
+                "inttoptr struct stores two pointer-sized fields");
+    {
+        uintptr_t f0 = 0;
+        uintptr_t f1 = 0;
+        memcpy(&f0, typeint->init_data, sizeof(uintptr_t));
+        memcpy(&f1, typeint->init_data + sizeof(uintptr_t), sizeof(uintptr_t));
+        TEST_ASSERT_EQ((long long)f0, 4, "first inttoptr immediate preserved");
+        TEST_ASSERT_EQ((long long)f1, 4, "second inttoptr immediate preserved");
+    }
 
     lr_arena_destroy(arena);
     return 0;

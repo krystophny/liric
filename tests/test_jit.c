@@ -2350,6 +2350,46 @@ int test_jit_global_struct_integer_init(void) {
     return 0;
 }
 
+int test_jit_global_struct_inttoptr_immediate_init(void) {
+    /*
+     * Regression: aggregate global initializers must preserve inttoptr
+     * immediate values instead of zeroing pointer fields.
+     */
+    const char *src =
+        "%type_info = type <{ ptr, ptr }>\n"
+        "@ti = private constant %type_info <{ ptr inttoptr (i64 4 to ptr), "
+        "ptr inttoptr (i32 8 to ptr) }>, align 8\n"
+        "define i64 @read_ti() {\n"
+        "entry:\n"
+        "  %p0 = getelementptr %type_info, ptr @ti, i32 0, i32 0\n"
+        "  %v0p = load ptr, ptr %p0, align 8\n"
+        "  %v0 = ptrtoint ptr %v0p to i64\n"
+        "  %p1 = getelementptr %type_info, ptr @ti, i32 0, i32 1\n"
+        "  %v1p = load ptr, ptr %p1, align 8\n"
+        "  %v1 = ptrtoint ptr %v1p to i64\n"
+        "  %r = add i64 %v0, %v1\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "read_ti");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 12, "inttoptr immediates preserved in global struct");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_aggregate_load_store_copy(void) {
     /*
      * Regression: aggregate values (>8 bytes) must not be truncated when
