@@ -22,8 +22,7 @@ C11, zero external dependencies, ~110ms clean build.
                   v                   v                   v
               ISel backend     Copy-and-patch       Real LLVM (opt)
             (single-pass,     (template memcpy,    (LLVM C API,
-             full coverage)    partial coverage,    obj/exe only)
-                              3.6x faster than TCC)
+             full coverage)    partial coverage)    obj/exe only)
                   |                   |                   |
                   +-------------------+-------------------+
                   |                   |                   |
