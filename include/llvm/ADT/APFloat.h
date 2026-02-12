@@ -33,15 +33,18 @@ inline const fltSemantics &fltSemantics::IEEEdouble() {
 
 class APFloat {
     double val_;
+    bool is_single_;
 
 public:
-    APFloat() : val_(0.0) {}
-    explicit APFloat(double v) : val_(v) {}
-    explicit APFloat(float v) : val_(static_cast<double>(v)) {}
-    APFloat(const fltSemantics &, uint64_t bits) : val_(0.0) {
+    APFloat() : val_(0.0), is_single_(false) {}
+    explicit APFloat(double v) : val_(v), is_single_(false) {}
+    explicit APFloat(float v) : val_(static_cast<double>(v)), is_single_(true) {}
+    APFloat(const fltSemantics &sem, uint64_t bits) : val_(0.0),
+        is_single_(&sem == &fltSemantics::IEEEsingle()) {
         (void)bits;
     }
-    APFloat(const fltSemantics &, const APInt &bits) : val_(0.0) {
+    APFloat(const fltSemantics &sem, const APInt &bits) : val_(0.0),
+        is_single_(&sem == &fltSemantics::IEEEsingle()) {
         uint64_t raw = bits.getZExtValue();
         if (bits.getBitWidth() <= 32) {
             float f;
@@ -55,6 +58,7 @@ public:
 
     double convertToDouble() const { return val_; }
     float convertToFloat() const { return static_cast<float>(val_); }
+    bool isSinglePrecision() const { return is_single_; }
 
     APInt bitcastToAPInt() const {
         uint64_t bits;
