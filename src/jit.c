@@ -766,6 +766,38 @@ static double llvm_sqrt_f64(double x) { return sqrt(x); }
 static double llvm_exp_f64(double x) { return exp(x); }
 static double llvm_pow_f64(double x, double y) { return pow(x, y); }
 static double llvm_copysign_f64(double x, double y) { return copysign(x, y); }
+static float llvm_sin_f32(float x) { return sinf(x); }
+static double llvm_sin_f64(double x) { return sin(x); }
+static float llvm_cos_f32(float x) { return cosf(x); }
+static double llvm_cos_f64(double x) { return cos(x); }
+static float llvm_log_f32(float x) { return logf(x); }
+static double llvm_log_f64(double x) { return log(x); }
+static float llvm_log2_f32(float x) { return log2f(x); }
+static double llvm_log2_f64(double x) { return log2(x); }
+static float llvm_log10_f32(float x) { return log10f(x); }
+static double llvm_log10_f64(double x) { return log10(x); }
+static float llvm_exp2_f32(float x) { return exp2f(x); }
+static double llvm_exp2_f64(double x) { return exp2(x); }
+static float llvm_floor_f32(float x) { return floorf(x); }
+static double llvm_floor_f64(double x) { return floor(x); }
+static float llvm_ceil_f32(float x) { return ceilf(x); }
+static double llvm_ceil_f64(double x) { return ceil(x); }
+static float llvm_trunc_f32(float x) { return truncf(x); }
+static double llvm_trunc_f64(double x) { return trunc(x); }
+static float llvm_round_f32(float x) { return roundf(x); }
+static double llvm_round_f64(double x) { return round(x); }
+static float llvm_rint_f32(float x) { return rintf(x); }
+static double llvm_rint_f64(double x) { return rint(x); }
+static float llvm_nearbyint_f32(float x) { return nearbyintf(x); }
+static double llvm_nearbyint_f64(double x) { return nearbyint(x); }
+static float llvm_fma_f32(float a, float b, float c) { return fmaf(a, b, c); }
+static double llvm_fma_f64(double a, double b, double c) { return fma(a, b, c); }
+static float llvm_minnum_f32(float x, float y) { return fminf(x, y); }
+static double llvm_minnum_f64(double x, double y) { return fmin(x, y); }
+static float llvm_maxnum_f32(float x, float y) { return fmaxf(x, y); }
+static double llvm_maxnum_f64(double x, double y) { return fmax(x, y); }
+static int32_t llvm_abs_i32(int32_t x, int32_t poison) { (void)poison; return abs(x); }
+static int64_t llvm_abs_i64(int64_t x, int64_t poison) { (void)poison; return llabs(x); }
 
 static uint64_t llvm_abs_exp_i64(int64_t e) {
     if (e >= 0)
@@ -1224,10 +1256,50 @@ static void register_builtin_symbols(lr_jit_t *j) {
     lr_jit_add_symbol(j, "llvm.powi.f64.i64", (void *)(uintptr_t)&llvm_powi_f64_i64);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
+    lr_jit_add_symbol(j, "llvm.memset.p0.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memset.p0.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
+    lr_jit_add_symbol(j, "llvm.memcpy.p0.p0.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memcpy.p0.p0.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
     lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i32);
     lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i64);
+    lr_jit_add_symbol(j, "llvm.memmove.p0.p0.i32", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i32);
+    lr_jit_add_symbol(j, "llvm.memmove.p0.p0.i64", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i64);
+    lr_jit_add_symbol(j, "llvm.sin.f32", (void *)(uintptr_t)&llvm_sin_f32);
+    lr_jit_add_symbol(j, "llvm.sin.f64", (void *)(uintptr_t)&llvm_sin_f64);
+    lr_jit_add_symbol(j, "llvm.cos.f32", (void *)(uintptr_t)&llvm_cos_f32);
+    lr_jit_add_symbol(j, "llvm.cos.f64", (void *)(uintptr_t)&llvm_cos_f64);
+    lr_jit_add_symbol(j, "llvm.log.f32", (void *)(uintptr_t)&llvm_log_f32);
+    lr_jit_add_symbol(j, "llvm.log.f64", (void *)(uintptr_t)&llvm_log_f64);
+    lr_jit_add_symbol(j, "llvm.log2.f32", (void *)(uintptr_t)&llvm_log2_f32);
+    lr_jit_add_symbol(j, "llvm.log2.f64", (void *)(uintptr_t)&llvm_log2_f64);
+    lr_jit_add_symbol(j, "llvm.log10.f32", (void *)(uintptr_t)&llvm_log10_f32);
+    lr_jit_add_symbol(j, "llvm.log10.f64", (void *)(uintptr_t)&llvm_log10_f64);
+    lr_jit_add_symbol(j, "llvm.exp2.f32", (void *)(uintptr_t)&llvm_exp2_f32);
+    lr_jit_add_symbol(j, "llvm.exp2.f64", (void *)(uintptr_t)&llvm_exp2_f64);
+    lr_jit_add_symbol(j, "llvm.floor.f32", (void *)(uintptr_t)&llvm_floor_f32);
+    lr_jit_add_symbol(j, "llvm.floor.f64", (void *)(uintptr_t)&llvm_floor_f64);
+    lr_jit_add_symbol(j, "llvm.ceil.f32", (void *)(uintptr_t)&llvm_ceil_f32);
+    lr_jit_add_symbol(j, "llvm.ceil.f64", (void *)(uintptr_t)&llvm_ceil_f64);
+    lr_jit_add_symbol(j, "llvm.trunc.f32", (void *)(uintptr_t)&llvm_trunc_f32);
+    lr_jit_add_symbol(j, "llvm.trunc.f64", (void *)(uintptr_t)&llvm_trunc_f64);
+    lr_jit_add_symbol(j, "llvm.round.f32", (void *)(uintptr_t)&llvm_round_f32);
+    lr_jit_add_symbol(j, "llvm.round.f64", (void *)(uintptr_t)&llvm_round_f64);
+    lr_jit_add_symbol(j, "llvm.rint.f32", (void *)(uintptr_t)&llvm_rint_f32);
+    lr_jit_add_symbol(j, "llvm.rint.f64", (void *)(uintptr_t)&llvm_rint_f64);
+    lr_jit_add_symbol(j, "llvm.nearbyint.f32", (void *)(uintptr_t)&llvm_nearbyint_f32);
+    lr_jit_add_symbol(j, "llvm.nearbyint.f64", (void *)(uintptr_t)&llvm_nearbyint_f64);
+    lr_jit_add_symbol(j, "llvm.fma.f32", (void *)(uintptr_t)&llvm_fma_f32);
+    lr_jit_add_symbol(j, "llvm.fma.f64", (void *)(uintptr_t)&llvm_fma_f64);
+    lr_jit_add_symbol(j, "llvm.fmuladd.f32", (void *)(uintptr_t)&llvm_fma_f32);
+    lr_jit_add_symbol(j, "llvm.fmuladd.f64", (void *)(uintptr_t)&llvm_fma_f64);
+    lr_jit_add_symbol(j, "llvm.minnum.f32", (void *)(uintptr_t)&llvm_minnum_f32);
+    lr_jit_add_symbol(j, "llvm.minnum.f64", (void *)(uintptr_t)&llvm_minnum_f64);
+    lr_jit_add_symbol(j, "llvm.maxnum.f32", (void *)(uintptr_t)&llvm_maxnum_f32);
+    lr_jit_add_symbol(j, "llvm.maxnum.f64", (void *)(uintptr_t)&llvm_maxnum_f64);
+    lr_jit_add_symbol(j, "llvm.abs.i32", (void *)(uintptr_t)&llvm_abs_i32);
+    lr_jit_add_symbol(j, "llvm.abs.i64", (void *)(uintptr_t)&llvm_abs_i64);
 }
 
 int lr_jit_load_library(lr_jit_t *j, const char *path) {
