@@ -582,7 +582,7 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
 
 uint32_t lr_session_param(struct lr_session *s, uint32_t idx) {
     if (!s || !s->cur_func || idx >= s->cur_func->num_params)
-        return 0;
+        return UINT32_MAX;
     return s->cur_func->param_vregs[idx];
 }
 
@@ -636,7 +636,7 @@ int lr_session_set_block(struct lr_session *s, uint32_t block_id,
 
 uint32_t lr_session_vreg(struct lr_session *s) {
     if (!s || !s->cur_func)
-        return 0;
+        return UINT32_MAX;
     return lr_vreg_new(s->cur_func);
 }
 
