@@ -537,9 +537,12 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
                 obj_build_result_destroy(out);
                 return -1;
             }
+            uint8_t abs64_reloc = LR_RELOC_X86_64_64;
+            if (strcmp(target->name, "aarch64") == 0)
+                abs64_reloc = LR_RELOC_ARM64_ABS64;
             lr_obj_add_data_reloc(&out->ctx,
                                   (uint32_t)(out->data_pos + rel->offset),
-                                  sym_idx, LR_RELOC_X86_64_64);
+                                  sym_idx, abs64_reloc);
         }
 
         out->data_pos += gsize;

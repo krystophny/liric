@@ -55,6 +55,7 @@
 #define R_X86_64_64         1
 
 /* ELF aarch64 relocation types */
+#define R_AARCH64_ABS64             257
 #define R_AARCH64_CALL26            283
 #define R_AARCH64_ADR_PREL_PG_HI21  275
 #define R_AARCH64_ADD_ABS_LO12_NC   277
@@ -227,6 +228,11 @@ lr_reloc_mapped_t elf_reloc_aarch64(uint8_t liric_type) {
         m.addend = 0;
         m.is_pcrel = false;
         break;
+    case LR_RELOC_ARM64_ABS64:
+        m.native_type = R_AARCH64_ABS64;
+        m.addend = 0;
+        m.is_pcrel = false;
+        break;
     default:
         m.native_type = R_AARCH64_CALL26;
         m.addend = 0;
@@ -273,13 +279,14 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
     const char shstrtab_content[] =
         "\0.text\0.data\0.rela.text\0.symtab\0.strtab\0.shstrtab\0.rela.data";
     size_t shstrtab_size = sizeof(shstrtab_content);
-    uint32_t sh_name_text      = 1;
-    uint32_t sh_name_data      = 7;
-    uint32_t sh_name_rela_text = 13;
-    uint32_t sh_name_symtab    = 24;
-    uint32_t sh_name_strtab    = 32;
-    uint32_t sh_name_shstrtab  = 40;
-    uint32_t sh_name_rela_data = 50;
+    /* Section name offsets within shstrtab */
+    uint32_t sh_name_text      = 1;   /* .text */
+    uint32_t sh_name_data      = 7;   /* .data */
+    uint32_t sh_name_rela_text = 13;  /* .rela.text */
+    uint32_t sh_name_symtab    = 24;  /* .symtab */
+    uint32_t sh_name_strtab    = 32;  /* .strtab */
+    uint32_t sh_name_shstrtab  = 40;  /* .shstrtab */
+    uint32_t sh_name_rela_data = 50;  /* .rela.data */
 
     /* Section indices:
      * 0: SHT_NULL
@@ -308,10 +315,11 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
         strtab_size += strlen(oc->symbols[i].name) + 1;
     }
 
-    uint32_t num_section_syms = has_data ? 2 : 1;
-    uint32_t first_global = 1 + num_section_syms;
+    uint32_t num_section_syms = has_data ? 2 : 1; /* .text, optionally .data */
+    uint32_t first_global = 1 + num_section_syms; /* after null + section syms */
     uint32_t total_syms = first_global + oc->num_symbols;
 
+    /* Layout computation */
     size_t ehdr_size = 64;
     size_t text_off = ehdr_size;
     size_t text_end = text_off + code_size;
@@ -319,24 +327,30 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
     size_t data_off = has_data ? obj_align_up(text_end, 8) : text_end;
     size_t data_end = data_off + (has_data ? data_size : 0);
 
+    /* .rela.text: Elf64_Rela entries are 24 bytes each */
     size_t rela_text_off = obj_align_up(data_end, 8);
     size_t rela_text_size = oc->num_relocs * 24;
     size_t rela_text_end = rela_text_off + rela_text_size;
 
+    /* .rela.data (if any) */
     size_t rela_data_off = has_data_relocs ? obj_align_up(rela_text_end, 8) : rela_text_end;
     size_t rela_data_size = has_data_relocs ? (oc->num_data_relocs * 24) : 0;
     size_t rela_data_end = rela_data_off + rela_data_size;
 
+    /* .symtab: Elf64_Sym entries are 24 bytes each */
     size_t symtab_off = obj_align_up(rela_data_end, 8);
     size_t symtab_size = total_syms * 24;
     size_t symtab_end = symtab_off + symtab_size;
 
+    /* .strtab */
     size_t strtab_off = symtab_end;
     size_t strtab_end = strtab_off + strtab_size;
 
+    /* .shstrtab */
     size_t shstrtab_off = strtab_end;
     size_t shstrtab_end = shstrtab_off + shstrtab_size;
 
+    /* Section headers (64 bytes each) */
     size_t shdr_off = obj_align_up(shstrtab_end, 8);
     size_t shdr_size = num_sections * 64;
     size_t total_size = shdr_off + shdr_size;
@@ -348,25 +362,26 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
     }
     uint8_t *p = buf;
 
+    /* ELF header (64 bytes) */
     w8(&p, ELFMAG0); w8(&p, ELFMAG1); w8(&p, ELFMAG2); w8(&p, ELFMAG3);
     w8(&p, ELFCLASS64);
     w8(&p, ELFDATA2LSB);
     w8(&p, EV_CURRENT);
     w8(&p, ELFOSABI_NONE);
-    wpad(&p, 8);
-    w16(&p, ET_REL);
-    w16(&p, e_machine);
-    w32(&p, EV_CURRENT);
-    w64(&p, 0);
-    w64(&p, 0);
-    w64(&p, shdr_off);
-    w32(&p, 0);
-    w16(&p, 64);
-    w16(&p, 0);
-    w16(&p, 0);
-    w16(&p, 64);
-    w16(&p, num_sections);
-    w16(&p, shstrtab_shndx);
+    wpad(&p, 8);               /* e_ident padding */
+    w16(&p, ET_REL);           /* e_type */
+    w16(&p, e_machine);        /* e_machine */
+    w32(&p, EV_CURRENT);       /* e_version */
+    w64(&p, 0);                /* e_entry */
+    w64(&p, 0);                /* e_phoff */
+    w64(&p, shdr_off);         /* e_shoff */
+    w32(&p, 0);                /* e_flags */
+    w16(&p, 64);               /* e_ehsize */
+    w16(&p, 0);                /* e_phentsize */
+    w16(&p, 0);                /* e_phnum */
+    w16(&p, 64);               /* e_shentsize */
+    w16(&p, num_sections);     /* e_shnum */
+    w16(&p, shstrtab_shndx);   /* e_shstrndx */
 
     memcpy(buf + text_off, code, code_size);
 
@@ -848,6 +863,8 @@ int write_elf_executable_aarch64(FILE *out, const uint8_t *code, size_t code_siz
                                  const char *entry_symbol) {
     if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
         return -1;
+    if (oc->num_data_relocs != 0)
+        return -1;
 
     const uint64_t image_base = 0x400000ULL;
     const size_t ehdr_size = 64;
@@ -1097,7 +1114,7 @@ int write_elf_executable_riscv64(FILE *out, const uint8_t *code, size_t code_siz
     if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
         return -1;
 
-    if (oc->num_relocs != 0)
+    if (oc->num_relocs != 0 || oc->num_data_relocs != 0)
         return -1;
 
     const uint64_t image_base = 0x400000ULL;

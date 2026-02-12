@@ -72,16 +72,22 @@ public:
     }
     bool isNegative() const { return val_ < 0.0; }
 
-    static APFloat getZero(const fltSemantics &, bool negative = false) {
-        return APFloat(negative ? -0.0 : 0.0);
+    static APFloat getZero(const fltSemantics &sem, bool negative = false) {
+        APFloat r(negative ? -0.0 : 0.0);
+        r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
+        return r;
     }
-    static APFloat getInf(const fltSemantics &, bool negative = false) {
-        return APFloat(negative ? -__builtin_inf() : __builtin_inf());
+    static APFloat getInf(const fltSemantics &sem, bool negative = false) {
+        APFloat r(negative ? -__builtin_inf() : __builtin_inf());
+        r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
+        return r;
     }
-    static APFloat getNaN(const fltSemantics &, bool negative = false, uint64_t payload = 0) {
+    static APFloat getNaN(const fltSemantics &sem, bool negative = false, uint64_t payload = 0) {
         (void)payload;
         double v = __builtin_nan("");
-        return APFloat(negative ? -v : v);
+        APFloat r(negative ? -v : v);
+        r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
+        return r;
     }
 
     using Semantics = APFloatBase::Semantics;

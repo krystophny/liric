@@ -14,6 +14,7 @@ enum {
     LR_RELOC_ARM64_PAGEOFF12          = 4,
     LR_RELOC_ARM64_GOT_LOAD_PAGE21    = 5,
     LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12 = 6,
+    LR_RELOC_ARM64_ABS64              = 7,
 };
 
 /* x86_64 relocation types (used by x86_64 backend) */
