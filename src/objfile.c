@@ -228,6 +228,25 @@ void lr_obj_add_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
     oc->relocs[i].type = type;
 }
 
+void lr_obj_add_data_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
+                            uint32_t symbol_idx, uint8_t type) {
+    if (oc->num_data_relocs == oc->data_reloc_cap) {
+        uint32_t new_cap = oc->data_reloc_cap == 0
+            ? OBJ_INITIAL_RELOC_CAP
+            : oc->data_reloc_cap * 2;
+        lr_obj_reloc_t *nr = realloc(oc->data_relocs,
+                                      new_cap * sizeof(lr_obj_reloc_t));
+        if (!nr) return;
+        oc->data_relocs = nr;
+        oc->data_reloc_cap = new_cap;
+    }
+
+    uint32_t i = oc->num_data_relocs++;
+    oc->data_relocs[i].offset = offset;
+    oc->data_relocs[i].symbol_idx = symbol_idx;
+    oc->data_relocs[i].type = type;
+}
+
 typedef struct {
     uint8_t *code_buf;
     uint8_t *data_buf;
@@ -274,6 +293,7 @@ static void obj_ctx_destroy(lr_objfile_ctx_t *ctx) {
     if (!ctx)
         return;
     free(ctx->relocs);
+    free(ctx->data_relocs);
     free(ctx->symbols);
     free(ctx->symbol_index);
     free(ctx->module_sym_defined);
@@ -506,6 +526,20 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
             lr_arena_destroy(arena);
             obj_build_result_destroy(out);
             return -1;
+        }
+
+        for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
+            uint32_t sym_idx = lr_obj_ensure_symbol(
+                &out->ctx, rel->symbol_name, false, 0, 0);
+            if (sym_idx == UINT32_MAX) {
+                m->obj_ctx = NULL;
+                lr_arena_destroy(arena);
+                obj_build_result_destroy(out);
+                return -1;
+            }
+            lr_obj_add_data_reloc(&out->ctx,
+                                  (uint32_t)(out->data_pos + rel->offset),
+                                  sym_idx, LR_RELOC_X86_64_64);
         }
 
         out->data_pos += gsize;

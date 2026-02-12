@@ -42,6 +42,9 @@ typedef struct lr_objfile_ctx {
     lr_obj_reloc_t *relocs;
     uint32_t num_relocs;
     uint32_t reloc_cap;
+    lr_obj_reloc_t *data_relocs;
+    uint32_t num_data_relocs;
+    uint32_t data_reloc_cap;
     lr_obj_symbol_t *symbols;
     uint32_t num_symbols;
     uint32_t symbol_cap;
@@ -72,6 +75,9 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
 
 void lr_obj_add_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
                        uint32_t symbol_idx, uint8_t type);
+
+void lr_obj_add_data_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
+                            uint32_t symbol_idx, uint8_t type);
 
 /* Byte-level write helpers shared by Mach-O and ELF format writers */
 
