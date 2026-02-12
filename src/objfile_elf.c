@@ -23,6 +23,9 @@
 
 /* Program header constants */
 #define PT_LOAD         1
+#define PT_DYNAMIC      2
+#define PT_INTERP       3
+#define PT_GNU_RELRO    0x6474E552
 #define PF_X            0x1
 #define PF_W            0x2
 #define PF_R            0x4
@@ -33,6 +36,9 @@
 #define SHT_SYMTAB      2
 #define SHT_STRTAB      3
 #define SHT_RELA        4
+#define SHT_HASH        5
+#define SHT_DYNAMIC     6
+#define SHT_DYNSYM      11
 
 /* Section header flags */
 #define SHF_WRITE       0x1
@@ -53,6 +59,25 @@
 #define R_X86_64_PLT32      4
 #define R_X86_64_GOTPCRELX  41
 #define R_X86_64_64         1
+#define R_X86_64_GLOB_DAT   6
+
+/* Dynamic section tags */
+#define DT_NULL         0
+#define DT_NEEDED       1
+#define DT_STRTAB       5
+#define DT_SYMTAB       6
+#define DT_RELA         7
+#define DT_RELASZ       8
+#define DT_RELAENT      9
+#define DT_STRSZ        10
+#define DT_SYMENT       11
+#define DT_HASH         4
+#define DT_BIND_NOW     24
+#define DT_FLAGS        30
+#define DT_FLAGS_1      0x6FFFFFFB
+
+#define DF_BIND_NOW     0x8
+#define DF_1_NOW        0x1
 
 /* ELF aarch64 relocation types */
 #define R_AARCH64_ABS64             257
@@ -855,6 +880,753 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
     free(data_mut);
     free(got_slot_off);
     return written == total_size ? 0 : -1;
+}
+
+/*
+ * SysV ELF hash function for .hash section lookup.
+ */
+static uint32_t elf_sysv_hash(const char *name) {
+    uint32_t h = 0, g;
+    while (*name) {
+        h = (h << 4) + (uint8_t)*name++;
+        g = h & 0xF0000000;
+        if (g)
+            h ^= g >> 24;
+        h &= ~g;
+    }
+    return h;
+}
+
+/*
+ * Write a dynamically-linked ELF executable for x86_64.
+ *
+ * Produces an ET_EXEC binary with PT_INTERP and PT_DYNAMIC that the Linux
+ * dynamic linker (ld-linux-x86-64.so.2) can load.  Undefined symbols are
+ * resolved at load time via GOT entries filled by R_X86_64_GLOB_DAT
+ * relocations.  DT_BIND_NOW forces eager binding so no PLT is required.
+ *
+ * Calls to undefined external functions go through 6-byte trampolines
+ * (jmp qword [rip+disp32]) appended after the user code.  The original
+ * E8 rel32 call sites are patched to target the appropriate trampoline.
+ *
+ * Layout (two PT_LOAD segments):
+ *   Text segment (R+X): ELF header, phdrs, .interp, .hash, .dynsym,
+ *                        .dynstr, .text (start stub + code + trampolines)
+ *   Data segment (R+W): .rela.dyn, .got, .data, .dynamic
+ *   Section headers at end of file (non-loaded, for readelf/objdump)
+ */
+int write_elf_dynamic_executable_x86_64(FILE *out,
+                                         const uint8_t *code, size_t code_size,
+                                         const uint8_t *data, size_t data_size,
+                                         const lr_objfile_ctx_t *oc,
+                                         const char *entry_symbol) {
+    if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
+        return -1;
+
+    const uint64_t image_base = 0x400000ULL;
+    const size_t ehdr_size = 64;
+    const size_t phdr_size = 56;
+    const size_t page_align = 0x1000;
+
+    /* _start stub: call <entry>; mov edi, eax; call <exit_trampoline>; hlt
+     * Using libc exit() instead of raw syscall ensures stdio buffers are flushed. */
+    static const uint8_t start_stub_template[] = {
+        0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (entry) */
+        0x89, 0xC7,                      /* mov edi, eax */
+        0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (exit trampoline) */
+        0xF4                             /* hlt (unreachable) */
+    };
+    const size_t start_stub_size = sizeof(start_stub_template);
+    const size_t exit_call_off = 8; /* byte offset of disp32 in exit call */
+
+    static const char interp[] = "/lib64/ld-linux-x86-64.so.2";
+    const size_t interp_size = sizeof(interp); /* includes NUL */
+    static const char libc_name[] = "libc.so.6";
+
+    /* Count undefined symbols. Always inject "exit" for the _start stub. */
+    uint32_t num_undef = 0;
+    bool exit_in_oc = false;
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        if (!oc->symbols[i].is_defined) {
+            num_undef++;
+            if (strcmp(oc->symbols[i].name, "exit") == 0)
+                exit_in_oc = true;
+        }
+    }
+    if (num_undef == 0)
+        return -1; /* caller should use static writer instead */
+
+    /* num_dynimport = module undefined symbols + synthetic "exit" if needed */
+    uint32_t num_dynimport = num_undef + (exit_in_oc ? 0 : 1);
+    uint32_t exit_dyn_idx = 0; /* 0-based index into dyn_* arrays */
+
+    const char **dyn_names = (const char **)malloc(num_dynimport * sizeof(char *));
+    uint32_t *dyn_oc_idx = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
+    uint32_t *sym_to_dynsym = (uint32_t *)calloc(oc->num_symbols, sizeof(uint32_t));
+    if (!dyn_names || !dyn_oc_idx || !sym_to_dynsym) {
+        free(dyn_names); free(dyn_oc_idx); free(sym_to_dynsym);
+        return -1;
+    }
+    {
+        uint32_t di = 0;
+        for (uint32_t i = 0; i < oc->num_symbols; i++) {
+            if (!oc->symbols[i].is_defined) {
+                dyn_names[di] = oc->symbols[i].name;
+                dyn_oc_idx[di] = i;
+                sym_to_dynsym[i] = di + 1;
+                if (strcmp(oc->symbols[i].name, "exit") == 0)
+                    exit_dyn_idx = di;
+                di++;
+            }
+        }
+        if (!exit_in_oc) {
+            dyn_names[di] = "exit";
+            dyn_oc_idx[di] = UINT32_MAX;
+            exit_dyn_idx = di;
+            di++;
+        }
+    }
+
+    /* Build .dynstr: "\0libc.so.6\0sym1\0sym2\0..." */
+    size_t dynstr_size = 1; /* leading NUL */
+    size_t libc_name_off = dynstr_size;
+    dynstr_size += sizeof(libc_name); /* includes NUL */
+    uint32_t *dyn_name_off = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
+    if (!dyn_name_off) {
+        free(dyn_names); free(dyn_oc_idx); free(sym_to_dynsym);
+        return -1;
+    }
+    for (uint32_t i = 0; i < num_dynimport; i++) {
+        dyn_name_off[i] = (uint32_t)dynstr_size;
+        dynstr_size += strlen(dyn_names[i]) + 1;
+    }
+
+    uint32_t dynsym_count = 1 + num_dynimport;
+    size_t dynsym_size = (size_t)dynsym_count * 24;
+
+    uint32_t nbucket = num_dynimport > 0 ? num_dynimport : 1;
+    uint32_t nchain = dynsym_count;
+    size_t hash_size = (2 + nbucket + nchain) * 4;
+
+    size_t rela_dyn_size = (size_t)num_dynimport * 24;
+    size_t trampoline_size = (size_t)num_dynimport * 6;
+    size_t got_size = (size_t)num_dynimport * 8;
+
+    /* .dynamic: tag entries (each 16 bytes) */
+    /* DT_NEEDED, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT,
+     * DT_RELA, DT_RELASZ, DT_RELAENT, DT_BIND_NOW, DT_FLAGS, DT_FLAGS_1,
+     * DT_NULL  = 13 entries */
+    const uint32_t num_dynamic_entries = 13;
+    size_t dynamic_size = (size_t)num_dynamic_entries * 16;
+
+    /* -- Layout computation --
+     *
+     * Text segment (page-aligned, R+X):
+     *   ehdr + phdrs | .interp | .hash | .dynsym | .dynstr | .text
+     * Data segment (page-aligned, R+W):
+     *   .rela.dyn | .got | .data | .dynamic
+     * Section headers (not loaded):
+     *   null + .interp + .hash + .dynsym + .dynstr + .text + .rela.dyn
+     *   + .got + .data + .dynamic + .shstrtab = 11 sections
+     */
+    const uint32_t num_phdrs = 4; /* PT_INTERP, PT_LOAD(text), PT_LOAD(data), PT_DYNAMIC */
+    size_t phdrs_end = ehdr_size + (size_t)num_phdrs * phdr_size;
+
+    size_t interp_off = obj_align_up(phdrs_end, 1);
+    size_t interp_end = interp_off + interp_size;
+
+    size_t hash_off = obj_align_up(interp_end, 4);
+    size_t hash_end = hash_off + hash_size;
+
+    size_t dynsym_off = obj_align_up(hash_end, 8);
+    size_t dynsym_end = dynsym_off + dynsym_size;
+
+    size_t dynstr_off = dynsym_end;
+    size_t dynstr_end = dynstr_off + dynstr_size;
+
+    size_t text_off = obj_align_up(dynstr_end, 16);
+    size_t code_off = text_off + start_stub_size;
+    size_t tramp_off = code_off + code_size;
+    size_t text_end = tramp_off + trampoline_size;
+
+    /* Data segment starts on next page boundary */
+    size_t data_seg_off = obj_align_up(text_end, page_align);
+
+    size_t rela_dyn_off = data_seg_off;
+    size_t rela_dyn_end = rela_dyn_off + rela_dyn_size;
+
+    size_t got_off = obj_align_up(rela_dyn_end, 8);
+    size_t got_end = got_off + got_size;
+
+    /* Internal defined-symbol GOT slots (for GOTPCREL relocations to
+     * defined symbols, same approach as the static writer) */
+    uint32_t *int_got_slot_off = NULL;
+    if (oc->num_symbols > 0) {
+        int_got_slot_off = (uint32_t *)calloc(oc->num_symbols, sizeof(uint32_t));
+        if (!int_got_slot_off) {
+            free(dyn_names); free(dyn_oc_idx);
+            free(sym_to_dynsym); free(dyn_name_off);
+            return -1;
+        }
+        for (uint32_t i = 0; i < oc->num_symbols; i++)
+            int_got_slot_off[i] = UINT32_MAX;
+    }
+
+    size_t extra_got_size = 0;
+    for (uint32_t i = 0; i < oc->num_relocs; i++) {
+        const lr_obj_reloc_t *rel = &oc->relocs[i];
+        if (rel->type != LR_RELOC_X86_64_GOTPCREL)
+            continue;
+        if (rel->symbol_idx >= oc->num_symbols)
+            continue;
+        if (!oc->symbols[rel->symbol_idx].is_defined)
+            continue; /* handled by dynamic GOT */
+        if (int_got_slot_off[rel->symbol_idx] != UINT32_MAX)
+            continue;
+        int_got_slot_off[rel->symbol_idx] = (uint32_t)(got_end - data_seg_off + extra_got_size);
+        extra_got_size += 8;
+    }
+
+    size_t user_data_off = obj_align_up(got_end + extra_got_size, 8);
+    size_t user_data_end = user_data_off + data_size;
+
+    size_t dynamic_off = obj_align_up(user_data_end, 8);
+    size_t dynamic_end = dynamic_off + dynamic_size;
+
+    size_t data_seg_end = dynamic_end;
+
+    /* Section header string table */
+    /* \0.interp\0.hash\0.dynsym\0.dynstr\0.text\0.rela.dyn\0.got\0.data\0.dynamic\0.shstrtab\0 */
+    const char shstrtab_content[] =
+        "\0.interp\0.hash\0.dynsym\0.dynstr\0.text\0.rela.dyn\0.got\0.data\0.dynamic\0.shstrtab";
+    size_t shstrtab_size = sizeof(shstrtab_content);
+    uint32_t shn_interp  = 1;
+    uint32_t shn_hash    = 9;
+    uint32_t shn_dynsym  = 15;
+    uint32_t shn_dynstr  = 23;
+    uint32_t shn_text    = 31;
+    uint32_t shn_reladyn = 37;
+    uint32_t shn_got     = 47;
+    uint32_t shn_data    = 52;
+    uint32_t shn_dynamic = 58;
+    uint32_t shn_shstrtab = 67;
+
+    size_t shstrtab_off = data_seg_end;
+    size_t shstrtab_end = shstrtab_off + shstrtab_size;
+
+    uint16_t num_sections = 11; /* null + 10 named sections */
+    size_t shdr_off = obj_align_up(shstrtab_end, 8);
+    size_t total_size = shdr_off + (size_t)num_sections * 64;
+
+    /* Virtual addresses */
+    uint64_t interp_vaddr  = image_base + interp_off;
+    uint64_t hash_vaddr    = image_base + hash_off;
+    uint64_t dynsym_vaddr  = image_base + dynsym_off;
+    uint64_t dynstr_vaddr  = image_base + dynstr_off;
+    uint64_t text_vaddr    = image_base + text_off;
+    uint64_t code_vaddr    = image_base + code_off;
+    uint64_t tramp_vaddr   = image_base + tramp_off;
+    uint64_t data_seg_vaddr = image_base + data_seg_off;
+    uint64_t rela_dyn_vaddr = image_base + rela_dyn_off;
+    uint64_t got_vaddr     = image_base + got_off;
+    uint64_t user_data_vaddr = image_base + user_data_off;
+    uint64_t dynamic_vaddr = image_base + dynamic_off;
+    (void)text_vaddr;
+
+    uint64_t entry_vaddr = image_base + text_off;
+
+    /* Find the entry point symbol */
+    const lr_obj_symbol_t *entry_sym = NULL;
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        const lr_obj_symbol_t *sym = &oc->symbols[i];
+        if (sym->is_defined && sym->section == 1 &&
+            strcmp(sym->name, entry_symbol) == 0) {
+            entry_sym = sym;
+            break;
+        }
+    }
+    if (!entry_sym || (size_t)entry_sym->offset >= code_size) {
+        free(dyn_names); free(dyn_oc_idx);
+        free(sym_to_dynsym); free(dyn_name_off);
+        free(int_got_slot_off);
+        return -1;
+    }
+
+    /* Allocate output buffer and mutable code/data copies */
+    uint8_t *buf = (uint8_t *)calloc(1, total_size);
+    uint8_t *code_mut = (uint8_t *)malloc(code_size);
+    size_t data_area_size = data_seg_end - data_seg_off;
+    uint8_t *data_area = (uint8_t *)calloc(1, data_area_size > 0 ? data_area_size : 1);
+    if (!buf || !code_mut || !data_area) {
+        free(buf); free(code_mut); free(data_area);
+        free(dyn_names); free(dyn_oc_idx);
+        free(sym_to_dynsym); free(dyn_name_off);
+        free(int_got_slot_off);
+        return -1;
+    }
+    memcpy(code_mut, code, code_size);
+    if (data && data_size > 0)
+        memcpy(data_area + (user_data_off - data_seg_off), data, data_size);
+
+    /* Apply relocations for defined symbols (same logic as static writer) */
+    for (uint32_t i = 0; i < oc->num_relocs; i++) {
+        const lr_obj_reloc_t *rel = &oc->relocs[i];
+        if (rel->symbol_idx >= oc->num_symbols)
+            goto fail;
+        if ((size_t)rel->offset + 4 > code_size)
+            goto fail;
+
+        const lr_obj_symbol_t *sym = &oc->symbols[rel->symbol_idx];
+
+        if (!sym->is_defined) {
+            /* Undefined symbol: PC32/PLT32 will be redirected to trampoline below */
+            if (rel->type == LR_RELOC_X86_64_PC32 ||
+                rel->type == LR_RELOC_X86_64_PLT32) {
+                /* Redirect call to trampoline for this dynamic import */
+                uint32_t dsym = sym_to_dynsym[rel->symbol_idx];
+                if (dsym == 0) goto fail;
+                uint32_t undef_idx = dsym - 1;
+                uint64_t tramp_target = tramp_vaddr + (uint64_t)undef_idx * 6;
+                uint64_t place_vaddr = code_vaddr + rel->offset;
+                if (patch_rel32_vaddr(code_mut, code_size, rel->offset,
+                                      place_vaddr, tramp_target) != 0)
+                    goto fail;
+                continue;
+            }
+            if (rel->type == LR_RELOC_X86_64_GOTPCREL) {
+                /* Undefined symbol with GOTPCREL: point to dynamic GOT slot */
+                uint32_t dsym = sym_to_dynsym[rel->symbol_idx];
+                if (dsym == 0) goto fail;
+                uint32_t undef_idx = dsym - 1;
+                uint64_t slot_vaddr = got_vaddr + (uint64_t)undef_idx * 8;
+                uint64_t place_vaddr = code_vaddr + rel->offset;
+                if (patch_rel32_vaddr(code_mut, code_size, rel->offset,
+                                      place_vaddr, slot_vaddr) != 0)
+                    goto fail;
+                continue;
+            }
+            goto fail; /* unsupported reloc type for undefined symbol */
+        }
+
+        /* Defined symbol: resolve directly */
+        uint64_t target_vaddr;
+        if (sym->section == 1) {
+            if ((size_t)sym->offset >= code_size) goto fail;
+            target_vaddr = code_vaddr + sym->offset;
+        } else if (sym->section == 2) {
+            target_vaddr = user_data_vaddr + sym->offset;
+        } else {
+            goto fail;
+        }
+
+        uint64_t place_vaddr = code_vaddr + rel->offset;
+        int rc = 0;
+        switch (rel->type) {
+        case LR_RELOC_X86_64_PC32:
+        case LR_RELOC_X86_64_PLT32:
+            rc = patch_rel32_vaddr(code_mut, code_size, rel->offset,
+                                   place_vaddr, target_vaddr);
+            break;
+        case LR_RELOC_X86_64_GOTPCREL: {
+            if (!int_got_slot_off ||
+                int_got_slot_off[rel->symbol_idx] == UINT32_MAX) {
+                rc = -1;
+                break;
+            }
+            uint32_t slot_rel = int_got_slot_off[rel->symbol_idx];
+            uint64_t slot_vaddr = data_seg_vaddr + slot_rel;
+            if (write_u64_le(data_area, data_area_size, slot_rel,
+                              target_vaddr) != 0) {
+                rc = -1;
+                break;
+            }
+            rc = patch_rel32_vaddr(code_mut, code_size, rel->offset,
+                                   place_vaddr, slot_vaddr);
+            break;
+        }
+        case LR_RELOC_X86_64_64:
+            rc = write_u64_le(code_mut, code_size, rel->offset, target_vaddr);
+            break;
+        default:
+            rc = -1;
+            break;
+        }
+        if (rc != 0) goto fail;
+    }
+
+    /* Apply data relocations for defined symbols */
+    for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
+        const lr_obj_reloc_t *rel = &oc->data_relocs[i];
+        if (rel->symbol_idx >= oc->num_symbols ||
+            rel->type != LR_RELOC_X86_64_64)
+            goto fail;
+        const lr_obj_symbol_t *sym = &oc->symbols[rel->symbol_idx];
+        if (!sym->is_defined) goto fail;
+
+        uint64_t target_vaddr;
+        if (sym->section == 1)
+            target_vaddr = code_vaddr + sym->offset;
+        else if (sym->section == 2)
+            target_vaddr = user_data_vaddr + sym->offset;
+        else
+            goto fail;
+
+        uint32_t da_off = (uint32_t)(user_data_off - data_seg_off) + rel->offset;
+        if ((size_t)da_off + 8 > data_area_size) goto fail;
+        if (write_u64_le(data_area, data_area_size, da_off, target_vaddr) != 0)
+            goto fail;
+    }
+
+    /* Build trampolines in the output buffer (after code) */
+    {
+        uint8_t *tp = buf + tramp_off;
+        for (uint32_t i = 0; i < num_dynimport; i++) {
+            uint64_t slot_va = got_vaddr + (uint64_t)i * 8;
+            uint64_t tramp_ip = tramp_vaddr + (uint64_t)i * 6 + 6; /* RIP after jmp */
+            int32_t disp = (int32_t)((int64_t)slot_va - (int64_t)tramp_ip);
+            *tp++ = 0xFF; /* jmp qword [rip+disp32] */
+            *tp++ = 0x25;
+            tp[0] = (uint8_t)(disp);
+            tp[1] = (uint8_t)(disp >> 8);
+            tp[2] = (uint8_t)(disp >> 16);
+            tp[3] = (uint8_t)(disp >> 24);
+            tp += 4;
+        }
+    }
+
+    /* -- Write .interp -- */
+    memcpy(buf + interp_off, interp, interp_size);
+
+    /* -- Write .hash -- */
+    {
+        uint8_t *hp = buf + hash_off;
+        w32(&hp, nbucket);
+        w32(&hp, nchain);
+        /* bucket array: hash(name) % nbucket -> first dynsym index */
+        uint32_t *buckets = (uint32_t *)calloc(nbucket, sizeof(uint32_t));
+        uint32_t *chains = (uint32_t *)calloc(nchain, sizeof(uint32_t));
+        if (!buckets || !chains) {
+            free(buckets); free(chains);
+            goto fail;
+        }
+        /* dynsym[0] is STN_UNDEF, hash chains for real symbols start at 1 */
+        for (uint32_t i = 0; i < num_dynimport; i++) {
+            uint32_t dsym_idx = i + 1;
+            const char *name = dyn_names[i];
+            uint32_t h = elf_sysv_hash(name) % nbucket;
+            chains[dsym_idx] = buckets[h];
+            buckets[h] = dsym_idx;
+        }
+        for (uint32_t i = 0; i < nbucket; i++)
+            w32(&hp, buckets[i]);
+        for (uint32_t i = 0; i < nchain; i++)
+            w32(&hp, chains[i]);
+        free(buckets);
+        free(chains);
+    }
+
+    /* -- Write .dynsym -- */
+    {
+        uint8_t *sp = buf + dynsym_off;
+        /* STN_UNDEF entry (24 zero bytes) */
+        wpad(&sp, 24);
+        for (uint32_t i = 0; i < num_dynimport; i++) {
+            w32(&sp, dyn_name_off[i]);                          /* st_name */
+            w8(&sp, ELF64_ST_INFO(STB_GLOBAL, STT_NOTYPE));      /* st_info */
+            w8(&sp, 0);                                            /* st_other */
+            w16(&sp, SHN_UNDEF);                                  /* st_shndx */
+            w64(&sp, 0);                                           /* st_value */
+            w64(&sp, 0);                                           /* st_size */
+        }
+    }
+
+    /* -- Write .dynstr -- */
+    {
+        uint8_t *dp = buf + dynstr_off;
+        *dp++ = 0; /* leading NUL */
+        memcpy(dp, libc_name, sizeof(libc_name));
+        dp += sizeof(libc_name);
+        for (uint32_t i = 0; i < num_dynimport; i++) {
+            const char *name = dyn_names[i];
+            size_t slen = strlen(name) + 1;
+            memcpy(dp, name, slen);
+            dp += slen;
+        }
+    }
+
+    /* -- Write .text (start stub + code) -- */
+    memcpy(buf + text_off, start_stub_template, start_stub_size);
+    memcpy(buf + code_off, code_mut, code_size);
+
+    /* Patch _start call to entry symbol */
+    if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + 1),
+                          entry_vaddr + 1, code_vaddr + entry_sym->offset) != 0)
+        goto fail;
+
+    /* Patch _start call to exit trampoline */
+    {
+        uint64_t exit_tramp_va = tramp_vaddr + (uint64_t)exit_dyn_idx * 6;
+        uint64_t exit_call_ip = entry_vaddr + exit_call_off;
+        if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + exit_call_off),
+                              exit_call_ip, exit_tramp_va) != 0)
+            goto fail;
+    }
+
+    /* -- Write data segment sections into data_area, then copy -- */
+
+    /* .rela.dyn */
+    {
+        uint8_t *rp = data_area + (rela_dyn_off - data_seg_off);
+        for (uint32_t i = 0; i < num_dynimport; i++) {
+            uint64_t got_slot = got_vaddr + (uint64_t)i * 8;
+            uint32_t dsym_idx = i + 1;
+            w64(&rp, got_slot);                                       /* r_offset */
+            w64(&rp, ELF64_R_INFO(dsym_idx, R_X86_64_GLOB_DAT));    /* r_info */
+            w64(&rp, 0);                                              /* r_addend */
+        }
+    }
+
+    /* .got is zero-initialized (dynamic linker fills it); already calloc'd */
+
+    /* .dynamic */
+    {
+        uint8_t *dp = data_area + (dynamic_off - data_seg_off);
+        /* DT_NEEDED "libc.so.6" */
+        w64(&dp, DT_NEEDED);  w64(&dp, libc_name_off);
+        /* DT_HASH */
+        w64(&dp, DT_HASH);    w64(&dp, hash_vaddr);
+        /* DT_STRTAB */
+        w64(&dp, DT_STRTAB);  w64(&dp, dynstr_vaddr);
+        /* DT_SYMTAB */
+        w64(&dp, DT_SYMTAB);  w64(&dp, dynsym_vaddr);
+        /* DT_STRSZ */
+        w64(&dp, DT_STRSZ);   w64(&dp, dynstr_size);
+        /* DT_SYMENT */
+        w64(&dp, DT_SYMENT);  w64(&dp, 24);
+        /* DT_RELA */
+        w64(&dp, DT_RELA);    w64(&dp, rela_dyn_vaddr);
+        /* DT_RELASZ */
+        w64(&dp, DT_RELASZ);  w64(&dp, rela_dyn_size);
+        /* DT_RELAENT */
+        w64(&dp, DT_RELAENT); w64(&dp, 24);
+        /* DT_BIND_NOW */
+        w64(&dp, DT_BIND_NOW); w64(&dp, 0);
+        /* DT_FLAGS */
+        w64(&dp, DT_FLAGS);   w64(&dp, DF_BIND_NOW);
+        /* DT_FLAGS_1 */
+        w64(&dp, DT_FLAGS_1); w64(&dp, DF_1_NOW);
+        /* DT_NULL */
+        w64(&dp, DT_NULL);    w64(&dp, 0);
+    }
+
+    /* Copy data segment into output buffer */
+    memcpy(buf + data_seg_off, data_area, data_area_size);
+
+    /* -- ELF header -- */
+    {
+        uint8_t *p = buf;
+        w8(&p, ELFMAG0); w8(&p, ELFMAG1); w8(&p, ELFMAG2); w8(&p, ELFMAG3);
+        w8(&p, ELFCLASS64);
+        w8(&p, ELFDATA2LSB);
+        w8(&p, EV_CURRENT);
+        w8(&p, ELFOSABI_NONE);
+        wpad(&p, 8);                    /* e_ident padding */
+        w16(&p, ET_EXEC);               /* e_type */
+        w16(&p, EM_X86_64);             /* e_machine */
+        w32(&p, EV_CURRENT);            /* e_version */
+        w64(&p, entry_vaddr);           /* e_entry */
+        w64(&p, ehdr_size);             /* e_phoff */
+        w64(&p, shdr_off);              /* e_shoff */
+        w32(&p, 0);                      /* e_flags */
+        w16(&p, 64);                     /* e_ehsize */
+        w16(&p, 56);                     /* e_phentsize */
+        w16(&p, num_phdrs);             /* e_phnum */
+        w16(&p, 64);                     /* e_shentsize */
+        w16(&p, num_sections);           /* e_shnum */
+        w16(&p, num_sections - 1);       /* e_shstrndx = last section */
+    }
+
+    /* -- Program headers -- */
+    {
+        uint8_t *p = buf + ehdr_size;
+
+        /* PT_INTERP */
+        w32(&p, PT_INTERP);
+        w32(&p, PF_R);
+        w64(&p, interp_off);              /* p_offset */
+        w64(&p, interp_vaddr);            /* p_vaddr */
+        w64(&p, interp_vaddr);            /* p_paddr */
+        w64(&p, interp_size);             /* p_filesz */
+        w64(&p, interp_size);             /* p_memsz */
+        w64(&p, 1);                        /* p_align */
+
+        /* PT_LOAD: text segment (R+X) */
+        w32(&p, PT_LOAD);
+        w32(&p, PF_R | PF_X);
+        w64(&p, 0);                        /* p_offset: from file start */
+        w64(&p, image_base);              /* p_vaddr */
+        w64(&p, image_base);              /* p_paddr */
+        w64(&p, text_end);                /* p_filesz */
+        w64(&p, text_end);                /* p_memsz */
+        w64(&p, page_align);              /* p_align */
+
+        /* PT_LOAD: data segment (R+W) */
+        w32(&p, PT_LOAD);
+        w32(&p, PF_R | PF_W);
+        w64(&p, data_seg_off);            /* p_offset */
+        w64(&p, data_seg_vaddr);          /* p_vaddr */
+        w64(&p, data_seg_vaddr);          /* p_paddr */
+        w64(&p, data_seg_end - data_seg_off); /* p_filesz */
+        w64(&p, data_seg_end - data_seg_off); /* p_memsz */
+        w64(&p, page_align);              /* p_align */
+
+        /* PT_DYNAMIC */
+        w32(&p, PT_DYNAMIC);
+        w32(&p, PF_R | PF_W);
+        w64(&p, dynamic_off);             /* p_offset */
+        w64(&p, dynamic_vaddr);           /* p_vaddr */
+        w64(&p, dynamic_vaddr);           /* p_paddr */
+        w64(&p, dynamic_size);            /* p_filesz */
+        w64(&p, dynamic_size);            /* p_memsz */
+        w64(&p, 8);                        /* p_align */
+    }
+
+    /* -- Write .shstrtab -- */
+    memcpy(buf + shstrtab_off, shstrtab_content, shstrtab_size);
+
+    /* -- Section headers -- */
+    {
+        uint8_t *sh = buf + shdr_off;
+
+        /* [0] SHT_NULL */
+        wpad(&sh, 64);
+
+        /* [1] .interp */
+        w32(&sh, shn_interp);
+        w32(&sh, SHT_PROGBITS);
+        w64(&sh, SHF_ALLOC);
+        w64(&sh, interp_vaddr);
+        w64(&sh, interp_off);
+        w64(&sh, interp_size);
+        w32(&sh, 0); w32(&sh, 0);
+        w64(&sh, 1); w64(&sh, 0);
+
+        /* [2] .hash */
+        w32(&sh, shn_hash);
+        w32(&sh, SHT_HASH);
+        w64(&sh, SHF_ALLOC);
+        w64(&sh, hash_vaddr);
+        w64(&sh, hash_off);
+        w64(&sh, hash_size);
+        w32(&sh, 3); /* sh_link = .dynsym section index */
+        w32(&sh, 0);
+        w64(&sh, 4); w64(&sh, 4);
+
+        /* [3] .dynsym */
+        w32(&sh, shn_dynsym);
+        w32(&sh, SHT_DYNSYM);
+        w64(&sh, SHF_ALLOC);
+        w64(&sh, dynsym_vaddr);
+        w64(&sh, dynsym_off);
+        w64(&sh, dynsym_size);
+        w32(&sh, 4); /* sh_link = .dynstr section index */
+        w32(&sh, 1); /* sh_info = index of first non-local symbol */
+        w64(&sh, 8); w64(&sh, 24);
+
+        /* [4] .dynstr */
+        w32(&sh, shn_dynstr);
+        w32(&sh, SHT_STRTAB);
+        w64(&sh, SHF_ALLOC);
+        w64(&sh, dynstr_vaddr);
+        w64(&sh, dynstr_off);
+        w64(&sh, dynstr_size);
+        w32(&sh, 0); w32(&sh, 0);
+        w64(&sh, 1); w64(&sh, 0);
+
+        /* [5] .text */
+        w32(&sh, shn_text);
+        w32(&sh, SHT_PROGBITS);
+        w64(&sh, SHF_ALLOC | SHF_EXECINSTR);
+        w64(&sh, image_base + text_off);
+        w64(&sh, text_off);
+        w64(&sh, text_end - text_off);
+        w32(&sh, 0); w32(&sh, 0);
+        w64(&sh, 16); w64(&sh, 0);
+
+        /* [6] .rela.dyn */
+        w32(&sh, shn_reladyn);
+        w32(&sh, SHT_RELA);
+        w64(&sh, SHF_ALLOC);
+        w64(&sh, rela_dyn_vaddr);
+        w64(&sh, rela_dyn_off);
+        w64(&sh, rela_dyn_size);
+        w32(&sh, 3); /* sh_link = .dynsym section index */
+        w32(&sh, 0);
+        w64(&sh, 8); w64(&sh, 24);
+
+        /* [7] .got */
+        w32(&sh, shn_got);
+        w32(&sh, SHT_PROGBITS);
+        w64(&sh, SHF_WRITE | SHF_ALLOC);
+        w64(&sh, got_vaddr);
+        w64(&sh, got_off);
+        w64(&sh, got_size + extra_got_size);
+        w32(&sh, 0); w32(&sh, 0);
+        w64(&sh, 8); w64(&sh, 8);
+
+        /* [8] .data */
+        w32(&sh, shn_data);
+        w32(&sh, SHT_PROGBITS);
+        w64(&sh, SHF_WRITE | SHF_ALLOC);
+        w64(&sh, user_data_vaddr);
+        w64(&sh, user_data_off);
+        w64(&sh, data_size);
+        w32(&sh, 0); w32(&sh, 0);
+        w64(&sh, 8); w64(&sh, 0);
+
+        /* [9] .dynamic */
+        w32(&sh, shn_dynamic);
+        w32(&sh, SHT_DYNAMIC);
+        w64(&sh, SHF_WRITE | SHF_ALLOC);
+        w64(&sh, dynamic_vaddr);
+        w64(&sh, dynamic_off);
+        w64(&sh, dynamic_size);
+        w32(&sh, 4); /* sh_link = .dynstr section index */
+        w32(&sh, 0);
+        w64(&sh, 8); w64(&sh, 16);
+
+        /* [10] .shstrtab */
+        w32(&sh, shn_shstrtab);
+        w32(&sh, SHT_STRTAB);
+        w64(&sh, 0);
+        w64(&sh, 0);
+        w64(&sh, shstrtab_off);
+        w64(&sh, shstrtab_size);
+        w32(&sh, 0); w32(&sh, 0);
+        w64(&sh, 1); w64(&sh, 0);
+    }
+
+    size_t written = fwrite(buf, 1, total_size, out);
+    free(buf);
+    free(code_mut);
+    free(data_area);
+    free(dyn_names);
+    free(dyn_oc_idx);
+    free(sym_to_dynsym);
+    free(dyn_name_off);
+    free(int_got_slot_off);
+    return written == total_size ? 0 : -1;
+
+fail:
+    free(buf);
+    free(code_mut);
+    free(data_area);
+    free(dyn_names);
+    free(dyn_oc_idx);
+    free(sym_to_dynsym);
+    free(dyn_name_off);
+    free(int_got_slot_off);
+    return -1;
 }
 
 int write_elf_executable_aarch64(FILE *out, const uint8_t *code, size_t code_size,

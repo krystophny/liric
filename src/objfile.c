@@ -582,11 +582,26 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
     int result = -1;
 #if defined(__linux__)
     if (strcmp(target->name, "x86_64") == 0) {
-        result = write_elf_executable_x86_64(
-            out, build.code_buf, build.code_pos,
-            build.has_data ? build.data_buf : NULL,
-            build.has_data ? build.data_pos : 0,
-            &build.ctx, entry_symbol);
+        bool has_undef = false;
+        for (uint32_t i = 0; i < build.ctx.num_symbols; i++) {
+            if (!build.ctx.symbols[i].is_defined) {
+                has_undef = true;
+                break;
+            }
+        }
+        if (has_undef) {
+            result = write_elf_dynamic_executable_x86_64(
+                out, build.code_buf, build.code_pos,
+                build.has_data ? build.data_buf : NULL,
+                build.has_data ? build.data_pos : 0,
+                &build.ctx, entry_symbol);
+        } else {
+            result = write_elf_executable_x86_64(
+                out, build.code_buf, build.code_pos,
+                build.has_data ? build.data_buf : NULL,
+                build.has_data ? build.data_pos : 0,
+                &build.ctx, entry_symbol);
+        }
     } else if (strcmp(target->name, "aarch64") == 0) {
         result = write_elf_executable_aarch64(
             out, build.code_buf, build.code_pos,

@@ -198,6 +198,9 @@ int test_objfile_elf_executable_aarch64_header(void);
 #if defined(__linux__)
 int test_objfile_elf_exe_runs(void);
 int test_objfile_link_and_run(void);
+int test_dynelf_puts_hello(void);
+int test_dynelf_readelf_dynamic(void);
+int test_dynelf_ldd_check(void);
 #endif
 #else
 int test_objfile_macho_header(void);
@@ -414,6 +417,9 @@ int main(void) {
 #if defined(__linux__)
     RUN_TEST(test_objfile_elf_exe_runs);
     RUN_TEST(test_objfile_link_and_run);
+    RUN_TEST(test_dynelf_puts_hello);
+    RUN_TEST(test_dynelf_readelf_dynamic);
+    RUN_TEST(test_dynelf_ldd_check);
 #endif
 #else
     RUN_TEST(test_objfile_macho_header);
