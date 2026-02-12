@@ -67,7 +67,9 @@ typedef enum lr_opcode {
     LR_OP_PTRTOINT,
     LR_OP_INTTOPTR,
     LR_OP_SITOFP,
+    LR_OP_UITOFP,
     LR_OP_FPTOSI,
+    LR_OP_FPTOUI,
     LR_OP_FPEXT,
     LR_OP_FPTRUNC,
     LR_OP_EXTRACTVALUE,
@@ -261,6 +263,8 @@ bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
                          const lr_operand_t *idx_op, lr_gep_step_t *out);
 lr_operand_t lr_canonicalize_gep_index(lr_module_t *m, lr_block_t *b,
                                        lr_func_t *f, lr_operand_t idx_op);
+
+int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 
 void lr_module_dump(lr_module_t *m, FILE *out);
 

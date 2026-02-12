@@ -57,6 +57,9 @@ typedef struct {
     uint32_t current_inst_index;
     bool func_uses_internal_sret;
     int32_t sret_ptr_off;
+    bool func_is_vararg;
+    int32_t vararg_rsa_off;
+    uint32_t vararg_named_gp;
 } x86_compile_ctx_t;
 
 static void invalidate_cached_reg(x86_compile_ctx_t *ctx, uint8_t reg) {
@@ -134,7 +137,7 @@ static bool inst_produces_elidable_rax_value(const lr_inst_t *inst) {
     case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
     case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
     case LR_OP_FCMP:
-    case LR_OP_FPTOSI:
+    case LR_OP_FPTOSI: case LR_OP_FPTOUI:
     case LR_OP_EXTRACTVALUE:
         return true;
     default:
@@ -159,7 +162,7 @@ static bool inst_consumes_operand0_in_rax(const lr_inst_t *inst) {
     case LR_OP_SEXT:
     case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
     case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
-    case LR_OP_SITOFP:
+    case LR_OP_SITOFP: case LR_OP_UITOFP:
         return true;
     default:
         return false;
@@ -1220,6 +1223,9 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         .current_inst_index = 0,
         .func_uses_internal_sret = false,
         .sret_ptr_off = 0,
+        .func_is_vararg = false,
+        .vararg_rsa_off = 0,
+        .vararg_named_gp = 0,
     };
 
     attach_obj_symbol_meta_cache(&ctx);
@@ -1253,6 +1259,17 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
         int32_t caller_off = 16 + (int32_t)(i - param_gp_cap) * 8;
         encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8B, X86_RAX, X86_RBP, caller_off, 8);
         emit_store_slot(&ctx, func->param_vregs[i], X86_RAX);
+    }
+
+    ctx.func_is_vararg = func->vararg;
+    if (func->vararg) {
+        uint32_t named_gp = func->num_params;
+        if (named_gp > 6) named_gp = 6;
+        ctx.vararg_named_gp = named_gp;
+        ctx.vararg_rsa_off = alloc_temp_slot(&ctx, 48, 8);
+        for (uint32_t i = 0; i < 6; i++)
+            emit_mem_store_sized(&ctx, param_regs[i], X86_RBP,
+                                 ctx.vararg_rsa_off + (int32_t)(i * 8), 8);
     }
 
     /* Walk IR blocks and instructions, emitting code directly */
@@ -1628,7 +1645,27 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
                 break;
             }
+            case LR_OP_UITOFP: {
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                size_t src_sz = lr_type_size(inst->operands[0].type);
+                if (src_sz <= 4) {
+                    /* zero-extend to 64-bit: mov eax, eax */
+                    ctx.buf[ctx.pos++] = 0x89; ctx.buf[ctx.pos++] = 0xC0;
+                }
+                emit_cvtsi2fp(&ctx, FP_SCRATCH0, X86_RAX, fsize);
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
+                break;
+            }
             case LR_OP_FPTOSI: {
+                uint8_t fsize = (inst->operands[0].type &&
+                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_cvtfp2si(&ctx, X86_RAX, FP_SCRATCH0, fsize);
+                emit_store_slot(&ctx, inst->dest, X86_RAX);
+                break;
+            }
+            case LR_OP_FPTOUI: {
                 uint8_t fsize = (inst->operands[0].type &&
                                  inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
                 emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
@@ -1809,6 +1846,41 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 break;
             }
             case LR_OP_CALL: {
+                if (inst->operands[0].kind == LR_VAL_GLOBAL && ctx.mod) {
+                    const char *cname = lr_module_symbol_name(
+                        ctx.mod, inst->operands[0].global_id);
+                    if (cname && strcmp(cname, "llvm.va_start.p0") == 0) {
+                        if (ctx.func_is_vararg && inst->num_operands >= 2) {
+                            emit_load_operand(&ctx, &inst->operands[1], X86_RAX);
+                            uint32_t gp_off = ctx.vararg_named_gp * 8;
+                            emit_mov_imm(&ctx, X86_RCX, (int64_t)gp_off, false);
+                            encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RCX, X86_RAX, 0, 4);
+                            emit_mov_imm(&ctx, X86_RCX, 48, false);
+                            encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RCX, X86_RAX, 4, 4);
+                            int32_t overflow_off = 16 + (int32_t)(ctx.vararg_named_gp > 6 ? ctx.vararg_named_gp - 6 : 0) * 8;
+                            encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8D, X86_RCX, X86_RBP, overflow_off, 8);
+                            encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RCX, X86_RAX, 8, 8);
+                            encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8D, X86_RCX, X86_RBP, ctx.vararg_rsa_off, 8);
+                            encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_RCX, X86_RAX, 16, 8);
+                            invalidate_cached_gprs(&ctx);
+                        }
+                        break;
+                    }
+                    if (cname && strcmp(cname, "llvm.va_end.p0") == 0)
+                        break;
+                    if (cname && strcmp(cname, "llvm.va_copy.p0") == 0) {
+                        if (inst->num_operands >= 3) {
+                            emit_load_operand(&ctx, &inst->operands[1], X86_RAX);
+                            emit_load_operand(&ctx, &inst->operands[2], X86_RCX);
+                            for (int32_t off = 0; off < 24; off += 8) {
+                                encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x8B, X86_R11, X86_RCX, off, 8);
+                                encode_mem(ctx.buf, &ctx.pos, ctx.buflen, 0x89, X86_R11, X86_RAX, off, 8);
+                            }
+                            invalidate_cached_gprs(&ctx);
+                        }
+                        break;
+                    }
+                }
                 static const uint8_t call_regs[] = { X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9 };
                 static const uint8_t call_fp_regs[] = {
                     X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3,
@@ -2052,10 +2124,16 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     return 0;
 }
 
+/* Copy-and-patch backend (target_x86_64_cp.c) */
+extern int x86_64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
+                                   uint8_t *buf, size_t buflen, size_t *out_len,
+                                   lr_arena_t *arena);
+
 static const lr_target_t x86_64_target = {
     .name = "x86_64",
     .ptr_size = 8,
     .compile_func = x86_64_compile_func,
+    .compile_func_cp = x86_64_compile_func_cp,
 };
 
 const lr_target_t *lr_target_x86_64(void) {

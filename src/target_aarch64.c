@@ -1680,6 +1680,7 @@ static const lr_target_t aarch64_target = {
     .name = "aarch64",
     .ptr_size = 8,
     .compile_func = aarch64_compile_func,
+    .compile_func_cp = NULL,
 };
 
 const lr_target_t *lr_target_aarch64(void) {

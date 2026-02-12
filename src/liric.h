@@ -10,5 +10,6 @@ lr_module_t *lr_parse_bc(const uint8_t *data, size_t len, char *err, size_t errl
 lr_module_t *lr_parse_wasm(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t errlen);
 void lr_module_free(lr_module_t *m);
+int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 
 #endif

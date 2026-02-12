@@ -181,6 +181,10 @@ int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_ll_compile(void);
 int test_session_multiple_functions(void);
+int test_merge_two_independent_functions(void);
+int test_merge_declaration_replaced_by_definition(void);
+int test_merge_global_definition(void);
+int test_merge_jit_runs_merged_function(void);
 int test_builder_compat_add_to_jit(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
@@ -191,8 +195,32 @@ int test_objfile_elf_symbols(void);
 int test_objfile_elf_call_relocation(void);
 int test_objfile_elf_readelf_validates(void);
 int test_objfile_elf_executable_aarch64_header(void);
+#if defined(__linux__)
+int test_objfile_elf_exe_runs(void);
+int test_objfile_link_and_run(void);
+int test_dynelf_puts_hello(void);
+int test_dynelf_readelf_dynamic(void);
+int test_dynelf_ldd_check(void);
+#endif
 #else
 int test_objfile_macho_header(void);
+#endif
+
+#if defined(__linux__)
+int test_session_ir_exe_ret_42(void);
+int test_session_ir_exe_branch(void);
+int test_session_ir_exe_call(void);
+int test_session_ir_exe_loop(void);
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+int test_cp_add_i32(void);
+int test_cp_arithmetic_chain_i32(void);
+int test_cp_all_alu_ops_i64(void);
+int test_cp_shift_ops(void);
+int test_cp_sdiv_srem(void);
+int test_cp_fallback_to_isel(void);
+int test_cp_immediate_operand(void);
 #endif
 
 int main(void) {
@@ -369,6 +397,20 @@ int main(void) {
     RUN_TEST(test_session_ll_compile);
     RUN_TEST(test_session_multiple_functions);
 
+#if defined(__linux__)
+    fprintf(stderr, "\nSession IR exe tests:\n");
+    RUN_TEST(test_session_ir_exe_ret_42);
+    RUN_TEST(test_session_ir_exe_branch);
+    RUN_TEST(test_session_ir_exe_call);
+    RUN_TEST(test_session_ir_exe_loop);
+#endif
+
+    fprintf(stderr, "\nModule merge tests:\n");
+    RUN_TEST(test_merge_two_independent_functions);
+    RUN_TEST(test_merge_declaration_replaced_by_definition);
+    RUN_TEST(test_merge_global_definition);
+    RUN_TEST(test_merge_jit_runs_merged_function);
+
     fprintf(stderr, "\nCompat API tests:\n");
     RUN_TEST(test_builder_compat_add_to_jit);
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
@@ -382,8 +424,26 @@ int main(void) {
     RUN_TEST(test_objfile_elf_call_relocation);
     RUN_TEST(test_objfile_elf_readelf_validates);
     RUN_TEST(test_objfile_elf_executable_aarch64_header);
+#if defined(__linux__)
+    RUN_TEST(test_objfile_elf_exe_runs);
+    RUN_TEST(test_objfile_link_and_run);
+    RUN_TEST(test_dynelf_puts_hello);
+    RUN_TEST(test_dynelf_readelf_dynamic);
+    RUN_TEST(test_dynelf_ldd_check);
+#endif
 #else
     RUN_TEST(test_objfile_macho_header);
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+    fprintf(stderr, "\nCopy-and-patch tests:\n");
+    RUN_TEST(test_cp_add_i32);
+    RUN_TEST(test_cp_arithmetic_chain_i32);
+    RUN_TEST(test_cp_all_alu_ops_i64);
+    RUN_TEST(test_cp_shift_ops);
+    RUN_TEST(test_cp_sdiv_srem);
+    RUN_TEST(test_cp_fallback_to_isel);
+    RUN_TEST(test_cp_immediate_operand);
 #endif
 
     fprintf(stderr, "\n================\n");

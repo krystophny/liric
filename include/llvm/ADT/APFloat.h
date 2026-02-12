@@ -33,15 +33,18 @@ inline const fltSemantics &fltSemantics::IEEEdouble() {
 
 class APFloat {
     double val_;
+    bool is_single_;
 
 public:
-    APFloat() : val_(0.0) {}
-    explicit APFloat(double v) : val_(v) {}
-    explicit APFloat(float v) : val_(static_cast<double>(v)) {}
-    APFloat(const fltSemantics &, uint64_t bits) : val_(0.0) {
+    APFloat() : val_(0.0), is_single_(false) {}
+    explicit APFloat(double v) : val_(v), is_single_(false) {}
+    explicit APFloat(float v) : val_(static_cast<double>(v)), is_single_(true) {}
+    APFloat(const fltSemantics &sem, uint64_t bits) : val_(0.0),
+        is_single_(&sem == &fltSemantics::IEEEsingle()) {
         (void)bits;
     }
-    APFloat(const fltSemantics &, const APInt &bits) : val_(0.0) {
+    APFloat(const fltSemantics &sem, const APInt &bits) : val_(0.0),
+        is_single_(&sem == &fltSemantics::IEEEsingle()) {
         uint64_t raw = bits.getZExtValue();
         if (bits.getBitWidth() <= 32) {
             float f;
@@ -55,6 +58,7 @@ public:
 
     double convertToDouble() const { return val_; }
     float convertToFloat() const { return static_cast<float>(val_); }
+    bool isSinglePrecision() const { return is_single_; }
 
     APInt bitcastToAPInt() const {
         uint64_t bits;
@@ -68,16 +72,22 @@ public:
     }
     bool isNegative() const { return val_ < 0.0; }
 
-    static APFloat getZero(const fltSemantics &, bool negative = false) {
-        return APFloat(negative ? -0.0 : 0.0);
+    static APFloat getZero(const fltSemantics &sem, bool negative = false) {
+        APFloat r(negative ? -0.0 : 0.0);
+        r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
+        return r;
     }
-    static APFloat getInf(const fltSemantics &, bool negative = false) {
-        return APFloat(negative ? -__builtin_inf() : __builtin_inf());
+    static APFloat getInf(const fltSemantics &sem, bool negative = false) {
+        APFloat r(negative ? -__builtin_inf() : __builtin_inf());
+        r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
+        return r;
     }
-    static APFloat getNaN(const fltSemantics &, bool negative = false, uint64_t payload = 0) {
+    static APFloat getNaN(const fltSemantics &sem, bool negative = false, uint64_t payload = 0) {
         (void)payload;
         double v = __builtin_nan("");
-        return APFloat(negative ? -v : v);
+        APFloat r(negative ? -v : v);
+        r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
+        return r;
     }
 
     using Semantics = APFloatBase::Semantics;

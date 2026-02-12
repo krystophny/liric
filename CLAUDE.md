@@ -84,6 +84,15 @@ This command fails unless all are true:
 - `failed == 0`
 - `zero_skip_gate_met == true`
 
+**Step 5: TCC comparison benchmark** (liric vs TinyCC, requires `tcc` and `libtcc`):
+```bash
+./build/bench_tcc --iters 10
+```
+Compares:
+- WALL-CLOCK: subprocess `tcc -o exe file.c` vs `liric -o exe file.ll`
+- IN-PROCESS: `tcc_compile_string() + tcc_relocate()` vs `lr_parse_ll() + lr_jit_add_module()`
+Five micro-benchmarks: ret42, add, arith_chain, loop_sum, fib20.
+
 **Focused corpus benchmark** (100 curated tests, fast iteration):
 ```bash
 ./build/bench_corpus                    # run all 100, print timing table
@@ -109,18 +118,28 @@ perf record -g -F 999 -- ./build/bench_corpus
 perf report --stdio --no-children --percent-limit 1
 ```
 
-## Current Performance Profile (2026-02-08)
+## Current Performance Profile (2026-02-12)
 
-100-case corpus (9.8MB LLVM IR): **99ms JIT total** (parse 84ms/85%, compile 15ms/15%).
+100-case corpus (9.8MB LLVM IR): **92ms JIT total** (parse 77ms/84%, compile 15ms/16%).
 
-Top hotspots (callgrind, `functions_30` 2MB test):
-- `lr_lexer_next`: 46% — lexer is the dominant bottleneck
-- `strtol` (from lexer): 3% — integer literal parsing
-- `parse_function_def`: 4% — parser
-- `parse_type`: 3% — type parsing
-- `resolve_vreg_n`: 3% — vreg name lookup
-- `lr_arena_alloc`: 3% — arena allocator
-- Backend (compile): 15% total — already fast
+**TCC vs liric (bench_tcc, 5 micro-benchmarks, best-of-10):**
+
+| Metric | TCC | liric | Ratio |
+|--------|-----|-------|-------|
+| Wall-clock exe-mode (us/case) | ~1300 | ~1400 | 0.96x (parity, process startup dominates) |
+| In-process compile+reloc (us/case) | ~195 | ~54 | **3.6x faster** |
+| In-process compile-only (us/case) | n/a (single-pass) | ~5 | — |
+
+```bash
+./build/bench_tcc --iters 10         # TCC vs liric micro-benchmarks
+```
+
+**LFortran corpus (2266 integration tests):**
+
+| Mode | Pass | Mismatch | Crash |
+|------|------|----------|-------|
+| ISel JIT (default) | 2191/2193 | 2 pre-existing | 0 |
+| copy_patch JIT | 2191/2193 | 2 (identical) | 0 |
 
 **Priority: parser/lexer optimization (issues #144, #145).**
 
@@ -136,10 +155,19 @@ ll_lexer --> ll_parser               wasm_decode --> wasm_to_ir
     +-------------- lr_module_t -----------+
                   (target-independent SSA IR)
                          |
-                         v
-                   ISel --> encode --> mmap+exec
-                   (MIR)   (binary)   (JIT run)
+         +---------------+---------------+
+         |               |               |
+    Mode A: C&P     Mode B: ISel    Mode C: LLVM
+    (memcpy+patch)  (single-pass)   (real LLVM C API)
+         |               |               |
+         v               v               v
+      JIT | obj | exe          (future)
 ```
+
+Three compilation modes selected via `LIRIC_COMPILE_MODE` env var:
+- **copy_patch** (Mode A): Pre-assembled x86_64 templates, memcpy + patch sentinels. 3.6x faster than TCC in-process. Falls back to ISel for unsupported opcodes.
+- **isel** (Mode B, default): Single-pass ISel + binary encoding. Full opcode coverage.
+- **llvm** (Mode C, planned): Translate `lr_module_t` to real LLVM C API for multi-pass optimization.
 
 The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm`).
 
@@ -151,9 +179,11 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 | **Core IR** | `src/ir.c/.h` | Types, instructions, blocks, functions, modules (target-independent SSA) |
 | **LLVM IR frontend** | `src/ll_lexer.c/.h`, `src/ll_parser.c/.h` | Tokenizer + recursive descent parser for .ll text |
 | **WASM frontend** | `src/wasm_decode.c/.h`, `src/wasm_to_ir.c/.h` | Binary decoder + stack-to-SSA converter for .wasm |
-| **Target interface** | `src/target.h` | Backend vtable: `isel_func`, `encode_func`, `print_inst` |
+| **Target interface** | `src/target.h` | Backend vtable: `compile_func` (ISel), `compile_func_cp` (C&P) |
 | **Target registry** | `src/target_registry.c` | `lr_target_by_name()`, `lr_target_host()`, host detection |
-| **x86_64 backend** | `src/target_x86_64.c/.h` | ISel (IR -> machine insts) + x86_64 binary encoder |
+| **x86_64 ISel backend** | `src/target_x86_64.c/.h` | ISel (IR -> machine insts) + x86_64 binary encoder |
+| **x86_64 C&P backend** | `src/target_x86_64_cp.c` | Copy-and-patch compiler with ISel fallback |
+| **C&P templates** | `src/cp_template.h`, `src/platform/cp_templates_x86_64.S` | Template infrastructure + 28 x86_64 asm templates |
 | **aarch64 backend** | `src/target_aarch64.c/.h` | ISel (IR -> machine insts) + aarch64 binary encoder |
 | **JIT engine** | `src/jit.c/.h` | mmap, W^X transitions, symbol table, module compilation |
 | **Public API** | `include/liric/liric.h` | 9 functions: parse (.ll and .wasm), module management, JIT lifecycle |
@@ -173,22 +203,23 @@ The CLI auto-detects format by checking the first 4 bytes for WASM magic (`\0asm
 - Type singletons for primitives (void, i1-i64, float, double, ptr); composite types allocated per-use
 - Operands are tagged unions: vreg, immediate, block ref, global ref, null, undef
 
-**Backend** (`target.h`) uses direct emission (no intermediate MIR):
-- Single-pass `compile_func` fuses ISel + binary encoding
+**Backend** (`target.h`) supports two compilation modes per target:
+- **ISel** (`compile_func`): Single-pass ISel + binary encoding, full opcode coverage
+- **Copy-and-patch** (`compile_func_cp`): Template memcpy + sentinel patching, 3.6x faster than TCC
 - Backend-local compile context holds code buffer, stack slots, and branch fixups
 - `LR_CC_*` condition codes shared across backends for integer and FP comparisons
 - Each backend uses native scratch registers (x86: RAX/RCX, aarch64: X9/X10)
 - Stack-based register allocation: every vreg gets a stack slot
 - PHI copies built before emission, applied at block terminators
+- JIT dispatches via `lr_compile_mode_t` field; C&P auto-falls back to ISel for unsupported opcodes
 
 **Backend interface** (`lr_target_t`):
 ```c
 typedef struct lr_target {
     const char *name;
     uint8_t ptr_size;
-    int (*compile_func)(lr_func_t *func, lr_module_t *mod,
-                        uint8_t *buf, size_t buflen, size_t *out_len,
-                        lr_arena_t *arena);
+    int (*compile_func)(lr_func_t *, lr_module_t *, uint8_t *, size_t, size_t *, lr_arena_t *);
+    int (*compile_func_cp)(lr_func_t *, lr_module_t *, uint8_t *, size_t, size_t *, lr_arena_t *);
 } lr_target_t;
 ```
 
@@ -198,7 +229,12 @@ typedef struct lr_target {
 - Symbol resolution: JIT symbols first, then dlsym fallback
 - `__builtin___clear_cache` for icache coherence on arm64
 
-**Two compilation modes supported by the IR (not yet exposed in CLI):**
+**Three compilation modes** (selected via `LIRIC_COMPILE_MODE` env var):
+- `isel` (default): ISel + encoding, full opcode coverage
+- `copy_patch`: Pre-assembled templates, 3.6x faster than TCC. Falls back to ISel for unsupported opcodes.
+- `llvm` (planned): Translate to real LLVM C API for multi-pass optimization
+
+**Module loading:**
 - Monolithic: all functions compiled together via `lr_jit_add_module()`
 - Incremental: multiple modules can be added to one JIT instance
 
@@ -230,6 +266,7 @@ Tests are a single executable (`test_liric`) with categories:
 - **WASM IR** (2): WASM-to-IR conversion correctness
 - **WASM JIT** (5): end-to-end WASM parse+compile+execute (constants, arithmetic, branches, loops, calls)
 - **Builder** (9): C builder API for programmatic IR construction
+- **Copy-and-Patch** (7, x86_64 only): C&P backend ALU ops, shifts, div/rem, immediates, ISel fallback
 - **LLVM Compat** (27, separate exe, requires `-DWITH_LLVM_COMPAT=ON`): C++ header-only LLVM API wrapper tests
 
 Test pattern:
@@ -252,10 +289,11 @@ RUN_TEST(test_name);           // in main()
 
 - Parser limits are hardcoded (4096 vregs, 1024 blocks, 1024 functions, 4096 globals)
 - No optimization passes on IR or MIR (issue #42)
-- No object file emission (JIT only, no ahead-of-time compilation)
 - WASM frontend: MVP integer subset only (no FP, SIMD, tables, bulk memory, multi-memory)
 - Stack-based register allocation only (no liveness analysis)
-- LFortran mass tests: 2200/2422 passing, 88 mismatches, 44 JIT failures (see STATUS.md)
+- LFortran mass tests: 2193/2266 passing, 50 mismatches, 23 unsupported (see STATUS.md)
+- Copy-and-patch covers ALU ops only (single-block, i32/i64); falls back to ISel for everything else
+- Mode C (real LLVM backend) not yet implemented
 - Lexer is 46% of JIT time — primary optimization target (#144)
 
 ## Coding Style

@@ -12,6 +12,11 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
                                 const uint8_t *data, size_t data_size,
                                 const lr_objfile_ctx_t *oc,
                                 const char *entry_symbol);
+int write_elf_dynamic_executable_x86_64(FILE *out,
+                                         const uint8_t *code, size_t code_size,
+                                         const uint8_t *data, size_t data_size,
+                                         const lr_objfile_ctx_t *oc,
+                                         const char *entry_symbol);
 int write_elf_executable_aarch64(FILE *out, const uint8_t *code, size_t code_size,
                                  const uint8_t *data, size_t data_size,
                                  const lr_objfile_ctx_t *oc,

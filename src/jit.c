@@ -1,14 +1,15 @@
 #include "jit.h"
+#include "bc_decode.h"
 #include "ir.h"
 #include "objfile.h"
 #include "target.h"
+#include "platform/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
-#include <math.h>
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #include <unistd.h>
@@ -119,6 +120,7 @@ typedef struct lr_materialize_prefetch_task {
 #if LR_HAS_PTHREADS
 typedef struct lr_materialize_prefetch_worker {
     const lr_target_t *target;
+    lr_compile_mode_t mode;
     size_t code_cap;
     lr_materialize_prefetch_task_t *tasks;
     uint32_t begin;
@@ -756,103 +758,6 @@ static int jit_ensure_module_symbols_interned(lr_module_t *m) {
     return 0;
 }
 
-static float llvm_fabs_f32(float x) { return fabsf(x); }
-static double llvm_fabs_f64(double x) { return fabs(x); }
-static float llvm_sqrt_f32(float x) { return sqrtf(x); }
-static float llvm_exp_f32(float x) { return expf(x); }
-static float llvm_copysign_f32(float x, float y) { return copysignf(x, y); }
-static float llvm_pow_f32(float x, float y) { return powf(x, y); }
-static double llvm_sqrt_f64(double x) { return sqrt(x); }
-static double llvm_exp_f64(double x) { return exp(x); }
-static double llvm_pow_f64(double x, double y) { return pow(x, y); }
-static double llvm_copysign_f64(double x, double y) { return copysign(x, y); }
-
-static uint64_t llvm_abs_exp_i64(int64_t e) {
-    if (e >= 0)
-        return (uint64_t)e;
-    return (uint64_t)(-(e + 1)) + 1u;
-}
-
-static float llvm_powi_f32_i64(float x, int64_t e) {
-    uint64_t exp = llvm_abs_exp_i64(e);
-    float base = x;
-    float out = 1.0f;
-    if (e < 0)
-        base = 1.0f / base;
-    while (exp != 0) {
-        if (exp & 1u)
-            out *= base;
-        base *= base;
-        exp >>= 1;
-    }
-    return out;
-}
-
-static double llvm_powi_f64_i64(double x, int64_t e) {
-    uint64_t exp = llvm_abs_exp_i64(e);
-    double base = x;
-    double out = 1.0;
-    if (e < 0)
-        base = 1.0 / base;
-    while (exp != 0) {
-        if (exp & 1u)
-            out *= base;
-        base *= base;
-        exp >>= 1;
-    }
-    return out;
-}
-
-static float llvm_powi_f32(float x, int32_t e) {
-    return llvm_powi_f32_i64(x, (int64_t)e);
-}
-
-static double llvm_powi_f64(double x, int32_t e) {
-    return llvm_powi_f64_i64(x, (int64_t)e);
-}
-
-static void llvm_memset_p0i8_i64(void *dst, uint64_t val, int64_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || len <= 0)
-        return;
-    memset(dst, (int)(uint8_t)val, (size_t)len);
-}
-
-static void llvm_memset_p0i8_i32(void *dst, uint64_t val, int32_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || len <= 0)
-        return;
-    memset(dst, (int)(uint8_t)val, (size_t)len);
-}
-
-static void llvm_memcpy_p0i8_p0i8_i32(void *dst, const void *src, int32_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memcpy(dst, src, (size_t)len);
-}
-
-static void llvm_memcpy_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memcpy(dst, src, (size_t)len);
-}
-
-static void llvm_memmove_p0i8_p0i8_i32(void *dst, const void *src, int32_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memmove(dst, src, (size_t)len);
-}
-
-static void llvm_memmove_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memmove(dst, src, (size_t)len);
-}
-
 static size_t align_up(size_t value, size_t align) {
     if (align == 0)
         return value;
@@ -913,6 +818,18 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     if (!j) return NULL;
 
     j->target = target;
+
+    j->mode = LR_COMPILE_ISEL;
+    const char *mode_env = getenv("LIRIC_COMPILE_MODE");
+    if (mode_env) {
+        if (strcmp(mode_env, "copy_patch") == 0)
+            j->mode = LR_COMPILE_COPY_PATCH;
+        else if (strcmp(mode_env, "isel") == 0)
+            j->mode = LR_COMPILE_ISEL;
+        else if (strcmp(mode_env, "llvm") == 0)
+            j->mode = LR_COMPILE_LLVM;
+    }
+
     j->arena = lr_arena_create(0);
     if (!j->arena) {
         free(j);
@@ -1205,29 +1122,31 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     update_last_symbol_lookup(j, e, hash);
 }
 
+void lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len) {
+    if (!j) return;
+    j->runtime_bc_data = bc_data;
+    j->runtime_bc_len = bc_len;
+    j->runtime_bc_loaded = false;
+}
+
 static void register_builtin_symbols(lr_jit_t *j) {
-    lr_jit_add_symbol(j, "llvm.fabs.f32", (void *)(uintptr_t)&llvm_fabs_f32);
-    lr_jit_add_symbol(j, "llvm.fabs.f64", (void *)(uintptr_t)&llvm_fabs_f64);
-    lr_jit_add_symbol(j, "llvm.sqrt.f32", (void *)(uintptr_t)&llvm_sqrt_f32);
-    lr_jit_add_symbol(j, "llvm.sqrt.f64", (void *)(uintptr_t)&llvm_sqrt_f64);
-    lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32);
-    lr_jit_add_symbol(j, "llvm.exp.f64", (void *)(uintptr_t)&llvm_exp_f64);
-    lr_jit_add_symbol(j, "llvm.pow.f32", (void *)(uintptr_t)&llvm_pow_f32);
-    lr_jit_add_symbol(j, "llvm.pow.f64", (void *)(uintptr_t)&llvm_pow_f64);
-    lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32);
-    lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64);
-    lr_jit_add_symbol(j, "llvm.powi.f32", (void *)(uintptr_t)&llvm_powi_f32);
-    lr_jit_add_symbol(j, "llvm.powi.f64", (void *)(uintptr_t)&llvm_powi_f64);
-    lr_jit_add_symbol(j, "llvm.powi.f32.i32", (void *)(uintptr_t)&llvm_powi_f32);
-    lr_jit_add_symbol(j, "llvm.powi.f64.i32", (void *)(uintptr_t)&llvm_powi_f64);
-    lr_jit_add_symbol(j, "llvm.powi.f32.i64", (void *)(uintptr_t)&llvm_powi_f32_i64);
-    lr_jit_add_symbol(j, "llvm.powi.f64.i64", (void *)(uintptr_t)&llvm_powi_f64_i64);
-    lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i64);
+    size_t n = lr_platform_intrinsic_count();
+    for (size_t i = 0; i < n; i++) {
+        const char *name = lr_platform_intrinsic_name(i);
+        const uint8_t *blob_begin, *blob_end;
+        if (!lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end))
+            continue;
+        size_t blob_size = (size_t)(blob_end - blob_begin);
+        size_t dest = align_up(j->code_size, 16);
+        if (dest + blob_size > j->code_cap)
+            continue;
+        if (make_writable(j) != 0)
+            continue;
+        memcpy(j->code_buf + dest, blob_begin, blob_size);
+        j->code_size = dest + blob_size;
+        make_executable_from(j, dest);
+        lr_jit_add_symbol(j, name, (void *)(j->code_buf + dest));
+    }
 }
 
 int lr_jit_load_library(lr_jit_t *j, const char *path) {
@@ -1771,7 +1690,11 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     }
     size_t code_len = 0;
     JIT_PROF_START(compile);
-    int rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
+    int rc;
+    if (j->mode == LR_COMPILE_COPY_PATCH && j->target->compile_func_cp)
+        rc = j->target->compile_func_cp(f, m, func_start, free_space, &code_len, j->arena);
+    else
+        rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
     JIT_PROF_END(compile);
     if (rc != 0)
         return rc;
@@ -1871,6 +1794,7 @@ static void *materialize_prefetch_worker_main(void *arg) {
         lr_jit_t worker_jit;
         memset(&worker_jit, 0, sizeof(worker_jit));
         worker_jit.target = w->target;
+        worker_jit.mode = w->mode;
         worker_jit.code_buf = scratch_buf;
         worker_jit.code_cap = w->code_cap;
         worker_jit.arena = worker_arena;
@@ -2099,6 +2023,7 @@ static bool materialize_prefetch_module_functions(lr_jit_t *j,
             end = pending;
 
         workers[wi].target = j->target;
+        workers[wi].mode = j->mode;
         workers[wi].code_cap = j->code_cap;
         workers[wi].tasks = tasks;
         workers[wi].begin = begin;
@@ -2411,6 +2336,22 @@ done:
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     if (!j || !j->target || !m) return -1;
+
+    if (j->runtime_bc_data && !j->runtime_bc_loaded) {
+        char rt_err[256] = {0};
+        lr_module_t *rt = lr_parse_bc_data(j->runtime_bc_data, j->runtime_bc_len,
+                                            m->arena, rt_err, sizeof(rt_err));
+        if (!rt) {
+            fprintf(stderr, "runtime bitcode parse failed: %s\n",
+                    rt_err[0] ? rt_err : "unknown parse error");
+            return -1;
+        }
+        if (lr_module_merge(m, rt) != 0) {
+            fprintf(stderr, "runtime bitcode merge failed\n");
+            return -1;
+        }
+        j->runtime_bc_loaded = true;
+    }
 
     bool own_wx_transition = !j->update_active;
     bool lazy_mode = jit_lazy_materialization_enabled();

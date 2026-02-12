@@ -6,6 +6,10 @@
 #include <string.h>
 #include <stdio.h>
 
+/* Guard: lr_opcode_t (ir.h) must stay in sync with lr_op_t (liric_session.h). */
+_Static_assert(LR_OP_INSERTVALUE == 43,
+               "lr_opcode_t changed: update lr_op_t in liric_session.h");
+
 /* Replicate the public operand descriptor type and kind constants.
    We cannot include liric.h alongside ir.h due to enum redeclarations. */
 typedef struct lr_operand_desc {
@@ -1259,11 +1263,6 @@ bool lc_global_has_initializer(lc_module_compat_t *mod, lc_value_t *global_val) 
     return g->init_data != NULL && g->init_size > 0;
 }
 
-lr_global_t *lc_value_get_global(lc_value_t *val) {
-    (void)val;
-    return NULL;
-}
-
 /* ---- Internal builder helpers ---- */
 
 static lc_value_t *wrap_vreg(lc_module_compat_t *mod, uint32_t vreg_id,
@@ -2029,8 +2028,7 @@ lc_value_t *lc_create_uitofp(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
     (void)name;
-    /* liric does not have uitofp; use sitofp as approximation */
-    return compat_cast(mod, b, f, LR_OP_SITOFP, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_UITOFP, val, to_type);
 }
 
 lc_value_t *lc_create_fptosi(lc_module_compat_t *mod, lr_block_t *b,
@@ -2044,8 +2042,7 @@ lc_value_t *lc_create_fptoui(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
     (void)name;
-    /* liric does not have fptoui; use fptosi as approximation */
-    return compat_cast(mod, b, f, LR_OP_FPTOSI, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_FPTOUI, val, to_type);
 }
 
 lc_value_t *lc_create_fpext(lc_module_compat_t *mod, lr_block_t *b,
@@ -2253,6 +2250,19 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     FILE *f = fopen(filename, "wb");
     if (!f) return -1;
     int rc = lc_module_emit_object_to_file(mod, f);
+    fclose(f);
+    return rc;
+}
+
+int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
+                               const char *runtime_ll, size_t runtime_len) {
+    if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
+    const lr_target_t *target = lr_target_host();
+    if (!target) return -1;
+    FILE *f = fopen(filename, "wb");
+    if (!f) return -1;
+    int rc = lr_emit_executable_with_runtime(mod->mod, runtime_ll, runtime_len,
+                                              target, f, "main");
     fclose(f);
     return rc;
 }

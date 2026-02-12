@@ -800,7 +800,9 @@ static const char *opcode_name(lr_opcode_t op) {
     case LR_OP_PTRTOINT:     return "ptrtoint";
     case LR_OP_INTTOPTR:     return "inttoptr";
     case LR_OP_SITOFP:       return "sitofp";
+    case LR_OP_UITOFP:       return "uitofp";
     case LR_OP_FPTOSI:       return "fptosi";
+    case LR_OP_FPTOUI:       return "fptoui";
     case LR_OP_FPEXT:        return "fpext";
     case LR_OP_FPTRUNC:      return "fptrunc";
     case LR_OP_EXTRACTVALUE: return "extractvalue";
@@ -850,8 +852,9 @@ static const char *fcmp_pred_name(int pred) {
 static bool is_cast_op(lr_opcode_t op) {
     return op == LR_OP_SEXT || op == LR_OP_ZEXT || op == LR_OP_TRUNC ||
            op == LR_OP_BITCAST || op == LR_OP_PTRTOINT ||
-           op == LR_OP_INTTOPTR || op == LR_OP_SITOFP ||
-           op == LR_OP_FPTOSI || op == LR_OP_FPEXT || op == LR_OP_FPTRUNC;
+           op == LR_OP_INTTOPTR || op == LR_OP_SITOFP || op == LR_OP_UITOFP ||
+           op == LR_OP_FPTOSI || op == LR_OP_FPTOUI ||
+           op == LR_OP_FPEXT || op == LR_OP_FPTRUNC;
 }
 
 static bool is_void_type(const lr_type_t *t) {
@@ -1006,6 +1009,254 @@ static void dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
         break;
     }
     fprintf(out, "\n");
+}
+
+/* ---- Module merge ------------------------------------------------------ */
+
+static lr_func_t *merge_find_func(lr_module_t *m, const char *name) {
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static lr_global_t *merge_find_global(lr_module_t *m, const char *name) {
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return g;
+    }
+    return NULL;
+}
+
+static lr_type_t *merge_remap_type(lr_module_t *dest, const lr_type_t *t) {
+    if (!t)
+        return NULL;
+    switch (t->kind) {
+    case LR_TYPE_VOID:   return dest->type_void;
+    case LR_TYPE_I1:     return dest->type_i1;
+    case LR_TYPE_I8:     return dest->type_i8;
+    case LR_TYPE_I16:    return dest->type_i16;
+    case LR_TYPE_I32:    return dest->type_i32;
+    case LR_TYPE_I64:    return dest->type_i64;
+    case LR_TYPE_FLOAT:  return dest->type_float;
+    case LR_TYPE_DOUBLE: return dest->type_double;
+    case LR_TYPE_PTR:    return dest->type_ptr;
+    case LR_TYPE_ARRAY:
+        return lr_type_array(dest->arena,
+                             merge_remap_type(dest, t->array.elem),
+                             t->array.count);
+    case LR_TYPE_STRUCT: {
+        lr_type_t **fields = NULL;
+        char *name = NULL;
+        if (t->struc.num_fields > 0) {
+            fields = lr_arena_array(dest->arena, lr_type_t *,
+                                    t->struc.num_fields);
+            for (uint32_t i = 0; i < t->struc.num_fields; i++)
+                fields[i] = merge_remap_type(dest, t->struc.fields[i]);
+        }
+        if (t->struc.name)
+            name = lr_arena_strdup(dest->arena, t->struc.name,
+                                   strlen(t->struc.name));
+        return lr_type_struct(dest->arena, fields, t->struc.num_fields,
+                              t->struc.packed, name);
+    }
+    case LR_TYPE_FUNC: {
+        lr_type_t *ret = merge_remap_type(dest, t->func.ret);
+        lr_type_t **params = NULL;
+        if (t->func.num_params > 0) {
+            params = lr_arena_array(dest->arena, lr_type_t *,
+                                    t->func.num_params);
+            for (uint32_t i = 0; i < t->func.num_params; i++)
+                params[i] = merge_remap_type(dest, t->func.params[i]);
+        }
+        return lr_type_func(dest->arena, ret, params, t->func.num_params,
+                             t->func.vararg);
+    }
+    }
+    return NULL;
+}
+
+static lr_operand_t merge_remap_operand(lr_module_t *dest,
+                                         const lr_operand_t *op,
+                                         const uint32_t *symbol_remap) {
+    lr_operand_t out = *op;
+    out.type = merge_remap_type(dest, op->type);
+    if (op->kind == LR_VAL_GLOBAL && symbol_remap)
+        out.global_id = symbol_remap[op->global_id];
+    return out;
+}
+
+static void merge_deep_copy_func_body(lr_module_t *dest, lr_func_t *df,
+                                       const lr_func_t *sf,
+                                       const uint32_t *symbol_remap) {
+    lr_arena_t *a = dest->arena;
+
+    df->next_vreg = sf->next_vreg;
+
+    for (lr_block_t *sb = sf->first_block; sb; sb = sb->next) {
+        lr_block_t *db = lr_arena_new(a, lr_block_t);
+        db->name = lr_arena_strdup(a, sb->name, strlen(sb->name));
+        db->id = sb->id;
+        db->func = df;
+
+        for (lr_inst_t *si = sb->first; si; si = si->next) {
+            lr_operand_t *ops = NULL;
+            if (si->num_operands > 0) {
+                ops = lr_arena_array(a, lr_operand_t, si->num_operands);
+                for (uint32_t i = 0; i < si->num_operands; i++)
+                    ops[i] = merge_remap_operand(dest, &si->operands[i],
+                                                 symbol_remap);
+            }
+
+            lr_type_t *itype = merge_remap_type(dest, si->type);
+            lr_inst_t *di = lr_inst_create(a, si->op, itype, si->dest,
+                                           ops, si->num_operands);
+            di->icmp_pred = si->icmp_pred;
+            di->num_indices = si->num_indices;
+            di->call_external_abi = si->call_external_abi;
+            di->call_vararg = si->call_vararg;
+
+            if (si->num_indices > 0 && si->indices) {
+                di->indices = lr_arena_array(a, uint32_t, si->num_indices);
+                memcpy(di->indices, si->indices,
+                       sizeof(uint32_t) * si->num_indices);
+            }
+
+            if (!db->first) db->first = di;
+            else db->last->next = di;
+            db->last = di;
+        }
+
+        df->num_blocks++;
+        if (!df->first_block) df->first_block = db;
+        else df->last_block->next = db;
+        df->last_block = db;
+        df->is_decl = false;
+    }
+}
+
+static void merge_replace_func(lr_module_t *dest, lr_func_t *df,
+                                const lr_func_t *sf,
+                                const uint32_t *symbol_remap) {
+    lr_arena_t *a = dest->arena;
+
+    df->ret_type = merge_remap_type(dest, sf->ret_type);
+    df->num_params = sf->num_params;
+    df->vararg = sf->vararg;
+
+    if (sf->num_params > 0) {
+        df->param_types = lr_arena_array(a, lr_type_t *, sf->num_params);
+        df->param_vregs = lr_arena_array(a, uint32_t, sf->num_params);
+        for (uint32_t i = 0; i < sf->num_params; i++) {
+            df->param_types[i] = merge_remap_type(dest, sf->param_types[i]);
+            df->param_vregs[i] = sf->param_vregs[i];
+        }
+    }
+
+    df->type = lr_type_func(a, df->ret_type, df->param_types,
+                             df->num_params, df->vararg);
+
+    df->first_block = NULL;
+    df->last_block = NULL;
+    df->block_array = NULL;
+    df->linear_inst_array = NULL;
+    df->block_inst_offsets = NULL;
+    df->num_linear_insts = 0;
+    df->num_blocks = 0;
+
+    merge_deep_copy_func_body(dest, df, sf, symbol_remap);
+}
+
+static void merge_copy_global_data(lr_module_t *dest, lr_global_t *dg,
+                                    const lr_global_t *sg) {
+    lr_arena_t *a = dest->arena;
+    if (sg->init_data && sg->init_size > 0) {
+        dg->init_data = lr_arena_alloc(a, sg->init_size, 1);
+        memcpy(dg->init_data, sg->init_data, sg->init_size);
+        dg->init_size = sg->init_size;
+    }
+    for (lr_reloc_t *sr = sg->relocs; sr; sr = sr->next) {
+        lr_reloc_t *dr = lr_arena_new(a, lr_reloc_t);
+        dr->offset = sr->offset;
+        dr->addend = sr->addend;
+        dr->symbol_name = lr_arena_strdup(a, sr->symbol_name,
+                                          strlen(sr->symbol_name));
+        dr->next = dg->relocs;
+        dg->relocs = dr;
+    }
+}
+
+int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
+    uint32_t *symbol_remap = NULL;
+    lr_arena_t *a = dest->arena;
+
+    if (!dest || !src)
+        return -1;
+
+    if (src->num_symbols > 0) {
+        symbol_remap = lr_arena_array(a, uint32_t, src->num_symbols);
+        for (uint32_t i = 0; i < src->num_symbols; i++) {
+            const char *name = src->symbol_names[i];
+            symbol_remap[i] = lr_module_intern_symbol(dest, name);
+        }
+    }
+
+    for (lr_global_t *sg = src->first_global; sg; sg = sg->next) {
+        lr_global_t *dg = merge_find_global(dest, sg->name);
+
+        if (dg) {
+            if (dg->is_external && !sg->is_external) {
+                dg->type = merge_remap_type(dest, sg->type);
+                dg->is_const = sg->is_const;
+                dg->is_external = false;
+                merge_copy_global_data(dest, dg, sg);
+            }
+        } else {
+            lr_global_t *ng = lr_global_create(dest, sg->name,
+                merge_remap_type(dest, sg->type), sg->is_const);
+            ng->is_external = sg->is_external;
+            merge_copy_global_data(dest, ng, sg);
+        }
+    }
+
+    for (lr_func_t *sf = src->first_func; sf; sf = sf->next) {
+        bool src_is_decl = sf->is_decl || !sf->first_block;
+        lr_func_t *df = merge_find_func(dest, sf->name);
+
+        if (df) {
+            bool dest_is_decl = df->is_decl || !df->first_block;
+            if (dest_is_decl && !src_is_decl)
+                merge_replace_func(dest, df, sf, symbol_remap);
+        } else {
+            lr_type_t **params = NULL;
+            if (sf->num_params > 0) {
+                params = lr_arena_array(a, lr_type_t *, sf->num_params);
+                for (uint32_t i = 0; i < sf->num_params; i++)
+                    params[i] = merge_remap_type(dest, sf->param_types[i]);
+            }
+
+            if (src_is_decl) {
+                lr_func_declare(dest, sf->name,
+                    merge_remap_type(dest, sf->ret_type),
+                    params, sf->num_params, sf->vararg);
+            } else {
+                lr_func_t *nf = lr_func_create(dest, sf->name,
+                    merge_remap_type(dest, sf->ret_type),
+                    params, sf->num_params, sf->vararg);
+                nf->first_block = NULL;
+                nf->last_block = NULL;
+                nf->block_array = NULL;
+                nf->linear_inst_array = NULL;
+                nf->block_inst_offsets = NULL;
+                nf->num_linear_insts = 0;
+                nf->num_blocks = 0;
+                merge_deep_copy_func_body(dest, nf, sf, symbol_remap);
+            }
+        }
+    }
+
+    return 0;
 }
 
 void lr_module_dump(lr_module_t *m, FILE *out) {

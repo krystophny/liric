@@ -3,6 +3,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <sys/stat.h>
+#include <sys/wait.h>
+#endif
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -473,3 +477,188 @@ int test_session_multiple_functions(void) {
     lr_session_destroy(s);
     return 0;
 }
+
+#if defined(__linux__)
+
+static int run_exe_expect(const char *path, int expected_rc) {
+    if (chmod(path, 0755) != 0) return -1;
+    int status = system(path);
+    if (!WIFEXITED(status)) return -2;
+    int actual = WEXITSTATUS(status);
+    if (actual != expected_rc) {
+        fprintf(stderr, "    expected exit %d, got %d\n", expected_rc, actual);
+        return -3;
+    }
+    return 0;
+}
+
+int test_session_ir_exe_ret_42(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_ir_ret42";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 42);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 42");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_ir_exe_branch(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t then_id = lr_session_block(s);
+    uint32_t else_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    uint32_t cmp = lr_emit_icmp(s, LR_CMP_SGT, LR_IMM(7, i32), LR_IMM(5, i32));
+    lr_emit_condbr(s, LR_VREG(cmp, i1), then_id, else_id);
+
+    lr_session_set_block(s, then_id, &err);
+    lr_emit_ret(s, LR_IMM(10, i32));
+
+    lr_session_set_block(s, else_id, &err);
+    lr_emit_ret(s, LR_IMM(20, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_ir_branch";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 10);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 10");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_ir_exe_call(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+
+    lr_type_t *h_params[] = {i32};
+    int rc = lr_session_func_begin(s, "helper", i32, h_params, 1, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "helper func begin");
+    uint32_t hx = lr_session_param(s, 0);
+    uint32_t hb = lr_session_block(s);
+    lr_session_set_block(s, hb, &err);
+    uint32_t hr = lr_emit_add(s, i32, LR_VREG(hx, i32), LR_IMM(10, i32));
+    lr_emit_ret(s, LR_VREG(hr, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "helper func end");
+
+    rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "_start func begin");
+    uint32_t sb = lr_session_block(s);
+    lr_session_set_block(s, sb, &err);
+    uint32_t helper_sym = lr_session_intern(s, "helper");
+    lr_operand_desc_t args[] = {LR_IMM(32, i32)};
+    uint32_t cr = lr_emit_call(s, i32, LR_GLOBAL(helper_sym, ptr), args, 1);
+    lr_emit_ret(s, LR_VREG(cr, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "_start func end");
+
+    const char *path = "/tmp/liric_test_ir_call";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 42);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 42");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_ir_exe_loop(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t loop_id = lr_session_block(s);
+    uint32_t exit_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    lr_emit_br(s, loop_id);
+
+    lr_session_set_block(s, loop_id, &err);
+    lr_operand_desc_t phi_i_v[] = {LR_IMM(0, i32), LR_VREG(2, i32)};
+    uint32_t phi_i_b[] = {entry_id, loop_id};
+    uint32_t vi = lr_emit_phi(s, i32, phi_i_v, phi_i_b, 2);
+
+    lr_operand_desc_t phi_s_v[] = {LR_IMM(0, i32), LR_VREG(3, i32)};
+    uint32_t phi_s_b[] = {entry_id, loop_id};
+    uint32_t vs = lr_emit_phi(s, i32, phi_s_v, phi_s_b, 2);
+
+    uint32_t vnext = lr_emit_add(s, i32, LR_VREG(vi, i32), LR_IMM(1, i32));
+    uint32_t vsum_next = lr_emit_add(s, i32, LR_VREG(vs, i32), LR_VREG(vnext, i32));
+
+    uint32_t vdone = lr_emit_icmp(s, LR_CMP_EQ, LR_VREG(vnext, i32), LR_IMM(10, i32));
+    lr_emit_condbr(s, LR_VREG(vdone, i1), exit_id, loop_id);
+
+    lr_session_set_block(s, exit_id, &err);
+    lr_emit_ret(s, LR_VREG(vsum_next, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_ir_loop";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 55);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 55");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+#endif

@@ -152,6 +152,7 @@ int main(int argc, char **argv) {
     const char *func_name = "main";
     const char *sig = "i32";
     const char *input_file = NULL;
+    const char *runtime_bc_file = NULL;
     int ignore_retcode = 0;
     int timing = 0;
     const char *load_libs[64];
@@ -173,6 +174,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --load-lib options\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            runtime_bc_file = argv[++i];
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         } else {
@@ -200,6 +203,17 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to read input file\n");
         return 1;
     }
+
+    file_buf_t runtime_bc = {0};
+    int have_runtime_bc = 0;
+    if (runtime_bc_file) {
+        if (read_file(runtime_bc_file, &runtime_bc) != 0) {
+            fprintf(stderr, "failed to read runtime bc file: %s\n", runtime_bc_file);
+            free_file(&src);
+            return 1;
+        }
+        have_runtime_bc = 1;
+    }
     if (timing) t_read_end = now_us();
 
     if (timing) t_parse_start = now_us();
@@ -207,6 +221,8 @@ int main(int argc, char **argv) {
     lr_module_t *m = lr_parse_ll(src.data, src.len, err, sizeof(err));
     if (!m) {
         fprintf(stderr, "parse error: %s\n", err);
+        if (have_runtime_bc)
+            free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
@@ -217,10 +233,16 @@ int main(int argc, char **argv) {
     if (!jit) {
         fprintf(stderr, "failed to create JIT\n");
         lr_module_free(m);
+        if (have_runtime_bc)
+            free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
     if (timing) t_jit_create_end = now_us();
+
+    if (have_runtime_bc) {
+        lr_jit_set_runtime_bc(jit, (const uint8_t *)runtime_bc.data, runtime_bc.len);
+    }
 
     if (timing) t_load_lib_start = now_us();
     for (int i = 0; i < num_load_libs; i++) {
@@ -228,6 +250,8 @@ int main(int argc, char **argv) {
             fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
             lr_jit_destroy(jit);
             lr_module_free(m);
+            if (have_runtime_bc)
+                free_file(&runtime_bc);
             free_file(&src);
             return 1;
         }
@@ -240,6 +264,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "JIT compilation failed\n");
         lr_jit_destroy(jit);
         lr_module_free(m);
+        if (have_runtime_bc)
+            free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
@@ -252,6 +278,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "function '%s' not found\n", func_name);
         lr_jit_destroy(jit);
         lr_module_free(m);
+        if (have_runtime_bc)
+            free_file(&runtime_bc);
         free_file(&src);
         return 3;
     }
@@ -276,6 +304,8 @@ int main(int argc, char **argv) {
 
     lr_jit_destroy(jit);
     lr_module_free(m);
+    if (have_runtime_bc)
+        free_file(&runtime_bc);
     free_file(&src);
     return run_rc;
 }

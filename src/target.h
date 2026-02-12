@@ -5,6 +5,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* Compilation mode: how IR becomes machine code */
+typedef enum lr_compile_mode {
+    LR_COMPILE_ISEL       = 0,  /* Mode B: ISel + encoding (current, default) */
+    LR_COMPILE_COPY_PATCH = 1,  /* Mode A: copy-and-patch templates */
+    LR_COMPILE_LLVM       = 2,  /* Mode C: translate to real LLVM (optional) */
+} lr_compile_mode_t;
+
 /* Target-neutral condition codes used by backends */
 enum {
     LR_CC_EQ = 0, LR_CC_NE, LR_CC_UGT, LR_CC_UGE, LR_CC_ULT, LR_CC_ULE,
@@ -21,9 +28,15 @@ typedef struct lr_target {
     const char *name;
     uint8_t ptr_size;
 
+    /* Mode B: ISel + encoding (always available) */
     int (*compile_func)(lr_func_t *func, lr_module_t *mod,
                         uint8_t *buf, size_t buflen, size_t *out_len,
                         lr_arena_t *arena);
+
+    /* Mode A: copy-and-patch (NULL if not implemented for this target) */
+    int (*compile_func_cp)(lr_func_t *func, lr_module_t *mod,
+                           uint8_t *buf, size_t buflen, size_t *out_len,
+                           lr_arena_t *arena);
 } lr_target_t;
 
 const lr_target_t *lr_target_x86_64(void);

@@ -305,9 +305,11 @@ public:
         (void)C;
         lc_module_compat_t *mod = liric_get_current_module();
         if (!mod) return nullptr;
+        bool is_double = !V.isSinglePrecision();
+        lr_type_t *ty = is_double ? lc_get_double_type(mod)
+                                  : lc_get_float_type(mod);
         return static_cast<ConstantFP *>(Value::wrap(
-            lc_value_const_fp(mod, lc_get_double_type(mod),
-                              V.convertToDouble(), true)));
+            lc_value_const_fp(mod, ty, V.convertToDouble(), is_double)));
     }
 
     double getValueAPF_double() const { return impl()->const_fp.val; }

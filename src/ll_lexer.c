@@ -114,12 +114,22 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"ptrtoint", LR_TOK_PTRTOINT},
     {"inttoptr", LR_TOK_INTTOPTR},
     {"sitofp", LR_TOK_SITOFP},
+    {"uitofp", LR_TOK_UITOFP},
     {"fptosi", LR_TOK_FPTOSI},
+    {"fptoui", LR_TOK_FPTOUI},
     {"fpext", LR_TOK_FPEXT},
     {"fptrunc", LR_TOK_FPTRUNC},
     {"extractvalue", LR_TOK_EXTRACTVALUE},
     {"insertvalue", LR_TOK_INSERTVALUE},
     {"unreachable", LR_TOK_UNREACHABLE},
+    {"switch", LR_TOK_SWITCH},
+    {"invoke", LR_TOK_INVOKE},
+    {"landingpad", LR_TOK_LANDINGPAD},
+    {"resume", LR_TOK_RESUME},
+    {"unwind", LR_TOK_UNWIND},
+    {"cleanup", LR_TOK_CLEANUP},
+    {"catch", LR_TOK_CATCH},
+    {"personality", LR_TOK_PERSONALITY},
     {"to", LR_TOK_TO},
     {"align", LR_TOK_ALIGN},
     {"nsw", LR_TOK_NSW},
@@ -177,6 +187,7 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"une", LR_TOK_UNE},
     {"uno", LR_TOK_UNO},
     {"x", LR_TOK_X},
+    {"x86_fp80", LR_TOK_DOUBLE},
     {NULL, LR_TOK_EOF}
 };
 
@@ -354,6 +365,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
     case 0x670195b6u:
         if (len == 6 && memcmp(s, "sitofp", 6) == 0) return LR_TOK_SITOFP;
         break;
+    case 0xc1f8df40u:
+        if (len == 6 && memcmp(s, "uitofp", 6) == 0) return LR_TOK_UITOFP;
+        break;
     case 0x6a9f8552u:
         if (len == 6 && memcmp(s, "define", 6) == 0) return LR_TOK_DEFINE;
         break;
@@ -377,6 +391,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
         break;
     case 0x91fa8f16u:
         if (len == 9 && memcmp(s, "writeonly", 9) == 0) return LR_TOK_WRITEONLY;
+        break;
+    case 0x93e05f71u:
+        if (len == 6 && memcmp(s, "switch", 6) == 0) return LR_TOK_SWITCH;
         break;
     case 0x991deba0u:
         if (len == 3 && memcmp(s, "ord", 3) == 0) return LR_TOK_ORD;
@@ -405,6 +422,27 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
     case 0xad2b82a6u:
         if (len == 3 && memcmp(s, "olt", 3) == 0) return LR_TOK_OLT;
         break;
+    case 0xb2f7980du:
+        if (len == 6 && memcmp(s, "invoke", 6) == 0) return LR_TOK_INVOKE;
+        break;
+    case 0x4807fb41u:
+        if (len == 10 && memcmp(s, "landingpad", 10) == 0) return LR_TOK_LANDINGPAD;
+        break;
+    case 0xff39a36au:
+        if (len == 6 && memcmp(s, "resume", 6) == 0) return LR_TOK_RESUME;
+        break;
+    case 0xa4dc0768u:
+        if (len == 6 && memcmp(s, "unwind", 6) == 0) return LR_TOK_UNWIND;
+        break;
+    case 0xd95df1b3u:
+        if (len == 7 && memcmp(s, "cleanup", 7) == 0) return LR_TOK_CLEANUP;
+        break;
+    case 0x4288e94cu:
+        if (len == 5 && memcmp(s, "catch", 5) == 0) return LR_TOK_CATCH;
+        break;
+    case 0x0e221f23u:
+        if (len == 11 && memcmp(s, "personality", 11) == 0) return LR_TOK_PERSONALITY;
+        break;
     case 0xb3f184a9u:
         if (len == 4 && memcmp(s, "call", 4) == 0) return LR_TOK_CALL;
         break;
@@ -425,6 +463,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
         break;
     case 0xc7649392u:
         if (len == 6 && memcmp(s, "fptosi", 6) == 0) return LR_TOK_FPTOSI;
+        break;
+    case 0xbb5e7080u:
+        if (len == 6 && memcmp(s, "fptoui", 6) == 0) return LR_TOK_FPTOUI;
         break;
     case 0xc7e7bc2eu:
         if (len == 5 && memcmp(s, "store", 5) == 0) return LR_TOK_STORE;
@@ -509,6 +550,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
         break;
     case 0xfd0c5087u:
         if (len == 1 && memcmp(s, "x", 1) == 0) return LR_TOK_X;
+        break;
+    case 0x87d98b64u:
+        if (len == 8 && memcmp(s, "x86_fp80", 8) == 0) return LR_TOK_DOUBLE;
         break;
     default:
         break;
@@ -744,6 +788,14 @@ const char *lr_tok_name(lr_tok_t kind) {
     case LR_TOK_SREM:      return "srem";
     case LR_TOK_UREM:      return "urem";
     case LR_TOK_CALL:      return "call";
+    case LR_TOK_SWITCH:    return "switch";
+    case LR_TOK_INVOKE:    return "invoke";
+    case LR_TOK_LANDINGPAD: return "landingpad";
+    case LR_TOK_RESUME:    return "resume";
+    case LR_TOK_UNWIND:    return "unwind";
+    case LR_TOK_CLEANUP:   return "cleanup";
+    case LR_TOK_CATCH:     return "catch";
+    case LR_TOK_PERSONALITY: return "personality";
     case LR_TOK_GETELEMENTPTR: return "getelementptr";
     case LR_TOK_ALIGN:     return "align";
     case LR_TOK_VOID:      return "void";

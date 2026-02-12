@@ -14,6 +14,7 @@ enum {
     LR_RELOC_ARM64_PAGEOFF12          = 4,
     LR_RELOC_ARM64_GOT_LOAD_PAGE21    = 5,
     LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12 = 6,
+    LR_RELOC_ARM64_ABS64              = 7,
 };
 
 /* x86_64 relocation types (used by x86_64 backend) */
@@ -42,6 +43,9 @@ typedef struct lr_objfile_ctx {
     lr_obj_reloc_t *relocs;
     uint32_t num_relocs;
     uint32_t reloc_cap;
+    lr_obj_reloc_t *data_relocs;
+    uint32_t num_data_relocs;
+    uint32_t data_reloc_cap;
     lr_obj_symbol_t *symbols;
     uint32_t num_symbols;
     uint32_t symbol_cap;
@@ -65,6 +69,10 @@ typedef lr_reloc_mapped_t (*lr_reloc_mapper_fn)(uint8_t liric_type);
 int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out);
 int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
                        const char *entry_symbol);
+int lr_emit_executable_with_runtime(lr_module_t *m, const char *runtime_ll,
+                                     size_t runtime_len,
+                                     const lr_target_t *target, FILE *out,
+                                     const char *entry_symbol);
 
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                bool is_defined, uint8_t section,
@@ -72,6 +80,9 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
 
 void lr_obj_add_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
                        uint32_t symbol_idx, uint8_t type);
+
+void lr_obj_add_data_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
+                            uint32_t symbol_idx, uint8_t type);
 
 /* Byte-level write helpers shared by Mach-O and ELF format writers */
 

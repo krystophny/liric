@@ -73,6 +73,9 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
                 const uint8_t *data, size_t data_size,
                 const lr_objfile_ctx_t *oc,
                 uint32_t cpu_type, lr_reloc_mapper_fn reloc_mapper) {
+    if (oc->num_data_relocs > 0)
+        return -1;
+
     uint32_t n_defined = 0;
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
         if (oc->symbols[i].is_defined)
