@@ -187,6 +187,7 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"une", LR_TOK_UNE},
     {"uno", LR_TOK_UNO},
     {"x", LR_TOK_X},
+    {"x86_fp80", LR_TOK_DOUBLE},
     {NULL, LR_TOK_EOF}
 };
 
@@ -549,6 +550,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
         break;
     case 0xfd0c5087u:
         if (len == 1 && memcmp(s, "x", 1) == 0) return LR_TOK_X;
+        break;
+    case 0x87d98b64u:
+        if (len == 8 && memcmp(s, "x86_fp80", 8) == 0) return LR_TOK_DOUBLE;
         break;
     default:
         break;

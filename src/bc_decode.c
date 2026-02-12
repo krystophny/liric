@@ -850,10 +850,10 @@ static bool bc_translate_instruction(bc_ctx_t *bc, bc_func_ctx_t *fnc,
         case LLVMBitCast: cast_op = LR_OP_BITCAST; break;
         case LLVMPtrToInt: cast_op = LR_OP_PTRTOINT; break;
         case LLVMIntToPtr: cast_op = LR_OP_INTTOPTR; break;
-        case LLVMUIToFP:
+        case LLVMUIToFP:  cast_op = LR_OP_UITOFP; break;
         case LLVMSIToFP:  cast_op = LR_OP_SITOFP; break;
-        case LLVMFPToSI:
-        case LLVMFPToUI:  cast_op = LR_OP_FPTOSI; break;
+        case LLVMFPToSI:  cast_op = LR_OP_FPTOSI; break;
+        case LLVMFPToUI:  cast_op = LR_OP_FPTOUI; break;
         case LLVMFPExt:   cast_op = LR_OP_FPEXT; break;
         case LLVMFPTrunc: cast_op = LR_OP_FPTRUNC; break;
         default: break;

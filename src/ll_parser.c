@@ -846,7 +846,8 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
     if (check(p, LR_TOK_BITCAST) || check(p, LR_TOK_INTTOPTR) ||
         check(p, LR_TOK_PTRTOINT) || check(p, LR_TOK_SEXT) ||
         check(p, LR_TOK_ZEXT) || check(p, LR_TOK_TRUNC) ||
-        check(p, LR_TOK_SITOFP) || check(p, LR_TOK_FPTOSI) ||
+        check(p, LR_TOK_SITOFP) || check(p, LR_TOK_UITOFP) ||
+        check(p, LR_TOK_FPTOSI) || check(p, LR_TOK_FPTOUI) ||
         check(p, LR_TOK_FPEXT) || check(p, LR_TOK_FPTRUNC)) {
         next(p);
         expect(p, LR_TOK_LPAREN);
@@ -1157,7 +1158,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
             case LR_TOK_SEXT: case LR_TOK_ZEXT: case LR_TOK_TRUNC:
             case LR_TOK_BITCAST: case LR_TOK_PTRTOINT: case LR_TOK_INTTOPTR:
-            case LR_TOK_SITOFP: case LR_TOK_FPTOSI:
+            case LR_TOK_SITOFP: case LR_TOK_UITOFP:
+            case LR_TOK_FPTOSI: case LR_TOK_FPTOUI:
             case LR_TOK_FPEXT: case LR_TOK_FPTRUNC: {
                 lr_operand_t src = parse_typed_operand(p);
                 expect(p, LR_TOK_TO);
@@ -1171,7 +1173,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 case LR_TOK_PTRTOINT: irop = LR_OP_PTRTOINT; break;
                 case LR_TOK_INTTOPTR: irop = LR_OP_INTTOPTR; break;
                 case LR_TOK_SITOFP:   irop = LR_OP_SITOFP; break;
+                case LR_TOK_UITOFP:   irop = LR_OP_UITOFP; break;
                 case LR_TOK_FPTOSI:   irop = LR_OP_FPTOSI; break;
+                case LR_TOK_FPTOUI:   irop = LR_OP_FPTOUI; break;
                 case LR_TOK_FPEXT:    irop = LR_OP_FPEXT; break;
                 case LR_TOK_FPTRUNC:  irop = LR_OP_FPTRUNC; break;
                 default: irop = LR_OP_BITCAST; break;
@@ -1904,7 +1908,8 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
     } else if (check(p, LR_TOK_BITCAST) || check(p, LR_TOK_INTTOPTR) ||
                check(p, LR_TOK_PTRTOINT) || check(p, LR_TOK_SEXT) ||
                check(p, LR_TOK_ZEXT) || check(p, LR_TOK_TRUNC) ||
-               check(p, LR_TOK_SITOFP) || check(p, LR_TOK_FPTOSI) ||
+               check(p, LR_TOK_SITOFP) || check(p, LR_TOK_UITOFP) ||
+               check(p, LR_TOK_FPTOSI) || check(p, LR_TOK_FPTOUI) ||
                check(p, LR_TOK_FPEXT) || check(p, LR_TOK_FPTRUNC)) {
         next(p);
         expect(p, LR_TOK_LPAREN);

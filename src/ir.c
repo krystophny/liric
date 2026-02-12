@@ -800,7 +800,9 @@ static const char *opcode_name(lr_opcode_t op) {
     case LR_OP_PTRTOINT:     return "ptrtoint";
     case LR_OP_INTTOPTR:     return "inttoptr";
     case LR_OP_SITOFP:       return "sitofp";
+    case LR_OP_UITOFP:       return "uitofp";
     case LR_OP_FPTOSI:       return "fptosi";
+    case LR_OP_FPTOUI:       return "fptoui";
     case LR_OP_FPEXT:        return "fpext";
     case LR_OP_FPTRUNC:      return "fptrunc";
     case LR_OP_EXTRACTVALUE: return "extractvalue";
@@ -850,8 +852,9 @@ static const char *fcmp_pred_name(int pred) {
 static bool is_cast_op(lr_opcode_t op) {
     return op == LR_OP_SEXT || op == LR_OP_ZEXT || op == LR_OP_TRUNC ||
            op == LR_OP_BITCAST || op == LR_OP_PTRTOINT ||
-           op == LR_OP_INTTOPTR || op == LR_OP_SITOFP ||
-           op == LR_OP_FPTOSI || op == LR_OP_FPEXT || op == LR_OP_FPTRUNC;
+           op == LR_OP_INTTOPTR || op == LR_OP_SITOFP || op == LR_OP_UITOFP ||
+           op == LR_OP_FPTOSI || op == LR_OP_FPTOUI ||
+           op == LR_OP_FPEXT || op == LR_OP_FPTRUNC;
 }
 
 static bool is_void_type(const lr_type_t *t) {

@@ -2029,8 +2029,7 @@ lc_value_t *lc_create_uitofp(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
     (void)name;
-    /* liric does not have uitofp; use sitofp as approximation */
-    return compat_cast(mod, b, f, LR_OP_SITOFP, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_UITOFP, val, to_type);
 }
 
 lc_value_t *lc_create_fptosi(lc_module_compat_t *mod, lr_block_t *b,
@@ -2044,8 +2043,7 @@ lc_value_t *lc_create_fptoui(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
     (void)name;
-    /* liric does not have fptoui; use fptosi as approximation */
-    return compat_cast(mod, b, f, LR_OP_FPTOSI, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_FPTOUI, val, to_type);
 }
 
 lc_value_t *lc_create_fpext(lc_module_compat_t *mod, lr_block_t *b,

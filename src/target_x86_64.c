@@ -134,7 +134,7 @@ static bool inst_produces_elidable_rax_value(const lr_inst_t *inst) {
     case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
     case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
     case LR_OP_FCMP:
-    case LR_OP_FPTOSI:
+    case LR_OP_FPTOSI: case LR_OP_FPTOUI:
     case LR_OP_EXTRACTVALUE:
         return true;
     default:
@@ -159,7 +159,7 @@ static bool inst_consumes_operand0_in_rax(const lr_inst_t *inst) {
     case LR_OP_SEXT:
     case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
     case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
-    case LR_OP_SITOFP:
+    case LR_OP_SITOFP: case LR_OP_UITOFP:
         return true;
     default:
         return false;
@@ -1628,7 +1628,27 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
                 break;
             }
+            case LR_OP_UITOFP: {
+                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_operand(&ctx, &inst->operands[0], X86_RAX);
+                size_t src_sz = lr_type_size(inst->operands[0].type);
+                if (src_sz <= 4) {
+                    /* zero-extend to 64-bit: mov eax, eax */
+                    ctx.buf[ctx.pos++] = 0x89; ctx.buf[ctx.pos++] = 0xC0;
+                }
+                emit_cvtsi2fp(&ctx, FP_SCRATCH0, X86_RAX, fsize);
+                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
+                break;
+            }
             case LR_OP_FPTOSI: {
+                uint8_t fsize = (inst->operands[0].type &&
+                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
+                emit_cvtfp2si(&ctx, X86_RAX, FP_SCRATCH0, fsize);
+                emit_store_slot(&ctx, inst->dest, X86_RAX);
+                break;
+            }
+            case LR_OP_FPTOUI: {
                 uint8_t fsize = (inst->operands[0].type &&
                                  inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
                 emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
