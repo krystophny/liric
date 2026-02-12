@@ -1,7 +1,9 @@
 #include "arena.h"
+#include "compile_mode.h"
 #include "ir.h"
 #include "jit.h"
 #include "liric.h"
+#include "llvm_backend.h"
 #include "objfile.h"
 #include "target.h"
 #include <stdarg.h>
@@ -831,7 +833,8 @@ int lr_session_compile_ll(struct lr_session *s, const char *src, size_t len,
 int lr_session_emit_object(struct lr_session *s, const char *path,
                             session_error_t *err) {
     const lr_target_t *target;
-    FILE *out;
+    lr_compile_mode_t mode;
+    FILE *out = NULL;
     int rc;
 
     err_clear(err);
@@ -847,6 +850,19 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
     if (!target) {
         err_set(err, S_ERR_BACKEND, "target not found");
         return -1;
+    }
+
+    mode = lr_compile_mode_from_env();
+    if (mode == LR_COMPILE_LLVM) {
+        char backend_err[256] = {0};
+        rc = lr_llvm_emit_object_path(s->module, target, path,
+                                      backend_err, sizeof(backend_err));
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "llvm object emission failed: %s",
+                    backend_err[0] ? backend_err : "unknown backend error");
+            return -1;
+        }
+        return 0;
     }
 
     out = fopen(path, "wb");
@@ -867,7 +883,8 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
 int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
     const lr_target_t *target;
-    FILE *out;
+    lr_compile_mode_t mode;
+    FILE *out = NULL;
     int rc;
 
     err_clear(err);
@@ -883,6 +900,20 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     if (!target) {
         err_set(err, S_ERR_BACKEND, "target not found");
         return -1;
+    }
+
+    mode = lr_compile_mode_from_env();
+    if (mode == LR_COMPILE_LLVM) {
+        char backend_err[256] = {0};
+        rc = lr_llvm_emit_executable_path(s->module, NULL, 0,
+                                          target, path, "_start",
+                                          backend_err, sizeof(backend_err));
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "llvm executable emission failed: %s",
+                    backend_err[0] ? backend_err : "unknown backend error");
+            return -1;
+        }
+        return 0;
     }
 
     out = fopen(path, "wb");
@@ -904,7 +935,8 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
                                       const char *runtime_ll, size_t runtime_len,
                                       session_error_t *err) {
     const lr_target_t *target;
-    FILE *out;
+    lr_compile_mode_t mode;
+    FILE *out = NULL;
     int rc;
 
     err_clear(err);
@@ -920,6 +952,21 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
     if (!target) {
         err_set(err, S_ERR_BACKEND, "target not found");
         return -1;
+    }
+
+    mode = lr_compile_mode_from_env();
+    if (mode == LR_COMPILE_LLVM) {
+        char backend_err[256] = {0};
+        rc = lr_llvm_emit_executable_path(s->module, runtime_ll, runtime_len,
+                                          target, path, "_start",
+                                          backend_err, sizeof(backend_err));
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND,
+                    "llvm executable emission with runtime failed: %s",
+                    backend_err[0] ? backend_err : "unknown backend error");
+            return -1;
+        }
+        return 0;
     }
 
     out = fopen(path, "wb");

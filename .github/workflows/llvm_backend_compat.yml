@@ -1,0 +1,49 @@
+name: LLVM Backend Compat
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  llvm-backend-matrix:
+    name: LLVM backend (llvmdev=${{ matrix.llvm-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm-version: ["7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup micromamba
+        uses: mamba-org/setup-micromamba@v2.0.2
+        with:
+          micromamba-version: "2.0.4-0"
+          environment-file: tools/llvm_backend_environment.yml
+          create-args: >-
+            llvmdev=${{ matrix.llvm-version }}
+          cache-environment: true
+          cache-environment-key: llvm-backend-${{ matrix.llvm-version }}
+
+      - name: Build and test
+        shell: bash -e -l {0}
+        run: |
+          with_compat=OFF
+          if [[ "${{ matrix.llvm-version }}" -ge 11 ]]; then
+            with_compat=ON
+          fi
+          llvm_config="$(command -v llvm-config)"
+          if [[ -z "${llvm_config}" ]]; then
+            echo "llvm-config not found" >&2
+            exit 1
+          fi
+          cmake -S . -B build -G Ninja \
+            -DWITH_REAL_LLVM_BACKEND=ON \
+            -DWITH_LLVM_COMPAT="${with_compat}" \
+            -DWITH_BENCH_TCC=OFF \
+            -DWITH_BENCH_LLI_PHASES=OFF \
+            -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure

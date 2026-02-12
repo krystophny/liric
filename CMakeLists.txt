@@ -27,6 +27,85 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
+option(WITH_REAL_LLVM_BACKEND "Enable real LLVM C API backend for mode 'llvm'" OFF)
+set(LIRIC_LLVM_CONFIG_EXE "" CACHE FILEPATH "Path to llvm-config for real LLVM backend")
+
+set(LIRIC_REAL_LLVM_INCLUDE_DIR "")
+set(LIRIC_REAL_LLVM_CFLAGS_LIST "")
+set(LIRIC_REAL_LLVM_LDFLAGS_LIST "")
+set(LIRIC_REAL_LLVM_LIBS_LIST "")
+set(LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST "")
+set(LIRIC_BACKEND_LLVM_VERSION "")
+set(LIRIC_BACKEND_LLVM_VERSION_MAJOR "0")
+
+if(WITH_REAL_LLVM_BACKEND)
+    if(LIRIC_LLVM_CONFIG_EXE)
+        set(LLVM_BACKEND_CONFIG_EXE "${LIRIC_LLVM_CONFIG_EXE}")
+    else()
+        find_program(LLVM_BACKEND_CONFIG_EXE llvm-config)
+    endif()
+    if(NOT LLVM_BACKEND_CONFIG_EXE)
+        message(FATAL_ERROR "WITH_REAL_LLVM_BACKEND=ON requires llvm-config (or set LIRIC_LLVM_CONFIG_EXE)")
+    endif()
+
+    execute_process(
+        COMMAND ${LLVM_BACKEND_CONFIG_EXE} --version
+        OUTPUT_VARIABLE LIRIC_BACKEND_LLVM_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    string(REGEX MATCH "^[0-9]+" LIRIC_BACKEND_LLVM_VERSION_MAJOR "${LIRIC_BACKEND_LLVM_VERSION}")
+    if(NOT LIRIC_BACKEND_LLVM_VERSION_MAJOR)
+        message(FATAL_ERROR "Could not parse LLVM major version from: ${LIRIC_BACKEND_LLVM_VERSION}")
+    endif()
+
+    execute_process(
+        COMMAND ${LLVM_BACKEND_CONFIG_EXE} --includedir
+        OUTPUT_VARIABLE LIRIC_REAL_LLVM_INCLUDE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_BACKEND_CONFIG_EXE} --cflags
+        OUTPUT_VARIABLE LIRIC_REAL_LLVM_CFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_BACKEND_CONFIG_EXE} --ldflags
+        OUTPUT_VARIABLE LIRIC_REAL_LLVM_LDFLAGS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_BACKEND_CONFIG_EXE} --libs all
+        OUTPUT_VARIABLE LIRIC_REAL_LLVM_LIBS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${LLVM_BACKEND_CONFIG_EXE} --system-libs
+        OUTPUT_VARIABLE LIRIC_REAL_LLVM_SYSTEM_LIBS
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    separate_arguments(LIRIC_REAL_LLVM_CFLAGS_LIST NATIVE_COMMAND "${LIRIC_REAL_LLVM_CFLAGS}")
+    separate_arguments(LIRIC_REAL_LLVM_LDFLAGS_LIST NATIVE_COMMAND "${LIRIC_REAL_LLVM_LDFLAGS}")
+    separate_arguments(LIRIC_REAL_LLVM_LIBS_LIST NATIVE_COMMAND "${LIRIC_REAL_LLVM_LIBS}")
+    separate_arguments(LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LIRIC_REAL_LLVM_SYSTEM_LIBS}")
+
+    add_compile_definitions(
+        LIRIC_HAVE_REAL_LLVM_BACKEND=1
+        LIRIC_BACKEND_LLVM_VERSION_MAJOR=${LIRIC_BACKEND_LLVM_VERSION_MAJOR}
+    )
+    message(STATUS "Real LLVM backend enabled (llvm-config=${LLVM_BACKEND_CONFIG_EXE}, version=${LIRIC_BACKEND_LLVM_VERSION})")
+endif()
+
+option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
+if(WITH_REAL_LLVM_BACKEND AND WITH_LLVM_COMPAT)
+    if(LIRIC_BACKEND_LLVM_VERSION_MAJOR LESS 11)
+        message(WARNING
+            "WITH_LLVM_COMPAT is disabled for real backend with LLVM < 11 "
+            "(known static-link C++ symbol collision in llvmdev packages).")
+        set(WITH_LLVM_COMPAT OFF CACHE BOOL "Build LLVM C++ compatibility layer tests" FORCE)
+    endif()
+endif()
+
 if(UNIX AND NOT APPLE)
     add_link_options("$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-rdynamic>")
 endif()
@@ -37,6 +116,7 @@ add_library(liric STATIC
     src/ll_lexer.c
     src/ll_parser.c
     src/frontend_common.c
+    src/compile_mode.c
     src/bc_decode.c
     src/frontend_registry.c
     src/wasm_decode.c
@@ -52,6 +132,7 @@ add_library(liric STATIC
     src/liric.c
     src/liric_compat.c
     src/session.c
+    src/llvm_backend.c
     src/objfile.c
     src/objfile_macho.c
     src/objfile_elf.c
@@ -69,6 +150,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch6
 endif()
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
+if(WITH_REAL_LLVM_BACKEND)
+    target_include_directories(liric PRIVATE "${LIRIC_REAL_LLVM_INCLUDE_DIR}")
+    target_compile_options(liric PRIVATE ${LIRIC_REAL_LLVM_CFLAGS_LIST})
+    target_compile_definitions(liric PRIVATE
+        LIRIC_HAVE_REAL_LLVM_BACKEND=1
+        LIRIC_BACKEND_LLVM_VERSION_MAJOR=${LIRIC_BACKEND_LLVM_VERSION_MAJOR}
+    )
+    target_link_options(liric PRIVATE ${LIRIC_REAL_LLVM_LDFLAGS_LIST})
+    target_link_libraries(liric PRIVATE
+        ${LIRIC_REAL_LLVM_LIBS_LIST}
+        ${LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST}
+        stdc++
+    )
+endif()
 
 add_executable(liric_bin tools/liric_main.c)
 set_target_properties(liric_bin PROPERTIES OUTPUT_NAME liric)
@@ -103,12 +198,24 @@ target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_tcc tools/bench_tcc.c)
-target_link_libraries(bench_tcc PRIVATE liric tcc ${LIRIC_PLATFORM_LIBS})
-target_include_directories(bench_tcc PRIVATE src)
+option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
+if(WITH_BENCH_TCC)
+    find_path(LIRTCC_INCLUDE_DIR libtcc.h)
+    find_library(LIRTCC_LIB tcc)
+    if(LIRTCC_INCLUDE_DIR AND LIRTCC_LIB)
+        add_executable(bench_tcc tools/bench_tcc.c)
+        target_include_directories(bench_tcc PRIVATE src "${LIRTCC_INCLUDE_DIR}")
+        target_link_libraries(bench_tcc PRIVATE liric "${LIRTCC_LIB}" ${LIRIC_PLATFORM_LIBS})
+    else()
+        message(STATUS "libtcc not found: bench_tcc target will not be built")
+    endif()
+else()
+    message(STATUS "bench_tcc target disabled (WITH_BENCH_TCC=OFF)")
+endif()
 
+option(WITH_BENCH_LLI_PHASES "Build bench_lli_phases when LLVM C ORC APIs are available" ON)
 find_program(LLVM_CONFIG_EXE llvm-config)
-if(LLVM_CONFIG_EXE)
+if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES)
     execute_process(
         COMMAND ${LLVM_CONFIG_EXE} --includedir
         OUTPUT_VARIABLE LLVM_INCLUDE_DIR
@@ -133,18 +240,26 @@ if(LLVM_CONFIG_EXE)
     separate_arguments(LLVM_LIBS_LIST NATIVE_COMMAND "${LLVM_LIBS}")
     separate_arguments(LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LLVM_SYSTEM_LIBS}")
 
-    add_executable(bench_lli_phases tools/bench_lli_phases.c)
-    target_include_directories(bench_lli_phases PRIVATE ${LLVM_INCLUDE_DIR})
-    target_link_options(bench_lli_phases PRIVATE ${LLVM_LDFLAGS_LIST})
-    target_link_libraries(
-        bench_lli_phases PRIVATE
-        ${LLVM_LIBS_LIST}
-        ${LLVM_SYSTEM_LIBS_LIST}
-        ${LIRIC_PLATFORM_LIBS}
-        stdc++
-    )
+    if(EXISTS "${LLVM_INCLUDE_DIR}/llvm-c/LLJIT.h")
+        add_executable(bench_lli_phases tools/bench_lli_phases.c)
+        target_include_directories(bench_lli_phases PRIVATE ${LLVM_INCLUDE_DIR})
+        target_link_options(bench_lli_phases PRIVATE ${LLVM_LDFLAGS_LIST})
+        target_link_libraries(
+            bench_lli_phases PRIVATE
+            ${LLVM_LIBS_LIST}
+            ${LLVM_SYSTEM_LIBS_LIST}
+            ${LIRIC_PLATFORM_LIBS}
+            stdc++
+        )
+    else()
+        message(STATUS "llvm-c/LLJIT.h not found: bench_lli_phases target will not be built")
+    endif()
 else()
-    message(STATUS "llvm-config not found: bench_lli_phases target will not be built")
+    if(WITH_BENCH_LLI_PHASES)
+        message(STATUS "llvm-config not found: bench_lli_phases target will not be built")
+    else()
+        message(STATUS "bench_lli_phases target disabled (WITH_BENCH_LLI_PHASES=OFF)")
+    endif()
 endif()
 
 enable_testing()
@@ -386,7 +501,7 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_shell_runner.cmake
 )
 
-if(CMAKE_NM)
+if(CMAKE_NM AND NOT WITH_REAL_LLVM_BACKEND)
     add_test(
         NAME liric_static_archive_no_llvm_undef
         COMMAND ${CMAKE_COMMAND}
@@ -403,7 +518,6 @@ install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
 if(WITH_LLVM_COMPAT)
     enable_language(CXX)
     set(CMAKE_CXX_STANDARD 17)
@@ -412,4 +526,11 @@ if(WITH_LLVM_COMPAT)
     target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
     target_compile_options(test_llvm_compat PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
     add_test(NAME llvm_compat_tests COMMAND test_llvm_compat)
+
+    if(WITH_REAL_LLVM_BACKEND)
+        add_executable(test_llvm_backend_roundtrip tests/test_llvm_backend_roundtrip.cpp)
+        target_link_libraries(test_llvm_backend_roundtrip PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
+        target_compile_options(test_llvm_backend_roundtrip PRIVATE -Wall -Wextra -Wpedantic)
+        add_test(NAME llvm_backend_roundtrip_tests COMMAND test_llvm_backend_roundtrip)
+    endif()
 endif()
