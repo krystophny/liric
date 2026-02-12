@@ -1,1016 +1,2159 @@
 #include "bc_decode.h"
 #include "frontend_common.h"
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#if LIRIC_HAVE_LLVM_BITCODE
-#include <llvm-c/BitReader.h>
-#include <llvm-c/Core.h>
-#endif
+/* ---- Magic detection --------------------------------------------------- */
 
 bool lr_bc_is_bitcode(const uint8_t *data, size_t len) {
     if (!data || len < 4)
         return false;
-
-    /* Raw LLVM bitcode magic: "BC\\xC0\\xDE". */
     if (data[0] == 0x42 && data[1] == 0x43 && data[2] == 0xC0 && data[3] == 0xDE)
         return true;
-
-    /* LLVM bitcode wrapper magic (little-endian 0x0B17C0DE). */
     if (data[0] == 0xDE && data[1] == 0xC0 && data[2] == 0x17 && data[3] == 0x0B)
         return true;
-
     return false;
 }
-
-#if !LIRIC_HAVE_LLVM_BITCODE
 
 bool lr_bc_parser_available(void) {
-    return false;
+    return true;
 }
 
-lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
-                              lr_arena_t *arena, char *err, size_t errlen) {
-    (void)arena;
+/* ---- Layer 1: Bitstream reader ----------------------------------------- */
 
-    if (!data && len != 0) {
-        lr_frontend_set_error(err, errlen, "invalid bitcode input buffer");
-        return NULL;
-    }
+enum {
+    BC_ABBREV_END_BLOCK   = 0,
+    BC_ABBREV_ENTER_BLOCK = 1,
+    BC_ABBREV_DEFINE      = 2,
+    BC_ABBREV_UNABBREV    = 3,
+    BC_FIRST_USER_ABBREV  = 4
+};
 
-    if (!lr_bc_is_bitcode(data, len)) {
-        lr_frontend_set_error(err, errlen, "input is not LLVM bitcode");
-        return NULL;
-    }
-
-    lr_frontend_set_error(err, errlen,
-                          "LLVM bitcode (.bc) detected, but this build has no LLVM bitcode decoder support");
-    return NULL;
-}
-
-#else
+typedef enum {
+    BC_OP_LITERAL = 0,
+    BC_OP_FIXED   = 1,
+    BC_OP_VBR     = 2,
+    BC_OP_ARRAY   = 3,
+    BC_OP_CHAR6   = 4,
+    BC_OP_BLOB    = 5
+} bc_abbrev_op_kind_t;
 
 typedef struct {
-    LLVMTypeRef ll;
-    lr_type_t *lr;
-} bc_type_entry_t;
+    bc_abbrev_op_kind_t kind;
+    uint64_t value;
+} bc_abbrev_op_t;
 
 typedef struct {
-    LLVMValueRef ll_value;
-    uint32_t vreg;
-    lr_type_t *type;
-} bc_value_entry_t;
+    bc_abbrev_op_t *ops;
+    uint32_t num_ops;
+} bc_abbrev_t;
 
 typedef struct {
-    LLVMBasicBlockRef ll_block;
-    lr_block_t *lr_block;
-} bc_block_entry_t;
-
-typedef struct {
-    bc_value_entry_t *entries;
-    uint32_t count;
+    uint32_t block_id;
+    bc_abbrev_t *abbrevs;
+    uint32_t num;
     uint32_t cap;
-} bc_value_map_t;
+} bc_blockinfo_entry_t;
 
 typedef struct {
-    bc_block_entry_t *entries;
-    uint32_t count;
-    uint32_t cap;
-} bc_block_map_t;
+    const uint8_t *data;
+    size_t len_bits;
+    size_t bit_pos;
 
-typedef struct {
-    bc_type_entry_t *entries;
-    uint32_t count;
-    uint32_t cap;
-    lr_module_t *module;
-    lr_arena_t *arena;
+    bc_abbrev_t *abbrevs;
+    uint32_t num_abbrevs;
+    uint32_t abbrev_cap;
+    uint32_t abbrev_len;
+
+    bc_blockinfo_entry_t *blockinfo;
+    uint32_t num_blockinfo;
+    uint32_t blockinfo_cap;
+
+    uint64_t *record;
+    uint32_t record_len;
+    uint32_t record_cap;
+    const uint8_t *blob_data;
+    size_t blob_len;
+
     char *err;
     size_t errlen;
-} bc_ctx_t;
+    bool has_error;
+} bc_reader_t;
 
-typedef struct {
-    bc_ctx_t *bc;
-    lr_func_t *func;
-    bc_value_map_t values;
-    bc_block_map_t blocks;
-} bc_func_ctx_t;
-
-static void bc_set_error(bc_ctx_t *bc, const char *fmt, ...) {
+static void bc_error(bc_reader_t *r, const char *fmt, ...) {
     va_list ap;
-    if (!bc || !bc->err || bc->errlen == 0)
+    if (!r || r->has_error)
+        return;
+    r->has_error = true;
+    if (!r->err || r->errlen == 0)
         return;
     va_start(ap, fmt);
-    vsnprintf(bc->err, bc->errlen, fmt, ap);
+    vsnprintf(r->err, r->errlen, fmt, ap);
     va_end(ap);
 }
 
-static bool value_map_put(bc_value_map_t *map, LLVMValueRef ll_value,
-                          uint32_t vreg, lr_type_t *type) {
-    bc_value_entry_t *next;
-    uint32_t new_cap;
-
-    if (!map)
-        return false;
-
-    if (map->count == map->cap) {
-        new_cap = map->cap ? map->cap * 2u : 64u;
-        next = (bc_value_entry_t *)realloc(map->entries,
-                                           (size_t)new_cap * sizeof(*next));
-        if (!next)
-            return false;
-        map->entries = next;
-        map->cap = new_cap;
-    }
-
-    map->entries[map->count].ll_value = ll_value;
-    map->entries[map->count].vreg = vreg;
-    map->entries[map->count].type = type;
-    map->count++;
-    return true;
-}
-
-static bool block_map_put(bc_block_map_t *map, LLVMBasicBlockRef ll_block,
-                          lr_block_t *lr_block) {
-    bc_block_entry_t *next;
-    uint32_t new_cap;
-
-    if (!map)
-        return false;
-
-    if (map->count == map->cap) {
-        new_cap = map->cap ? map->cap * 2u : 32u;
-        next = (bc_block_entry_t *)realloc(map->entries,
-                                           (size_t)new_cap * sizeof(*next));
-        if (!next)
-            return false;
-        map->entries = next;
-        map->cap = new_cap;
-    }
-
-    map->entries[map->count].ll_block = ll_block;
-    map->entries[map->count].lr_block = lr_block;
-    map->count++;
-    return true;
-}
-
-static bool type_map_put(bc_ctx_t *bc, LLVMTypeRef ll, lr_type_t *lr) {
-    bc_type_entry_t *next;
-    uint32_t new_cap;
-
-    if (!bc)
-        return false;
-
-    if (bc->count == bc->cap) {
-        new_cap = bc->cap ? bc->cap * 2u : 64u;
-        next = (bc_type_entry_t *)realloc(bc->entries, (size_t)new_cap * sizeof(*next));
-        if (!next)
-            return false;
-        bc->entries = next;
-        bc->cap = new_cap;
-    }
-
-    bc->entries[bc->count].ll = ll;
-    bc->entries[bc->count].lr = lr;
-    bc->count++;
-    return true;
-}
-
-static lr_type_t *type_map_get(bc_ctx_t *bc, LLVMTypeRef ll) {
+static uint64_t bc_read_fixed(bc_reader_t *r, uint32_t width) {
+    uint64_t val = 0;
     uint32_t i;
-    if (!bc || !ll)
-        return NULL;
-    for (i = 0; i < bc->count; i++) {
-        if (bc->entries[i].ll == ll)
-            return bc->entries[i].lr;
+    if (width == 0)
+        return 0;
+    if (r->bit_pos + width > r->len_bits) {
+        bc_error(r, "bitstream overrun at bit %zu", r->bit_pos);
+        return 0;
     }
-    return NULL;
+    for (i = 0; i < width; i++) {
+        size_t byte_idx = (r->bit_pos + i) / 8;
+        uint32_t bit_idx = (uint32_t)((r->bit_pos + i) % 8);
+        if ((r->data[byte_idx] >> bit_idx) & 1)
+            val |= (uint64_t)1 << i;
+    }
+    r->bit_pos += width;
+    return val;
 }
 
-static bc_value_entry_t *value_map_get(bc_value_map_t *map, LLVMValueRef ll_value) {
+static uint64_t bc_read_vbr(bc_reader_t *r, uint32_t width) {
+    uint64_t val = 0;
+    uint32_t shift = 0;
+    uint64_t hi_bit = (uint64_t)1 << (width - 1);
+    for (;;) {
+        uint64_t chunk = bc_read_fixed(r, width);
+        if (r->has_error)
+            return 0;
+        val |= (chunk & (hi_bit - 1)) << shift;
+        if (!(chunk & hi_bit))
+            break;
+        shift += width - 1;
+        if (shift > 63) {
+            bc_error(r, "VBR overflow");
+            return 0;
+        }
+    }
+    return val;
+}
+
+static void bc_align32(bc_reader_t *r) {
+    uint32_t rem = (uint32_t)(r->bit_pos % 32);
+    if (rem != 0)
+        r->bit_pos += 32 - rem;
+}
+
+
+static void bc_record_push(bc_reader_t *r, uint64_t val) {
+    if (r->record_len == r->record_cap) {
+        uint32_t new_cap = r->record_cap ? r->record_cap * 2 : 64;
+        uint64_t *tmp = (uint64_t *)realloc(r->record, (size_t)new_cap * sizeof(uint64_t));
+        if (!tmp) {
+            bc_error(r, "out of memory in record buffer");
+            return;
+        }
+        r->record = tmp;
+        r->record_cap = new_cap;
+    }
+    r->record[r->record_len++] = val;
+}
+
+static void bc_abbrev_list_push(bc_abbrev_t **list, uint32_t *count,
+                                uint32_t *cap, bc_abbrev_t abbrev) {
+    if (*count == *cap) {
+        uint32_t new_cap = *cap ? *cap * 2 : 16;
+        bc_abbrev_t *tmp = (bc_abbrev_t *)realloc(*list, (size_t)new_cap * sizeof(bc_abbrev_t));
+        if (!tmp)
+            return;
+        *list = tmp;
+        *cap = new_cap;
+    }
+    (*list)[*count] = abbrev;
+    (*count)++;
+}
+
+static void bc_free_abbrev_list(bc_abbrev_t *list, uint32_t count) {
     uint32_t i;
-    if (!map || !ll_value)
-        return NULL;
-    for (i = 0; i < map->count; i++) {
-        if (map->entries[i].ll_value == ll_value)
-            return &map->entries[i];
-    }
-    return NULL;
+    if (!list)
+        return;
+    for (i = 0; i < count; i++)
+        free(list[i].ops);
+    free(list);
 }
 
-static lr_block_t *block_map_get(bc_block_map_t *map, LLVMBasicBlockRef ll_block) {
+static bc_blockinfo_entry_t *bc_find_blockinfo(bc_reader_t *r, uint32_t block_id) {
     uint32_t i;
-    if (!map || !ll_block)
-        return NULL;
-    for (i = 0; i < map->count; i++) {
-        if (map->entries[i].ll_block == ll_block)
-            return map->entries[i].lr_block;
+    for (i = 0; i < r->num_blockinfo; i++) {
+        if (r->blockinfo[i].block_id == block_id)
+            return &r->blockinfo[i];
     }
     return NULL;
 }
 
-static lr_type_t *bc_convert_type(bc_ctx_t *bc, LLVMTypeRef ll_ty) {
-    LLVMTypeKind kind;
-    lr_type_t *cached;
-
-    if (!bc || !ll_ty)
-        return NULL;
-
-    cached = type_map_get(bc, ll_ty);
-    if (cached)
-        return cached;
-
-    kind = LLVMGetTypeKind(ll_ty);
-    switch (kind) {
-    case LLVMVoidTypeKind:
-        return bc->module->type_void;
-    case LLVMIntegerTypeKind: {
-        unsigned bits = LLVMGetIntTypeWidth(ll_ty);
-        switch (bits) {
-        case 1:  return bc->module->type_i1;
-        case 8:  return bc->module->type_i8;
-        case 16: return bc->module->type_i16;
-        case 32: return bc->module->type_i32;
-        case 64: return bc->module->type_i64;
-        default:
-            bc_set_error(bc, "unsupported integer width in bitcode: i%u", bits);
+static bc_blockinfo_entry_t *bc_get_or_create_blockinfo(bc_reader_t *r, uint32_t block_id) {
+    bc_blockinfo_entry_t *entry = bc_find_blockinfo(r, block_id);
+    if (entry)
+        return entry;
+    if (r->num_blockinfo == r->blockinfo_cap) {
+        uint32_t new_cap = r->blockinfo_cap ? r->blockinfo_cap * 2 : 8;
+        bc_blockinfo_entry_t *tmp = (bc_blockinfo_entry_t *)realloc(
+            r->blockinfo, (size_t)new_cap * sizeof(bc_blockinfo_entry_t));
+        if (!tmp)
             return NULL;
-        }
+        r->blockinfo = tmp;
+        r->blockinfo_cap = new_cap;
     }
-    case LLVMFloatTypeKind:
-        return bc->module->type_float;
-    case LLVMDoubleTypeKind:
-        return bc->module->type_double;
-    case LLVMPointerTypeKind:
-        return bc->module->type_ptr;
-    case LLVMArrayTypeKind: {
-        lr_type_t *elem = bc_convert_type(bc, LLVMGetElementType(ll_ty));
-        uint64_t n = LLVMGetArrayLength2(ll_ty);
-        lr_type_t *arr;
-        if (!elem)
-            return NULL;
-        arr = lr_type_array(bc->arena, elem, n);
-        if (!arr) {
-            bc_set_error(bc, "failed to allocate array type");
-            return NULL;
-        }
-        if (!type_map_put(bc, ll_ty, arr)) {
-            bc_set_error(bc, "out of memory while caching array type");
-            return NULL;
-        }
-        return arr;
-    }
-    case LLVMStructTypeKind: {
-        lr_type_t *st = lr_arena_new(bc->arena, lr_type_t);
-        LLVMTypeRef *ll_fields = NULL;
-        lr_type_t **fields = NULL;
-        unsigned nfields = LLVMCountStructElementTypes(ll_ty);
-        unsigned i;
-        const char *name = LLVMGetStructName(ll_ty);
-        char *owned_name = NULL;
-
-        if (LLVMIsOpaqueStruct(ll_ty)) {
-            bc_set_error(bc, "opaque struct types are not supported in bitcode");
-            return NULL;
-        }
-
-        if (!st) {
-            bc_set_error(bc, "failed to allocate struct type");
-            return NULL;
-        }
-        st->kind = LR_TYPE_STRUCT;
-        st->struc.fields = NULL;
-        st->struc.num_fields = nfields;
-        st->struc.packed = LLVMIsPackedStruct(ll_ty) != 0;
-        st->struc.name = NULL;
-
-        if (!type_map_put(bc, ll_ty, st)) {
-            bc_set_error(bc, "out of memory while caching struct type");
-            return NULL;
-        }
-
-        if (name && name[0] != '\0')
-            owned_name = lr_arena_strdup(bc->arena, name, strlen(name));
-        st->struc.name = owned_name;
-
-        if (nfields == 0)
-            return st;
-
-        ll_fields = (LLVMTypeRef *)malloc((size_t)nfields * sizeof(*ll_fields));
-        fields = lr_arena_array(bc->arena, lr_type_t *, nfields);
-        if (!ll_fields || !fields) {
-            free(ll_fields);
-            bc_set_error(bc, "out of memory while decoding struct fields");
-            return NULL;
-        }
-
-        LLVMGetStructElementTypes(ll_ty, ll_fields);
-        for (i = 0; i < nfields; i++) {
-            fields[i] = bc_convert_type(bc, ll_fields[i]);
-            if (!fields[i]) {
-                free(ll_fields);
-                return NULL;
-            }
-        }
-        free(ll_fields);
-        st->struc.fields = fields;
-        return st;
-    }
-    case LLVMFunctionTypeKind: {
-        lr_type_t *fn = lr_arena_new(bc->arena, lr_type_t);
-        lr_type_t *ret = bc_convert_type(bc, LLVMGetReturnType(ll_ty));
-        unsigned nparams = LLVMCountParamTypes(ll_ty);
-        LLVMTypeRef *ll_params = NULL;
-        lr_type_t **params = NULL;
-        unsigned i;
-
-        if (!fn || !ret) {
-            bc_set_error(bc, "failed to allocate function type");
-            return NULL;
-        }
-        fn->kind = LR_TYPE_FUNC;
-        fn->func.ret = ret;
-        fn->func.params = NULL;
-        fn->func.num_params = nparams;
-        fn->func.vararg = LLVMIsFunctionVarArg(ll_ty) != 0;
-
-        if (!type_map_put(bc, ll_ty, fn)) {
-            bc_set_error(bc, "out of memory while caching function type");
-            return NULL;
-        }
-
-        if (nparams == 0)
-            return fn;
-
-        ll_params = (LLVMTypeRef *)malloc((size_t)nparams * sizeof(*ll_params));
-        params = lr_arena_array(bc->arena, lr_type_t *, nparams);
-        if (!ll_params || !params) {
-            free(ll_params);
-            bc_set_error(bc, "out of memory while decoding function parameters");
-            return NULL;
-        }
-        LLVMGetParamTypes(ll_ty, ll_params);
-        for (i = 0; i < nparams; i++) {
-            params[i] = bc_convert_type(bc, ll_params[i]);
-            if (!params[i]) {
-                free(ll_params);
-                return NULL;
-            }
-        }
-        free(ll_params);
-        fn->func.params = params;
-        return fn;
-    }
-    default:
-        break;
-    }
-
-    bc_set_error(bc, "unsupported LLVM type kind in bitcode: %d", (int)kind);
-    return NULL;
+    entry = &r->blockinfo[r->num_blockinfo++];
+    memset(entry, 0, sizeof(*entry));
+    entry->block_id = block_id;
+    return entry;
 }
 
-static bool bc_map_icmp_pred(LLVMIntPredicate pred, lr_icmp_pred_t *out) {
-    if (!out)
-        return false;
-    switch (pred) {
-    case LLVMIntEQ:  *out = LR_ICMP_EQ; return true;
-    case LLVMIntNE:  *out = LR_ICMP_NE; return true;
-    case LLVMIntSGT: *out = LR_ICMP_SGT; return true;
-    case LLVMIntSGE: *out = LR_ICMP_SGE; return true;
-    case LLVMIntSLT: *out = LR_ICMP_SLT; return true;
-    case LLVMIntSLE: *out = LR_ICMP_SLE; return true;
-    case LLVMIntUGT: *out = LR_ICMP_UGT; return true;
-    case LLVMIntUGE: *out = LR_ICMP_UGE; return true;
-    case LLVMIntULT: *out = LR_ICMP_ULT; return true;
-    case LLVMIntULE: *out = LR_ICMP_ULE; return true;
-    default:
-        return false;
+static void bc_read_define_abbrev(bc_reader_t *r) {
+    uint32_t numops = (uint32_t)bc_read_vbr(r, 5);
+    uint32_t i;
+    bc_abbrev_t abbrev;
+    bc_abbrev_op_t *ops;
+    if (r->has_error)
+        return;
+    ops = (bc_abbrev_op_t *)malloc((size_t)numops * sizeof(bc_abbrev_op_t));
+    if (!ops) {
+        bc_error(r, "out of memory in define_abbrev");
+        return;
     }
-}
-
-static bool bc_map_fcmp_pred(LLVMRealPredicate pred, lr_fcmp_pred_t *out) {
-    if (!out)
-        return false;
-    switch (pred) {
-    case LLVMRealPredicateFalse: *out = LR_FCMP_FALSE; return true;
-    case LLVMRealOEQ: *out = LR_FCMP_OEQ; return true;
-    case LLVMRealOGT: *out = LR_FCMP_OGT; return true;
-    case LLVMRealOGE: *out = LR_FCMP_OGE; return true;
-    case LLVMRealOLT: *out = LR_FCMP_OLT; return true;
-    case LLVMRealOLE: *out = LR_FCMP_OLE; return true;
-    case LLVMRealONE: *out = LR_FCMP_ONE; return true;
-    case LLVMRealORD: *out = LR_FCMP_ORD; return true;
-    case LLVMRealUEQ: *out = LR_FCMP_UEQ; return true;
-    case LLVMRealUGT: *out = LR_FCMP_UGT; return true;
-    case LLVMRealUGE: *out = LR_FCMP_UGE; return true;
-    case LLVMRealULT: *out = LR_FCMP_ULT; return true;
-    case LLVMRealULE: *out = LR_FCMP_ULE; return true;
-    case LLVMRealUNE: *out = LR_FCMP_UNE; return true;
-    case LLVMRealUNO: *out = LR_FCMP_UNO; return true;
-    case LLVMRealPredicateTrue: *out = LR_FCMP_TRUE; return true;
-    default:
-        return false;
-    }
-}
-
-static bool bc_map_binary_opcode(LLVMOpcode opcode, lr_opcode_t *out) {
-    if (!out)
-        return false;
-    switch (opcode) {
-    case LLVMAdd:  *out = LR_OP_ADD;  return true;
-    case LLVMSub:  *out = LR_OP_SUB;  return true;
-    case LLVMMul:  *out = LR_OP_MUL;  return true;
-    case LLVMSDiv: *out = LR_OP_SDIV; return true;
-    case LLVMUDiv: *out = LR_OP_SDIV; return true;
-    case LLVMSRem: *out = LR_OP_SREM; return true;
-    case LLVMURem: *out = LR_OP_SREM; return true;
-    case LLVMAnd:  *out = LR_OP_AND;  return true;
-    case LLVMOr:   *out = LR_OP_OR;   return true;
-    case LLVMXor:  *out = LR_OP_XOR;  return true;
-    case LLVMShl:  *out = LR_OP_SHL;  return true;
-    case LLVMLShr: *out = LR_OP_LSHR; return true;
-    case LLVMAShr: *out = LR_OP_ASHR; return true;
-    case LLVMFAdd: *out = LR_OP_FADD; return true;
-    case LLVMFSub: *out = LR_OP_FSUB; return true;
-    case LLVMFMul: *out = LR_OP_FMUL; return true;
-    case LLVMFDiv: *out = LR_OP_FDIV; return true;
-    default:
-        return false;
-    }
-}
-
-static bool bc_value_name(LLVMValueRef value, const char **out_name, size_t *out_len) {
-    const char *name;
-    size_t len;
-    if (!value || !out_name || !out_len)
-        return false;
-    name = LLVMGetValueName2(value, &len);
-    if (!name || len == 0)
-        return false;
-    *out_name = name;
-    *out_len = len;
-    return true;
-}
-
-static bool bc_make_operand(bc_ctx_t *bc, bc_func_ctx_t *fnc, LLVMValueRef ll_value,
-                            lr_type_t *expected_type, lr_operand_t *out) {
-    lr_type_t *value_type;
-    bc_value_entry_t *mapped;
-    const char *name = NULL;
-    size_t name_len = 0;
-    uint32_t sym_id;
-
-    if (!bc || !fnc || !ll_value || !out)
-        return false;
-
-    mapped = value_map_get(&fnc->values, ll_value);
-    if (mapped) {
-        *out = lr_op_vreg(mapped->vreg, mapped->type);
-        return true;
-    }
-
-    value_type = bc_convert_type(bc, LLVMTypeOf(ll_value));
-    if (!value_type)
-        return false;
-
-    if (LLVMIsAConstantInt(ll_value)) {
-        *out = lr_op_imm_i64((int64_t)LLVMConstIntGetSExtValue(ll_value), value_type);
-        return true;
-    }
-
-    if (LLVMIsAConstantFP(ll_value)) {
-        LLVMBool loses_info = 0;
-        *out = lr_op_imm_f64(LLVMConstRealGetDouble(ll_value, &loses_info), value_type);
-        return true;
-    }
-
-    if (LLVMIsAConstantPointerNull(ll_value)) {
-        *out = lr_op_null(expected_type ? expected_type : bc->module->type_ptr);
-        return true;
-    }
-
-    if (LLVMIsAUndefValue(ll_value) || LLVMIsAPoisonValue(ll_value)) {
-        out->kind = LR_VAL_UNDEF;
-        out->type = expected_type ? expected_type : value_type;
-        out->global_offset = 0;
-        return true;
-    }
-
-    if (LLVMIsABasicBlock(ll_value)) {
-        LLVMBasicBlockRef bb = LLVMValueAsBasicBlock(ll_value);
-        lr_block_t *lr_bb = block_map_get(&fnc->blocks, bb);
-        if (!lr_bb) {
-            bc_set_error(bc, "failed to resolve basic block operand");
-            return false;
-        }
-        *out = lr_op_block(lr_bb->id);
-        return true;
-    }
-
-    if (LLVMIsAFunction(ll_value) || LLVMIsAGlobalVariable(ll_value)) {
-        if (!bc_value_name(ll_value, &name, &name_len)) {
-            bc_set_error(bc, "failed to resolve symbol name for global operand");
-            return false;
-        }
-        {
-            char *owned = lr_arena_strdup(bc->arena, name, name_len);
-            sym_id = lr_frontend_intern_symbol(bc->module, owned);
-            if (sym_id == UINT32_MAX) {
-                bc_set_error(bc, "failed to intern symbol '%s'", owned);
-                return false;
-            }
-        }
-        *out = lr_op_global(sym_id, expected_type ? expected_type : bc->module->type_ptr);
-        return true;
-    }
-
-    if (LLVMIsAConstantExpr(ll_value)) {
-        LLVMOpcode op = LLVMGetConstOpcode(ll_value);
-        if (op == LLVMBitCast || op == LLVMAddrSpaceCast ||
-            op == LLVMPtrToInt || op == LLVMIntToPtr) {
-            return bc_make_operand(bc, fnc, LLVMGetOperand(ll_value, 0),
-                                   expected_type, out);
-        }
-    }
-
-    bc_set_error(bc, "unsupported LLVM value kind in bitcode operand");
-    return false;
-}
-
-static bool bc_append_inst(lr_block_t *block, lr_inst_t *inst, bc_ctx_t *bc,
-                           const char *what) {
-    if (!block || !inst || !bc) {
-        if (bc)
-            bc_set_error(bc, "internal error appending instruction");
-        return false;
-    }
-    lr_block_append(block, inst);
-    (void)what;
-    return true;
-}
-
-static bool bc_translate_instruction(bc_ctx_t *bc, bc_func_ctx_t *fnc,
-                                     lr_block_t *lr_block, LLVMValueRef inst) {
-    LLVMOpcode opcode;
-    lr_inst_t *lr_inst;
-    uint32_t dest = 0;
-    lr_type_t *dest_type = NULL;
-    bc_value_entry_t *mapped = NULL;
-
-    if (!bc || !fnc || !lr_block || !inst)
-        return false;
-
-    mapped = value_map_get(&fnc->values, inst);
-    if (mapped) {
-        dest = mapped->vreg;
-        dest_type = mapped->type;
-    }
-
-    opcode = LLVMGetInstructionOpcode(inst);
-
-    if (opcode == LLVMRet) {
-        int nops = LLVMGetNumOperands(inst);
-        if (nops == 0) {
-            lr_inst = lr_inst_create(bc->arena, LR_OP_RET_VOID,
-                                     bc->module->type_void, 0, NULL, 0);
+    for (i = 0; i < numops && !r->has_error; i++) {
+        uint64_t is_literal = bc_read_fixed(r, 1);
+        if (is_literal) {
+            ops[i].kind = BC_OP_LITERAL;
+            ops[i].value = bc_read_vbr(r, 8);
         } else {
-            lr_operand_t op;
-            if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), dest_type, &op))
-                return false;
-            lr_inst = lr_inst_create(bc->arena, LR_OP_RET, op.type, 0, &op, 1);
+            uint64_t encoding = bc_read_fixed(r, 3);
+            ops[i].kind = (bc_abbrev_op_kind_t)encoding;
+            ops[i].value = 0;
+            if (encoding == BC_OP_FIXED || encoding == BC_OP_VBR)
+                ops[i].value = bc_read_vbr(r, 5);
         }
-        return bc_append_inst(lr_block, lr_inst, bc, "ret");
     }
-
-    if (opcode == LLVMBr) {
-        unsigned nsucc = LLVMGetNumSuccessors(inst);
-        if (nsucc == 1) {
-            lr_block_t *dst = block_map_get(&fnc->blocks, LLVMGetSuccessor(inst, 0));
-            lr_operand_t op;
-            if (!dst) {
-                bc_set_error(bc, "failed to resolve branch successor");
-                return false;
-            }
-            op = lr_op_block(dst->id);
-            lr_inst = lr_inst_create(bc->arena, LR_OP_BR, bc->module->type_void, 0, &op, 1);
-            return bc_append_inst(lr_block, lr_inst, bc, "br");
-        } else if (nsucc == 2) {
-            lr_operand_t ops[3];
-            lr_block_t *t = block_map_get(&fnc->blocks, LLVMGetSuccessor(inst, 0));
-            lr_block_t *f = block_map_get(&fnc->blocks, LLVMGetSuccessor(inst, 1));
-            if (!t || !f) {
-                bc_set_error(bc, "failed to resolve conditional branch successors");
-                return false;
-            }
-            if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), bc->module->type_i1, &ops[0]))
-                return false;
-            ops[1] = lr_op_block(t->id);
-            ops[2] = lr_op_block(f->id);
-            lr_inst = lr_inst_create(bc->arena, LR_OP_CONDBR,
-                                     bc->module->type_void, 0, ops, 3);
-            return bc_append_inst(lr_block, lr_inst, bc, "condbr");
-        }
-
-        bc_set_error(bc, "unsupported branch form with %u successors", nsucc);
-        return false;
-    }
-
-    if (opcode == LLVMUnreachable) {
-        lr_inst = lr_inst_create(bc->arena, LR_OP_UNREACHABLE, bc->module->type_void,
-                                 0, NULL, 0);
-        return bc_append_inst(lr_block, lr_inst, bc, "unreachable");
-    }
-
-    if (opcode == LLVMICmp) {
-        lr_icmp_pred_t pred;
-        lr_operand_t ops[2];
-        if (!bc_map_icmp_pred(LLVMGetICmpPredicate(inst), &pred)) {
-            bc_set_error(bc, "unsupported icmp predicate in bitcode");
-            return false;
-        }
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), NULL, &ops[0]) ||
-            !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 1), ops[0].type, &ops[1]))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, LR_OP_ICMP, bc->module->type_i1,
-                                 dest, ops, 2);
-        if (!lr_inst)
-            return false;
-        lr_inst->icmp_pred = pred;
-        return bc_append_inst(lr_block, lr_inst, bc, "icmp");
-    }
-
-    if (opcode == LLVMFCmp) {
-        lr_fcmp_pred_t pred;
-        lr_operand_t ops[2];
-        if (!bc_map_fcmp_pred(LLVMGetFCmpPredicate(inst), &pred)) {
-            bc_set_error(bc, "unsupported fcmp predicate in bitcode");
-            return false;
-        }
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), NULL, &ops[0]) ||
-            !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 1), ops[0].type, &ops[1]))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, LR_OP_FCMP, bc->module->type_i1,
-                                 dest, ops, 2);
-        if (!lr_inst)
-            return false;
-        lr_inst->fcmp_pred = pred;
-        return bc_append_inst(lr_block, lr_inst, bc, "fcmp");
-    }
-
-    if (opcode == LLVMAlloca) {
-        int nops = LLVMGetNumOperands(inst);
-        lr_operand_t ops_local[1];
-        lr_operand_t *ops = NULL;
-        lr_type_t *elem_ty = bc_convert_type(bc, LLVMGetAllocatedType(inst));
-        if (!elem_ty)
-            return false;
-        if (nops > 0) {
-            if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0),
-                                 bc->module->type_i64, &ops_local[0]))
-                return false;
-            ops = ops_local;
-        }
-        lr_inst = lr_inst_create(bc->arena, LR_OP_ALLOCA, bc->module->type_ptr,
-                                 dest, ops, (uint32_t)(nops > 0 ? 1 : 0));
-        if (!lr_inst)
-            return false;
-        lr_inst->type = elem_ty;
-        return bc_append_inst(lr_block, lr_inst, bc, "alloca");
-    }
-
-    if (opcode == LLVMLoad) {
-        lr_operand_t op;
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), bc->module->type_ptr, &op))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, LR_OP_LOAD, dest_type, dest, &op, 1);
-        return bc_append_inst(lr_block, lr_inst, bc, "load");
-    }
-
-    if (opcode == LLVMStore) {
-        lr_operand_t ops[2];
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), NULL, &ops[0]) ||
-            !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 1), bc->module->type_ptr, &ops[1]))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, LR_OP_STORE, bc->module->type_void, 0, ops, 2);
-        return bc_append_inst(lr_block, lr_inst, bc, "store");
-    }
-
-    if (opcode == LLVMGetElementPtr) {
-        int nraw = LLVMGetNumOperands(inst);
-        uint32_t nops = (uint32_t)nraw;
-        lr_operand_t *ops;
-        lr_type_t *base_ty;
-        uint32_t i;
-        if (nops == 0) {
-            bc_set_error(bc, "invalid gep with zero operands");
-            return false;
-        }
-        ops = (lr_operand_t *)malloc((size_t)nops * sizeof(*ops));
-        if (!ops) {
-            bc_set_error(bc, "out of memory in gep decode");
-            return false;
-        }
-
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), bc->module->type_ptr, &ops[0])) {
-            free(ops);
-            return false;
-        }
-        for (i = 1; i < nops; i++) {
-            if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, (unsigned)i), NULL, &ops[i])) {
-                free(ops);
-                return false;
-            }
-            ops[i] = lr_canonicalize_gep_index(bc->module, lr_block, fnc->func, ops[i]);
-        }
-
-        base_ty = bc_convert_type(bc, LLVMGetGEPSourceElementType(inst));
-        if (!base_ty) {
-            free(ops);
-            return false;
-        }
-
-        lr_inst = lr_inst_create(bc->arena, LR_OP_GEP, bc->module->type_ptr, dest, ops, nops);
+    if (r->has_error) {
         free(ops);
-        if (!lr_inst)
-            return false;
-        lr_inst->type = base_ty;
-        return bc_append_inst(lr_block, lr_inst, bc, "gep");
+        return;
     }
+    abbrev.ops = ops;
+    abbrev.num_ops = numops;
+    bc_abbrev_list_push(&r->abbrevs, &r->num_abbrevs, &r->abbrev_cap, abbrev);
+}
 
-    if (opcode == LLVMCall) {
-        unsigned nargs = LLVMGetNumArgOperands(inst);
-        uint32_t nops = (uint32_t)nargs + 1u;
-        lr_operand_t *ops = (lr_operand_t *)malloc((size_t)nops * sizeof(*ops));
-        LLVMTypeRef called_fty = LLVMGetCalledFunctionType(inst);
-        unsigned nparam_types = called_fty ? LLVMCountParamTypes(called_fty) : 0;
-        LLVMTypeRef *param_types = NULL;
-        unsigned i;
+static uint32_t bc_read_record(bc_reader_t *r, uint32_t abbrev_id) {
+    uint32_t code;
+    r->record_len = 0;
+    r->blob_data = NULL;
+    r->blob_len = 0;
 
-        if (!ops) {
-            bc_set_error(bc, "out of memory in call decode");
-            return false;
-        }
-
-        if (!bc_make_operand(bc, fnc, LLVMGetCalledValue(inst), bc->module->type_ptr, &ops[0])) {
-            free(ops);
-            return false;
-        }
-
-        if (called_fty && nparam_types > 0) {
-            param_types = (LLVMTypeRef *)malloc((size_t)nparam_types * sizeof(*param_types));
-            if (!param_types) {
-                free(ops);
-                bc_set_error(bc, "out of memory in call parameter decode");
-                return false;
-            }
-            LLVMGetParamTypes(called_fty, param_types);
-        }
-
-        for (i = 0; i < nargs; i++) {
-            lr_type_t *expected = NULL;
-            if (called_fty && i < nparam_types)
-                expected = bc_convert_type(bc, param_types[i]);
-            if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, i), expected, &ops[i + 1])) {
-                free(param_types);
-                free(ops);
-                return false;
-            }
-        }
-        free(param_types);
-
-        if (!dest_type && called_fty)
-            dest_type = bc_convert_type(bc, LLVMGetReturnType(called_fty));
-        if (!dest_type)
-            dest_type = bc->module->type_void;
-
-        lr_inst = lr_inst_create(bc->arena, LR_OP_CALL, dest_type, dest, ops, nops);
-        free(ops);
-        return bc_append_inst(lr_block, lr_inst, bc, "call");
-    }
-
-    if (opcode == LLVMPHI) {
-        unsigned nin = LLVMCountIncoming(inst);
-        uint32_t nops = (uint32_t)(nin * 2u);
-        lr_operand_t *ops = (lr_operand_t *)malloc((size_t)nops * sizeof(*ops));
-        unsigned i;
-        if (!ops) {
-            bc_set_error(bc, "out of memory in phi decode");
-            return false;
-        }
-        for (i = 0; i < nin; i++) {
-            LLVMValueRef in_val = LLVMGetIncomingValue(inst, i);
-            LLVMBasicBlockRef in_block = LLVMGetIncomingBlock(inst, i);
-            lr_block_t *pred = block_map_get(&fnc->blocks, in_block);
-            if (!pred) {
-                free(ops);
-                bc_set_error(bc, "failed to resolve phi predecessor block");
-                return false;
-            }
-            if (!bc_make_operand(bc, fnc, in_val, dest_type, &ops[2u * i])) {
-                free(ops);
-                return false;
-            }
-            ops[2u * i + 1u] = lr_op_block(pred->id);
-        }
-        lr_inst = lr_inst_create(bc->arena, LR_OP_PHI, dest_type, dest, ops, nops);
-        free(ops);
-        return bc_append_inst(lr_block, lr_inst, bc, "phi");
-    }
-
-    if (opcode == LLVMSelect) {
-        lr_operand_t ops[3];
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), bc->module->type_i1, &ops[0]) ||
-            !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 1), dest_type, &ops[1]) ||
-            !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 2), dest_type, &ops[2]))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, LR_OP_SELECT, dest_type, dest, ops, 3);
-        return bc_append_inst(lr_block, lr_inst, bc, "select");
-    }
-
-    if (opcode == LLVMFNeg) {
-        lr_operand_t op;
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), dest_type, &op))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, LR_OP_FNEG, dest_type, dest, &op, 1);
-        return bc_append_inst(lr_block, lr_inst, bc, "fneg");
-    }
-
-    if (opcode == LLVMSExt || opcode == LLVMZExt || opcode == LLVMTrunc ||
-        opcode == LLVMBitCast || opcode == LLVMPtrToInt || opcode == LLVMIntToPtr ||
-        opcode == LLVMUIToFP || opcode == LLVMSIToFP || opcode == LLVMFPToSI ||
-        opcode == LLVMFPToUI || opcode == LLVMFPExt || opcode == LLVMFPTrunc) {
-        lr_opcode_t cast_op = LR_OP_BITCAST;
-        lr_operand_t op;
-
-        switch (opcode) {
-        case LLVMSExt:    cast_op = LR_OP_SEXT; break;
-        case LLVMZExt:    cast_op = LR_OP_ZEXT; break;
-        case LLVMTrunc:   cast_op = LR_OP_TRUNC; break;
-        case LLVMBitCast: cast_op = LR_OP_BITCAST; break;
-        case LLVMPtrToInt: cast_op = LR_OP_PTRTOINT; break;
-        case LLVMIntToPtr: cast_op = LR_OP_INTTOPTR; break;
-        case LLVMUIToFP:  cast_op = LR_OP_UITOFP; break;
-        case LLVMSIToFP:  cast_op = LR_OP_SITOFP; break;
-        case LLVMFPToSI:  cast_op = LR_OP_FPTOSI; break;
-        case LLVMFPToUI:  cast_op = LR_OP_FPTOUI; break;
-        case LLVMFPExt:   cast_op = LR_OP_FPEXT; break;
-        case LLVMFPTrunc: cast_op = LR_OP_FPTRUNC; break;
-        default: break;
-        }
-
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), NULL, &op))
-            return false;
-        lr_inst = lr_inst_create(bc->arena, cast_op, dest_type, dest, &op, 1);
-        return bc_append_inst(lr_block, lr_inst, bc, "cast");
-    }
-
-    if (opcode == LLVMExtractValue || opcode == LLVMInsertValue) {
-        uint32_t nops = (opcode == LLVMExtractValue) ? 1u : 2u;
-        lr_operand_t ops[2];
-        uint32_t nidx = (uint32_t)LLVMGetNumIndices(inst);
-        const unsigned *idx_src = LLVMGetIndices(inst);
-        uint32_t *idx_copy = NULL;
-        uint32_t i;
-
-        if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), NULL, &ops[0]))
-            return false;
-        if (opcode == LLVMInsertValue &&
-            !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 1), NULL, &ops[1]))
-            return false;
-
-        lr_inst = lr_inst_create(bc->arena,
-                                 opcode == LLVMExtractValue ? LR_OP_EXTRACTVALUE : LR_OP_INSERTVALUE,
-                                 dest_type, dest, ops, nops);
-        if (!lr_inst)
-            return false;
-
-        if (nidx > 0) {
-            idx_copy = lr_arena_array(bc->arena, uint32_t, nidx);
-            if (!idx_copy) {
-                bc_set_error(bc, "out of memory in aggregate index decode");
-                return false;
-            }
-            for (i = 0; i < nidx; i++)
-                idx_copy[i] = idx_src[i];
-        }
-        lr_inst->indices = idx_copy;
-        lr_inst->num_indices = nidx;
-        return bc_append_inst(lr_block, lr_inst, bc, "aggregate");
+    if (abbrev_id == BC_ABBREV_UNABBREV) {
+        uint32_t numops, i;
+        code = (uint32_t)bc_read_vbr(r, 6);
+        numops = (uint32_t)bc_read_vbr(r, 6);
+        for (i = 0; i < numops && !r->has_error; i++)
+            bc_record_push(r, bc_read_vbr(r, 6));
+        return code;
     }
 
     {
-        lr_opcode_t bin_op;
-        lr_operand_t ops[2];
-        if (bc_map_binary_opcode(opcode, &bin_op)) {
-            if (!bc_make_operand(bc, fnc, LLVMGetOperand(inst, 0), dest_type, &ops[0]) ||
-                !bc_make_operand(bc, fnc, LLVMGetOperand(inst, 1), dest_type, &ops[1]))
-                return false;
-            lr_inst = lr_inst_create(bc->arena, bin_op, dest_type, dest, ops, 2);
-            return bc_append_inst(lr_block, lr_inst, bc, "binary");
+        uint32_t idx = abbrev_id - BC_FIRST_USER_ABBREV;
+        bc_abbrev_t *abbrev;
+        uint32_t i;
+        if (idx >= r->num_abbrevs) {
+            bc_error(r, "invalid abbreviation id %u (have %u)", abbrev_id, r->num_abbrevs);
+            return 0;
         }
+        abbrev = &r->abbrevs[idx];
+        code = 0;
+        for (i = 0; i < abbrev->num_ops && !r->has_error; i++) {
+            bc_abbrev_op_t *op = &abbrev->ops[i];
+            if (op->kind == BC_OP_LITERAL) {
+                if (i == 0)
+                    code = (uint32_t)op->value;
+                else
+                    bc_record_push(r, op->value);
+            } else if (op->kind == BC_OP_FIXED) {
+                uint64_t val = bc_read_fixed(r, (uint32_t)op->value);
+                if (i == 0)
+                    code = (uint32_t)val;
+                else
+                    bc_record_push(r, val);
+            } else if (op->kind == BC_OP_VBR) {
+                uint64_t val = bc_read_vbr(r, (uint32_t)op->value);
+                if (i == 0)
+                    code = (uint32_t)val;
+                else
+                    bc_record_push(r, val);
+            } else if (op->kind == BC_OP_CHAR6) {
+                uint64_t val = bc_read_fixed(r, 6);
+                if (i == 0)
+                    code = (uint32_t)val;
+                else
+                    bc_record_push(r, val);
+            } else if (op->kind == BC_OP_ARRAY) {
+                uint32_t count = (uint32_t)bc_read_vbr(r, 6);
+                uint32_t j;
+                bc_abbrev_op_t *elem_op;
+                if (i + 1 >= abbrev->num_ops) {
+                    bc_error(r, "array abbrev missing element encoding");
+                    return 0;
+                }
+                elem_op = &abbrev->ops[i + 1];
+                for (j = 0; j < count && !r->has_error; j++) {
+                    uint64_t val = 0;
+                    if (elem_op->kind == BC_OP_FIXED)
+                        val = bc_read_fixed(r, (uint32_t)elem_op->value);
+                    else if (elem_op->kind == BC_OP_VBR)
+                        val = bc_read_vbr(r, (uint32_t)elem_op->value);
+                    else if (elem_op->kind == BC_OP_CHAR6)
+                        val = bc_read_fixed(r, 6);
+                    else
+                        val = bc_read_vbr(r, 6);
+                    bc_record_push(r, val);
+                }
+                i++;
+            } else if (op->kind == BC_OP_BLOB) {
+                uint32_t blob_len = (uint32_t)bc_read_vbr(r, 6);
+                bc_align32(r);
+                if (r->bit_pos + (size_t)blob_len * 8 > r->len_bits) {
+                    bc_error(r, "blob overrun");
+                    return code;
+                }
+                r->blob_data = r->data + r->bit_pos / 8;
+                r->blob_len = blob_len;
+                r->bit_pos += (size_t)blob_len * 8;
+                bc_align32(r);
+            }
+        }
+        return code;
     }
-
-    bc_set_error(bc, "unsupported LLVM instruction opcode in bitcode: %d", (int)opcode);
-    return false;
 }
 
-static bool bc_translate_function_body(bc_ctx_t *bc, LLVMValueRef ll_fn, lr_func_t *lr_fn) {
-    LLVMValueRef ll_inst;
-    LLVMBasicBlockRef ll_bb;
-    bc_func_ctx_t fnc;
-    uint32_t block_seq = 0;
-    unsigned nparams;
-    unsigned i;
-
-    memset(&fnc, 0, sizeof(fnc));
-    fnc.bc = bc;
-    fnc.func = lr_fn;
-
-    for (ll_bb = LLVMGetFirstBasicBlock(ll_fn); ll_bb; ll_bb = LLVMGetNextBasicBlock(ll_bb)) {
-        const char *bb_name = LLVMGetBasicBlockName(ll_bb);
-        lr_block_t *lr_bb;
-        char generated[32];
-        if (!bb_name || bb_name[0] == '\0') {
-            snprintf(generated, sizeof(generated), "bb%u", block_seq++);
-            bb_name = generated;
-        }
-        lr_bb = lr_block_create(lr_fn, bc->arena, bb_name);
-        if (!lr_bb || !block_map_put(&fnc.blocks, ll_bb, lr_bb)) {
-            bc_set_error(bc, "failed to allocate basic block map");
-            free(fnc.blocks.entries);
-            free(fnc.values.entries);
-            return false;
-        }
+static void bc_skip_block(bc_reader_t *r) {
+    (void)bc_read_vbr(r, 4);
+    bc_align32(r);
+    {
+        uint32_t block_words = (uint32_t)bc_read_fixed(r, 32);
+        r->bit_pos += (size_t)block_words * 32;
     }
+}
 
-    nparams = LLVMCountParams(ll_fn);
-    for (i = 0; i < nparams && i < lr_fn->num_params; i++) {
-        LLVMValueRef ll_param = LLVMGetParam(ll_fn, i);
-        if (!value_map_put(&fnc.values, ll_param, lr_fn->param_vregs[i], lr_fn->param_types[i])) {
-            bc_set_error(bc, "failed to allocate parameter vreg map");
-            free(fnc.blocks.entries);
-            free(fnc.values.entries);
-            return false;
+static void bc_process_blockinfo_content(bc_reader_t *r, size_t end_pos) {
+    uint32_t current_blockinfo_id = 0;
+    bool has_id = false;
+    uint32_t saved_abbrev_len = r->abbrev_len;
+    bc_abbrev_t *saved_abbrevs = r->abbrevs;
+    uint32_t saved_num_abbrevs = r->num_abbrevs;
+    uint32_t saved_abbrev_cap = r->abbrev_cap;
+
+    r->abbrevs = NULL;
+    r->num_abbrevs = 0;
+    r->abbrev_cap = 0;
+    r->abbrev_len = 2;
+
+    while (r->bit_pos < end_pos && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(r);
+            break;
         }
-    }
-
-    for (ll_bb = LLVMGetFirstBasicBlock(ll_fn); ll_bb; ll_bb = LLVMGetNextBasicBlock(ll_bb)) {
-        for (ll_inst = LLVMGetFirstInstruction(ll_bb); ll_inst;
-             ll_inst = LLVMGetNextInstruction(ll_inst)) {
-            lr_type_t *ty = bc_convert_type(bc, LLVMTypeOf(ll_inst));
-            uint32_t vreg;
-            if (!ty) {
-                free(fnc.blocks.entries);
-                free(fnc.values.entries);
-                return false;
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_abbrev_t abbrev;
+            uint32_t numops = (uint32_t)bc_read_vbr(r, 5);
+            uint32_t i;
+            bc_abbrev_op_t *ops = (bc_abbrev_op_t *)malloc(
+                (size_t)numops * sizeof(bc_abbrev_op_t));
+            if (!ops) {
+                bc_error(r, "out of memory in blockinfo define_abbrev");
+                break;
             }
-            if (ty->kind == LR_TYPE_VOID)
+            for (i = 0; i < numops && !r->has_error; i++) {
+                uint64_t is_literal = bc_read_fixed(r, 1);
+                if (is_literal) {
+                    ops[i].kind = BC_OP_LITERAL;
+                    ops[i].value = bc_read_vbr(r, 8);
+                } else {
+                    uint64_t encoding = bc_read_fixed(r, 3);
+                    ops[i].kind = (bc_abbrev_op_kind_t)encoding;
+                    ops[i].value = 0;
+                    if (encoding == BC_OP_FIXED || encoding == BC_OP_VBR)
+                        ops[i].value = bc_read_vbr(r, 5);
+                }
+            }
+            if (r->has_error) {
+                free(ops);
+                break;
+            }
+            abbrev.ops = ops;
+            abbrev.num_ops = numops;
+            if (has_id) {
+                bc_blockinfo_entry_t *bi = bc_get_or_create_blockinfo(r, current_blockinfo_id);
+                if (bi)
+                    bc_abbrev_list_push(&bi->abbrevs, &bi->num, &bi->cap, abbrev);
+                else
+                    free(ops);
+            }
+            continue;
+        }
+        if (entry == BC_ABBREV_UNABBREV || entry >= BC_FIRST_USER_ABBREV) {
+            uint32_t code = bc_read_record(r, entry);
+            if (code == 1 && r->record_len > 0) {
+                current_blockinfo_id = (uint32_t)r->record[0];
+                has_id = true;
+            }
+            continue;
+        }
+        bc_error(r, "unexpected entry in blockinfo: %u", entry);
+    }
+
+    free(r->abbrevs);
+    r->abbrevs = saved_abbrevs;
+    r->num_abbrevs = saved_num_abbrevs;
+    r->abbrev_cap = saved_abbrev_cap;
+    r->abbrev_len = saved_abbrev_len;
+}
+
+/* ---- Layer 2: IR decoder ----------------------------------------------- */
+
+enum {
+    BC_MODULE_BLOCK       = 8,
+    BC_PARAMATTR_BLOCK    = 9,
+    BC_PARAMATTR_GRP_BLOCK = 10,
+    BC_CONSTANTS_BLOCK    = 11,
+    BC_FUNCTION_BLOCK     = 12,
+    BC_IDENTIFICATION_BLOCK = 13,
+    BC_VALUE_SYMTAB_BLOCK = 14,
+    BC_METADATA_BLOCK     = 15,
+    BC_METADATA_ATTACH_BLOCK = 16,
+    BC_TYPE_BLOCK         = 17,
+    BC_OPERAND_BUNDLE_BLOCK = 21,
+    BC_METADATA_KIND_BLOCK = 22,
+    BC_STRTAB_BLOCK       = 23,
+    BC_SYMTAB_BLOCK       = 25
+};
+
+enum {
+    MODULE_CODE_VERSION      = 1,
+    MODULE_CODE_GLOBALVAR    = 7,
+    MODULE_CODE_FUNCTION     = 8,
+    MODULE_CODE_SOURCE_FILENAME = 16,
+    MODULE_CODE_VSTOFFSET    = 18
+};
+
+enum {
+    TYPE_CODE_NUMENTRY     = 1,
+    TYPE_CODE_VOID         = 2,
+    TYPE_CODE_FLOAT        = 3,
+    TYPE_CODE_DOUBLE       = 4,
+    TYPE_CODE_LABEL        = 5,
+    TYPE_CODE_INTEGER      = 7,
+    TYPE_CODE_POINTER      = 8,
+    TYPE_CODE_ARRAY        = 11,
+    TYPE_CODE_X86_FP80     = 13,
+    TYPE_CODE_STRUCT_ANON  = 18,
+    TYPE_CODE_STRUCT_NAME  = 19,
+    TYPE_CODE_STRUCT_NAMED = 20,
+    TYPE_CODE_FUNCTION     = 21,
+    TYPE_CODE_METADATA     = 25,
+    TYPE_CODE_OPAQUE_PTR   = 25
+};
+
+enum {
+    CONST_CODE_SETTYPE   = 1,
+    CONST_CODE_NULL      = 2,
+    CONST_CODE_UNDEF     = 3,
+    CONST_CODE_INTEGER   = 4,
+    CONST_CODE_FLOAT     = 6,
+    CONST_CODE_AGGREGATE = 7,
+    CONST_CODE_POISON    = 26
+};
+
+enum {
+    FUNC_CODE_DECLAREBLOCKS = 1,
+    FUNC_CODE_INST_BINOP    = 2,
+    FUNC_CODE_INST_CAST     = 3,
+    FUNC_CODE_INST_RET      = 10,
+    FUNC_CODE_INST_BR       = 11,
+    FUNC_CODE_INST_SWITCH   = 12,
+    FUNC_CODE_INST_UNREACHABLE = 15,
+    FUNC_CODE_INST_PHI      = 16,
+    FUNC_CODE_INST_ALLOCA   = 19,
+    FUNC_CODE_INST_LOAD     = 20,
+    FUNC_CODE_INST_STORE_OLD = 24,
+    FUNC_CODE_INST_EXTRACTVALUE = 26,
+    FUNC_CODE_INST_INSERTVALUE = 27,
+    FUNC_CODE_INST_CMP2     = 28,
+    FUNC_CODE_INST_SELECT   = 29,
+    FUNC_CODE_INST_CALL     = 34,
+    FUNC_CODE_INST_GEP      = 43,
+    FUNC_CODE_INST_STORE    = 44,
+    FUNC_CODE_INST_UNOP     = 56
+};
+
+enum {
+    VST_CODE_ENTRY   = 1,
+    VST_CODE_BBENTRY = 2,
+    VST_CODE_FNENTRY = 3
+};
+
+typedef struct {
+    lr_type_t **types;
+    uint32_t count;
+    uint32_t cap;
+} bc_type_table_t;
+
+typedef struct {
+    enum { BC_VAL_VREG, BC_VAL_CONST, BC_VAL_GLOBAL, BC_VAL_FUNC } kind;
+    lr_type_t *type;
+    union {
+        uint32_t vreg;
+        lr_operand_t operand;
+        uint32_t global_sym;
+        lr_func_t *func;
+    };
+} bc_value_t;
+
+typedef struct {
+    bc_value_t *values;
+    uint32_t count;
+    uint32_t cap;
+} bc_value_table_t;
+
+typedef struct {
+    lr_func_t **funcs;
+    uint32_t count;
+    uint32_t cap;
+} bc_func_list_t;
+
+typedef struct {
+    bc_reader_t *reader;
+    lr_module_t *module;
+    lr_arena_t *arena;
+    bc_type_table_t types;
+    bc_value_table_t global_values;
+    bc_func_list_t func_list;
+    const uint8_t *strtab_data;
+    size_t strtab_len;
+    uint32_t bc_version;
+    char *err;
+    size_t errlen;
+} bc_decoder_t;
+
+static void bc_dec_error(bc_decoder_t *d, const char *fmt, ...) {
+    va_list ap;
+    if (!d || !d->err || d->errlen == 0)
+        return;
+    va_start(ap, fmt);
+    vsnprintf(d->err, d->errlen, fmt, ap);
+    va_end(ap);
+}
+
+static void bc_type_table_push(bc_type_table_t *t, lr_type_t *ty) {
+    if (t->count == t->cap) {
+        uint32_t new_cap = t->cap ? t->cap * 2 : 32;
+        lr_type_t **tmp = (lr_type_t **)realloc(t->types, (size_t)new_cap * sizeof(lr_type_t *));
+        if (!tmp)
+            return;
+        t->types = tmp;
+        t->cap = new_cap;
+    }
+    t->types[t->count++] = ty;
+}
+
+static void bc_value_push(bc_value_table_t *t, bc_value_t val) {
+    if (t->count == t->cap) {
+        uint32_t new_cap = t->cap ? t->cap * 2 : 64;
+        bc_value_t *tmp = (bc_value_t *)realloc(t->values, (size_t)new_cap * sizeof(bc_value_t));
+        if (!tmp)
+            return;
+        t->values = tmp;
+        t->cap = new_cap;
+    }
+    t->values[t->count++] = val;
+}
+
+static void bc_func_list_push(bc_func_list_t *fl, lr_func_t *f) {
+    if (fl->count == fl->cap) {
+        uint32_t new_cap = fl->cap ? fl->cap * 2 : 16;
+        lr_func_t **tmp = (lr_func_t **)realloc(fl->funcs, (size_t)new_cap * sizeof(lr_func_t *));
+        if (!tmp)
+            return;
+        fl->funcs = tmp;
+        fl->cap = new_cap;
+    }
+    fl->funcs[fl->count++] = f;
+}
+
+static lr_type_t *bc_get_type(bc_decoder_t *d, uint32_t idx) {
+    if (idx >= d->types.count) {
+        bc_dec_error(d, "type index %u out of range (have %u)", idx, d->types.count);
+        return NULL;
+    }
+    return d->types.types[idx];
+}
+
+static lr_operand_t bc_make_operand_from_value(bc_decoder_t *d, bc_value_table_t *vt,
+                                                uint32_t val_id,
+                                                lr_func_t *func,
+                                                lr_type_t *type_hint) {
+    lr_operand_t op;
+    bc_value_t *v;
+    memset(&op, 0, sizeof(op));
+    while (val_id >= vt->count) {
+        bc_value_t fwd;
+        uint32_t before = vt->count;
+        fwd.kind = BC_VAL_VREG;
+        fwd.type = type_hint ? type_hint : d->module->type_i32;
+        fwd.vreg = func ? lr_vreg_new(func) : 0;
+        bc_value_push(vt, fwd);
+        if (vt->count == before) {
+            bc_dec_error(d, "out of memory while extending value table");
+            op.kind = LR_VAL_UNDEF;
+            op.type = fwd.type;
+            return op;
+        }
+    }
+    v = &vt->values[val_id];
+    switch (v->kind) {
+    case BC_VAL_VREG:
+        op = lr_op_vreg(v->vreg, v->type);
+        break;
+    case BC_VAL_CONST:
+        op = v->operand;
+        break;
+    case BC_VAL_GLOBAL:
+        op = lr_op_global(v->global_sym, d->module->type_ptr);
+        break;
+    case BC_VAL_FUNC:
+        {
+            uint32_t sym = lr_frontend_intern_symbol(d->module, v->func->name);
+            op = lr_op_global(sym, d->module->type_ptr);
+        }
+        break;
+    }
+    return op;
+}
+
+static int64_t bc_decode_signed_vbr(uint64_t v) {
+    if ((v & 1) == 0)
+        return (int64_t)(v >> 1);
+    if (v != 1)
+        return -(int64_t)(v >> 1);
+    return INT64_MIN;
+}
+
+static bool bc_resolve_rel_value_id(bc_decoder_t *d, uint32_t base_value_id,
+                                    uint32_t rel, uint32_t *out_val_id) {
+    if (rel > base_value_id) {
+        bc_dec_error(d, "invalid relative value id: rel=%u base=%u", rel, base_value_id);
+        return false;
+    }
+    *out_val_id = base_value_id - rel;
+    return true;
+}
+
+static bool bc_resolve_phi_value_id(bc_decoder_t *d, uint32_t base_before_def,
+                                    int64_t rel_signed, uint32_t *out_val_id) {
+    if (rel_signed >= 0) {
+        uint32_t rel = (uint32_t)rel_signed;
+        if (rel > base_before_def) {
+            bc_dec_error(d, "invalid PHI relative value id: rel=%u base=%u",
+                         rel, base_before_def);
+            return false;
+        }
+        *out_val_id = base_before_def - rel;
+        return true;
+    }
+
+    {
+        if (rel_signed == INT64_MIN) {
+            bc_dec_error(d, "unsupported PHI relative value sentinel");
+            return false;
+        }
+        uint64_t fwd = (uint64_t)(-rel_signed);
+        uint64_t id = (uint64_t)base_before_def + fwd;
+        if (id > UINT32_MAX) {
+            bc_dec_error(d, "PHI forward value id overflow");
+            return false;
+        }
+        *out_val_id = (uint32_t)id;
+    }
+    return true;
+}
+
+static bool bc_define_vreg_value(bc_decoder_t *d, bc_value_table_t *vt, lr_func_t *func,
+                                 uint32_t value_id, lr_type_t *type, uint32_t *out_vreg) {
+    while (value_id >= vt->count) {
+        bc_value_t fwd;
+        uint32_t before = vt->count;
+        fwd.kind = BC_VAL_VREG;
+        fwd.type = d->module->type_i32;
+        fwd.vreg = lr_vreg_new(func);
+        bc_value_push(vt, fwd);
+        if (vt->count == before) {
+            bc_dec_error(d, "out of memory while materializing value table");
+            return false;
+        }
+    }
+
+    {
+        bc_value_t *slot = &vt->values[value_id];
+        if (slot->kind != BC_VAL_VREG) {
+            bc_dec_error(d, "value id %u is not vreg-definable", value_id);
+            return false;
+        }
+        slot->type = type;
+        *out_vreg = slot->vreg;
+    }
+    return true;
+}
+
+/* ---- Type block decoder ------------------------------------------------ */
+
+static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos) {
+    char *struct_name = NULL;
+    size_t struct_name_len = 0;
+
+    while (r->bit_pos < end_pos && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(r);
+            free(struct_name);
+            return true;
+        }
+        if (entry == BC_ABBREV_ENTER_BLOCK) {
+            bc_skip_block(r);
+            continue;
+        }
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_read_define_abbrev(r);
+            continue;
+        }
+
+        {
+            uint32_t code = bc_read_record(r, entry);
+            if (r->has_error)
+                break;
+
+            switch (code) {
+            case TYPE_CODE_NUMENTRY:
+                break;
+            case TYPE_CODE_VOID:
+                bc_type_table_push(&d->types, d->module->type_void);
+                break;
+            case TYPE_CODE_FLOAT:
+                bc_type_table_push(&d->types, d->module->type_float);
+                break;
+            case TYPE_CODE_DOUBLE:
+                bc_type_table_push(&d->types, d->module->type_double);
+                break;
+            case TYPE_CODE_LABEL:
+                bc_type_table_push(&d->types, d->module->type_void);
+                break;
+            case TYPE_CODE_INTEGER: {
+                uint32_t width = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                lr_type_t *ty = NULL;
+                switch (width) {
+                case 1:  ty = d->module->type_i1; break;
+                case 8:  ty = d->module->type_i8; break;
+                case 16: ty = d->module->type_i16; break;
+                case 32: ty = d->module->type_i32; break;
+                case 64: ty = d->module->type_i64; break;
+                default:
+                    bc_dec_error(d, "unsupported integer width: i%u", width);
+                    free(struct_name);
+                    return false;
+                }
+                bc_type_table_push(&d->types, ty);
+                break;
+            }
+            case TYPE_CODE_POINTER:
+                bc_type_table_push(&d->types, d->module->type_ptr);
+                break;
+            case TYPE_CODE_ARRAY: {
+                uint64_t count = r->record_len > 0 ? r->record[0] : 0;
+                uint32_t elem_idx = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                lr_type_t *elem = bc_get_type(d, elem_idx);
+                if (!elem) {
+                    free(struct_name);
+                    return false;
+                }
+                bc_type_table_push(&d->types, lr_type_array(d->arena, elem, count));
+                break;
+            }
+            case TYPE_CODE_STRUCT_ANON: {
+                uint32_t packed = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                uint32_t nfields = r->record_len > 1 ? r->record_len - 1 : 0;
+                lr_type_t **fields = NULL;
+                uint32_t i;
+                if (nfields > 0) {
+                    fields = lr_arena_array(d->arena, lr_type_t *, nfields);
+                    for (i = 0; i < nfields; i++) {
+                        fields[i] = bc_get_type(d, (uint32_t)r->record[i + 1]);
+                        if (!fields[i]) {
+                            free(struct_name);
+                            return false;
+                        }
+                    }
+                }
+                bc_type_table_push(&d->types,
+                    lr_type_struct(d->arena, fields, nfields, packed != 0, NULL));
+                break;
+            }
+            case TYPE_CODE_STRUCT_NAME: {
+                uint32_t i;
+                free(struct_name);
+                struct_name_len = r->record_len;
+                struct_name = (char *)malloc(struct_name_len + 1);
+                if (struct_name) {
+                    for (i = 0; i < r->record_len; i++)
+                        struct_name[i] = (char)r->record[i];
+                    struct_name[struct_name_len] = '\0';
+                }
+                break;
+            }
+            case TYPE_CODE_STRUCT_NAMED: {
+                uint32_t packed = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                uint32_t nfields = r->record_len > 1 ? r->record_len - 1 : 0;
+                lr_type_t **fields = NULL;
+                char *owned_name = NULL;
+                uint32_t i;
+                if (nfields > 0) {
+                    fields = lr_arena_array(d->arena, lr_type_t *, nfields);
+                    for (i = 0; i < nfields; i++) {
+                        fields[i] = bc_get_type(d, (uint32_t)r->record[i + 1]);
+                        if (!fields[i]) {
+                            free(struct_name);
+                            return false;
+                        }
+                    }
+                }
+                if (struct_name)
+                    owned_name = lr_arena_strdup(d->arena, struct_name, struct_name_len);
+                bc_type_table_push(&d->types,
+                    lr_type_struct(d->arena, fields, nfields, packed != 0, owned_name));
+                free(struct_name);
+                struct_name = NULL;
+                struct_name_len = 0;
+                break;
+            }
+            case TYPE_CODE_FUNCTION: {
+                uint32_t vararg = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                uint32_t ret_idx = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                uint32_t nparams = r->record_len > 2 ? r->record_len - 2 : 0;
+                lr_type_t *ret_ty = bc_get_type(d, ret_idx);
+                lr_type_t **params = NULL;
+                uint32_t i;
+                if (!ret_ty) {
+                    free(struct_name);
+                    return false;
+                }
+                if (nparams > 0) {
+                    params = lr_arena_array(d->arena, lr_type_t *, nparams);
+                    for (i = 0; i < nparams; i++) {
+                        params[i] = bc_get_type(d, (uint32_t)r->record[i + 2]);
+                        if (!params[i]) {
+                            free(struct_name);
+                            return false;
+                        }
+                    }
+                }
+                bc_type_table_push(&d->types,
+                    lr_type_func(d->arena, ret_ty, params, nparams, vararg != 0));
+                break;
+            }
+            case TYPE_CODE_METADATA:
+            case TYPE_CODE_X86_FP80:
+                bc_type_table_push(&d->types, d->module->type_void);
+                break;
+            default:
+                bc_type_table_push(&d->types, d->module->type_void);
+                break;
+            }
+        }
+    }
+    free(struct_name);
+    return !r->has_error;
+}
+
+/* ---- Constants block decoder ------------------------------------------- */
+
+static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
+                                       size_t end_pos, bc_value_table_t *vt) {
+    lr_type_t *cur_type = d->module->type_i32;
+
+    while (r->bit_pos < end_pos && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(r);
+            return true;
+        }
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_read_define_abbrev(r);
+            continue;
+        }
+        if (entry == BC_ABBREV_ENTER_BLOCK) {
+            bc_skip_block(r);
+            continue;
+        }
+
+        {
+            uint32_t code = bc_read_record(r, entry);
+            if (r->has_error)
+                return false;
+
+            switch (code) {
+            case CONST_CODE_SETTYPE: {
+                uint32_t tidx = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                lr_type_t *ty = bc_get_type(d, tidx);
+                if (!ty)
+                    return false;
+                cur_type = ty;
+                break;
+            }
+            case CONST_CODE_NULL: {
+                bc_value_t cv;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                if (cur_type->kind == LR_TYPE_PTR)
+                    cv.operand = lr_op_null(cur_type);
+                else
+                    cv.operand = lr_op_imm_i64(0, cur_type);
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_UNDEF:
+            case CONST_CODE_POISON: {
+                bc_value_t cv;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.operand.kind = LR_VAL_UNDEF;
+                cv.operand.type = cur_type;
+                cv.operand.global_offset = 0;
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_INTEGER: {
+                bc_value_t cv;
+                uint64_t raw = r->record_len > 0 ? r->record[0] : 0;
+                int64_t val = bc_decode_signed_vbr(raw);
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.operand = lr_op_imm_i64(val, cur_type);
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_FLOAT: {
+                bc_value_t cv;
+                uint64_t raw = r->record_len > 0 ? r->record[0] : 0;
+                double fval;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                if (cur_type->kind == LR_TYPE_FLOAT) {
+                    uint32_t raw32 = (uint32_t)raw;
+                    float f32;
+                    memcpy(&f32, &raw32, sizeof(f32));
+                    fval = (double)f32;
+                } else {
+                    memcpy(&fval, &raw, sizeof(fval));
+                }
+                cv.operand = lr_op_imm_f64(fval, cur_type);
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_AGGREGATE: {
+                bc_value_t cv;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.operand.kind = LR_VAL_UNDEF;
+                cv.operand.type = cur_type;
+                cv.operand.global_offset = 0;
+                bc_value_push(vt, cv);
+                break;
+            }
+            default: {
+                bc_value_t cv;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.operand.kind = LR_VAL_UNDEF;
+                cv.operand.type = cur_type;
+                cv.operand.global_offset = 0;
+                bc_value_push(vt, cv);
+                break;
+            }
+            }
+        }
+    }
+    return !r->has_error;
+}
+
+/* ---- Value symtab block decoder ---------------------------------------- */
+
+static bool bc_decode_value_symtab(bc_decoder_t *d, bc_reader_t *r, size_t end_pos,
+                                    lr_func_t *func, lr_block_t **blocks, uint32_t nblocks) {
+    while (r->bit_pos < end_pos && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(r);
+            return true;
+        }
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_read_define_abbrev(r);
+            continue;
+        }
+
+        {
+            uint32_t code = bc_read_record(r, entry);
+            if (r->has_error)
+                return false;
+
+            if (code == VST_CODE_BBENTRY && func) {
+                uint32_t bb_id = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                if (bb_id < nblocks && blocks[bb_id]) {
+                    uint32_t i;
+                    size_t namelen = r->record_len > 1 ? r->record_len - 1 : 0;
+                    char *name = lr_arena_strdup(d->arena, "", 0);
+                    if (namelen > 0) {
+                        char *tmp = (char *)malloc(namelen + 1);
+                        if (tmp) {
+                            for (i = 0; i < (uint32_t)namelen; i++)
+                                tmp[i] = (char)r->record[i + 1];
+                            tmp[namelen] = '\0';
+                            name = lr_arena_strdup(d->arena, tmp, namelen);
+                            free(tmp);
+                        }
+                    }
+                    blocks[bb_id]->name = name;
+                }
+            }
+            if (code == VST_CODE_FNENTRY) {
+                /* Module-level FNENTRY: record[0] = valueid, record[1] = strtab_offset */
+                /* Name is already set via strtab; skip. */
+            }
+        }
+    }
+    return !r->has_error;
+}
+
+/* ---- Opcode mapping ---------------------------------------------------- */
+
+static lr_opcode_t bc_map_binop(uint32_t opc, bool is_fp) {
+    if (is_fp) {
+        switch (opc) {
+        case 0: return LR_OP_FADD;
+        case 1: return LR_OP_FSUB;
+        case 2: return LR_OP_FMUL;
+        case 3: return LR_OP_FDIV;
+        default: return LR_OP_FADD;
+        }
+    }
+    switch (opc) {
+    case 0:  return LR_OP_ADD;
+    case 1:  return LR_OP_SUB;
+    case 2:  return LR_OP_MUL;
+    case 3:  return LR_OP_SDIV;
+    case 4:  return LR_OP_SDIV;
+    case 5:  return LR_OP_SREM;
+    case 6:  return LR_OP_SREM;
+    case 7:  return LR_OP_SHL;
+    case 8:  return LR_OP_LSHR;
+    case 9:  return LR_OP_ASHR;
+    case 10: return LR_OP_AND;
+    case 11: return LR_OP_OR;
+    case 12: return LR_OP_XOR;
+    default: return LR_OP_ADD;
+    }
+}
+
+static lr_opcode_t bc_map_cast(uint32_t opc) {
+    switch (opc) {
+    case 0:  return LR_OP_TRUNC;
+    case 1:  return LR_OP_ZEXT;
+    case 2:  return LR_OP_SEXT;
+    case 3:  return LR_OP_FPTOUI;
+    case 4:  return LR_OP_FPTOSI;
+    case 5:  return LR_OP_UITOFP;
+    case 6:  return LR_OP_SITOFP;
+    case 7:  return LR_OP_FPTRUNC;
+    case 8:  return LR_OP_FPEXT;
+    case 9:  return LR_OP_PTRTOINT;
+    case 10: return LR_OP_INTTOPTR;
+    case 11: return LR_OP_BITCAST;
+    default: return LR_OP_BITCAST;
+    }
+}
+
+static bool bc_type_is_fp(lr_type_t *t) {
+    return t && (t->kind == LR_TYPE_FLOAT || t->kind == LR_TYPE_DOUBLE);
+}
+
+static bool bc_map_icmp_pred(uint32_t pred, lr_icmp_pred_t *out) {
+    switch (pred) {
+    case 32: *out = LR_ICMP_EQ; return true;
+    case 33: *out = LR_ICMP_NE; return true;
+    case 34: *out = LR_ICMP_UGT; return true;
+    case 35: *out = LR_ICMP_UGE; return true;
+    case 36: *out = LR_ICMP_ULT; return true;
+    case 37: *out = LR_ICMP_ULE; return true;
+    case 38: *out = LR_ICMP_SGT; return true;
+    case 39: *out = LR_ICMP_SGE; return true;
+    case 40: *out = LR_ICMP_SLT; return true;
+    case 41: *out = LR_ICMP_SLE; return true;
+    default: return false;
+    }
+}
+
+static bool bc_map_fcmp_pred(uint32_t pred, lr_fcmp_pred_t *out) {
+    switch (pred) {
+    case 0:  *out = LR_FCMP_FALSE; return true;
+    case 1:  *out = LR_FCMP_OEQ; return true;
+    case 2:  *out = LR_FCMP_OGT; return true;
+    case 3:  *out = LR_FCMP_OGE; return true;
+    case 4:  *out = LR_FCMP_OLT; return true;
+    case 5:  *out = LR_FCMP_OLE; return true;
+    case 6:  *out = LR_FCMP_ONE; return true;
+    case 7:  *out = LR_FCMP_ORD; return true;
+    case 8:  *out = LR_FCMP_UNO; return true;
+    case 9:  *out = LR_FCMP_UEQ; return true;
+    case 10: *out = LR_FCMP_UGT; return true;
+    case 11: *out = LR_FCMP_UGE; return true;
+    case 12: *out = LR_FCMP_ULT; return true;
+    case 13: *out = LR_FCMP_ULE; return true;
+    case 14: *out = LR_FCMP_UNE; return true;
+    case 15: *out = LR_FCMP_TRUE; return true;
+    default: return false;
+    }
+}
+
+/* ---- Function block decoder -------------------------------------------- */
+
+static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
+                                      size_t end_pos, lr_func_t *func) {
+    bc_value_table_t local_vt;
+    lr_block_t **blocks = NULL;
+    uint32_t num_blocks = 0;
+    uint32_t cur_block = 0;
+    uint32_t next_value_id = 0;
+    uint32_t i;
+    bool ok = true;
+
+    memset(&local_vt, 0, sizeof(local_vt));
+
+    /* Pre-populate with global values */
+    for (i = 0; i < d->global_values.count; i++)
+        bc_value_push(&local_vt, d->global_values.values[i]);
+
+    /* Add function parameters */
+    for (i = 0; i < func->num_params; i++) {
+        bc_value_t pv;
+        pv.kind = BC_VAL_VREG;
+        pv.type = func->param_types[i];
+        pv.vreg = func->param_vregs[i];
+        bc_value_push(&local_vt, pv);
+    }
+    next_value_id = local_vt.count;
+
+    while (r->bit_pos < end_pos && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(r);
+            break;
+        }
+        if (entry == BC_ABBREV_ENTER_BLOCK) {
+            uint32_t block_id = (uint32_t)bc_read_vbr(r, 8);
+            uint32_t new_abbrev_len = (uint32_t)bc_read_vbr(r, 4);
+            uint32_t saved_abbrev_len, saved_num_abbrevs, saved_abbrev_cap;
+            bc_abbrev_t *saved_abbrevs;
+            bc_blockinfo_entry_t *bi;
+            size_t sub_end;
+
+            bc_align32(r);
+            {
+                uint32_t block_words = (uint32_t)bc_read_fixed(r, 32);
+                sub_end = r->bit_pos + (size_t)block_words * 32;
+            }
+
+            saved_abbrev_len = r->abbrev_len;
+            saved_num_abbrevs = r->num_abbrevs;
+            saved_abbrev_cap = r->abbrev_cap;
+            saved_abbrevs = r->abbrevs;
+
+            r->abbrev_len = new_abbrev_len;
+            r->abbrevs = NULL;
+            r->num_abbrevs = 0;
+            r->abbrev_cap = 0;
+
+            bi = bc_find_blockinfo(r, block_id);
+            if (bi) {
+                uint32_t j;
+                for (j = 0; j < bi->num; j++) {
+                    bc_abbrev_t copy;
+                    copy.num_ops = bi->abbrevs[j].num_ops;
+                    copy.ops = (bc_abbrev_op_t *)malloc(
+                        (size_t)copy.num_ops * sizeof(bc_abbrev_op_t));
+                    if (copy.ops)
+                        memcpy(copy.ops, bi->abbrevs[j].ops,
+                               (size_t)copy.num_ops * sizeof(bc_abbrev_op_t));
+                    bc_abbrev_list_push(&r->abbrevs, &r->num_abbrevs, &r->abbrev_cap, copy);
+                }
+            }
+
+            if (block_id == BC_CONSTANTS_BLOCK) {
+                ok = bc_decode_constants_block(d, r, sub_end, &local_vt);
+                next_value_id = local_vt.count;
+            } else if (block_id == BC_VALUE_SYMTAB_BLOCK) {
+                ok = bc_decode_value_symtab(d, r, sub_end, func, blocks, num_blocks);
+            } else {
+                r->bit_pos = sub_end;
+            }
+
+            bc_free_abbrev_list(r->abbrevs, r->num_abbrevs);
+            r->abbrevs = saved_abbrevs;
+            r->num_abbrevs = saved_num_abbrevs;
+            r->abbrev_cap = saved_abbrev_cap;
+            r->abbrev_len = saved_abbrev_len;
+
+            if (!ok)
+                break;
+            continue;
+        }
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_read_define_abbrev(r);
+            continue;
+        }
+
+        {
+            uint32_t code = bc_read_record(r, entry);
+            if (r->has_error)
+                break;
+
+            if (code == FUNC_CODE_DECLAREBLOCKS) {
+                num_blocks = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                blocks = (lr_block_t **)calloc(num_blocks, sizeof(lr_block_t *));
+                if (!blocks) {
+                    bc_dec_error(d, "out of memory allocating block array");
+                    ok = false;
+                    break;
+                }
+                for (i = 0; i < num_blocks; i++) {
+                    char name[32];
+                    snprintf(name, sizeof(name), "bb%u", i);
+                    blocks[i] = lr_block_create(func, d->arena, name);
+                }
+                cur_block = 0;
                 continue;
-            vreg = lr_vreg_new(lr_fn);
-            if (!value_map_put(&fnc.values, ll_inst, vreg, ty)) {
-                bc_set_error(bc, "failed to allocate instruction vreg map");
-                free(fnc.blocks.entries);
-                free(fnc.values.entries);
-                return false;
             }
+
+            if (!blocks || cur_block >= num_blocks) {
+                bc_dec_error(d, "instruction before DECLAREBLOCKS or block overflow");
+                ok = false;
+                break;
+            }
+
+            switch (code) {
+            case FUNC_CODE_INST_RET: {
+                lr_inst_t *inst;
+                if (r->record_len == 0) {
+                    inst = lr_inst_create(d->arena, LR_OP_RET_VOID,
+                                          d->module->type_void, 0, NULL, 0);
+                } else {
+                    uint32_t rel = (uint32_t)r->record[0];
+                    uint32_t vid = 0;
+                    lr_operand_t op;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, rel, &vid)) {
+                        ok = false;
+                        break;
+                    }
+                    op = bc_make_operand_from_value(d, &local_vt, vid, func, func->ret_type);
+                    inst = lr_inst_create(d->arena, LR_OP_RET, op.type, 0, &op, 1);
+                }
+                lr_block_append(blocks[cur_block], inst);
+                cur_block++;
+                break;
+            }
+            case FUNC_CODE_INST_BR: {
+                if (r->record_len == 1) {
+                    uint32_t dest_bb = (uint32_t)r->record[0];
+                    lr_operand_t op = lr_op_block(dest_bb);
+                    lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_BR,
+                                                     d->module->type_void, 0, &op, 1);
+                    lr_block_append(blocks[cur_block], inst);
+                } else if (r->record_len >= 3) {
+                    lr_operand_t ops[3];
+                    uint32_t bb_true = (uint32_t)r->record[0];
+                    uint32_t bb_false = (uint32_t)r->record[1];
+                    uint32_t cond_rel = (uint32_t)r->record[2];
+                    uint32_t cond_vid = 0;
+                    lr_inst_t *inst;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid,
+                                                        func, d->module->type_i1);
+                    ops[1] = lr_op_block(bb_true);
+                    ops[2] = lr_op_block(bb_false);
+                    inst = lr_inst_create(d->arena, LR_OP_CONDBR,
+                                          d->module->type_void, 0, ops, 3);
+                    lr_block_append(blocks[cur_block], inst);
+                }
+                cur_block++;
+                break;
+            }
+            case FUNC_CODE_INST_UNREACHABLE: {
+                lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_UNREACHABLE,
+                                                  d->module->type_void, 0, NULL, 0);
+                lr_block_append(blocks[cur_block], inst);
+                cur_block++;
+                break;
+            }
+            case FUNC_CODE_INST_BINOP: {
+                uint32_t lhs_rel = (uint32_t)r->record[0];
+                uint32_t rhs_rel = (uint32_t)r->record[1];
+                uint32_t opc = (uint32_t)r->record[2];
+                uint32_t lhs_vid = 0;
+                uint32_t rhs_vid = 0;
+                lr_operand_t ops[2];
+                lr_type_t *res_type;
+                uint32_t dest;
+                lr_inst_t *inst;
+                bool is_fp;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid)) {
+                    ok = false;
+                    break;
+                }
+                ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, rhs_vid, func, ops[0].type);
+                res_type = ops[0].type;
+                is_fp = bc_type_is_fp(res_type);
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, res_type, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, bc_map_binop(opc, is_fp),
+                                       res_type, dest, ops, 2);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_CAST: {
+                uint32_t src_rel = (uint32_t)r->record[0];
+                uint32_t dest_ty_idx = (uint32_t)r->record[1];
+                uint32_t cast_opc = (uint32_t)r->record[2];
+                uint32_t src_vid = 0;
+                lr_operand_t op;
+                lr_type_t *dest_type;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
+                    ok = false;
+                    break;
+                }
+                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, NULL);
+                dest_type = bc_get_type(d, dest_ty_idx);
+                if (!dest_type) { ok = false; break; }
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, dest_type, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, bc_map_cast(cast_opc),
+                                       dest_type, dest, &op, 1);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_CMP2: {
+                uint32_t lhs_rel = (uint32_t)r->record[0];
+                uint32_t rhs_rel = (uint32_t)r->record[1];
+                uint32_t pred = (uint32_t)r->record[2];
+                uint32_t lhs_vid = 0;
+                uint32_t rhs_vid = 0;
+                lr_operand_t ops[2];
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid)) {
+                    ok = false;
+                    break;
+                }
+                ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, rhs_vid, func, ops[0].type);
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          d->module->type_i1, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                if (bc_type_is_fp(ops[0].type)) {
+                    lr_fcmp_pred_t fpred;
+                    if (!bc_map_fcmp_pred(pred, &fpred)) {
+                        bc_dec_error(d, "unsupported fcmp predicate: %u", pred);
+                        ok = false;
+                        break;
+                    }
+                    inst = lr_inst_create(d->arena, LR_OP_FCMP,
+                                           d->module->type_i1, dest, ops, 2);
+                    if (inst)
+                        inst->fcmp_pred = fpred;
+                } else {
+                    lr_icmp_pred_t ipred;
+                    if (!bc_map_icmp_pred(pred, &ipred)) {
+                        bc_dec_error(d, "unsupported icmp predicate: %u", pred);
+                        ok = false;
+                        break;
+                    }
+                    inst = lr_inst_create(d->arena, LR_OP_ICMP,
+                                           d->module->type_i1, dest, ops, 2);
+                    if (inst)
+                        inst->icmp_pred = ipred;
+                }
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_PHI: {
+                uint32_t ty_idx = (uint32_t)r->record[0];
+                lr_type_t *phi_type = bc_get_type(d, ty_idx);
+                uint32_t npairs = (r->record_len - 1) / 2;
+                lr_operand_t *ops;
+                uint32_t dest, j;
+                uint32_t phi_base_before_def;
+                lr_inst_t *inst;
+
+                if (!phi_type) { ok = false; break; }
+                ops = (lr_operand_t *)malloc((size_t)(npairs * 2) * sizeof(lr_operand_t));
+                if (!ops) {
+                    bc_dec_error(d, "out of memory for phi operands");
+                    ok = false;
+                    break;
+                }
+                phi_base_before_def = next_value_id;
+                if (!bc_define_vreg_value(d, &local_vt, func, phi_base_before_def,
+                                          phi_type, &dest)) {
+                    free(ops);
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                for (j = 0; j < npairs; j++) {
+                    int64_t val_signed = bc_decode_signed_vbr(r->record[1 + j * 2]);
+                    uint32_t bb_id = (uint32_t)r->record[2 + j * 2];
+                    uint32_t val_id;
+                    if (!bc_resolve_phi_value_id(d, phi_base_before_def,
+                                                 val_signed, &val_id)) {
+                        free(ops);
+                        ok = false;
+                        break;
+                    }
+                    ops[j * 2] = bc_make_operand_from_value(d, &local_vt, val_id,
+                                                            func, phi_type);
+                    ops[j * 2 + 1] = lr_op_block(bb_id);
+                }
+                if (!ok)
+                    break;
+
+                inst = lr_inst_create(d->arena, LR_OP_PHI, phi_type, dest, ops, npairs * 2);
+                free(ops);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_ALLOCA: {
+                uint32_t inst_ty_idx, op_ty_idx, align_raw;
+                lr_type_t *elem_ty;
+                lr_operand_t size_op;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                inst_ty_idx = (uint32_t)r->record[0];
+                op_ty_idx = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                (void)op_ty_idx;
+                align_raw = r->record_len > 3 ? (uint32_t)r->record[3] : 0;
+                (void)align_raw;
+
+                elem_ty = bc_get_type(d, inst_ty_idx);
+                if (!elem_ty) { ok = false; break; }
+
+                if (r->record_len > 2) {
+                    uint32_t sz_rel = (uint32_t)r->record[2];
+                    uint32_t sz_vid = 0;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, sz_rel, &sz_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    size_op = bc_make_operand_from_value(d, &local_vt, sz_vid,
+                                                         func, d->module->type_i64);
+                } else {
+                    size_op = lr_op_imm_i64(1, d->module->type_i64);
+                }
+
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          d->module->type_ptr, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_ALLOCA,
+                                       d->module->type_ptr, dest, &size_op, 1);
+                if (inst)
+                    inst->type = elem_ty;
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_LOAD: {
+                uint32_t ptr_rel = (uint32_t)r->record[0];
+                uint32_t ty_idx = (uint32_t)r->record[1];
+                uint32_t ptr_vid = 0;
+                lr_operand_t op;
+                lr_type_t *load_ty;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid)) {
+                    ok = false;
+                    break;
+                }
+                op = bc_make_operand_from_value(d, &local_vt, ptr_vid, func, d->module->type_ptr);
+                load_ty = bc_get_type(d, ty_idx);
+                if (!load_ty) { ok = false; break; }
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, load_ty, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_LOAD, load_ty, dest, &op, 1);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_STORE:
+            case FUNC_CODE_INST_STORE_OLD: {
+                lr_operand_t ops[2];
+                lr_inst_t *inst;
+                if (code == FUNC_CODE_INST_STORE) {
+                    uint32_t ptr_rel = (uint32_t)r->record[0];
+                    uint32_t val_rel = (uint32_t)r->record[1];
+                    uint32_t ptr_vid = 0, val_vid = 0;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    ops[0] = bc_make_operand_from_value(d, &local_vt, val_vid, func, NULL);
+                    ops[1] = bc_make_operand_from_value(d, &local_vt, ptr_vid,
+                                                        func, d->module->type_ptr);
+                } else {
+                    uint32_t ptr_rel = (uint32_t)r->record[0];
+                    uint32_t val_rel = (uint32_t)r->record[1];
+                    uint32_t ptr_vid = 0, val_vid = 0;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    ops[0] = bc_make_operand_from_value(d, &local_vt, val_vid, func, NULL);
+                    ops[1] = bc_make_operand_from_value(d, &local_vt, ptr_vid,
+                                                        func, d->module->type_ptr);
+                }
+                if (!ok)
+                    break;
+                inst = lr_inst_create(d->arena, LR_OP_STORE,
+                                       d->module->type_void, 0, ops, 2);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_GEP: {
+                uint32_t inbounds = (uint32_t)r->record[0];
+                uint32_t src_ty_idx = (uint32_t)r->record[1];
+                uint32_t nops_total = (r->record_len - 2);
+                uint32_t j;
+                lr_type_t *base_ty;
+                lr_operand_t *ops;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                (void)inbounds;
+                base_ty = bc_get_type(d, src_ty_idx);
+                if (!base_ty) { ok = false; break; }
+
+                ops = (lr_operand_t *)malloc((size_t)nops_total * sizeof(lr_operand_t));
+                if (!ops) {
+                    bc_dec_error(d, "out of memory for gep operands");
+                    ok = false;
+                    break;
+                }
+                for (j = 0; j < nops_total; j++) {
+                    uint32_t rel = (uint32_t)r->record[2 + j];
+                    uint32_t vid = 0;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, rel, &vid)) {
+                        ok = false;
+                        break;
+                    }
+                    ops[j] = bc_make_operand_from_value(d, &local_vt, vid, func, NULL);
+                    if (j > 0)
+                        ops[j] = lr_canonicalize_gep_index(d->module, blocks[cur_block],
+                                                            func, ops[j]);
+                }
+                if (!ok) {
+                    free(ops);
+                    break;
+                }
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          d->module->type_ptr, &dest)) {
+                    free(ops);
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_GEP,
+                                       d->module->type_ptr, dest, ops, nops_total);
+                free(ops);
+                if (inst)
+                    inst->type = base_ty;
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_CALL: {
+                uint32_t cc_flags, fn_ty_idx;
+                lr_type_t *fn_type;
+                uint32_t callee_rel, callee_vid;
+                lr_operand_t callee_op;
+                uint32_t nargs, j;
+                lr_operand_t *ops;
+                lr_type_t *ret_type;
+                uint32_t dest = 0;
+                lr_inst_t *inst;
+
+                (void)r->record[0]; /* attr */
+                cc_flags = (uint32_t)r->record[1];
+                fn_ty_idx = (uint32_t)r->record[2];
+                fn_type = bc_get_type(d, fn_ty_idx);
+                if (!fn_type || fn_type->kind != LR_TYPE_FUNC) {
+                    bc_dec_error(d, "call references non-function type");
+                    ok = false;
+                    break;
+                }
+
+                callee_rel = (uint32_t)r->record[3];
+                if (!bc_resolve_rel_value_id(d, next_value_id, callee_rel, &callee_vid)) {
+                    ok = false;
+                    break;
+                }
+                callee_op = bc_make_operand_from_value(d, &local_vt, callee_vid,
+                                                       func, d->module->type_ptr);
+
+                nargs = r->record_len > 4 ? r->record_len - 4 : 0;
+                ops = (lr_operand_t *)malloc((size_t)(nargs + 1) * sizeof(lr_operand_t));
+                if (!ops) {
+                    bc_dec_error(d, "out of memory for call operands");
+                    ok = false;
+                    break;
+                }
+                ops[0] = callee_op;
+                for (j = 0; j < nargs; j++) {
+                    uint32_t rel = (uint32_t)r->record[4 + j];
+                    uint32_t vid = 0;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, rel, &vid)) {
+                        ok = false;
+                        break;
+                    }
+                    ops[j + 1] = bc_make_operand_from_value(d, &local_vt, vid, func, NULL);
+                }
+                if (!ok) {
+                    free(ops);
+                    break;
+                }
+
+                ret_type = fn_type->func.ret;
+                if (ret_type->kind != LR_TYPE_VOID) {
+                    if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                              ret_type, &dest)) {
+                        free(ops);
+                        ok = false;
+                        break;
+                    }
+                    next_value_id++;
+                }
+
+                inst = lr_inst_create(d->arena, LR_OP_CALL,
+                                       ret_type, dest, ops, nargs + 1);
+                free(ops);
+                (void)cc_flags;
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_SELECT: {
+                uint32_t true_rel = (uint32_t)r->record[0];
+                uint32_t false_rel = (uint32_t)r->record[1];
+                uint32_t cond_rel = (uint32_t)r->record[2];
+                uint32_t true_vid = 0;
+                uint32_t false_vid = 0;
+                uint32_t cond_vid = 0;
+                lr_operand_t ops[3];
+                lr_type_t *res_type;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, true_rel, &true_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, false_rel, &false_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
+                    ok = false;
+                    break;
+                }
+                ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid,
+                                                    func, d->module->type_i1);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, NULL);
+                ops[2] = bc_make_operand_from_value(d, &local_vt, false_vid,
+                                                    func, ops[1].type);
+                res_type = ops[1].type;
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, res_type, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_SELECT,
+                                       res_type, dest, ops, 3);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_EXTRACTVALUE: {
+                uint32_t agg_rel = (uint32_t)r->record[0];
+                uint32_t agg_vid = 0;
+                lr_operand_t op;
+                uint32_t nidx = r->record_len > 1 ? r->record_len - 1 : 0;
+                uint32_t *idx_copy = NULL;
+                uint32_t dest, j;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, agg_rel, &agg_vid)) {
+                    ok = false;
+                    break;
+                }
+                op = bc_make_operand_from_value(d, &local_vt, agg_vid, func, NULL);
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          d->module->type_i32, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_EXTRACTVALUE,
+                                       d->module->type_i32, dest, &op, 1);
+                if (inst && nidx > 0) {
+                    idx_copy = lr_arena_array(d->arena, uint32_t, nidx);
+                    for (j = 0; j < nidx; j++)
+                        idx_copy[j] = (uint32_t)r->record[1 + j];
+                    inst->indices = idx_copy;
+                    inst->num_indices = nidx;
+                }
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_INSERTVALUE: {
+                uint32_t agg_rel = (uint32_t)r->record[0];
+                uint32_t val_rel = (uint32_t)r->record[1];
+                uint32_t agg_vid = 0;
+                uint32_t val_vid = 0;
+                lr_operand_t ops[2];
+                uint32_t nidx = r->record_len > 2 ? r->record_len - 2 : 0;
+                uint32_t *idx_copy = NULL;
+                uint32_t dest, j;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, agg_rel, &agg_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
+                    ok = false;
+                    break;
+                }
+                ops[0] = bc_make_operand_from_value(d, &local_vt, agg_vid, func, NULL);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, val_vid,
+                                                    func, ops[0].type);
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          ops[0].type, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_INSERTVALUE,
+                                       ops[0].type, dest, ops, 2);
+                if (inst && nidx > 0) {
+                    idx_copy = lr_arena_array(d->arena, uint32_t, nidx);
+                    for (j = 0; j < nidx; j++)
+                        idx_copy[j] = (uint32_t)r->record[2 + j];
+                    inst->indices = idx_copy;
+                    inst->num_indices = nidx;
+                }
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_UNOP: {
+                uint32_t src_rel = (uint32_t)r->record[0];
+                uint32_t unopc = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                uint32_t src_vid = 0;
+                lr_operand_t op;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
+                    ok = false;
+                    break;
+                }
+                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, NULL);
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          op.type, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                (void)unopc;
+                inst = lr_inst_create(d->arena, LR_OP_FNEG,
+                                       op.type, dest, &op, 1);
+                lr_block_append(blocks[cur_block], inst);
+                break;
+            }
+            case FUNC_CODE_INST_SWITCH: {
+                uint32_t ty_idx = (uint32_t)r->record[0];
+                uint32_t cond_rel = (uint32_t)r->record[1];
+                uint32_t default_bb = (uint32_t)r->record[2];
+                uint32_t cond_vid = 0;
+                lr_operand_t cond_op;
+                (void)ty_idx;
+                if (!bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
+                    ok = false;
+                    break;
+                }
+                cond_op = bc_make_operand_from_value(d, &local_vt, cond_vid, func, NULL);
+                (void)cond_op;
+
+                {
+                    lr_operand_t op = lr_op_block(default_bb);
+                    lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_BR,
+                                                     d->module->type_void, 0, &op, 1);
+                    lr_block_append(blocks[cur_block], inst);
+                }
+                cur_block++;
+                break;
+            }
+            default:
+                break;
+            }
+
+            if (!ok)
+                break;
         }
     }
 
-    for (ll_bb = LLVMGetFirstBasicBlock(ll_fn); ll_bb; ll_bb = LLVMGetNextBasicBlock(ll_bb)) {
-        lr_block_t *lr_bb = block_map_get(&fnc.blocks, ll_bb);
-        if (!lr_bb) {
-            bc_set_error(bc, "internal error: missing block mapping");
-            free(fnc.blocks.entries);
-            free(fnc.values.entries);
-            return false;
-        }
-        for (ll_inst = LLVMGetFirstInstruction(ll_bb); ll_inst;
-             ll_inst = LLVMGetNextInstruction(ll_inst)) {
-            if (!bc_translate_instruction(bc, &fnc, lr_bb, ll_inst)) {
-                free(fnc.blocks.entries);
-                free(fnc.values.entries);
-                return false;
-            }
-        }
-    }
-
-    free(fnc.blocks.entries);
-    free(fnc.values.entries);
-    return true;
+    free(blocks);
+    free(local_vt.values);
+    return ok && !r->has_error;
 }
 
-bool lr_bc_parser_available(void) {
-    return true;
+/* ---- Module block decoder ---------------------------------------------- */
+
+static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos) {
+    uint32_t func_body_idx = 0;
+    bool ok = true;
+
+    while (r->bit_pos < end_pos && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(r);
+            return true;
+        }
+        if (entry == BC_ABBREV_ENTER_BLOCK) {
+            uint32_t block_id = (uint32_t)bc_read_vbr(r, 8);
+            uint32_t new_abbrev_len = (uint32_t)bc_read_vbr(r, 4);
+            uint32_t saved_abbrev_len, saved_num_abbrevs, saved_abbrev_cap;
+            bc_abbrev_t *saved_abbrevs;
+            bc_blockinfo_entry_t *bi;
+            size_t sub_end;
+
+            bc_align32(r);
+            {
+                uint32_t block_words = (uint32_t)bc_read_fixed(r, 32);
+                sub_end = r->bit_pos + (size_t)block_words * 32;
+            }
+
+            if (block_id == 0) {
+                (void)new_abbrev_len;
+                bc_process_blockinfo_content(r, sub_end);
+                continue;
+            }
+
+            saved_abbrev_len = r->abbrev_len;
+            saved_num_abbrevs = r->num_abbrevs;
+            saved_abbrev_cap = r->abbrev_cap;
+            saved_abbrevs = r->abbrevs;
+
+            r->abbrev_len = new_abbrev_len;
+            r->abbrevs = NULL;
+            r->num_abbrevs = 0;
+            r->abbrev_cap = 0;
+
+            bi = bc_find_blockinfo(r, block_id);
+            if (bi) {
+                uint32_t j;
+                for (j = 0; j < bi->num; j++) {
+                    bc_abbrev_t copy;
+                    copy.num_ops = bi->abbrevs[j].num_ops;
+                    copy.ops = (bc_abbrev_op_t *)malloc(
+                        (size_t)copy.num_ops * sizeof(bc_abbrev_op_t));
+                    if (copy.ops)
+                        memcpy(copy.ops, bi->abbrevs[j].ops,
+                               (size_t)copy.num_ops * sizeof(bc_abbrev_op_t));
+                    bc_abbrev_list_push(&r->abbrevs, &r->num_abbrevs, &r->abbrev_cap, copy);
+                }
+            }
+
+            if (block_id == BC_TYPE_BLOCK) {
+                ok = bc_decode_type_block(d, r, sub_end);
+            } else if (block_id == BC_FUNCTION_BLOCK) {
+                lr_func_t *target = NULL;
+                while (func_body_idx < d->func_list.count) {
+                    if (!d->func_list.funcs[func_body_idx]->is_decl) {
+                        target = d->func_list.funcs[func_body_idx];
+                        func_body_idx++;
+                        break;
+                    }
+                    func_body_idx++;
+                }
+                if (target)
+                    ok = bc_decode_function_block(d, r, sub_end, target);
+                else
+                    r->bit_pos = sub_end;
+            } else if (block_id == BC_VALUE_SYMTAB_BLOCK) {
+                ok = bc_decode_value_symtab(d, r, sub_end, NULL, NULL, 0);
+            } else {
+                r->bit_pos = sub_end;
+            }
+
+            bc_free_abbrev_list(r->abbrevs, r->num_abbrevs);
+            r->abbrevs = saved_abbrevs;
+            r->num_abbrevs = saved_num_abbrevs;
+            r->abbrev_cap = saved_abbrev_cap;
+            r->abbrev_len = saved_abbrev_len;
+
+            if (!ok)
+                return false;
+            continue;
+        }
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_read_define_abbrev(r);
+            continue;
+        }
+
+        {
+            uint32_t code = bc_read_record(r, entry);
+            if (r->has_error)
+                return false;
+
+            switch (code) {
+            case MODULE_CODE_VERSION:
+                d->bc_version = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                break;
+            case MODULE_CODE_FUNCTION: {
+                uint32_t strtab_off = 0, strtab_size = 0;
+                uint32_t type_idx, is_proto;
+                lr_type_t *fn_type;
+                char *name = NULL;
+                lr_type_t *ret_ty;
+                lr_type_t **params = NULL;
+                uint32_t nparams;
+                bool is_decl, vararg;
+                lr_func_t *fn;
+                bc_value_t fv;
+
+                if (d->bc_version >= 2 && r->record_len >= 2) {
+                    strtab_off = (uint32_t)r->record[0];
+                    strtab_size = (uint32_t)r->record[1];
+                    type_idx = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
+                    is_proto = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
+                } else {
+                    type_idx = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                    is_proto = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
+                }
+
+                fn_type = bc_get_type(d, type_idx);
+                if (!fn_type || fn_type->kind != LR_TYPE_FUNC) {
+                    bc_dec_error(d, "MODULE_CODE_FUNCTION references non-function type %u", type_idx);
+                    return false;
+                }
+
+                if (d->bc_version >= 2 && d->strtab_data && strtab_size > 0 &&
+                    (size_t)strtab_off + strtab_size <= d->strtab_len) {
+                    name = lr_arena_strdup(d->arena, (const char *)d->strtab_data + strtab_off,
+                                           strtab_size);
+                }
+                if (!name)
+                    name = lr_arena_strdup(d->arena, "unknown", 7);
+
+                ret_ty = fn_type->func.ret;
+                nparams = fn_type->func.num_params;
+                vararg = fn_type->func.vararg;
+                if (nparams > 0) {
+                    params = lr_arena_array(d->arena, lr_type_t *, nparams);
+                    memcpy(params, fn_type->func.params, (size_t)nparams * sizeof(lr_type_t *));
+                }
+                is_decl = (is_proto != 0);
+
+                fn = lr_frontend_create_function(d->module, name, ret_ty, params,
+                                                  nparams, vararg, is_decl, NULL);
+                if (!fn) {
+                    bc_dec_error(d, "failed to create function '%s'", name);
+                    return false;
+                }
+
+                fv.kind = BC_VAL_FUNC;
+                fv.type = d->module->type_ptr;
+                fv.func = fn;
+                bc_value_push(&d->global_values, fv);
+                bc_func_list_push(&d->func_list, fn);
+                break;
+            }
+            case MODULE_CODE_GLOBALVAR: {
+                uint32_t strtab_off = 0, strtab_size = 0;
+                uint32_t type_idx;
+                uint32_t isconst_plus1, linkage;
+                lr_type_t *gtype;
+                char *gname = NULL;
+                lr_global_t *g;
+                bc_value_t gv;
+                bool is_const, is_external;
+
+                if (d->bc_version >= 2 && r->record_len >= 2) {
+                    strtab_off = (uint32_t)r->record[0];
+                    strtab_size = (uint32_t)r->record[1];
+                    type_idx = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
+                    isconst_plus1 = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
+                    linkage = r->record_len > 6 ? (uint32_t)r->record[6] : 0;
+                } else {
+                    type_idx = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
+                    isconst_plus1 = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
+                    linkage = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
+                }
+
+                gtype = bc_get_type(d, type_idx);
+                if (!gtype)
+                    gtype = d->module->type_i8;
+
+                if (d->bc_version >= 2 && d->strtab_data && strtab_size > 0 &&
+                    (size_t)strtab_off + strtab_size <= d->strtab_len) {
+                    gname = lr_arena_strdup(d->arena, (const char *)d->strtab_data + strtab_off,
+                                             strtab_size);
+                }
+                if (!gname)
+                    gname = lr_arena_strdup(d->arena, "global", 6);
+
+                is_const = (isconst_plus1 > 1);
+                is_external = (linkage == 0 && isconst_plus1 == 0);
+
+                g = lr_global_create(d->module, gname, gtype, is_const);
+                if (g)
+                    g->is_external = is_external;
+
+                lr_frontend_intern_symbol(d->module, gname);
+
+                gv.kind = BC_VAL_GLOBAL;
+                gv.type = d->module->type_ptr;
+                gv.global_sym = lr_frontend_intern_symbol(d->module, gname);
+                bc_value_push(&d->global_values, gv);
+                break;
+            }
+            case MODULE_CODE_SOURCE_FILENAME:
+            case MODULE_CODE_VSTOFFSET:
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    return ok && !r->has_error;
+}
+
+/* ---- Top-level parser -------------------------------------------------- */
+
+static void bc_scan_strtab(bc_decoder_t *d, bc_reader_t *r) {
+    size_t saved_pos = r->bit_pos;
+    uint32_t saved_abbrev_len = r->abbrev_len;
+    bc_abbrev_t *saved_abbrevs = r->abbrevs;
+    uint32_t saved_num_abbrevs = r->num_abbrevs;
+    uint32_t saved_abbrev_cap = r->abbrev_cap;
+
+    r->bit_pos = 0;
+
+    while (r->bit_pos < r->len_bits && !r->has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(r, 2);
+        if (entry == BC_ABBREV_ENTER_BLOCK) {
+            uint32_t block_id = (uint32_t)bc_read_vbr(r, 8);
+            uint32_t new_abbrev_len = (uint32_t)bc_read_vbr(r, 4);
+            bc_align32(r);
+            {
+                uint32_t block_words = (uint32_t)bc_read_fixed(r, 32);
+                size_t sub_end = r->bit_pos + (size_t)block_words * 32;
+
+                if (block_id == BC_STRTAB_BLOCK) {
+                    r->abbrev_len = new_abbrev_len;
+                    r->abbrevs = NULL;
+                    r->num_abbrevs = 0;
+                    r->abbrev_cap = 0;
+
+                    while (r->bit_pos < sub_end && !r->has_error) {
+                        uint32_t e = (uint32_t)bc_read_fixed(r, r->abbrev_len);
+                        if (e == BC_ABBREV_END_BLOCK) {
+                            bc_align32(r);
+                            break;
+                        }
+                        if (e == BC_ABBREV_DEFINE) {
+                            bc_read_define_abbrev(r);
+                            continue;
+                        }
+                        (void)bc_read_record(r, e);
+                        if (r->blob_data && r->blob_len > 0) {
+                            d->strtab_data = r->blob_data;
+                            d->strtab_len = r->blob_len;
+                        }
+                    }
+
+                    bc_free_abbrev_list(r->abbrevs, r->num_abbrevs);
+                    break;
+                }
+                r->bit_pos = sub_end;
+            }
+        } else {
+            break;
+        }
+    }
+
+    r->bit_pos = saved_pos;
+    r->abbrev_len = saved_abbrev_len;
+    r->abbrevs = saved_abbrevs;
+    r->num_abbrevs = saved_num_abbrevs;
+    r->abbrev_cap = saved_abbrev_cap;
+    r->has_error = false;
 }
 
 lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
-                              lr_arena_t *arena, char *err, size_t errlen) {
-    LLVMContextRef llctx = NULL;
-    LLVMMemoryBufferRef membuf = NULL;
-    LLVMModuleRef llmod = NULL;
-    LLVMValueRef ll_fn;
-    bc_ctx_t bc;
+                               lr_arena_t *arena, char *err, size_t errlen) {
+    bc_reader_t reader;
+    bc_decoder_t decoder;
+    const uint8_t *bc_data = data;
+    size_t bc_len = len;
 
     if (!data && len != 0) {
         lr_frontend_set_error(err, errlen, "invalid bitcode input buffer");
@@ -1025,137 +2168,169 @@ lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
         return NULL;
     }
 
-    memset(&bc, 0, sizeof(bc));
-    bc.arena = arena;
-    bc.err = err;
-    bc.errlen = errlen;
+    /* Handle wrapper format */
+    if (len >= 20 && data[0] == 0xDE && data[1] == 0xC0 && data[2] == 0x17 && data[3] == 0x0B) {
+        uint32_t bc_offset, bc_size;
+        memcpy(&bc_offset, data + 8, 4);
+        memcpy(&bc_size, data + 12, 4);
+        if ((size_t)bc_offset + bc_size <= len) {
+            bc_data = data + bc_offset;
+            bc_len = bc_size;
+        }
+    }
+
+    /* Skip raw bitcode magic "BC\xC0\xDE" */
+    if (bc_len >= 4 && bc_data[0] == 0x42 && bc_data[1] == 0x43 &&
+        bc_data[2] == 0xC0 && bc_data[3] == 0xDE) {
+        bc_data += 4;
+        bc_len -= 4;
+    }
+
+    memset(&reader, 0, sizeof(reader));
+    reader.data = bc_data;
+    reader.len_bits = bc_len * 8;
+    reader.bit_pos = 0;
+    reader.abbrev_len = 2;
+    reader.err = err;
+    reader.errlen = errlen;
     if (err && errlen > 0)
         err[0] = '\0';
 
-    bc.module = lr_module_create(arena);
-    if (!bc.module) {
+    memset(&decoder, 0, sizeof(decoder));
+    decoder.reader = &reader;
+    decoder.arena = arena;
+    decoder.err = err;
+    decoder.errlen = errlen;
+
+    decoder.module = lr_module_create(arena);
+    if (!decoder.module) {
         lr_frontend_set_error(err, errlen, "failed to allocate liric module");
         return NULL;
     }
 
-    llctx = LLVMContextCreate();
-    if (!llctx) {
-        lr_frontend_set_error(err, errlen, "failed to create LLVM context");
-        free(bc.entries);
-        return NULL;
-    }
+    /* First pass: scan for STRTAB block at top level */
+    bc_scan_strtab(&decoder, &reader);
 
-    membuf = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char *)data, len, "liric_bc_input");
-    if (!membuf) {
-        lr_frontend_set_error(err, errlen, "failed to create LLVM memory buffer");
-        LLVMContextDispose(llctx);
-        free(bc.entries);
-        return NULL;
-    }
+    /* Second pass: process all top-level blocks */
+    while (reader.bit_pos < reader.len_bits && !reader.has_error) {
+        uint32_t entry = (uint32_t)bc_read_fixed(&reader, 2);
 
-    if (LLVMParseBitcodeInContext2(llctx, membuf, &llmod) != 0 || !llmod) {
-        lr_frontend_set_error(err, errlen, "failed to parse LLVM bitcode");
-        LLVMDisposeMemoryBuffer(membuf);
-        LLVMContextDispose(llctx);
-        free(bc.entries);
-        return NULL;
-    }
+        if (entry == BC_ABBREV_ENTER_BLOCK) {
+            uint32_t block_id = (uint32_t)bc_read_vbr(&reader, 8);
+            uint32_t new_abbrev_len = (uint32_t)bc_read_vbr(&reader, 4);
+            uint32_t saved_abbrev_len, saved_num_abbrevs, saved_abbrev_cap;
+            bc_abbrev_t *saved_abbrevs;
+            bc_blockinfo_entry_t *bi;
+            size_t sub_end;
 
-    /* Create function signatures first, then decode bodies. */
-    for (ll_fn = LLVMGetFirstFunction(llmod); ll_fn; ll_fn = LLVMGetNextFunction(ll_fn)) {
-        const char *name = NULL;
-        size_t name_len = 0;
-        char *owned_name;
-        LLVMTypeRef fn_ty;
-        lr_type_t *ret_ty;
-        lr_type_t **params = NULL;
-        unsigned nparams = 0;
-        unsigned i;
-        bool is_decl;
-        lr_func_t *lr_fn;
-
-        if (!bc_value_name(ll_fn, &name, &name_len)) {
-            bc_set_error(&bc, "found function with empty name in bitcode");
-            LLVMDisposeModule(llmod);
-            LLVMDisposeMemoryBuffer(membuf);
-            LLVMContextDispose(llctx);
-            free(bc.entries);
-            return NULL;
-        }
-        owned_name = lr_arena_strdup(arena, name, name_len);
-        fn_ty = LLVMGlobalGetValueType(ll_fn);
-        ret_ty = bc_convert_type(&bc, LLVMGetReturnType(fn_ty));
-        if (!ret_ty) {
-            LLVMDisposeModule(llmod);
-            LLVMDisposeMemoryBuffer(membuf);
-            LLVMContextDispose(llctx);
-            free(bc.entries);
-            return NULL;
-        }
-
-        nparams = LLVMCountParamTypes(fn_ty);
-        if (nparams > 0) {
-            LLVMTypeRef *ll_params = (LLVMTypeRef *)malloc((size_t)nparams * sizeof(*ll_params));
-            params = lr_arena_array(arena, lr_type_t *, nparams);
-            if (!ll_params || !params) {
-                free(ll_params);
-                bc_set_error(&bc, "out of memory while creating function signature");
-                LLVMDisposeModule(llmod);
-                LLVMDisposeMemoryBuffer(membuf);
-                LLVMContextDispose(llctx);
-                free(bc.entries);
-                return NULL;
+            bc_align32(&reader);
+            {
+                uint32_t block_words = (uint32_t)bc_read_fixed(&reader, 32);
+                sub_end = reader.bit_pos + (size_t)block_words * 32;
             }
-            LLVMGetParamTypes(fn_ty, ll_params);
-            for (i = 0; i < nparams; i++) {
-                params[i] = bc_convert_type(&bc, ll_params[i]);
-                if (!params[i]) {
-                    free(ll_params);
-                    LLVMDisposeModule(llmod);
-                    LLVMDisposeMemoryBuffer(membuf);
-                    LLVMContextDispose(llctx);
-                    free(bc.entries);
-                    return NULL;
+
+            if (block_id == 0) {
+                (void)new_abbrev_len;
+                bc_process_blockinfo_content(&reader, sub_end);
+                continue;
+            }
+
+            saved_abbrev_len = reader.abbrev_len;
+            saved_num_abbrevs = reader.num_abbrevs;
+            saved_abbrev_cap = reader.abbrev_cap;
+            saved_abbrevs = reader.abbrevs;
+
+            reader.abbrev_len = new_abbrev_len;
+            reader.abbrevs = NULL;
+            reader.num_abbrevs = 0;
+            reader.abbrev_cap = 0;
+
+            bi = bc_find_blockinfo(&reader, block_id);
+            if (bi) {
+                uint32_t j;
+                for (j = 0; j < bi->num; j++) {
+                    bc_abbrev_t copy;
+                    copy.num_ops = bi->abbrevs[j].num_ops;
+                    copy.ops = (bc_abbrev_op_t *)malloc(
+                        (size_t)copy.num_ops * sizeof(bc_abbrev_op_t));
+                    if (copy.ops)
+                        memcpy(copy.ops, bi->abbrevs[j].ops,
+                               (size_t)copy.num_ops * sizeof(bc_abbrev_op_t));
+                    bc_abbrev_list_push(&reader.abbrevs, &reader.num_abbrevs,
+                                        &reader.abbrev_cap, copy);
                 }
             }
-            free(ll_params);
-        }
 
-        is_decl = LLVMIsDeclaration(ll_fn) != 0 || LLVMCountBasicBlocks(ll_fn) == 0;
-        lr_fn = lr_frontend_create_function(bc.module, owned_name, ret_ty, params, nparams,
-                                            LLVMIsFunctionVarArg(fn_ty) != 0, is_decl, NULL);
-        if (!lr_fn) {
-            bc_set_error(&bc, "failed to create liric function '%s'", owned_name);
-            LLVMDisposeModule(llmod);
-            LLVMDisposeMemoryBuffer(membuf);
-            LLVMContextDispose(llctx);
-            free(bc.entries);
-            return NULL;
-        }
-    }
-
-    {
-        lr_func_t *cur_lr = bc.module->first_func;
-        for (ll_fn = LLVMGetFirstFunction(llmod); ll_fn && cur_lr;
-             ll_fn = LLVMGetNextFunction(ll_fn), cur_lr = cur_lr->next) {
-            bool is_decl = LLVMIsDeclaration(ll_fn) != 0 || LLVMCountBasicBlocks(ll_fn) == 0;
-            if (is_decl)
-                continue;
-            if (!bc_translate_function_body(&bc, ll_fn, cur_lr)) {
-                LLVMDisposeModule(llmod);
-                LLVMDisposeMemoryBuffer(membuf);
-                LLVMContextDispose(llctx);
-                free(bc.entries);
-                return NULL;
+            if (block_id == BC_MODULE_BLOCK) {
+                if (!bc_decode_module_block(&decoder, &reader, sub_end)) {
+                    bc_free_abbrev_list(reader.abbrevs, reader.num_abbrevs);
+                    reader.abbrevs = saved_abbrevs;
+                    reader.num_abbrevs = saved_num_abbrevs;
+                    reader.abbrev_cap = saved_abbrev_cap;
+                    reader.abbrev_len = saved_abbrev_len;
+                    goto cleanup_fail;
+                }
+            } else {
+                reader.bit_pos = sub_end;
             }
+
+            bc_free_abbrev_list(reader.abbrevs, reader.num_abbrevs);
+            reader.abbrevs = saved_abbrevs;
+            reader.num_abbrevs = saved_num_abbrevs;
+            reader.abbrev_cap = saved_abbrev_cap;
+            reader.abbrev_len = saved_abbrev_len;
+            continue;
         }
+
+        if (entry == BC_ABBREV_END_BLOCK) {
+            bc_align32(&reader);
+            continue;
+        }
+
+        /* Top-level non-block entry: skip. At top level abbrev_len is 2, so
+           only enter_block (1) is expected. End_block (0) or define (2) or
+           unabbrev (3) are unusual but handle gracefully. */
+        if (entry == BC_ABBREV_DEFINE) {
+            bc_read_define_abbrev(&reader);
+            continue;
+        }
+        if (entry == BC_ABBREV_UNABBREV) {
+            (void)bc_read_record(&reader, entry);
+            continue;
+        }
+        break;
     }
 
-    LLVMDisposeModule(llmod);
-    LLVMDisposeMemoryBuffer(membuf);
-    LLVMContextDispose(llctx);
-    free(bc.entries);
-    return bc.module;
-}
+    if (reader.has_error)
+        goto cleanup_fail;
 
-#endif
+    /* Success */
+    free(reader.record);
+    bc_free_abbrev_list(reader.abbrevs, reader.num_abbrevs);
+    {
+        uint32_t i;
+        for (i = 0; i < reader.num_blockinfo; i++)
+            bc_free_abbrev_list(reader.blockinfo[i].abbrevs, reader.blockinfo[i].num);
+    }
+    free(reader.blockinfo);
+    free(decoder.types.types);
+    free(decoder.global_values.values);
+    free(decoder.func_list.funcs);
+    return decoder.module;
+
+cleanup_fail:
+    free(reader.record);
+    bc_free_abbrev_list(reader.abbrevs, reader.num_abbrevs);
+    {
+        uint32_t i;
+        for (i = 0; i < reader.num_blockinfo; i++)
+            bc_free_abbrev_list(reader.blockinfo[i].abbrevs, reader.blockinfo[i].num);
+    }
+    free(reader.blockinfo);
+    free(decoder.types.types);
+    free(decoder.global_values.values);
+    free(decoder.func_list.funcs);
+    if (err && errlen > 0 && err[0] == '\0')
+        lr_frontend_set_error(err, errlen, "failed to parse LLVM bitcode");
+    return NULL;
+}
