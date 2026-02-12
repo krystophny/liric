@@ -2,6 +2,7 @@
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
 #include "../src/jit.h"
+#include "../src/platform/platform.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -29,6 +30,13 @@ static lr_module_t *parse(const char *src, lr_arena_t *arena) {
     lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
     if (!m) fprintf(stderr, "  parse error: %s\n", err);
     return m;
+}
+
+static int require_intrinsic_blob(const char *name) {
+    if (lr_platform_intrinsic_supported(name))
+        return 1;
+    fprintf(stderr, "  note: skipping intrinsic test (unsupported on this platform): %s\n", name);
+    return 0;
 }
 
 static int set_parallel_prefetch_env(const char *value, char **old_value, int *had_old_value) {
@@ -1919,6 +1927,9 @@ int test_jit_const_gep_vtable_function_ptr(void) {
 }
 
 int test_jit_llvm_intrinsic_fabs_f32(void) {
+    if (!require_intrinsic_blob("llvm.fabs.f32"))
+        return 0;
+
     const char *src =
         "declare float @llvm.fabs.f32(float)\n"
         "define i32 @call_fabs_bits() {\n"
@@ -1948,6 +1959,9 @@ int test_jit_llvm_intrinsic_fabs_f32(void) {
 }
 
 int test_jit_llvm_intrinsic_powi_f32_i32(void) {
+    if (!require_intrinsic_blob("llvm.powi.f32.i32"))
+        return 0;
+
     const char *src =
         "declare float @llvm.powi.f32.i32(float, i32)\n"
         "define i32 @call_powi_bits() {\n"
@@ -1977,6 +1991,10 @@ int test_jit_llvm_intrinsic_powi_f32_i32(void) {
 }
 
 int test_jit_llvm_intrinsic_memcpy_memset(void) {
+    if (!require_intrinsic_blob("llvm.memset.p0i8.i32") ||
+        !require_intrinsic_blob("llvm.memcpy.p0i8.p0i8.i32"))
+        return 0;
+
     const char *src =
         "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"
         "declare void @llvm.memcpy.p0i8.p0i8.i32(ptr, ptr, i32, i1)\n"
@@ -2011,6 +2029,10 @@ int test_jit_llvm_intrinsic_memcpy_memset(void) {
 }
 
 int test_jit_llvm_intrinsic_memmove(void) {
+    if (!require_intrinsic_blob("llvm.memset.p0i8.i32") ||
+        !require_intrinsic_blob("llvm.memmove.p0i8.p0i8.i32"))
+        return 0;
+
     const char *src =
         "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"
         "declare void @llvm.memmove.p0i8.p0i8.i32(ptr, ptr, i32, i1)\n"

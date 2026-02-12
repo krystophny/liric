@@ -527,12 +527,21 @@ static built_module_t build_puts_hello_module(void) {
     return result;
 }
 
+static int host_supports_dynelf_tests(const lr_target_t *target) {
+    const lr_target_t *x86_64 = lr_target_by_name("x86_64");
+    return target && x86_64 && target == x86_64;
+}
+
 int test_dynelf_puts_hello(void) {
     built_module_t bm = build_puts_hello_module();
     TEST_ASSERT(bm.module != NULL, "module create");
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
+    if (!host_supports_dynelf_tests(target)) {
+        lr_session_destroy(bm.session);
+        return 0;
+    }
 
     const char *path = "/tmp/liric_test_dynelf_puts";
     FILE *fp = fopen(path, "wb");
@@ -570,6 +579,10 @@ int test_dynelf_readelf_dynamic(void) {
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
+    if (!host_supports_dynelf_tests(target)) {
+        lr_session_destroy(bm.session);
+        return 0;
+    }
 
     const char *path = "/tmp/liric_test_dynelf_readelf";
     FILE *fp = fopen(path, "wb");
@@ -603,6 +616,10 @@ int test_dynelf_ldd_check(void) {
 
     const lr_target_t *target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target");
+    if (!host_supports_dynelf_tests(target)) {
+        lr_session_destroy(bm.session);
+        return 0;
+    }
 
     const char *path = "/tmp/liric_test_dynelf_ldd";
     FILE *fp = fopen(path, "wb");
