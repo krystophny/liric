@@ -2,6 +2,7 @@
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
 #include "../src/jit.h"
+#include "../src/platform/platform.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -29,6 +30,13 @@ static lr_module_t *parse(const char *src, lr_arena_t *arena) {
     lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
     if (!m) fprintf(stderr, "  parse error: %s\n", err);
     return m;
+}
+
+static int require_intrinsic_blob(const char *name) {
+    if (lr_platform_intrinsic_supported(name))
+        return 1;
+    fprintf(stderr, "  note: skipping intrinsic test (unsupported on this platform): %s\n", name);
+    return 0;
 }
 
 static int set_parallel_prefetch_env(const char *value, char **old_value, int *had_old_value) {
@@ -1919,6 +1927,9 @@ int test_jit_const_gep_vtable_function_ptr(void) {
 }
 
 int test_jit_llvm_intrinsic_fabs_f32(void) {
+    if (!require_intrinsic_blob("llvm.fabs.f32"))
+        return 0;
+
     const char *src =
         "declare float @llvm.fabs.f32(float)\n"
         "define i32 @call_fabs_bits() {\n"
@@ -1948,6 +1959,9 @@ int test_jit_llvm_intrinsic_fabs_f32(void) {
 }
 
 int test_jit_llvm_intrinsic_powi_f32_i32(void) {
+    if (!require_intrinsic_blob("llvm.powi.f32.i32"))
+        return 0;
+
     const char *src =
         "declare float @llvm.powi.f32.i32(float, i32)\n"
         "define i32 @call_powi_bits() {\n"
@@ -1977,6 +1991,10 @@ int test_jit_llvm_intrinsic_powi_f32_i32(void) {
 }
 
 int test_jit_llvm_intrinsic_memcpy_memset(void) {
+    if (!require_intrinsic_blob("llvm.memset.p0i8.i32") ||
+        !require_intrinsic_blob("llvm.memcpy.p0i8.p0i8.i32"))
+        return 0;
+
     const char *src =
         "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"
         "declare void @llvm.memcpy.p0i8.p0i8.i32(ptr, ptr, i32, i1)\n"
@@ -2011,6 +2029,10 @@ int test_jit_llvm_intrinsic_memcpy_memset(void) {
 }
 
 int test_jit_llvm_intrinsic_memmove(void) {
+    if (!require_intrinsic_blob("llvm.memset.p0i8.i32") ||
+        !require_intrinsic_blob("llvm.memmove.p0i8.p0i8.i32"))
+        return 0;
+
     const char *src =
         "declare void @llvm.memset.p0i8.i32(ptr, i8, i32, i1)\n"
         "declare void @llvm.memmove.p0i8.p0i8.i32(ptr, ptr, i32, i1)\n"
@@ -2344,6 +2366,46 @@ int test_jit_global_struct_integer_init(void) {
     fn_t fn; LR_JIT_GET_FN(fn, jit, "read_pair");
     TEST_ASSERT(fn != NULL, "function lookup");
     TEST_ASSERT_EQ(fn(), 42, "packed struct init: 10 + 32 = 42");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_global_struct_inttoptr_immediate_init(void) {
+    /*
+     * Regression: aggregate global initializers must preserve inttoptr
+     * immediate values instead of zeroing pointer fields.
+     */
+    const char *src =
+        "%type_info = type <{ ptr, ptr }>\n"
+        "@ti = private constant %type_info <{ ptr inttoptr (i64 4 to ptr), "
+        "ptr inttoptr (i32 8 to ptr) }>, align 8\n"
+        "define i64 @read_ti() {\n"
+        "entry:\n"
+        "  %p0 = getelementptr %type_info, ptr @ti, i32 0, i32 0\n"
+        "  %v0p = load ptr, ptr %p0, align 8\n"
+        "  %v0 = ptrtoint ptr %v0p to i64\n"
+        "  %p1 = getelementptr %type_info, ptr @ti, i32 0, i32 1\n"
+        "  %v1p = load ptr, ptr %p1, align 8\n"
+        "  %v1 = ptrtoint ptr %v1p to i64\n"
+        "  %r = add i64 %v0, %v1\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "read_ti");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 12, "inttoptr immediates preserved in global struct");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);

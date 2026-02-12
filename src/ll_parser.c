@@ -1911,6 +1911,7 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
                check(p, LR_TOK_SITOFP) || check(p, LR_TOK_UITOFP) ||
                check(p, LR_TOK_FPTOSI) || check(p, LR_TOK_FPTOUI) ||
                check(p, LR_TOK_FPEXT) || check(p, LR_TOK_FPTRUNC)) {
+        lr_tok_t cast_tok = p->cur.kind;
         next(p);
         expect(p, LR_TOK_LPAREN);
         lr_operand_t src = parse_typed_operand(p);
@@ -1927,6 +1928,12 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
                 r->next = g->relocs;
                 g->relocs = r;
             }
+        } else if (cast_tok == LR_TOK_INTTOPTR &&
+                   src.kind == LR_VAL_IMM_I64 &&
+                   field_off + field_sz <= buf_size) {
+            uint64_t raw = (uint64_t)src.imm_i64;
+            size_t copy_sz = field_sz < sizeof(raw) ? field_sz : sizeof(raw);
+            memcpy(buf + field_off, &raw, copy_sz);
         }
     } else if (check(p, LR_TOK_INT_LIT)) {
         int64_t val = p->cur.int_val;
