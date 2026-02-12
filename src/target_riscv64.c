@@ -654,12 +654,14 @@ static const lr_target_t target_riscv64gc = {
     .name = "riscv64gc",
     .ptr_size = 8,
     .compile_func = rv_compile_func_rv64gc,
+    .compile_func_cp = NULL,
 };
 
 static const lr_target_t target_riscv64im = {
     .name = "riscv64im",
     .ptr_size = 8,
     .compile_func = rv_compile_func_rv64im,
+    .compile_func_cp = NULL,
 };
 
 const lr_target_t *lr_target_riscv64(void) {

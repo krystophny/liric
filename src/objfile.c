@@ -156,11 +156,6 @@ static const char *remap_intrinsic(const char *name) {
     if (strcmp(name, "llvm.abs.i32") == 0) return "abs";
     if (strcmp(name, "llvm.fmuladd.f32") == 0) return "fmaf";
     if (strcmp(name, "llvm.fmuladd.f64") == 0) return "fma";
-    if (strcmp(name, "llvm.va_start.p0") == 0) return "__liric_va_start";
-    if (strcmp(name, "llvm.va_end.p0") == 0) return "__liric_va_end";
-    if (strcmp(name, "llvm.va_copy.p0") == 0) return "__liric_va_copy";
-    if (strcmp(name, "llvm.is.fpclass.f32") == 0) return "__liric_is_fpclass_f32";
-    if (strcmp(name, "llvm.is.fpclass.f64") == 0) return "__liric_is_fpclass_f64";
     return name;
 }
 

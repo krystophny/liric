@@ -120,6 +120,10 @@ extern const uint8_t lr_stub_llvm_abs_i32_begin[];
 extern const uint8_t lr_stub_llvm_abs_i32_end[];
 extern const uint8_t lr_stub_llvm_abs_i64_begin[];
 extern const uint8_t lr_stub_llvm_abs_i64_end[];
+extern const uint8_t lr_stub_llvm_is_fpclass_f32_begin[];
+extern const uint8_t lr_stub_llvm_is_fpclass_f32_end[];
+extern const uint8_t lr_stub_llvm_is_fpclass_f64_begin[];
+extern const uint8_t lr_stub_llvm_is_fpclass_f64_end[];
 #else
 #if !defined(LR_PLATFORM_HAS_X86_64_BLOBS)
 #define LR_PLATFORM_HAS_X86_64_BLOBS 0
@@ -201,6 +205,8 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.maxnum.f64", LR_X86_BLOB(lr_stub_llvm_maxnum_f64_begin, lr_stub_llvm_maxnum_f64_end) },
     { "llvm.abs.i32", LR_X86_BLOB(lr_stub_llvm_abs_i32_begin, lr_stub_llvm_abs_i32_end) },
     { "llvm.abs.i64", LR_X86_BLOB(lr_stub_llvm_abs_i64_begin, lr_stub_llvm_abs_i64_end) },
+    { "llvm.is.fpclass.f32", LR_X86_BLOB(lr_stub_llvm_is_fpclass_f32_begin, lr_stub_llvm_is_fpclass_f32_end) },
+    { "llvm.is.fpclass.f64", LR_X86_BLOB(lr_stub_llvm_is_fpclass_f64_begin, lr_stub_llvm_is_fpclass_f64_end) },
 };
 
 static const lr_platform_intrinsic_desc_t *lookup_intrinsic(const char *name) {
@@ -229,4 +235,15 @@ bool lr_platform_intrinsic_blob_lookup(const char *name,
     *begin = d->blob_begin;
     *end = d->blob_end;
     return true;
+}
+
+size_t lr_platform_intrinsic_count(void) {
+    return sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
+}
+
+const char *lr_platform_intrinsic_name(size_t idx) {
+    size_t n = sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
+    if (idx >= n)
+        return NULL;
+    return g_intrinsics[idx].name;
 }

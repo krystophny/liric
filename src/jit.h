@@ -40,6 +40,7 @@ typedef struct lr_symbol_provider {
 
 typedef struct lr_jit {
     const lr_target_t *target;
+    lr_compile_mode_t mode;
     bool map_jit_enabled;
     bool update_active;
     bool update_dirty;

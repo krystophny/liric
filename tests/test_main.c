@@ -213,6 +213,16 @@ int test_session_ir_exe_call(void);
 int test_session_ir_exe_loop(void);
 #endif
 
+#if defined(__x86_64__) || defined(_M_X64)
+int test_cp_add_i32(void);
+int test_cp_arithmetic_chain_i32(void);
+int test_cp_all_alu_ops_i64(void);
+int test_cp_shift_ops(void);
+int test_cp_sdiv_srem(void);
+int test_cp_fallback_to_isel(void);
+int test_cp_immediate_operand(void);
+#endif
+
 int main(void) {
     fprintf(stderr, "liric test suite\n");
     fprintf(stderr, "================\n\n");
@@ -423,6 +433,17 @@ int main(void) {
 #endif
 #else
     RUN_TEST(test_objfile_macho_header);
+#endif
+
+#if defined(__x86_64__) || defined(_M_X64)
+    fprintf(stderr, "\nCopy-and-patch tests:\n");
+    RUN_TEST(test_cp_add_i32);
+    RUN_TEST(test_cp_arithmetic_chain_i32);
+    RUN_TEST(test_cp_all_alu_ops_i64);
+    RUN_TEST(test_cp_shift_ops);
+    RUN_TEST(test_cp_sdiv_srem);
+    RUN_TEST(test_cp_fallback_to_isel);
+    RUN_TEST(test_cp_immediate_operand);
 #endif
 
     fprintf(stderr, "\n================\n");

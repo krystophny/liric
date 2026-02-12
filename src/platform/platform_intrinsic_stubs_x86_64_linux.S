@@ -733,3 +733,116 @@ lr_stub_llvm_abs_i64_begin:
     cmovl rax, rdi
     ret
 lr_stub_llvm_abs_i64_end:
+
+.globl lr_stub_llvm_is_fpclass_f64_begin
+.globl lr_stub_llvm_is_fpclass_f64_end
+lr_stub_llvm_is_fpclass_f64_begin:
+    movq rax, xmm0
+    mov ecx, eax
+    shr ecx, 31
+    mov rdx, rax
+    shr rdx, 52
+    and edx, 0x7FF
+    movabs r8, 0x000FFFFFFFFFFFFF
+    and rax, r8
+    cmp edx, 0x7FF
+    jne .Lfpc64_not_special
+    test rax, rax
+    jnz .Lfpc64_nan
+    mov eax, 512
+    test ecx, 1
+    jz .Lfpc64_check
+    mov eax, 4
+    jmp .Lfpc64_check
+.Lfpc64_nan:
+    bt rax, 51
+    jc .Lfpc64_qnan
+    mov eax, 1
+    jmp .Lfpc64_check
+.Lfpc64_qnan:
+    mov eax, 2
+    jmp .Lfpc64_check
+.Lfpc64_not_special:
+    test edx, edx
+    jnz .Lfpc64_normal
+    test rax, rax
+    jnz .Lfpc64_subnormal
+    mov eax, 64
+    test ecx, 1
+    jz .Lfpc64_check
+    mov eax, 32
+    jmp .Lfpc64_check
+.Lfpc64_subnormal:
+    mov eax, 128
+    test ecx, 1
+    jz .Lfpc64_check
+    mov eax, 16
+    jmp .Lfpc64_check
+.Lfpc64_normal:
+    mov eax, 256
+    test ecx, 1
+    jz .Lfpc64_check
+    mov eax, 8
+.Lfpc64_check:
+    and eax, edi
+    test eax, eax
+    setnz al
+    movzx eax, al
+    ret
+lr_stub_llvm_is_fpclass_f64_end:
+
+.globl lr_stub_llvm_is_fpclass_f32_begin
+.globl lr_stub_llvm_is_fpclass_f32_end
+lr_stub_llvm_is_fpclass_f32_begin:
+    movd eax, xmm0
+    mov ecx, eax
+    shr ecx, 31
+    mov edx, eax
+    shr edx, 23
+    and edx, 0xFF
+    and eax, 0x7FFFFF
+    cmp edx, 0xFF
+    jne .Lfpc32_not_special
+    test eax, eax
+    jnz .Lfpc32_nan
+    mov eax, 512
+    test ecx, 1
+    jz .Lfpc32_check
+    mov eax, 4
+    jmp .Lfpc32_check
+.Lfpc32_nan:
+    bt eax, 22
+    jc .Lfpc32_qnan
+    mov eax, 1
+    jmp .Lfpc32_check
+.Lfpc32_qnan:
+    mov eax, 2
+    jmp .Lfpc32_check
+.Lfpc32_not_special:
+    test edx, edx
+    jnz .Lfpc32_normal
+    test eax, eax
+    jnz .Lfpc32_subnormal
+    mov eax, 64
+    test ecx, 1
+    jz .Lfpc32_check
+    mov eax, 32
+    jmp .Lfpc32_check
+.Lfpc32_subnormal:
+    mov eax, 128
+    test ecx, 1
+    jz .Lfpc32_check
+    mov eax, 16
+    jmp .Lfpc32_check
+.Lfpc32_normal:
+    mov eax, 256
+    test ecx, 1
+    jz .Lfpc32_check
+    mov eax, 8
+.Lfpc32_check:
+    and eax, edi
+    test eax, eax
+    setnz al
+    movzx eax, al
+    ret
+lr_stub_llvm_is_fpclass_f32_end:

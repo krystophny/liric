@@ -2,13 +2,13 @@
 #include "ir.h"
 #include "objfile.h"
 #include "target.h"
+#include "platform/platform.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <dlfcn.h>
-#include <math.h>
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #include <unistd.h>
@@ -119,6 +119,7 @@ typedef struct lr_materialize_prefetch_task {
 #if LR_HAS_PTHREADS
 typedef struct lr_materialize_prefetch_worker {
     const lr_target_t *target;
+    lr_compile_mode_t mode;
     size_t code_cap;
     lr_materialize_prefetch_task_t *tasks;
     uint32_t begin;
@@ -756,135 +757,6 @@ static int jit_ensure_module_symbols_interned(lr_module_t *m) {
     return 0;
 }
 
-static float llvm_fabs_f32(float x) { return fabsf(x); }
-static double llvm_fabs_f64(double x) { return fabs(x); }
-static float llvm_sqrt_f32(float x) { return sqrtf(x); }
-static float llvm_exp_f32(float x) { return expf(x); }
-static float llvm_copysign_f32(float x, float y) { return copysignf(x, y); }
-static float llvm_pow_f32(float x, float y) { return powf(x, y); }
-static double llvm_sqrt_f64(double x) { return sqrt(x); }
-static double llvm_exp_f64(double x) { return exp(x); }
-static double llvm_pow_f64(double x, double y) { return pow(x, y); }
-static double llvm_copysign_f64(double x, double y) { return copysign(x, y); }
-static float llvm_sin_f32(float x) { return sinf(x); }
-static double llvm_sin_f64(double x) { return sin(x); }
-static float llvm_cos_f32(float x) { return cosf(x); }
-static double llvm_cos_f64(double x) { return cos(x); }
-static float llvm_log_f32(float x) { return logf(x); }
-static double llvm_log_f64(double x) { return log(x); }
-static float llvm_log2_f32(float x) { return log2f(x); }
-static double llvm_log2_f64(double x) { return log2(x); }
-static float llvm_log10_f32(float x) { return log10f(x); }
-static double llvm_log10_f64(double x) { return log10(x); }
-static float llvm_exp2_f32(float x) { return exp2f(x); }
-static double llvm_exp2_f64(double x) { return exp2(x); }
-static float llvm_floor_f32(float x) { return floorf(x); }
-static double llvm_floor_f64(double x) { return floor(x); }
-static float llvm_ceil_f32(float x) { return ceilf(x); }
-static double llvm_ceil_f64(double x) { return ceil(x); }
-static float llvm_trunc_f32(float x) { return truncf(x); }
-static double llvm_trunc_f64(double x) { return trunc(x); }
-static float llvm_round_f32(float x) { return roundf(x); }
-static double llvm_round_f64(double x) { return round(x); }
-static float llvm_rint_f32(float x) { return rintf(x); }
-static double llvm_rint_f64(double x) { return rint(x); }
-static float llvm_nearbyint_f32(float x) { return nearbyintf(x); }
-static double llvm_nearbyint_f64(double x) { return nearbyint(x); }
-static float llvm_fma_f32(float a, float b, float c) { return fmaf(a, b, c); }
-static double llvm_fma_f64(double a, double b, double c) { return fma(a, b, c); }
-static float llvm_minnum_f32(float x, float y) { return fminf(x, y); }
-static double llvm_minnum_f64(double x, double y) { return fmin(x, y); }
-static float llvm_maxnum_f32(float x, float y) { return fmaxf(x, y); }
-static double llvm_maxnum_f64(double x, double y) { return fmax(x, y); }
-static int32_t llvm_abs_i32(int32_t x, int32_t poison) { (void)poison; return abs(x); }
-static int64_t llvm_abs_i64(int64_t x, int64_t poison) { (void)poison; return llabs(x); }
-
-static uint64_t llvm_abs_exp_i64(int64_t e) {
-    if (e >= 0)
-        return (uint64_t)e;
-    return (uint64_t)(-(e + 1)) + 1u;
-}
-
-static float llvm_powi_f32_i64(float x, int64_t e) {
-    uint64_t exp = llvm_abs_exp_i64(e);
-    float base = x;
-    float out = 1.0f;
-    if (e < 0)
-        base = 1.0f / base;
-    while (exp != 0) {
-        if (exp & 1u)
-            out *= base;
-        base *= base;
-        exp >>= 1;
-    }
-    return out;
-}
-
-static double llvm_powi_f64_i64(double x, int64_t e) {
-    uint64_t exp = llvm_abs_exp_i64(e);
-    double base = x;
-    double out = 1.0;
-    if (e < 0)
-        base = 1.0 / base;
-    while (exp != 0) {
-        if (exp & 1u)
-            out *= base;
-        base *= base;
-        exp >>= 1;
-    }
-    return out;
-}
-
-static float llvm_powi_f32(float x, int32_t e) {
-    return llvm_powi_f32_i64(x, (int64_t)e);
-}
-
-static double llvm_powi_f64(double x, int32_t e) {
-    return llvm_powi_f64_i64(x, (int64_t)e);
-}
-
-static void llvm_memset_p0i8_i64(void *dst, uint64_t val, int64_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || len <= 0)
-        return;
-    memset(dst, (int)(uint8_t)val, (size_t)len);
-}
-
-static void llvm_memset_p0i8_i32(void *dst, uint64_t val, int32_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || len <= 0)
-        return;
-    memset(dst, (int)(uint8_t)val, (size_t)len);
-}
-
-static void llvm_memcpy_p0i8_p0i8_i32(void *dst, const void *src, int32_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memcpy(dst, src, (size_t)len);
-}
-
-static void llvm_memcpy_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memcpy(dst, src, (size_t)len);
-}
-
-static void llvm_memmove_p0i8_p0i8_i32(void *dst, const void *src, int32_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memmove(dst, src, (size_t)len);
-}
-
-static void llvm_memmove_p0i8_p0i8_i64(void *dst, const void *src, int64_t len, uint64_t is_volatile) {
-    (void)is_volatile;
-    if (!dst || !src || len <= 0)
-        return;
-    memmove(dst, src, (size_t)len);
-}
-
 static size_t align_up(size_t value, size_t align) {
     if (align == 0)
         return value;
@@ -945,6 +817,18 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     if (!j) return NULL;
 
     j->target = target;
+
+    j->mode = LR_COMPILE_ISEL;
+    const char *mode_env = getenv("LIRIC_COMPILE_MODE");
+    if (mode_env) {
+        if (strcmp(mode_env, "copy_patch") == 0)
+            j->mode = LR_COMPILE_COPY_PATCH;
+        else if (strcmp(mode_env, "isel") == 0)
+            j->mode = LR_COMPILE_ISEL;
+        else if (strcmp(mode_env, "llvm") == 0)
+            j->mode = LR_COMPILE_LLVM;
+    }
+
     j->arena = lr_arena_create(0);
     if (!j->arena) {
         free(j);
@@ -1238,68 +1122,23 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
-    lr_jit_add_symbol(j, "llvm.fabs.f32", (void *)(uintptr_t)&llvm_fabs_f32);
-    lr_jit_add_symbol(j, "llvm.fabs.f64", (void *)(uintptr_t)&llvm_fabs_f64);
-    lr_jit_add_symbol(j, "llvm.sqrt.f32", (void *)(uintptr_t)&llvm_sqrt_f32);
-    lr_jit_add_symbol(j, "llvm.sqrt.f64", (void *)(uintptr_t)&llvm_sqrt_f64);
-    lr_jit_add_symbol(j, "llvm.exp.f32", (void *)(uintptr_t)&llvm_exp_f32);
-    lr_jit_add_symbol(j, "llvm.exp.f64", (void *)(uintptr_t)&llvm_exp_f64);
-    lr_jit_add_symbol(j, "llvm.pow.f32", (void *)(uintptr_t)&llvm_pow_f32);
-    lr_jit_add_symbol(j, "llvm.pow.f64", (void *)(uintptr_t)&llvm_pow_f64);
-    lr_jit_add_symbol(j, "llvm.copysign.f32", (void *)(uintptr_t)&llvm_copysign_f32);
-    lr_jit_add_symbol(j, "llvm.copysign.f64", (void *)(uintptr_t)&llvm_copysign_f64);
-    lr_jit_add_symbol(j, "llvm.powi.f32", (void *)(uintptr_t)&llvm_powi_f32);
-    lr_jit_add_symbol(j, "llvm.powi.f64", (void *)(uintptr_t)&llvm_powi_f64);
-    lr_jit_add_symbol(j, "llvm.powi.f32.i32", (void *)(uintptr_t)&llvm_powi_f32);
-    lr_jit_add_symbol(j, "llvm.powi.f64.i32", (void *)(uintptr_t)&llvm_powi_f64);
-    lr_jit_add_symbol(j, "llvm.powi.f32.i64", (void *)(uintptr_t)&llvm_powi_f32_i64);
-    lr_jit_add_symbol(j, "llvm.powi.f64.i64", (void *)(uintptr_t)&llvm_powi_f64_i64);
-    lr_jit_add_symbol(j, "llvm.memset.p0i8.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memset.p0i8.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memset.p0.i32", (void *)(uintptr_t)&llvm_memset_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memset.p0.i64", (void *)(uintptr_t)&llvm_memset_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memcpy.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memcpy.p0.p0.i32", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memcpy.p0.p0.i64", (void *)(uintptr_t)&llvm_memcpy_p0i8_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i32", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memmove.p0i8.p0i8.i64", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.memmove.p0.p0.i32", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i32);
-    lr_jit_add_symbol(j, "llvm.memmove.p0.p0.i64", (void *)(uintptr_t)&llvm_memmove_p0i8_p0i8_i64);
-    lr_jit_add_symbol(j, "llvm.sin.f32", (void *)(uintptr_t)&llvm_sin_f32);
-    lr_jit_add_symbol(j, "llvm.sin.f64", (void *)(uintptr_t)&llvm_sin_f64);
-    lr_jit_add_symbol(j, "llvm.cos.f32", (void *)(uintptr_t)&llvm_cos_f32);
-    lr_jit_add_symbol(j, "llvm.cos.f64", (void *)(uintptr_t)&llvm_cos_f64);
-    lr_jit_add_symbol(j, "llvm.log.f32", (void *)(uintptr_t)&llvm_log_f32);
-    lr_jit_add_symbol(j, "llvm.log.f64", (void *)(uintptr_t)&llvm_log_f64);
-    lr_jit_add_symbol(j, "llvm.log2.f32", (void *)(uintptr_t)&llvm_log2_f32);
-    lr_jit_add_symbol(j, "llvm.log2.f64", (void *)(uintptr_t)&llvm_log2_f64);
-    lr_jit_add_symbol(j, "llvm.log10.f32", (void *)(uintptr_t)&llvm_log10_f32);
-    lr_jit_add_symbol(j, "llvm.log10.f64", (void *)(uintptr_t)&llvm_log10_f64);
-    lr_jit_add_symbol(j, "llvm.exp2.f32", (void *)(uintptr_t)&llvm_exp2_f32);
-    lr_jit_add_symbol(j, "llvm.exp2.f64", (void *)(uintptr_t)&llvm_exp2_f64);
-    lr_jit_add_symbol(j, "llvm.floor.f32", (void *)(uintptr_t)&llvm_floor_f32);
-    lr_jit_add_symbol(j, "llvm.floor.f64", (void *)(uintptr_t)&llvm_floor_f64);
-    lr_jit_add_symbol(j, "llvm.ceil.f32", (void *)(uintptr_t)&llvm_ceil_f32);
-    lr_jit_add_symbol(j, "llvm.ceil.f64", (void *)(uintptr_t)&llvm_ceil_f64);
-    lr_jit_add_symbol(j, "llvm.trunc.f32", (void *)(uintptr_t)&llvm_trunc_f32);
-    lr_jit_add_symbol(j, "llvm.trunc.f64", (void *)(uintptr_t)&llvm_trunc_f64);
-    lr_jit_add_symbol(j, "llvm.round.f32", (void *)(uintptr_t)&llvm_round_f32);
-    lr_jit_add_symbol(j, "llvm.round.f64", (void *)(uintptr_t)&llvm_round_f64);
-    lr_jit_add_symbol(j, "llvm.rint.f32", (void *)(uintptr_t)&llvm_rint_f32);
-    lr_jit_add_symbol(j, "llvm.rint.f64", (void *)(uintptr_t)&llvm_rint_f64);
-    lr_jit_add_symbol(j, "llvm.nearbyint.f32", (void *)(uintptr_t)&llvm_nearbyint_f32);
-    lr_jit_add_symbol(j, "llvm.nearbyint.f64", (void *)(uintptr_t)&llvm_nearbyint_f64);
-    lr_jit_add_symbol(j, "llvm.fma.f32", (void *)(uintptr_t)&llvm_fma_f32);
-    lr_jit_add_symbol(j, "llvm.fma.f64", (void *)(uintptr_t)&llvm_fma_f64);
-    lr_jit_add_symbol(j, "llvm.fmuladd.f32", (void *)(uintptr_t)&llvm_fma_f32);
-    lr_jit_add_symbol(j, "llvm.fmuladd.f64", (void *)(uintptr_t)&llvm_fma_f64);
-    lr_jit_add_symbol(j, "llvm.minnum.f32", (void *)(uintptr_t)&llvm_minnum_f32);
-    lr_jit_add_symbol(j, "llvm.minnum.f64", (void *)(uintptr_t)&llvm_minnum_f64);
-    lr_jit_add_symbol(j, "llvm.maxnum.f32", (void *)(uintptr_t)&llvm_maxnum_f32);
-    lr_jit_add_symbol(j, "llvm.maxnum.f64", (void *)(uintptr_t)&llvm_maxnum_f64);
-    lr_jit_add_symbol(j, "llvm.abs.i32", (void *)(uintptr_t)&llvm_abs_i32);
-    lr_jit_add_symbol(j, "llvm.abs.i64", (void *)(uintptr_t)&llvm_abs_i64);
+    size_t n = lr_platform_intrinsic_count();
+    for (size_t i = 0; i < n; i++) {
+        const char *name = lr_platform_intrinsic_name(i);
+        const uint8_t *blob_begin, *blob_end;
+        if (!lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end))
+            continue;
+        size_t blob_size = (size_t)(blob_end - blob_begin);
+        size_t dest = align_up(j->code_size, 16);
+        if (dest + blob_size > j->code_cap)
+            continue;
+        if (make_writable(j) != 0)
+            continue;
+        memcpy(j->code_buf + dest, blob_begin, blob_size);
+        j->code_size = dest + blob_size;
+        make_executable_from(j, dest);
+        lr_jit_add_symbol(j, name, (void *)(j->code_buf + dest));
+    }
 }
 
 int lr_jit_load_library(lr_jit_t *j, const char *path) {
@@ -1843,7 +1682,11 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     }
     size_t code_len = 0;
     JIT_PROF_START(compile);
-    int rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
+    int rc;
+    if (j->mode == LR_COMPILE_COPY_PATCH && j->target->compile_func_cp)
+        rc = j->target->compile_func_cp(f, m, func_start, free_space, &code_len, j->arena);
+    else
+        rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
     JIT_PROF_END(compile);
     if (rc != 0)
         return rc;
@@ -1943,6 +1786,7 @@ static void *materialize_prefetch_worker_main(void *arg) {
         lr_jit_t worker_jit;
         memset(&worker_jit, 0, sizeof(worker_jit));
         worker_jit.target = w->target;
+        worker_jit.mode = w->mode;
         worker_jit.code_buf = scratch_buf;
         worker_jit.code_cap = w->code_cap;
         worker_jit.arena = worker_arena;
@@ -2171,6 +2015,7 @@ static bool materialize_prefetch_module_functions(lr_jit_t *j,
             end = pending;
 
         workers[wi].target = j->target;
+        workers[wi].mode = j->mode;
         workers[wi].code_cap = j->code_cap;
         workers[wi].tasks = tasks;
         workers[wi].begin = begin;

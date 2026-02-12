@@ -47,6 +47,7 @@ add_library(liric STATIC
     src/target_common.c
     src/target_shared.c
     src/target_x86_64.c
+    src/target_x86_64_cp.c
     src/target_aarch64.c
     src/target_riscv64.c
     src/jit.c
@@ -60,7 +61,10 @@ add_library(liric STATIC
     src/platform/platform_intrinsics.c
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_x86_64_linux.S)
+    target_sources(liric PRIVATE
+        src/platform/platform_intrinsic_stubs_x86_64_linux.S
+        src/platform/cp_templates_x86_64.S
+    )
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_aarch64_linux.S)
@@ -100,6 +104,10 @@ target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
+
+add_executable(bench_tcc tools/bench_tcc.c)
+target_link_libraries(bench_tcc PRIVATE liric tcc ${LIRIC_PLATFORM_LIBS})
+target_include_directories(bench_tcc PRIVATE src)
 
 set(LIRIC_HAVE_LLVM_BITCODE OFF)
 set(LIRIC_LLVM_BITCODE_LDFLAGS_LIST)
@@ -194,6 +202,7 @@ add_executable(test_liric
     tests/test_session.c
     tests/test_merge.c
     tests/test_objfile.c
+    tests/test_cp.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
