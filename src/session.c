@@ -895,6 +895,44 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     return 0;
 }
 
+int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
+                                      const char *runtime_ll, size_t runtime_len,
+                                      session_error_t *err) {
+    const lr_target_t *target;
+    FILE *out;
+    int rc;
+
+    err_clear(err);
+    if (!s || !s->module || !path || !runtime_ll || runtime_len == 0) {
+        err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
+        return -1;
+    }
+
+    if (s->cfg.target && s->cfg.target[0])
+        target = lr_target_by_name(s->cfg.target);
+    else
+        target = lr_target_host();
+    if (!target) {
+        err_set(err, S_ERR_BACKEND, "target not found");
+        return -1;
+    }
+
+    out = fopen(path, "wb");
+    if (!out) {
+        err_set(err, S_ERR_BACKEND, "cannot open output file: %s", path);
+        return -1;
+    }
+
+    rc = lr_emit_executable_with_runtime(s->module, runtime_ll, runtime_len,
+                                          target, out, "_start");
+    (void)fclose(out);
+    if (rc != 0) {
+        err_set(err, S_ERR_BACKEND, "executable emission with runtime failed");
+        return -1;
+    }
+    return 0;
+}
+
 /* ---- Access to underlying module --------------------------------------- */
 
 lr_module_t *lr_session_module(struct lr_session *s) {

@@ -51,6 +51,7 @@ int main(int argc, char **argv) {
     const char *target_name = NULL;
     const char *input_file = NULL;
     const char *func_name = "main";
+    const char *runtime_path = NULL;
     const char *load_libs[64];
     int num_load_libs = 0;
 
@@ -61,6 +62,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) target_name = argv[++i];
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) emit_exe_path = argv[++i];
         else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) func_name = argv[++i];
+        else if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) runtime_path = argv[++i];
         else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
             if (num_load_libs < 64)
                 load_libs[num_load_libs++] = argv[++i];
@@ -105,6 +107,34 @@ int main(int argc, char **argv) {
         fprintf(stderr, "parse error: %s\n", err);
         free(src);
         return 1;
+    }
+
+    if (runtime_path) {
+        size_t rt_len;
+        char *rt_src = read_file(runtime_path, &rt_len);
+        if (!rt_src) {
+            fprintf(stderr, "failed to read runtime: %s\n", runtime_path);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+        char rt_err[512] = {0};
+        lr_module_t *rt = lr_parse_ll(rt_src, rt_len, rt_err, sizeof(rt_err));
+        free(rt_src);
+        if (!rt) {
+            fprintf(stderr, "runtime parse error: %s\n", rt_err);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+        if (lr_module_merge(m, rt) != 0) {
+            fprintf(stderr, "runtime merge failed\n");
+            lr_module_free(rt);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+        lr_module_free(rt);
     }
 
     if (dump_ir) {

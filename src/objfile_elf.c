@@ -942,6 +942,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     static const char interp[] = "/lib64/ld-linux-x86-64.so.2";
     const size_t interp_size = sizeof(interp); /* includes NUL */
     static const char libc_name[] = "libc.so.6";
+    static const char libm_name[] = "libm.so.6";
 
     /* Count undefined symbols. Always inject "exit" for the _start stub. */
     uint32_t num_undef = 0;
@@ -987,10 +988,12 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         }
     }
 
-    /* Build .dynstr: "\0libc.so.6\0sym1\0sym2\0..." */
+    /* Build .dynstr: "\0libc.so.6\0libm.so.6\0sym1\0sym2\0..." */
     size_t dynstr_size = 1; /* leading NUL */
     size_t libc_name_off = dynstr_size;
     dynstr_size += sizeof(libc_name); /* includes NUL */
+    size_t libm_name_off = dynstr_size;
+    dynstr_size += sizeof(libm_name); /* includes NUL */
     uint32_t *dyn_name_off = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
     if (!dyn_name_off) {
         free(dyn_names); free(dyn_oc_idx); free(sym_to_dynsym);
@@ -1013,10 +1016,10 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     size_t got_size = (size_t)num_dynimport * 8;
 
     /* .dynamic: tag entries (each 16 bytes) */
-    /* DT_NEEDED, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_STRSZ, DT_SYMENT,
-     * DT_RELA, DT_RELASZ, DT_RELAENT, DT_BIND_NOW, DT_FLAGS, DT_FLAGS_1,
-     * DT_NULL  = 13 entries */
-    const uint32_t num_dynamic_entries = 13;
+    /* DT_NEEDED(libc), DT_NEEDED(libm), DT_HASH, DT_STRTAB, DT_SYMTAB,
+     * DT_STRSZ, DT_SYMENT, DT_RELA, DT_RELASZ, DT_RELAENT, DT_BIND_NOW,
+     * DT_FLAGS, DT_FLAGS_1, DT_NULL  = 14 entries */
+    const uint32_t num_dynamic_entries = 14;
     size_t dynamic_size = (size_t)num_dynamic_entries * 16;
 
     /* -- Layout computation --
@@ -1346,6 +1349,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         *dp++ = 0; /* leading NUL */
         memcpy(dp, libc_name, sizeof(libc_name));
         dp += sizeof(libc_name);
+        memcpy(dp, libm_name, sizeof(libm_name));
+        dp += sizeof(libm_name);
         for (uint32_t i = 0; i < num_dynimport; i++) {
             const char *name = dyn_names[i];
             size_t slen = strlen(name) + 1;
@@ -1393,6 +1398,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         uint8_t *dp = data_area + (dynamic_off - data_seg_off);
         /* DT_NEEDED "libc.so.6" */
         w64(&dp, DT_NEEDED);  w64(&dp, libc_name_off);
+        /* DT_NEEDED "libm.so.6" */
+        w64(&dp, DT_NEEDED);  w64(&dp, libm_name_off);
         /* DT_HASH */
         w64(&dp, DT_HASH);    w64(&dp, hash_vaddr);
         /* DT_STRTAB */

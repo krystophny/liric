@@ -184,6 +184,9 @@ int lr_session_compile_ll(lr_session_t *s, const char *src, size_t len,
 
 int lr_session_emit_object(lr_session_t *s, const char *path, lr_error_t *err);
 int lr_session_emit_exe(lr_session_t *s, const char *path, lr_error_t *err);
+int lr_session_emit_exe_with_runtime(lr_session_t *s, const char *path,
+                                      const char *runtime_ll, size_t runtime_len,
+                                      lr_error_t *err);
 
 /* ---- Access to underlying module (for compat layer interop) ------------ */
 

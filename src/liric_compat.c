@@ -2254,3 +2254,16 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     fclose(f);
     return rc;
 }
+
+int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
+                               const char *runtime_ll, size_t runtime_len) {
+    if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
+    const lr_target_t *target = lr_target_host();
+    if (!target) return -1;
+    FILE *f = fopen(filename, "wb");
+    if (!f) return -1;
+    int rc = lr_emit_executable_with_runtime(mod->mod, runtime_ll, runtime_len,
+                                              target, f, "main");
+    fclose(f);
+    return rc;
+}

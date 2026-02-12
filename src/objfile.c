@@ -1,6 +1,7 @@
 #include "objfile.h"
 #include "objfile_macho.h"
 #include "objfile_elf.h"
+#include "liric.h"
 #include "platform/platform.h"
 #include "arena.h"
 #include <stdlib.h>
@@ -145,6 +146,21 @@ static const char *remap_intrinsic(const char *name) {
     if (strcmp(name, "llvm.rint.f64") == 0) return "rint";
     if (strcmp(name, "llvm.nearbyint.f32") == 0) return "nearbyintf";
     if (strcmp(name, "llvm.nearbyint.f64") == 0) return "nearbyint";
+    if (strcmp(name, "llvm.memcpy.p0.p0.i64") == 0) return "memcpy";
+    if (strcmp(name, "llvm.memcpy.p0.p0.i32") == 0) return "memcpy";
+    if (strcmp(name, "llvm.memmove.p0.p0.i64") == 0) return "memmove";
+    if (strcmp(name, "llvm.memmove.p0.p0.i32") == 0) return "memmove";
+    if (strcmp(name, "llvm.memset.p0.i64") == 0) return "memset";
+    if (strcmp(name, "llvm.memset.p0.i32") == 0) return "memset";
+    if (strcmp(name, "llvm.abs.i64") == 0) return "llabs";
+    if (strcmp(name, "llvm.abs.i32") == 0) return "abs";
+    if (strcmp(name, "llvm.fmuladd.f32") == 0) return "fmaf";
+    if (strcmp(name, "llvm.fmuladd.f64") == 0) return "fma";
+    if (strcmp(name, "llvm.va_start.p0") == 0) return "__liric_va_start";
+    if (strcmp(name, "llvm.va_end.p0") == 0) return "__liric_va_end";
+    if (strcmp(name, "llvm.va_copy.p0") == 0) return "__liric_va_copy";
+    if (strcmp(name, "llvm.is.fpclass.f32") == 0) return "__liric_is_fpclass_f32";
+    if (strcmp(name, "llvm.is.fpclass.f64") == 0) return "__liric_is_fpclass_f64";
     return name;
 }
 
@@ -154,6 +170,7 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
     if (!name) return UINT32_MAX;
     if (!oc->preserve_symbol_names)
         name = remap_intrinsic(name);
+    if (!name) return UINT32_MAX;
     uint32_t hash = obj_symbol_hash(name);
 
     if (oc->symbol_index_cap == 0) {
@@ -579,6 +596,18 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
     if (obj_build_module(m, target, true, &build) != 0)
         return -1;
 
+    /* Remap remaining undefined llvm.* intrinsics to libc equivalents.
+       This runs after intrinsic stub embedding, so only truly unresolved
+       intrinsics (like llvm.memcpy) get remapped. */
+    for (uint32_t i = 0; i < build.ctx.num_symbols; i++) {
+        if (build.ctx.symbols[i].is_defined)
+            continue;
+        const char *orig = build.ctx.symbols[i].name;
+        const char *mapped = remap_intrinsic(orig);
+        if (mapped != orig)
+            build.ctx.symbols[i].name = mapped;
+    }
+
     int result = -1;
 #if defined(__linux__)
     if (strcmp(target->name, "x86_64") == 0) {
@@ -670,4 +699,26 @@ done:
 
     obj_build_result_destroy(&build);
     return result;
+}
+
+int lr_emit_executable_with_runtime(lr_module_t *m, const char *runtime_ll,
+                                     size_t runtime_len,
+                                     const lr_target_t *target, FILE *out,
+                                     const char *entry_symbol) {
+    if (!m || !runtime_ll || runtime_len == 0 || !target || !out)
+        return -1;
+
+    char parse_err[256] = {0};
+    lr_module_t *rt = lr_parse_ll(runtime_ll, runtime_len, parse_err,
+                                   sizeof(parse_err));
+    if (!rt)
+        return -1;
+
+    if (lr_module_merge(m, rt) != 0) {
+        lr_module_free(rt);
+        return -1;
+    }
+    lr_module_free(rt);
+
+    return lr_emit_executable(m, target, out, entry_symbol);
 }
