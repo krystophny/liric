@@ -10,7 +10,9 @@ usage: bench_api_clean_gate.sh [options]
   --lfortran-liric PATH   path to lfortran+WITH_LIRIC binary (forwarded to bench_api)
   --test-dir PATH         path to integration_tests dir (forwarded to bench_api)
   --probe-runner PATH     path to liric_probe_runner (forwarded to bench_compat_check)
-  --runtime-lib PATH      path to liblfortran_runtime (forwarded to bench_compat_check)
+  --runtime-lib PATH      path to liblfortran_runtime for lli (forwarded to bench_compat_check)
+  --runtime-bc PATH       path to runtime bitcode for liric (forwarded to bench_compat_check)
+  --lfortran-src PATH     lfortran source root used to build runtime bitcode (forwarded to bench_compat_check)
   --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
   --workers N             worker count hint (forwarded to bench_compat_check)
   --iters N               bench_api iterations (default: 1)
@@ -59,6 +61,8 @@ lfortran_liric_path=""
 test_dir=""
 probe_runner=""
 runtime_lib=""
+runtime_bc=""
+lfortran_src=""
 cmake_path=""
 workers=""
 iters="1"
@@ -101,6 +105,16 @@ while [[ $# -gt 0 ]]; do
         --runtime-lib)
             [[ $# -ge 2 ]] || die "missing value for $1"
             runtime_lib="$2"
+            shift 2
+            ;;
+        --runtime-bc)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            runtime_bc="$2"
+            shift 2
+            ;;
+        --lfortran-src)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            lfortran_src="$2"
             shift 2
             ;;
         --cmake)
@@ -169,6 +183,12 @@ if [[ "$no_run" == "0" ]]; then
     fi
     if [[ -n "$runtime_lib" ]]; then
         compat_args+=(--runtime-lib "$runtime_lib")
+    fi
+    if [[ -n "$runtime_bc" ]]; then
+        compat_args+=(--runtime-bc "$runtime_bc")
+    fi
+    if [[ -n "$lfortran_src" ]]; then
+        compat_args+=(--lfortran-src "$lfortran_src")
     fi
     if [[ -n "$cmake_path" ]]; then
         compat_args+=(--cmake "$cmake_path")

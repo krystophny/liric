@@ -34,6 +34,8 @@ typedef struct {
 typedef struct {
     const char *probe_runner;
     const char *runtime_lib;
+    const char *runtime_bc;
+    const char *lfortran_src;
     const char *lli;
     const char *lli_phases;
     const char *bench_dir;
@@ -78,6 +80,28 @@ static void die(const char *msg, const char *path) {
 static int file_exists(const char *path) {
     struct stat st;
     return path && stat(path, &st) == 0;
+}
+
+static int mkdir_p(const char *path) {
+    char tmp[PATH_MAX];
+    size_t n;
+    if (!path || !path[0]) return -1;
+    n = strlen(path);
+    if (n >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, n + 1);
+    if (tmp[n - 1] == '/')
+        tmp[n - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+                return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
 }
 
 static char *xstrdup(const char *s) {
@@ -389,12 +413,76 @@ static void rowlist_free(rowlist_t *l) {
     l->n = l->cap = 0;
 }
 
+static int ensure_runtime_bc(cfg_t *cfg) {
+    char *runtime_c = NULL;
+    char *include_dir = NULL;
+    char *out_dir = NULL;
+    cmd_result_t cc_r;
+    int ok = 0;
+
+    if (!cfg || !cfg->runtime_bc || !cfg->lfortran_src)
+        return 0;
+    if (file_exists(cfg->runtime_bc))
+        return 1;
+
+    runtime_c = path_join2(cfg->lfortran_src, "src/libasr/runtime/lfortran_intrinsics.c");
+    include_dir = path_join2(cfg->lfortran_src, "src");
+    if (!runtime_c || !include_dir)
+        goto done;
+    if (!file_exists(runtime_c)) {
+        fprintf(stderr, "runtime source not found: %s\n", runtime_c);
+        goto done;
+    }
+
+    out_dir = dirname_dup(cfg->runtime_bc);
+    if (!out_dir || mkdir_p(out_dir) != 0) {
+        fprintf(stderr, "failed to create runtime bc directory: %s\n",
+                out_dir ? out_dir : "(null)");
+        goto done;
+    }
+
+    {
+        char include_flag[PATH_MAX + 3];
+        char *cc_argv[11];
+        snprintf(include_flag, sizeof(include_flag), "-I%s", include_dir);
+        cc_argv[0] = "clang";
+        cc_argv[1] = "-c";
+        cc_argv[2] = "-emit-llvm";
+        cc_argv[3] = "-O2";
+        cc_argv[4] = "-fno-exceptions";
+        cc_argv[5] = "-fno-unwind-tables";
+        cc_argv[6] = include_flag;
+        cc_argv[7] = "-o";
+        cc_argv[8] = (char *)cfg->runtime_bc;
+        cc_argv[9] = runtime_c;
+        cc_argv[10] = NULL;
+        fprintf(stderr, "Generating runtime bc: %s\n", cfg->runtime_bc);
+        cc_r = run_cmd(cc_argv, 120, NULL, NULL);
+    }
+    if (cc_r.rc != 0) {
+        fprintf(stderr, "failed to generate runtime bc (clang rc=%d)\n", cc_r.rc);
+        if (cc_r.stderr_text && cc_r.stderr_text[0])
+            fprintf(stderr, "%s\n", cc_r.stderr_text);
+    } else {
+        ok = file_exists(cfg->runtime_bc);
+    }
+    free_cmd_result(&cc_r);
+
+done:
+    free(runtime_c);
+    free(include_dir);
+    free(out_dir);
+    return ok;
+}
+
 static void usage(void) {
     printf("usage: bench_ll [options]\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           command timeout in seconds (default: 15)\n");
     printf("  --probe-runner PATH   path to liric_probe_runner\n");
-    printf("  --runtime-lib PATH    path to liblfortran_runtime\n");
+    printf("  --runtime-lib PATH    path to liblfortran_runtime (used by lli)\n");
+    printf("  --runtime-bc PATH     path to generated lfortran runtime bitcode (required for liric)\n");
+    printf("  --lfortran-src PATH   lfortran source root used to auto-build runtime bc\n");
     printf("  --lli PATH            path to lli\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
     printf("  --bench-dir PATH      benchmark dir (default: /tmp/liric_bench)\n");
@@ -408,6 +496,8 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.runtime_lib = file_exists(default_runtime_dylib) ? default_runtime_dylib : default_runtime_so;
+    cfg.runtime_bc = "/tmp/liric_bench/runtime/lfortran_intrinsics.bc";
+    cfg.lfortran_src = "../lfortran";
     cfg.lli = "lli";
     cfg.lli_phases = "build/bench_lli_phases";
     cfg.bench_dir = "/tmp/liric_bench";
@@ -428,6 +518,10 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            cfg.runtime_bc = argv[++i];
+        } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
+            cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--lli") == 0 && i + 1 < argc) {
             cfg.lli = argv[++i];
         } else if (strcmp(argv[i], "--lli-phases") == 0 && i + 1 < argc) {
@@ -441,10 +535,13 @@ static cfg_t parse_args(int argc, char **argv) {
 
     if (!file_exists(cfg.probe_runner)) die("probe runner not found", cfg.probe_runner);
     if (!file_exists(cfg.runtime_lib)) die("runtime lib not found", cfg.runtime_lib);
+    if (!cfg.runtime_bc || !cfg.runtime_bc[0]) die("runtime bc path not set", NULL);
     if (!file_exists(cfg.lli_phases)) die("bench_lli_phases not found", cfg.lli_phases);
 
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
+    cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
+    cfg.lfortran_src = to_abs_path(cfg.lfortran_src);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
     if (strchr(cfg.lli, '/')) cfg.lli = to_abs_path(cfg.lli);
 
@@ -453,6 +550,8 @@ static cfg_t parse_args(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
+    if (!ensure_runtime_bc(&cfg))
+        die("runtime bc unavailable (set --runtime-bc or --lfortran-src)", cfg.runtime_bc);
     char *compat_path = path_join2(cfg.bench_dir, "compat_ll.txt");
     char *ll_dir = path_join2(cfg.bench_dir, "ll");
     char *jsonl_path = path_join2(cfg.bench_dir, "bench_ll.jsonl");
@@ -582,8 +681,8 @@ int main(int argc, char **argv) {
                 probe_argv[1] = "--timing";
                 probe_argv[2] = "--sig";
                 probe_argv[3] = "i32_argc_argv";
-                probe_argv[4] = "--load-lib";
-                probe_argv[5] = (char *)cfg.runtime_lib;
+                probe_argv[4] = "--runtime-bc";
+                probe_argv[5] = (char *)cfg.runtime_bc;
                 probe_argv[6] = ll_path;
                 probe_argv[7] = NULL;
 
