@@ -145,6 +145,25 @@ bool lc_type_struct_has_name(lr_type_t *ty);
 lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
                                         const char *name, lr_type_t *type);
 
+/* ---- Compat utility helpers ---- */
+const char *lc_intrinsic_name(unsigned intrinsic_id);
+bool lc_is_lfortran_jit_wrapper_ir(const char *asm_text, size_t len);
+lr_module_t *lc_build_lfortran_jit_wrapper_module(char *err, size_t errlen);
+size_t lc_format_i64(char *buf, size_t buf_size, int64_t value);
+size_t lc_format_u64(char *buf, size_t buf_size, uint64_t value);
+size_t lc_format_f64(char *buf, size_t buf_size, double value);
+size_t lc_format_ptr(char *buf, size_t buf_size, const void *ptr);
+bool lc_pack_constant_bytes(lc_value_t *value, lr_type_t *ty,
+                             uint8_t *out, size_t out_size);
+lc_value_t *lc_const_struct_from_values(lc_module_compat_t *mod,
+                                         lr_type_t *struct_ty,
+                                         lc_value_t **values,
+                                         uint32_t num_values);
+lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
+                                        lr_type_t *array_ty,
+                                        lc_value_t **values,
+                                        uint32_t num_values);
+
 /* ---- Function ---- */
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
                             lr_type_t *func_type);
