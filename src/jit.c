@@ -1244,16 +1244,6 @@ static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
     return apply_module_global_relocs(j, m);
 }
 
-static int finalize_module_functions(lr_module_t *m, lr_func_t **funcs, uint32_t nfuncs,
-                                     lr_arena_t *fallback_arena) {
-    lr_arena_t *layout_arena = (m && m->arena) ? m->arena : fallback_arena;
-    for (uint32_t i = 0; i < nfuncs; i++) {
-        if (lr_func_finalize(funcs[i], layout_arena) != 0)
-            return -1;
-    }
-    return 0;
-}
-
 static uint32_t module_symbol_id(const lr_module_t *m, const char *name, uint32_t hash) {
     if (!m || !name || !name[0] || m->symbol_index_cap == 0)
         return UINT32_MAX;
@@ -1891,6 +1881,28 @@ static uint32_t materialize_prefetch_collect_targets(lr_jit_t *j,
     return count;
 }
 
+static bool materialize_prefetch_finalize_targets(lr_jit_t *j,
+                                                  lr_materialize_prefetch_task_t *tasks,
+                                                  uint32_t pending) {
+    if (!j || !tasks || pending == 0)
+        return false;
+
+    for (uint32_t i = 0; i < pending; i++) {
+        lr_lazy_func_entry_t *entry = tasks[i].entry;
+        if (!entry || !entry->func || lr_func_is_finalized(entry->func))
+            continue;
+
+        lr_arena_t *layout_arena =
+            (entry->module && entry->module->arena) ? entry->module->arena : j->arena;
+        if (!layout_arena)
+            return false;
+        if (lr_func_finalize(entry->func, layout_arena) != 0)
+            return false;
+    }
+
+    return true;
+}
+
 static bool materialize_prefetch_module_functions(lr_jit_t *j,
                                                   const lr_lazy_func_entry_t *trigger,
                                                   lr_materialize_prefetch_task_t *out_trigger_task) {
@@ -1935,6 +1947,11 @@ static bool materialize_prefetch_module_functions(lr_jit_t *j,
     }
     if (nthreads > pending)
         nthreads = pending;
+    /* Finalize once on the caller thread to avoid concurrent arena mutation. */
+    if (!materialize_prefetch_finalize_targets(j, tasks, pending)) {
+        free(tasks);
+        return false;
+    }
 
 #if LR_HAS_PTHREADS
     pthread_t *threads = (pthread_t *)calloc(nthreads, sizeof(*threads));
@@ -2341,8 +2358,6 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         if (!f->is_decl)
             funcs[fi++] = f;
     }
-    if (finalize_module_functions(m, funcs, nfuncs, j->arena) != 0)
-        goto done;
     if (lazy_mode) {
         if (register_lazy_module_functions(j, m, funcs, nfuncs) != 0)
             goto done;
