@@ -194,6 +194,8 @@ int test_bc_parse_auto_loop_phi(void);
 int test_session_direct_ret_42(void);
 int test_session_add_args(void);
 int test_session_arithmetic_chain(void);
+int test_session_stream_stencil_fast_path(void);
+int test_session_stream_stencil_unsupported_fallback(void);
 int test_session_icmp_branch(void);
 int test_session_alloca_load_store(void);
 int test_session_loop_phi(void);
@@ -446,6 +448,8 @@ int main(void) {
     RUN_TEST(test_session_direct_ret_42);
     RUN_TEST(test_session_add_args);
     RUN_TEST(test_session_arithmetic_chain);
+    RUN_TEST(test_session_stream_stencil_fast_path);
+    RUN_TEST(test_session_stream_stencil_unsupported_fallback);
     RUN_TEST(test_session_icmp_branch);
     RUN_TEST(test_session_alloca_load_store);
     RUN_TEST(test_session_loop_phi);

@@ -1,4 +1,5 @@
 #include <liric/liric_session.h>
+#include "ir.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,17 @@
 
 static inline void fn_ptr_cast(void *dst, void *src) {
     memcpy(dst, &src, sizeof(src));
+}
+
+static lr_func_t *find_func_by_name(lr_module_t *m, const char *name) {
+    lr_func_t *f;
+    if (!m || !name)
+        return NULL;
+    for (f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
 }
 
 static void set_compile_mode_env(const char *value) {
@@ -146,6 +158,139 @@ int test_session_arithmetic_chain(void) {
     TEST_ASSERT_EQ(fn(10, 2), 14, "arith(10,2) == 14");
 
     lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_stream_stencil_fast_path(void) {
+#if !defined(__x86_64__) && !defined(_M_X64)
+    return 0;
+#else
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
+    lr_module_t *m;
+    lr_func_t *f;
+    lr_session_t *s;
+    lr_type_t *i32;
+    lr_type_t *params[2];
+    int rc;
+    uint32_t a, b, sum;
+    void *addr = NULL;
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+
+    set_compile_mode_env("stencil");
+    cfg.mode = LR_MODE_DIRECT;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i32 = lr_type_i32_s(s);
+    params[0] = i32;
+    params[1] = i32;
+    rc = lr_session_func_begin(s, "session_stream_fast", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    a = lr_session_param(s, 0);
+    b = lr_session_param(s, 1);
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    sum = lr_emit_add(s, i32, LR_VREG(a, i32), LR_VREG(b, i32));
+    lr_emit_ret(s, LR_VREG(sum, i32));
+
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(20, 22), 42, "stream fast add result");
+
+    m = lr_session_module(s);
+    f = find_func_by_name(m, "session_stream_fast");
+    TEST_ASSERT(f != NULL, "function exists in module");
+    TEST_ASSERT(f->is_decl, "direct mode marks function declared after JIT");
+    TEST_ASSERT(f->first_block != NULL, "function block exists");
+    TEST_ASSERT(f->first_block->first == NULL, "fast path skips IR instruction construction");
+
+    lr_session_destroy(s);
+    if (prev_mode) {
+        set_compile_mode_env(prev_mode);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    return 0;
+#endif
+}
+
+int test_session_stream_stencil_unsupported_fallback(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
+    lr_module_t *m;
+    lr_func_t *f;
+    lr_session_t *s;
+    lr_type_t *i32;
+    lr_type_t *i1;
+    lr_type_t *params[2];
+    int rc;
+    uint32_t va, vb;
+    uint32_t entry_id, then_id, else_id;
+    uint32_t cmp;
+    void *addr = NULL;
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+
+    set_compile_mode_env("stencil");
+    cfg.mode = LR_MODE_DIRECT;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i32 = lr_type_i32_s(s);
+    i1 = lr_type_i1_s(s);
+    params[0] = i32;
+    params[1] = i32;
+
+    rc = lr_session_func_begin(s, "session_stream_fallback", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    va = lr_session_param(s, 0);
+    vb = lr_session_param(s, 1);
+
+    entry_id = lr_session_block(s);
+    then_id = lr_session_block(s);
+    else_id = lr_session_block(s);
+
+    rc = lr_session_set_block(s, entry_id, &err);
+    TEST_ASSERT_EQ(rc, 0, "set entry block");
+    cmp = lr_emit_icmp(s, LR_CMP_SGT, LR_VREG(va, i32), LR_VREG(vb, i32));
+    lr_emit_condbr(s, LR_VREG(cmp, i1), then_id, else_id);
+
+    rc = lr_session_set_block(s, then_id, &err);
+    TEST_ASSERT_EQ(rc, 0, "set then block");
+    lr_emit_ret(s, LR_VREG(va, i32));
+
+    rc = lr_session_set_block(s, else_id, &err);
+    TEST_ASSERT_EQ(rc, 0, "set else block");
+    lr_emit_ret(s, LR_VREG(vb, i32));
+
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(10, 3), 10, "fallback branch returns lhs when greater");
+    TEST_ASSERT_EQ(fn(2, 7), 7, "fallback branch returns rhs when greater");
+
+    m = lr_session_module(s);
+    f = find_func_by_name(m, "session_stream_fallback");
+    TEST_ASSERT(f != NULL, "function exists in module");
+    TEST_ASSERT(f->first_block != NULL, "unsupported stream op falls back to IR path");
+
+    lr_session_destroy(s);
+    if (prev_mode) {
+        set_compile_mode_env(prev_mode);
+    } else {
+        set_compile_mode_env(NULL);
+    }
     return 0;
 }
 
