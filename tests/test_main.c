@@ -184,6 +184,8 @@ int test_wasm_decode_add(void);
 int test_wasm_decode_invalid_magic(void);
 int test_wasm_ir_ret_42(void);
 int test_wasm_ir_add_args(void);
+int test_wasm_streaming_callback_collects_opcodes(void);
+int test_wasm_streaming_callback_abort_propagates_error(void);
 int test_wasm_jit_ret_42(void);
 int test_wasm_jit_add_args(void);
 int test_wasm_jit_branch(void);
@@ -434,6 +436,8 @@ int main(void) {
     fprintf(stderr, "\nWASM IR tests:\n");
     RUN_TEST(test_wasm_ir_ret_42);
     RUN_TEST(test_wasm_ir_add_args);
+    RUN_TEST(test_wasm_streaming_callback_collects_opcodes);
+    RUN_TEST(test_wasm_streaming_callback_abort_propagates_error);
 
     fprintf(stderr, "\nWASM JIT tests:\n");
     RUN_TEST(test_wasm_jit_ret_42);

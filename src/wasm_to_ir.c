@@ -131,6 +131,8 @@ typedef struct {
     char *err;
     size_t errlen;
     bool failed;
+    lr_wasm_inst_callback_t on_inst;
+    void *on_inst_ctx;
 } wasm_ctx_t;
 
 static void ctx_err(wasm_ctx_t *ctx, const char *msg) {
@@ -163,17 +165,41 @@ static lr_type_t *wasm_to_lr_type(lr_module_t *m, uint8_t vt) {
     }
 }
 
+static void append_inst(wasm_ctx_t *ctx, lr_inst_t *inst) {
+    if (!ctx || !inst)
+        return;
+    lr_block_append(ctx->cur_block, inst);
+    if (ctx->on_inst &&
+        ctx->on_inst(ctx->func, ctx->cur_block, inst, ctx->on_inst_ctx) != 0) {
+        ctx_err(ctx, "wasm streaming callback failed");
+    }
+}
+
 static void emit_inst(wasm_ctx_t *ctx, lr_opcode_t op, lr_type_t *type,
                       uint32_t dest, lr_operand_t *ops, uint32_t nops) {
-    lr_inst_t *inst = lr_inst_create(ctx->arena, op, type, dest, ops, nops);
-    lr_block_append(ctx->cur_block, inst);
+    lr_inst_t *inst;
+    if (!ctx || ctx->failed)
+        return;
+    inst = lr_inst_create(ctx->arena, op, type, dest, ops, nops);
+    if (!inst) {
+        ctx_err(ctx, "failed to allocate WASM IR instruction");
+        return;
+    }
+    append_inst(ctx, inst);
 }
 
 static void emit_icmp(wasm_ctx_t *ctx, lr_type_t *type, uint32_t dest,
                       lr_operand_t *ops, uint32_t nops, lr_icmp_pred_t pred) {
-    lr_inst_t *inst = lr_inst_create(ctx->arena, LR_OP_ICMP, type, dest, ops, nops);
+    lr_inst_t *inst;
+    if (!ctx || ctx->failed)
+        return;
+    inst = lr_inst_create(ctx->arena, LR_OP_ICMP, type, dest, ops, nops);
+    if (!inst) {
+        ctx_err(ctx, "failed to allocate WASM IR instruction");
+        return;
+    }
     inst->icmp_pred = pred;
-    lr_block_append(ctx->cur_block, inst);
+    append_inst(ctx, inst);
 }
 
 /* Read a LEB128 u32 from the body bytes, advancing *pos */
@@ -779,9 +805,23 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
 
 /* ---- Module-level conversion ---- */
 
-lr_module_t *lr_wasm_to_ir(const lr_wasm_module_t *wmod,
-                            lr_arena_t *arena, char *err, size_t errlen) {
-    lr_module_t *m = lr_module_create(arena);
+lr_module_t *lr_wasm_to_ir_streaming(const lr_wasm_module_t *wmod,
+                                     lr_arena_t *arena,
+                                     lr_wasm_inst_callback_t on_inst,
+                                     void *on_inst_ctx,
+                                     char *err, size_t errlen) {
+    lr_module_t *m;
+    if (!wmod || !arena) {
+        if (err && errlen > 0)
+            snprintf(err, errlen, "invalid wasm conversion input");
+        return NULL;
+    }
+    m = lr_module_create(arena);
+    if (!m) {
+        if (err && errlen > 0)
+            snprintf(err, errlen, "failed to allocate liric module");
+        return NULL;
+    }
 
     /* Create IR functions for imports (as declarations) */
     for (uint32_t i = 0; i < wmod->num_imports; i++) {
@@ -851,6 +891,8 @@ lr_module_t *lr_wasm_to_ir(const lr_wasm_module_t *wmod,
         ctx.cur_block = func->first_block;
         ctx.err = err;
         ctx.errlen = errlen;
+        ctx.on_inst = on_inst;
+        ctx.on_inst_ctx = on_inst_ctx;
 
         convert_func_body(&ctx, wmod, i);
         if (ctx.failed) return NULL;
@@ -859,4 +901,9 @@ lr_module_t *lr_wasm_to_ir(const lr_wasm_module_t *wmod,
     }
 
     return m;
+}
+
+lr_module_t *lr_wasm_to_ir(const lr_wasm_module_t *wmod,
+                           lr_arena_t *arena, char *err, size_t errlen) {
+    return lr_wasm_to_ir_streaming(wmod, arena, NULL, NULL, err, errlen);
 }

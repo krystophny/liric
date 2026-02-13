@@ -23,6 +23,27 @@
     } \
 } while (0)
 
+typedef struct {
+    lr_opcode_t ops[128];
+    uint32_t count;
+    uint32_t fail_after;
+} wasm_stream_cb_ctx_t;
+
+static int collect_wasm_stream_callback(lr_func_t *func, lr_block_t *block,
+                                        const lr_inst_t *inst, void *ctx_ptr) {
+    wasm_stream_cb_ctx_t *ctx = (wasm_stream_cb_ctx_t *)ctx_ptr;
+    (void)func;
+    (void)block;
+    if (!ctx || !inst)
+        return -1;
+    if (ctx->count < (uint32_t)(sizeof(ctx->ops) / sizeof(ctx->ops[0])))
+        ctx->ops[ctx->count] = inst->op;
+    ctx->count++;
+    if (ctx->fail_after > 0 && ctx->count >= ctx->fail_after)
+        return -1;
+    return 0;
+}
+
 /* ---- LEB128 tests ---- */
 
 int test_wasm_leb128_u32(void) {
@@ -245,6 +266,71 @@ int test_wasm_ir_add_args(void) {
         for (lr_inst_t *inst = b->first; inst; inst = inst->next)
             if (inst->op == LR_OP_ADD) found_add = true;
     TEST_ASSERT(found_add, "IR contains ADD");
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_wasm_streaming_callback_collects_opcodes(void) {
+    /* Function adding two i32 params */
+    uint8_t wasm[] = {
+        0x00, 0x61, 0x73, 0x6D,
+        0x01, 0x00, 0x00, 0x00,
+        /* Type: (i32, i32) -> i32 */
+        0x01, 0x07, 0x01, 0x60, 0x02, 0x7F, 0x7F, 0x01, 0x7F,
+        /* Function: type 0 */
+        0x03, 0x02, 0x01, 0x00,
+        /* Export: "add" -> func 0 */
+        0x07, 0x07, 0x01, 0x03, 'a', 'd', 'd', 0x00, 0x00,
+        /* Code: local.get 0, local.get 1, i32.add, end */
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B,
+    };
+    lr_arena_t *arena = lr_arena_create(0);
+    wasm_stream_cb_ctx_t cb_ctx = {0};
+    char err[256] = {0};
+    bool saw_add = false;
+    bool saw_ret = false;
+    lr_wasm_module_t *wmod = lr_wasm_decode(wasm, sizeof(wasm), arena, err, sizeof(err));
+    TEST_ASSERT(wmod != NULL, "decode add_args");
+    lr_module_t *m = lr_wasm_to_ir_streaming(wmod, arena, collect_wasm_stream_callback,
+                                             &cb_ctx, err, sizeof(err));
+    TEST_ASSERT(m != NULL, "streaming ir add_args");
+    TEST_ASSERT(cb_ctx.count > 0, "callback invoked for emitted instructions");
+    for (uint32_t i = 0; i < cb_ctx.count && i < (uint32_t)(sizeof(cb_ctx.ops) / sizeof(cb_ctx.ops[0])); i++) {
+        if (cb_ctx.ops[i] == LR_OP_ADD) saw_add = true;
+        if (cb_ctx.ops[i] == LR_OP_RET) saw_ret = true;
+    }
+    TEST_ASSERT(saw_add, "callback saw add opcode");
+    TEST_ASSERT(saw_ret, "callback saw ret opcode");
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_wasm_streaming_callback_abort_propagates_error(void) {
+    /* Function returning constant 42 */
+    uint8_t wasm[] = {
+        0x00, 0x61, 0x73, 0x6D,
+        0x01, 0x00, 0x00, 0x00,
+        /* Type: () -> i32 */
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F,
+        /* Function: type 0 */
+        0x03, 0x02, 0x01, 0x00,
+        /* Export: "f" -> func 0 */
+        0x07, 0x05, 0x01, 0x01, 'f', 0x00, 0x00,
+        /* Code: i32.const 42, end */
+        0x0A, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2A, 0x0B,
+    };
+    lr_arena_t *arena = lr_arena_create(0);
+    wasm_stream_cb_ctx_t cb_ctx = {0};
+    char err[256] = {0};
+    lr_wasm_module_t *wmod = lr_wasm_decode(wasm, sizeof(wasm), arena, err, sizeof(err));
+    TEST_ASSERT(wmod != NULL, "decode ret_42");
+
+    cb_ctx.fail_after = 1;
+    lr_module_t *m = lr_wasm_to_ir_streaming(wmod, arena, collect_wasm_stream_callback,
+                                             &cb_ctx, err, sizeof(err));
+    TEST_ASSERT(m == NULL, "streaming callback failure aborts conversion");
+    TEST_ASSERT(strstr(err, "wasm streaming callback failed") != NULL,
+                "streaming callback failure error message");
     lr_arena_destroy(arena);
     return 0;
 }
