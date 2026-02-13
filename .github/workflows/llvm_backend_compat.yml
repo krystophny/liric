@@ -116,7 +116,7 @@ jobs:
         run: |
           git init
           git remote add origin "https://github.com/${{ github.repository }}.git"
-          git fetch --depth=1 origin "${{ github.ref }}"
+          git fetch --depth=1 origin "${{ github.sha }}"
           git checkout FETCH_HEAD
 
       - name: Build and test
