@@ -43,10 +43,19 @@ static char *read_stdin(size_t *out_len) {
     return buf;
 }
 
+static bool module_has_main_definition(const lr_module_t *m) {
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, "main") == 0 && !f->is_decl &&
+            f->first_block) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
     bool jit_mode = false;
     bool dump_ir = false;
-    const char *emit_obj_path = NULL;
     const char *emit_exe_path = NULL;
     const char *target_name = NULL;
     const char *input_file = NULL;
@@ -58,7 +67,6 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--jit") == 0) jit_mode = true;
         else if (strcmp(argv[i], "--dump-ir") == 0) dump_ir = true;
-        else if (strcmp(argv[i], "--emit-obj") == 0 && i + 1 < argc) emit_obj_path = argv[++i];
         else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) target_name = argv[++i];
         else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) emit_exe_path = argv[++i];
         else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) func_name = argv[++i];
@@ -77,16 +85,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (emit_obj_path && jit_mode) {
-        fprintf(stderr, "--emit-obj and --jit are mutually exclusive\n");
-        return 1;
-    }
-    if (emit_obj_path && emit_exe_path) {
-        fprintf(stderr, "-o cannot be combined with --emit-obj\n");
-        return 1;
-    }
     if (emit_exe_path && (jit_mode || dump_ir)) {
-        fprintf(stderr, "-o is only valid for executable output mode\n");
+        fprintf(stderr, "-o is only valid for file output mode\n");
         return 1;
     }
 
@@ -139,37 +139,6 @@ int main(int argc, char **argv) {
 
     if (dump_ir) {
         lr_module_dump(m, stdout);
-        lr_module_free(m);
-        free(src);
-        return 0;
-    }
-
-    if (emit_obj_path) {
-        const lr_target_t *target = target_name ? lr_target_by_name(target_name) : lr_target_host();
-        if (!target) {
-            fprintf(stderr, "unknown target: %s\n", target_name ? target_name : "<host>");
-            lr_module_free(m);
-            free(src);
-            return 1;
-        }
-
-        FILE *out = fopen(emit_obj_path, "wb");
-        if (!out) {
-            fprintf(stderr, "failed to open object output: %s\n", emit_obj_path);
-            lr_module_free(m);
-            free(src);
-            return 1;
-        }
-
-        int rc = lr_emit_object(m, target, out);
-        fclose(out);
-        if (rc != 0) {
-            fprintf(stderr, "object emission failed\n");
-            lr_module_free(m);
-            free(src);
-            return 1;
-        }
-
         lr_module_free(m);
         free(src);
         return 0;
@@ -231,29 +200,34 @@ int main(int argc, char **argv) {
     }
 
     const char *out_path = emit_exe_path ? emit_exe_path : "a.out";
+    bool emit_object = !module_has_main_definition(m);
     FILE *out = fopen(out_path, "wb");
     if (!out) {
-        fprintf(stderr, "failed to open executable output: %s\n", out_path);
+        fprintf(stderr, "failed to open output: %s\n", out_path);
         lr_module_free(m);
         free(src);
         return 1;
     }
 
-    int emit_rc = lr_emit_executable(m, target, out, func_name);
+    int emit_rc = emit_object ? lr_emit_object(m, target, out)
+                              : lr_emit_executable(m, target, out, func_name);
     fclose(out);
     if (emit_rc != 0) {
-        fprintf(stderr, "executable emission failed\n");
+        fprintf(stderr, emit_object ? "object emission failed\n"
+                                    : "executable emission failed\n");
         lr_module_free(m);
         free(src);
         return 1;
     }
 
 #if !defined(_WIN32)
-    if (chmod(out_path, 0755) != 0) {
-        fprintf(stderr, "failed to chmod executable output: %s\n", out_path);
-        lr_module_free(m);
-        free(src);
-        return 1;
+    if (!emit_object) {
+        if (chmod(out_path, 0755) != 0) {
+            fprintf(stderr, "failed to chmod executable output: %s\n", out_path);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
     }
 #endif
 
