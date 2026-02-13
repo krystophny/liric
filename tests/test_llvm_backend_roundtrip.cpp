@@ -5,6 +5,7 @@
 #include <string>
 #include <system_error>
 
+#include <liric/liric.h>
 #include <liric/liric_compat.h>
 
 #include <llvm/IR/BasicBlock.h>
@@ -201,12 +202,60 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
     return 0;
 }
 
+static int test_wrapper_jit_mode_llvm(void) {
+    const char *old_mode = std::getenv("LIRIC_COMPILE_MODE");
+    char old_copy[64] = {0};
+    if (old_mode)
+        std::snprintf(old_copy, sizeof(old_copy), "%s", old_mode);
+    set_mode_env("llvm");
+
+    llvm::LLVMContext ctx;
+    llvm::Module mod("roundtrip_jit", ctx);
+    build_main_ret42_module(mod, ctx);
+
+    lr_jit_t *jit = lr_jit_create();
+    if (!jit) {
+        std::fprintf(stderr, "  FAIL: jit create\n");
+        restore_mode_env(old_copy);
+        return 1;
+    }
+
+    int rc = lc_module_add_to_jit(mod.getCompat(), jit);
+    if (rc != 0) {
+        std::fprintf(stderr, "  FAIL: add module to jit\n");
+        lr_jit_destroy(jit);
+        restore_mode_env(old_copy);
+        return 1;
+    }
+
+    void *main_addr = lr_jit_get_function(jit, "main");
+    if (!main_addr) {
+        std::fprintf(stderr, "  FAIL: jit lookup main\n");
+        lr_jit_destroy(jit);
+        restore_mode_env(old_copy);
+        return 1;
+    }
+
+    int (*fn)(void) = (int (*)(void))main_addr;
+    if (fn() != 42) {
+        std::fprintf(stderr, "  FAIL: jit main returned non-42\n");
+        lr_jit_destroy(jit);
+        restore_mode_env(old_copy);
+        return 1;
+    }
+
+    lr_jit_destroy(jit);
+    restore_mode_env(old_copy);
+    return 0;
+}
+
 int main(void) {
     std::fprintf(stderr, "llvm backend roundtrip tests\n");
     std::fprintf(stderr, "============================\n\n");
 
     RUN_TEST(test_wrapper_object_emit_mode_llvm);
     RUN_TEST(test_wrapper_to_api_executable_roundtrip);
+    RUN_TEST(test_wrapper_jit_mode_llvm);
 
     std::fprintf(stderr, "\nSummary: %d/%d passed, %d failed\n",
                  tests_passed, tests_run, tests_failed);

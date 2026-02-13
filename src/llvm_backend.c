@@ -112,19 +112,28 @@ static char *module_to_ll_text(lr_module_t *m, size_t *out_len) {
 }
 
 static lr_module_t *clone_module(lr_module_t *m, char *err, size_t err_cap) {
-    char parse_err[256] = {0};
-    size_t ll_len = 0;
-    char *ll = module_to_ll_text(m, &ll_len);
+    lr_arena_t *arena = NULL;
     lr_module_t *out = NULL;
-    if (!ll) {
-        set_err(err, err_cap, "failed to dump module to text");
+
+    if (!m) {
+        set_err(err, err_cap, "invalid module clone input");
         return NULL;
     }
-    out = lr_parse_ll(ll, ll_len, parse_err, sizeof(parse_err));
-    free(ll);
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        set_err(err, err_cap, "failed to allocate clone arena");
+        return NULL;
+    }
+    out = lr_module_create(arena);
     if (!out) {
-        set_err(err, err_cap, "failed to parse dumped module: %s",
-                parse_err[0] ? parse_err : "unknown parse error");
+        lr_arena_destroy(arena);
+        set_err(err, err_cap, "failed to create clone module");
+        return NULL;
+    }
+    if (lr_module_merge(out, m) != 0) {
+        lr_module_free(out);
+        set_err(err, err_cap, "failed to clone module");
         return NULL;
     }
     return out;
