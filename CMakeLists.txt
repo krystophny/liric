@@ -131,6 +131,7 @@ add_library(liric STATIC
     src/jit.c
     src/liric.c
     src/liric_compat.c
+    src/stencil_data.c
     src/session.c
     src/module_emit.c
     src/llvm_backend.c
@@ -152,6 +153,33 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch6
 endif()
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    add_executable(stencil_gen tools/stencil_gen.c)
+    target_include_directories(stencil_gen PRIVATE src)
+
+    set(LIRIC_STENCIL_INPUTS
+        ${CMAKE_CURRENT_SOURCE_DIR}/stencils/add_i32.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/stencils/sub_i64.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/stencils/fadd_f64.c
+    )
+    set(LIRIC_STENCIL_DATA_HEADER
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/stencil_data_x86_64.h
+    )
+    add_custom_command(
+        OUTPUT ${LIRIC_STENCIL_DATA_HEADER}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/generated
+        COMMAND $<TARGET_FILE:stencil_gen>
+            --compiler ${CMAKE_C_COMPILER}
+            --input-dir ${CMAKE_CURRENT_SOURCE_DIR}/stencils
+            --output ${LIRIC_STENCIL_DATA_HEADER}
+        DEPENDS stencil_gen ${LIRIC_STENCIL_INPUTS}
+        VERBATIM
+    )
+    add_custom_target(liric_stencil_data DEPENDS ${LIRIC_STENCIL_DATA_HEADER})
+    add_dependencies(liric liric_stencil_data)
+    target_include_directories(liric PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+    target_compile_definitions(liric PRIVATE LIRIC_HAVE_GENERATED_STENCILS=1)
+endif()
 if(WITH_REAL_LLVM_BACKEND)
     target_include_directories(liric PRIVATE "${LIRIC_REAL_LLVM_INCLUDE_DIR}")
     target_compile_options(liric PRIVATE ${LIRIC_REAL_LLVM_CFLAGS_LIST})
@@ -282,10 +310,18 @@ add_executable(test_liric
     tests/test_merge.c
     tests/test_objfile.c
     tests/test_cp.c
+    tests/test_stencil_gen.c
     tests/test_platform_os.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    target_compile_definitions(test_liric PRIVATE
+        LIRIC_STENCIL_GEN_EXE="$<TARGET_FILE:stencil_gen>"
+        LIRIC_STENCIL_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/stencils"
+        LIRIC_STENCIL_CC="${CMAKE_C_COMPILER}"
+    )
+endif()
 add_test(NAME liric_tests COMMAND test_liric)
 
 add_test(
