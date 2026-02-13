@@ -214,6 +214,10 @@ lr_operand_t lr_canonicalize_gep_index(lr_module_t *m, lr_block_t *b,
 
 int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 
+void lr_dump_func_signature(const lr_func_t *f, FILE *out);
+void lr_dump_block_label(const lr_block_t *b, FILE *out);
+void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out);
+void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out);
 void lr_module_dump(lr_module_t *m, FILE *out);
 
 #endif
