@@ -132,6 +132,7 @@ add_library(liric STATIC
     src/liric.c
     src/liric_compat.c
     src/session.c
+    src/module_emit.c
     src/llvm_backend.c
     src/objfile.c
     src/objfile_macho.c

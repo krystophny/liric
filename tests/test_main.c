@@ -208,6 +208,9 @@ int test_builder_compat_add_to_jit(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
 int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
+int test_builder_compat_emit_object_to_file(void);
+int test_builder_compat_emit_object_llvm_mode_contract(void);
+int test_builder_compat_emit_executable_llvm_mode_contract(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -454,6 +457,9 @@ int main(void) {
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
     RUN_TEST(test_builder_compat_memory_and_call_path);
     RUN_TEST(test_builder_compat_phi_finalize_add_incoming_after_finalize_noop);
+    RUN_TEST(test_builder_compat_emit_object_to_file);
+    RUN_TEST(test_builder_compat_emit_object_llvm_mode_contract);
+    RUN_TEST(test_builder_compat_emit_executable_llvm_mode_contract);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)

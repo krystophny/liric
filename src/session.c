@@ -1,11 +1,8 @@
 #include "arena.h"
-#include "compile_mode.h"
 #include "ir.h"
 #include "jit.h"
 #include "liric.h"
-#include "llvm_backend.h"
-#include "objfile.h"
-#include "target.h"
+#include "module_emit.h"
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -806,49 +803,17 @@ int lr_session_compile_ll(struct lr_session *s, const char *src, size_t len,
 
 int lr_session_emit_object(struct lr_session *s, const char *path,
                             session_error_t *err) {
-    const lr_target_t *target;
-    lr_compile_mode_t mode;
-    FILE *out = NULL;
-    int rc;
+    char backend_err[256] = {0};
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_object arguments");
         return -1;
     }
-
-    if (s->cfg.target && s->cfg.target[0])
-        target = lr_target_by_name(s->cfg.target);
-    else
-        target = lr_target_host();
-    if (!target) {
-        err_set(err, S_ERR_BACKEND, "target not found");
-        return -1;
-    }
-
-    mode = lr_compile_mode_from_env();
-    if (mode == LR_COMPILE_LLVM) {
-        char backend_err[256] = {0};
-        rc = lr_llvm_emit_object_path(s->module, target, path,
-                                      backend_err, sizeof(backend_err));
-        if (rc != 0) {
-            err_set(err, S_ERR_BACKEND, "llvm object emission failed: %s",
-                    backend_err[0] ? backend_err : "unknown backend error");
-            return -1;
-        }
-        return 0;
-    }
-
-    out = fopen(path, "wb");
-    if (!out) {
-        err_set(err, S_ERR_BACKEND, "cannot open output file: %s", path);
-        return -1;
-    }
-
-    rc = lr_emit_object(s->module, target, out);
-    (void)fclose(out);
-    if (rc != 0) {
-        err_set(err, S_ERR_BACKEND, "object emission failed");
+    if (lr_emit_module_object_path(s->module, s->cfg.target, path,
+                                   backend_err, sizeof(backend_err)) != 0) {
+        err_set(err, S_ERR_BACKEND, "%s",
+                backend_err[0] ? backend_err : "object emission failed");
         return -1;
     }
     return 0;
@@ -856,50 +821,18 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
 
 int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
-    const lr_target_t *target;
-    lr_compile_mode_t mode;
-    FILE *out = NULL;
-    int rc;
+    char backend_err[256] = {0};
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
-
-    if (s->cfg.target && s->cfg.target[0])
-        target = lr_target_by_name(s->cfg.target);
-    else
-        target = lr_target_host();
-    if (!target) {
-        err_set(err, S_ERR_BACKEND, "target not found");
-        return -1;
-    }
-
-    mode = lr_compile_mode_from_env();
-    if (mode == LR_COMPILE_LLVM) {
-        char backend_err[256] = {0};
-        rc = lr_llvm_emit_executable_path(s->module, NULL, 0,
-                                          target, path, "_start",
-                                          backend_err, sizeof(backend_err));
-        if (rc != 0) {
-            err_set(err, S_ERR_BACKEND, "llvm executable emission failed: %s",
-                    backend_err[0] ? backend_err : "unknown backend error");
-            return -1;
-        }
-        return 0;
-    }
-
-    out = fopen(path, "wb");
-    if (!out) {
-        err_set(err, S_ERR_BACKEND, "cannot open output file: %s", path);
-        return -1;
-    }
-
-    rc = lr_emit_executable(s->module, target, out, "_start");
-    (void)fclose(out);
-    if (rc != 0) {
-        err_set(err, S_ERR_BACKEND, "executable emission failed");
+    if (lr_emit_module_executable_path(s->module, s->cfg.target, path,
+                                       "_start", NULL, 0,
+                                       backend_err, sizeof(backend_err)) != 0) {
+        err_set(err, S_ERR_BACKEND, "%s",
+                backend_err[0] ? backend_err : "executable emission failed");
         return -1;
     }
     return 0;
@@ -908,52 +841,19 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
 int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
                                       const char *runtime_ll, size_t runtime_len,
                                       session_error_t *err) {
-    const lr_target_t *target;
-    lr_compile_mode_t mode;
-    FILE *out = NULL;
-    int rc;
+    char backend_err[256] = {0};
 
     err_clear(err);
     if (!s || !s->module || !path || !runtime_ll || runtime_len == 0) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
         return -1;
     }
-
-    if (s->cfg.target && s->cfg.target[0])
-        target = lr_target_by_name(s->cfg.target);
-    else
-        target = lr_target_host();
-    if (!target) {
-        err_set(err, S_ERR_BACKEND, "target not found");
-        return -1;
-    }
-
-    mode = lr_compile_mode_from_env();
-    if (mode == LR_COMPILE_LLVM) {
-        char backend_err[256] = {0};
-        rc = lr_llvm_emit_executable_path(s->module, runtime_ll, runtime_len,
-                                          target, path, "_start",
-                                          backend_err, sizeof(backend_err));
-        if (rc != 0) {
-            err_set(err, S_ERR_BACKEND,
-                    "llvm executable emission with runtime failed: %s",
-                    backend_err[0] ? backend_err : "unknown backend error");
-            return -1;
-        }
-        return 0;
-    }
-
-    out = fopen(path, "wb");
-    if (!out) {
-        err_set(err, S_ERR_BACKEND, "cannot open output file: %s", path);
-        return -1;
-    }
-
-    rc = lr_emit_executable_with_runtime(s->module, runtime_ll, runtime_len,
-                                          target, out, "_start");
-    (void)fclose(out);
-    if (rc != 0) {
-        err_set(err, S_ERR_BACKEND, "executable emission with runtime failed");
+    if (lr_emit_module_executable_path(s->module, s->cfg.target, path,
+                                       "_start", runtime_ll, runtime_len,
+                                       backend_err, sizeof(backend_err)) != 0) {
+        err_set(err, S_ERR_BACKEND, "%s",
+                backend_err[0] ? backend_err :
+                "executable emission with runtime failed");
         return -1;
     }
     return 0;
