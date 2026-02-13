@@ -84,6 +84,7 @@ struct lr_session {
     void *compile_ctx;
     size_t compile_start;
     bool compile_active;
+    bool compile_opened_update;
     uint32_t emitted_count;
 };
 
@@ -281,6 +282,18 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
         return -1;
     }
 
+    /* Transition JIT buffer to writable before compile_begin, which
+       emits the prologue immediately in the streaming backend. */
+    s->compile_opened_update = false;
+    if (!s->jit->update_active) {
+        lr_jit_begin_update(s->jit);
+        s->compile_opened_update = s->jit->update_active;
+    }
+    if (!s->jit->update_active) {
+        err_set(err, S_ERR_BACKEND, "jit update transition failed");
+        return -1;
+    }
+
     rc = s->jit->target->compile_begin(
         &s->compile_ctx, &meta, s->module,
         s->jit->code_buf + s->compile_start,
@@ -290,6 +303,9 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     if (rc != 0 || !s->compile_ctx) {
         err_set(err, S_ERR_BACKEND, "backend compile begin failed");
         s->compile_ctx = NULL;
+        if (s->compile_opened_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        s->compile_opened_update = false;
         return -1;
     }
 
@@ -301,35 +317,39 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
                                  session_error_t *err) {
     size_t code_len = 0;
     int rc;
-    bool opened_update = false;
+    bool should_close_update;
 
     if (!s || !s->cur_func || !s->jit || !s->compile_active || !s->compile_ctx) {
         err_set(err, S_ERR_STATE, "no active direct compile context");
         return -1;
     }
 
+    /* The update may have been opened by begin_direct_compile (for
+       streaming backends that emit code in compile_begin). */
     if (!s->jit->update_active) {
         lr_jit_begin_update(s->jit);
-        opened_update = s->jit->update_active;
+        s->compile_opened_update = s->jit->update_active;
     }
     if (!s->jit->update_active) {
         err_set(err, S_ERR_BACKEND, "jit update transition failed");
         return -1;
     }
+    should_close_update = s->compile_opened_update;
 
     rc = s->jit->target->compile_end(s->compile_ctx, &code_len);
     s->compile_ctx = NULL;
     s->compile_active = false;
+    s->compile_opened_update = false;
     if (rc != 0) {
         err_set(err, S_ERR_BACKEND, "backend compile end failed");
-        if (opened_update && s->jit->update_active)
+        if (should_close_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         return -1;
     }
 
     if (s->compile_start + code_len > s->jit->code_cap) {
         err_set(err, S_ERR_BACKEND, "jit code buffer overflow");
-        if (opened_update && s->jit->update_active)
+        if (should_close_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         return -1;
     }
@@ -344,7 +364,7 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     if (out_addr)
         *out_addr = s->jit->code_buf + s->compile_start;
 
-    if (opened_update && s->jit->update_active)
+    if (should_close_update && s->jit->update_active)
         lr_jit_end_update(s->jit);
     return 0;
 }
@@ -441,6 +461,8 @@ static int validate_block_termination(struct lr_session *s,
 static void finish_function_state(struct lr_session *s) {
     if (!s)
         return;
+    if (s->compile_opened_update && s->jit && s->jit->update_active)
+        lr_jit_end_update(s->jit);
     reset_block_tracking(s);
     reset_phi_copies(s);
     s->cur_func = NULL;
@@ -449,6 +471,7 @@ static void finish_function_state(struct lr_session *s) {
     s->compile_ctx = NULL;
     s->compile_start = 0;
     s->compile_active = false;
+    s->compile_opened_update = false;
     s->emitted_count = 0;
 }
 
@@ -870,6 +893,15 @@ int lr_session_add_phi_copy(struct lr_session *s, uint32_t pred_block_id,
         return -1;
     if (append_phi_copy(s, pred_block_id, copy, err) != 0)
         return -1;
+    if (s->compile_active && s->compile_ctx && s->jit &&
+        s->jit->target && s->jit->target->compile_add_phi_copy) {
+        if (s->jit->target->compile_add_phi_copy(
+                s->compile_ctx, pred_block_id,
+                copy->dest_vreg, &copy->src_op) != 0) {
+            err_set(err, S_ERR_BACKEND, "backend phi copy failed");
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -904,11 +936,6 @@ uint32_t lr_session_block(struct lr_session *s) {
     id = s->block_count;
     if (ensure_block(s, id, NULL) != 0)
         return UINT32_MAX;
-    if (s->compile_active && s->emitted_count == 0 && s->block_count > 1) {
-        /* Current streaming bridge path is only used for single-block direct emission. */
-        s->compile_active = false;
-        s->compile_ctx = NULL;
-    }
     return id;
 }
 
@@ -1046,7 +1073,10 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             normalized.operands = resolved_call_ops;
         } else if (s->emitted_count == 0) {
             /* Fall back before streaming emits so unresolved calls can use normal IR/JIT lowering. */
+            if (s->compile_opened_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
             s->compile_active = false;
+            s->compile_opened_update = false;
             s->compile_ctx = NULL;
         } else {
             err_set(err, S_ERR_BACKEND,
@@ -1078,6 +1108,23 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             err_set(err, S_ERR_BACKEND, "backend emit failed");
             free(resolved_call_ops);
             return 0;
+        }
+        /* Extract phi copies from PHI operand pairs and forward to backend. */
+        if (normalized.op == LR_OP_PHI &&
+            s->jit->target->compile_add_phi_copy &&
+            normalized.num_operands >= 2) {
+            for (uint32_t pi = 0; pi + 1 < normalized.num_operands; pi += 2) {
+                uint32_t pred_id = 0;
+                if (normalized.operands[pi + 1].kind == LR_OP_KIND_BLOCK)
+                    pred_id = normalized.operands[pi + 1].block_id;
+                if (s->jit->target->compile_add_phi_copy(
+                        s->compile_ctx, pred_id, dest,
+                        &normalized.operands[pi]) != 0) {
+                    err_set(err, S_ERR_BACKEND, "backend phi copy failed");
+                    free(resolved_call_ops);
+                    return 0;
+                }
+            }
         }
     } else {
         if (emit_ir_instruction(s, &normalized, err, NULL) != 0) {

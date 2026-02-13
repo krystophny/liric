@@ -100,6 +100,33 @@ static int operand_to_desc(const lr_operand_t *op, lr_operand_desc_t *out) {
     }
 }
 
+static int replay_phi_copies(const lr_target_t *target, void *compile_ctx,
+                             const lr_func_t *func) {
+    if (!target->compile_add_phi_copy)
+        return 0;
+    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
+        lr_block_t *b = func->block_array[bi];
+        if (!b)
+            return -1;
+        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
+            lr_inst_t *inst = b->inst_array[ii];
+            if (!inst || inst->op != LR_OP_PHI)
+                continue;
+            for (uint32_t pi = 0; pi + 1 < inst->num_operands; pi += 2) {
+                lr_operand_desc_t val_desc;
+                if (operand_to_desc(&inst->operands[pi], &val_desc) != 0)
+                    return -1;
+                uint32_t pred_id = inst->operands[pi + 1].block_id;
+                if (target->compile_add_phi_copy(
+                        compile_ctx, pred_id, inst->dest,
+                        &val_desc) != 0)
+                    return -1;
+            }
+        }
+    }
+    return 0;
+}
+
 static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
                                   const lr_func_t *func) {
     uint32_t max_operands = 0;
@@ -112,6 +139,9 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
     if (!target->compile_set_block && !target->compile_emit)
         return 0;
     if (!target->compile_set_block || !target->compile_emit)
+        return -1;
+
+    if (replay_phi_copies(target, compile_ctx, func) != 0)
         return -1;
 
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
@@ -217,6 +247,11 @@ int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
         return -1;
     if (!lr_func_is_finalized(func) && lr_func_finalize(func, layout_arena) != 0)
         return -1;
+
+    /* Prefer direct non-streaming path when available (has lookahead
+       optimizations like should_elide_store_slot). */
+    if (target->compile_func && mode == LR_COMPILE_ISEL)
+        return target->compile_func(func, mod, buf, buflen, out_len, arena);
 
     memset(&meta, 0, sizeof(meta));
     meta.func = func;

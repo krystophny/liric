@@ -55,6 +55,7 @@ typedef struct lr_target {
     const char *name;
     uint8_t ptr_size;
 
+    /* Streaming compilation vtable (session API path) */
     int (*compile_begin)(void **compile_ctx,
                          const lr_compile_func_meta_t *func_meta,
                          lr_module_t *mod,
@@ -64,6 +65,16 @@ typedef struct lr_target {
                         const lr_compile_inst_desc_t *inst_desc);
     int (*compile_set_block)(void *compile_ctx, uint32_t block_id);
     int (*compile_end)(void *compile_ctx, size_t *out_len);
+    int (*compile_add_phi_copy)(void *compile_ctx, uint32_t pred_block_id,
+                                uint32_t dest_vreg,
+                                const lr_operand_desc_t *src_op);
+
+    /* Direct compilation from finalized IR (non-streaming path).
+       When set, lr_target_compile prefers this over streaming replay
+       for full-function compilation with lookahead optimizations. */
+    int (*compile_func)(lr_func_t *func, lr_module_t *mod,
+                        uint8_t *buf, size_t buflen, size_t *out_len,
+                        lr_arena_t *arena);
 } lr_target_t;
 
 const lr_target_t *lr_target_x86_64(void);

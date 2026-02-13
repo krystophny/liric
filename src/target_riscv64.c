@@ -1032,6 +1032,8 @@ static const lr_target_t target_riscv64gc = {
     .compile_emit = rv_compile_emit,
     .compile_set_block = rv_compile_set_block,
     .compile_end = rv_compile_end,
+    .compile_add_phi_copy = NULL,
+    .compile_func = NULL,
 };
 
 static const lr_target_t target_riscv64im = {
@@ -1041,6 +1043,8 @@ static const lr_target_t target_riscv64im = {
     .compile_emit = rv_compile_emit,
     .compile_set_block = rv_compile_set_block,
     .compile_end = rv_compile_end,
+    .compile_add_phi_copy = NULL,
+    .compile_func = NULL,
 };
 
 const lr_target_t *lr_target_riscv64(void) {
