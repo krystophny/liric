@@ -59,21 +59,10 @@ typedef struct lr_owned_module {
     struct lr_owned_module *next;
 } lr_owned_module_t;
 
-typedef struct session_stream_inst {
-    session_inst_desc_t desc;
-    lr_operand_desc_t *operands;
-    uint32_t *indices;
-    uint32_t block_id;
-    struct session_stream_inst *next;
-} session_stream_inst_t;
-
-typedef struct session_stream_state {
-    bool enabled;
-    bool supported;
-    uint32_t count;
-    session_stream_inst_t *first;
-    session_stream_inst_t *last;
-} session_stream_state_t;
+typedef struct session_phi_copy_entry {
+    uint32_t pred_block_id;
+    lr_phi_copy_desc_t copy;
+} session_phi_copy_entry_t;
 
 struct lr_session {
     session_config_t cfg;
@@ -82,10 +71,18 @@ struct lr_session {
     lr_func_t *cur_func;
     lr_block_t *cur_block;
     lr_block_t **blocks;
+    bool *block_seen;
+    bool *block_terminated;
     uint32_t block_count;
     uint32_t block_cap;
     lr_owned_module_t *owned_modules;
-    session_stream_state_t stream;
+    session_phi_copy_entry_t *phi_copies;
+    uint32_t phi_copy_count;
+    uint32_t phi_copy_cap;
+    void *compile_ctx;
+    size_t compile_start;
+    bool compile_active;
+    uint32_t emitted_count;
 };
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
@@ -141,7 +138,7 @@ static bool opcode_has_dest(lr_opcode_t op, lr_type_t *type) {
     }
 }
 
-static lr_operand_t desc_to_op(const lr_operand_desc_t *d) {
+static lr_operand_t operand_desc_to_operand(const lr_operand_desc_t *d) {
     lr_operand_t op;
     memset(&op, 0, sizeof(op));
     if (!d) {
@@ -173,313 +170,185 @@ static lr_operand_t desc_to_op(const lr_operand_desc_t *d) {
     return op;
 }
 
-static void stream_reset(session_stream_state_t *stream) {
-    session_stream_inst_t *it;
-    if (!stream)
-        return;
-    it = stream->first;
-    while (it) {
-        session_stream_inst_t *next = it->next;
-        free(it->operands);
-        free(it->indices);
-        free(it);
-        it = next;
-    }
-    stream->enabled = false;
-    stream->supported = false;
-    stream->count = 0;
-    stream->first = NULL;
-    stream->last = NULL;
+static size_t align_up_size(size_t value, size_t alignment) {
+    return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
-static void stream_begin(struct lr_session *s) {
-    bool can_stream;
+static int ensure_phi_copy_capacity(struct lr_session *s, uint32_t need) {
+    session_phi_copy_entry_t *new_entries = NULL;
+    uint32_t new_cap = 0;
+    if (!s)
+        return -1;
+    if (need <= s->phi_copy_cap)
+        return 0;
+    new_cap = s->phi_copy_cap == 0 ? 8u : s->phi_copy_cap;
+    while (new_cap < need)
+        new_cap *= 2u;
+    new_entries = (session_phi_copy_entry_t *)calloc(new_cap, sizeof(*new_entries));
+    if (!new_entries)
+        return -1;
+    if (s->phi_copy_count > 0) {
+        memcpy(new_entries, s->phi_copies,
+               sizeof(*new_entries) * s->phi_copy_count);
+    }
+    free(s->phi_copies);
+    s->phi_copies = new_entries;
+    s->phi_copy_cap = new_cap;
+    return 0;
+}
+
+static void reset_phi_copies(struct lr_session *s) {
     if (!s)
         return;
-    stream_reset(&s->stream);
-    can_stream = (s->cfg.mode == SESSION_MODE_DIRECT &&
-                  s->jit &&
-                  s->jit->target &&
-                  lr_target_can_compile(s->jit->target, s->jit->mode));
-    s->stream.enabled = can_stream;
-    s->stream.supported = can_stream;
+    s->phi_copy_count = 0;
 }
 
-static bool stream_operand_supported(const lr_operand_desc_t *op) {
-    if (!op)
-        return false;
-    return op->kind == LR_OP_KIND_VREG || op->kind == LR_OP_KIND_IMM_I64;
-}
-
-static bool stream_inst_supported(const session_inst_desc_t *inst) {
-    lr_type_kind_t k;
-    if (!inst)
-        return false;
-    switch (inst->op) {
-    case LR_OP_RET:
-        if (inst->num_operands < 1 || !inst->operands || !inst->type)
-            return false;
-        k = inst->type->kind;
-        if (k != LR_TYPE_I32 && k != LR_TYPE_I64)
-            return false;
-        return stream_operand_supported(&inst->operands[0]);
-    case LR_OP_RET_VOID:
-        return true;
-    case LR_OP_ADD:
-    case LR_OP_SUB:
-    case LR_OP_AND:
-    case LR_OP_OR:
-    case LR_OP_XOR:
-    case LR_OP_MUL:
-    case LR_OP_SDIV:
-    case LR_OP_SREM:
-    case LR_OP_SHL:
-    case LR_OP_LSHR:
-    case LR_OP_ASHR:
-        if (!inst->type || inst->num_operands < 2 || !inst->operands)
-            return false;
-        k = inst->type->kind;
-        if (k != LR_TYPE_I32 && k != LR_TYPE_I64)
-            return false;
-        return stream_operand_supported(&inst->operands[0]) &&
-               stream_operand_supported(&inst->operands[1]);
-    default:
-        return false;
-    }
-}
-
-static int stream_append(struct lr_session *s, const session_inst_desc_t *inst,
-                         uint32_t block_id, session_error_t *err) {
-    session_stream_inst_t *node = NULL;
-    if (!s || !inst)
-        return -1;
-    node = (session_stream_inst_t *)calloc(1, sizeof(*node));
-    if (!node) {
-        err_set(err, S_ERR_BACKEND, "stream instruction allocation failed");
+static int ensure_block_capacity(struct lr_session *s, uint32_t need) {
+    lr_block_t **new_blocks = NULL;
+    bool *new_seen = NULL;
+    bool *new_terminated = NULL;
+    uint32_t new_cap = 0;
+    if (need <= s->block_cap)
+        return 0;
+    new_cap = s->block_cap == 0 ? 8u : s->block_cap;
+    while (new_cap < need)
+        new_cap *= 2u;
+    new_blocks = (lr_block_t **)calloc(new_cap, sizeof(*new_blocks));
+    new_seen = (bool *)calloc(new_cap, sizeof(*new_seen));
+    new_terminated = (bool *)calloc(new_cap, sizeof(*new_terminated));
+    if (!new_blocks || !new_seen || !new_terminated) {
+        free(new_blocks);
+        free(new_seen);
+        free(new_terminated);
         return -1;
     }
-    node->desc = *inst;
-    node->block_id = block_id;
-    if (inst->num_operands > 0) {
-        node->operands = (lr_operand_desc_t *)calloc(inst->num_operands, sizeof(*node->operands));
-        if (!node->operands) {
-            free(node);
-            err_set(err, S_ERR_BACKEND, "stream operand allocation failed");
-            return -1;
-        }
-        memcpy(node->operands, inst->operands, inst->num_operands * sizeof(*node->operands));
-        node->desc.operands = node->operands;
+    if (s->block_cap > 0) {
+        memcpy(new_blocks, s->blocks, sizeof(*new_blocks) * s->block_cap);
+        memcpy(new_seen, s->block_seen, sizeof(*new_seen) * s->block_cap);
+        memcpy(new_terminated, s->block_terminated,
+               sizeof(*new_terminated) * s->block_cap);
     }
-    if (inst->num_indices > 0) {
-        node->indices = (uint32_t *)calloc(inst->num_indices, sizeof(*node->indices));
-        if (!node->indices) {
-            free(node->operands);
-            free(node);
-            err_set(err, S_ERR_BACKEND, "stream index allocation failed");
-            return -1;
-        }
-        memcpy(node->indices, inst->indices, inst->num_indices * sizeof(*node->indices));
-        node->desc.indices = node->indices;
-    }
-    if (!s->stream.first) {
-        s->stream.first = node;
-        s->stream.last = node;
-    } else {
-        s->stream.last->next = node;
-        s->stream.last = node;
-    }
-    s->stream.count++;
+    free(s->blocks);
+    free(s->block_seen);
+    free(s->block_terminated);
+    s->blocks = new_blocks;
+    s->block_seen = new_seen;
+    s->block_terminated = new_terminated;
+    s->block_cap = new_cap;
     return 0;
 }
 
-static int validate_stream_blocks(struct lr_session *s, session_error_t *err) {
-    bool *seen = NULL;
-    bool *terminated = NULL;
-    session_stream_inst_t *it;
+static void reset_block_tracking(struct lr_session *s) {
     uint32_t i;
-    if (!s || !s->cur_func)
-        return -1;
-    if (s->block_count == 0) {
-        err_set(err, S_ERR_STATE, "block 0 is not terminated");
-        return -1;
-    }
-    seen = (bool *)calloc(s->block_count, sizeof(*seen));
-    terminated = (bool *)calloc(s->block_count, sizeof(*terminated));
-    if (!seen || !terminated) {
-        free(seen);
-        free(terminated);
-        err_set(err, S_ERR_BACKEND, "stream validation allocation failed");
-        return -1;
-    }
-    for (it = s->stream.first; it; it = it->next) {
-        if (it->block_id >= s->block_count) {
-            free(seen);
-            free(terminated);
-            err_set(err, S_ERR_STATE, "invalid streamed block id");
-            return -1;
-        }
-        seen[it->block_id] = true;
-        terminated[it->block_id] = is_terminator(it->desc.op);
-    }
+    if (!s)
+        return;
     for (i = 0; i < s->block_count; i++) {
-        if (!seen[i] || !terminated[i]) {
-            free(seen);
-            free(terminated);
-            err_set(err, S_ERR_STATE, "block %u is not terminated", i);
-            return -1;
-        }
+        s->block_seen[i] = false;
+        s->block_terminated[i] = false;
     }
-    free(seen);
-    free(terminated);
+}
+
+static bool direct_mode_enabled(const struct lr_session *s) {
+    return s &&
+           s->cfg.mode == SESSION_MODE_DIRECT &&
+           s->jit &&
+           s->jit->target &&
+           lr_target_can_compile(s->jit->target, s->jit->mode);
+}
+
+static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
+    lr_compile_func_meta_t meta;
+    int rc;
+
+    if (!direct_mode_enabled(s) || !s->cur_func)
+        return 0;
+
+    memset(&meta, 0, sizeof(meta));
+    meta.func = s->cur_func;
+    meta.ret_type = s->cur_func->ret_type;
+    meta.param_types = s->cur_func->param_types;
+    meta.num_params = s->cur_func->num_params;
+    meta.vararg = s->cur_func->vararg;
+    meta.num_blocks = s->block_count;
+    meta.next_vreg = s->cur_func->next_vreg;
+    meta.mode = s->jit->mode;
+
+    s->compile_start = align_up_size(s->jit->code_size, 16u);
+    if (s->compile_start >= s->jit->code_cap) {
+        err_set(err, S_ERR_BACKEND, "jit code buffer exhausted");
+        return -1;
+    }
+
+    rc = s->jit->target->compile_begin(
+        &s->compile_ctx, &meta, s->module,
+        s->jit->code_buf + s->compile_start,
+        s->jit->code_cap - s->compile_start,
+        s->jit->arena
+    );
+    if (rc != 0 || !s->compile_ctx) {
+        err_set(err, S_ERR_BACKEND, "backend compile begin failed");
+        s->compile_ctx = NULL;
+        return -1;
+    }
+
+    s->compile_active = true;
     return 0;
 }
 
-static int stream_can_compile_direct(struct lr_session *s) {
-    bool saw_terminator = false;
-    session_stream_inst_t *it;
-
-    if (!s || !s->stream.enabled || !s->stream.supported || !s->jit ||
-        !s->jit->target || !s->cur_func)
-        return 0;
-
-    if (s->jit->mode != LR_COMPILE_COPY_PATCH &&
-        s->jit->mode != LR_COMPILE_ISEL)
-        return 0;
-    if (!lr_target_can_compile(s->jit->target, s->jit->mode))
-        return 0;
-
-    if (s->block_count != 1 || s->cur_func->num_params > 6 || s->cur_func->vararg)
-        return 0;
-
-    for (it = s->stream.first; it; it = it->next) {
-        if (it->block_id != 0 || !stream_inst_supported(&it->desc))
-            return 0;
-        if (saw_terminator)
-            return 0;
-        if (is_terminator(it->desc.op))
-            saw_terminator = true;
-    }
-    return saw_terminator ? 1 : 0;
-}
-
-static int stream_compile_direct(struct lr_session *s, void **out_addr,
+static int finish_direct_compile(struct lr_session *s, void **out_addr,
                                  session_error_t *err) {
-    lr_jit_t *j = NULL;
-    session_stream_inst_t *it = NULL;
-    lr_inst_t *insts = NULL;
-    lr_inst_t **inst_ptrs = NULL;
-    lr_operand_t **inst_operands = NULL;
-    lr_block_t block;
-    lr_block_t *blocks[1];
-    lr_func_t func;
-    uint32_t i = 0;
-    int rc = -1;
     size_t code_len = 0;
+    int rc;
     bool opened_update = false;
 
-    if (!s || !s->cur_func || !s->jit || !s->jit->target || !s->cur_func->name) {
-        err_set(err, S_ERR_STATE, "stream direct compile unavailable");
+    if (!s || !s->cur_func || !s->jit || !s->compile_active || !s->compile_ctx) {
+        err_set(err, S_ERR_STATE, "no active direct compile context");
         return -1;
     }
 
-    j = s->jit;
-    if (!lr_target_can_compile(j->target, j->mode)) {
-        err_set(err, S_ERR_MODE, "stream direct compile unsupported in this mode");
-        return -1;
+    if (!s->jit->update_active) {
+        lr_jit_begin_update(s->jit);
+        opened_update = s->jit->update_active;
     }
-
-    insts = (lr_inst_t *)calloc(s->stream.count, sizeof(*insts));
-    inst_ptrs = (lr_inst_t **)calloc(s->stream.count, sizeof(*inst_ptrs));
-    inst_operands = (lr_operand_t **)calloc(s->stream.count, sizeof(*inst_operands));
-    if (!insts || !inst_ptrs || !inst_operands) {
-        err_set(err, S_ERR_BACKEND, "stream lowering allocation failed");
-        goto cleanup;
-    }
-
-    for (it = s->stream.first; it; it = it->next, i++) {
-        uint32_t oi;
-        insts[i].op = it->desc.op;
-        insts[i].type = it->desc.type;
-        insts[i].dest = it->desc.dest;
-        insts[i].num_operands = it->desc.num_operands;
-        if (it->desc.num_operands > 0) {
-            inst_operands[i] = (lr_operand_t *)calloc(it->desc.num_operands, sizeof(*inst_operands[i]));
-            if (!inst_operands[i]) {
-                err_set(err, S_ERR_BACKEND, "stream operand lowering allocation failed");
-                goto cleanup;
-            }
-            for (oi = 0; oi < it->desc.num_operands; oi++)
-                inst_operands[i][oi] = desc_to_op(&it->desc.operands[oi]);
-            insts[i].operands = inst_operands[i];
-        }
-        insts[i].next = (i + 1 < s->stream.count) ? &insts[i + 1] : NULL;
-        inst_ptrs[i] = &insts[i];
-    }
-
-    memset(&block, 0, sizeof(block));
-    block.id = 0;
-    block.first = s->stream.count > 0 ? &insts[0] : NULL;
-    block.last = s->stream.count > 0 ? &insts[s->stream.count - 1] : NULL;
-    block.inst_array = inst_ptrs;
-    block.num_insts = s->stream.count;
-
-    memset(&func, 0, sizeof(func));
-    blocks[0] = &block;
-    func.name = s->cur_func->name;
-    func.num_params = s->cur_func->num_params;
-    func.param_vregs = s->cur_func->param_vregs;
-    func.vararg = s->cur_func->vararg;
-    func.next_vreg = s->cur_func->next_vreg;
-    func.num_blocks = 1;
-    func.first_block = &block;
-    func.last_block = &block;
-    func.block_array = blocks;
-    block.func = &func;
-
-    if (!j->update_active) {
-        lr_jit_begin_update(j);
-        opened_update = j->update_active;
-    }
-    if (!j->update_active) {
+    if (!s->jit->update_active) {
         err_set(err, S_ERR_BACKEND, "jit update transition failed");
-        goto cleanup;
+        return -1;
     }
 
-    {
-        size_t free_space = j->code_cap - j->code_size;
-        uint8_t *func_start = j->code_buf + j->code_size;
-        rc = lr_target_compile(j->target, j->mode, &func, s->module,
-                               func_start, free_space, &code_len, j->arena);
-        if (rc != 0 || code_len > free_space) {
-            err_set(err, S_ERR_BACKEND, "stream direct compile failed");
-            rc = -1;
-            goto cleanup;
-        }
-        j->code_size += code_len;
-        if (j->update_active && code_len > 0)
-            j->update_dirty = true;
-        lr_jit_add_symbol(j, s->cur_func->name, func_start);
-        s->cur_func->is_decl = true;
-        if (out_addr)
-            *out_addr = func_start;
+    rc = s->jit->target->compile_end(s->compile_ctx, &code_len);
+    s->compile_ctx = NULL;
+    s->compile_active = false;
+    if (rc != 0) {
+        err_set(err, S_ERR_BACKEND, "backend compile end failed");
+        if (opened_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return -1;
     }
 
-    rc = 0;
-cleanup:
-    if (opened_update && j->update_active)
-        lr_jit_end_update(j);
-    if (inst_operands) {
-        for (i = 0; i < s->stream.count; i++)
-            free(inst_operands[i]);
+    if (s->compile_start + code_len > s->jit->code_cap) {
+        err_set(err, S_ERR_BACKEND, "jit code buffer overflow");
+        if (opened_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return -1;
     }
-    free(inst_operands);
-    free(inst_ptrs);
-    free(insts);
-    return rc;
+
+    s->jit->code_size = s->compile_start + code_len;
+    if (s->jit->update_active && code_len > 0)
+        s->jit->update_dirty = true;
+
+    lr_jit_add_symbol(s->jit, s->cur_func->name,
+                      s->jit->code_buf + s->compile_start);
+    s->cur_func->is_decl = true;
+    if (out_addr)
+        *out_addr = s->jit->code_buf + s->compile_start;
+
+    if (opened_update && s->jit->update_active)
+        lr_jit_end_update(s->jit);
+    return 0;
 }
 
-static int session_emit_ir_desc(struct lr_session *s, const session_inst_desc_t *inst,
-                                session_error_t *err, uint32_t *out_dest) {
+static int emit_ir_instruction(struct lr_session *s, const session_inst_desc_t *inst,
+                               session_error_t *err, uint32_t *out_dest) {
     lr_operand_t *ops = NULL;
     lr_inst_t *out = NULL;
     uint32_t i;
@@ -503,7 +372,7 @@ static int session_emit_ir_desc(struct lr_session *s, const session_inst_desc_t 
             return -1;
         }
         for (i = 0; i < inst->num_operands; i++)
-            ops[i] = desc_to_op(&inst->operands[i]);
+            ops[i] = operand_desc_to_operand(&inst->operands[i]);
     }
 
     if (inst->op == LR_OP_GEP && inst->num_operands > 1) {
@@ -549,36 +418,50 @@ static int session_emit_ir_desc(struct lr_session *s, const session_inst_desc_t 
     return 0;
 }
 
-static int stream_replay_to_ir(struct lr_session *s, session_error_t *err) {
-    session_stream_inst_t *it;
-    if (!s)
+static int validate_block_termination(struct lr_session *s,
+                                      session_error_t *err) {
+    uint32_t i;
+    if (!s || !s->cur_func)
         return -1;
-    for (it = s->stream.first; it; it = it->next) {
-        if (ensure_block(s, it->block_id, err) != 0)
+    if (s->block_count == 0) {
+        err_set(err, S_ERR_STATE, "block 0 is not terminated");
+        return -1;
+    }
+    for (i = 0; i < s->block_count; i++) {
+        if (!s->block_seen[i] || !s->block_terminated[i]) {
+            err_set(err, S_ERR_STATE, "block %u is not terminated", i);
             return -1;
-        s->cur_block = s->blocks[it->block_id];
-        if (session_emit_ir_desc(s, &it->desc, err, NULL) != 0)
-            return -1;
+        }
     }
     return 0;
 }
 
-static int ensure_block_capacity(struct lr_session *s, uint32_t need) {
-    lr_block_t **new_blocks = NULL;
-    uint32_t new_cap = 0;
-    if (need <= s->block_cap)
-        return 0;
-    new_cap = s->block_cap == 0 ? 8u : s->block_cap;
-    while (new_cap < need)
-        new_cap *= 2u;
-    new_blocks = (lr_block_t **)calloc(new_cap, sizeof(*new_blocks));
-    if (!new_blocks)
+static void finish_function_state(struct lr_session *s) {
+    if (!s)
+        return;
+    reset_block_tracking(s);
+    reset_phi_copies(s);
+    s->cur_func = NULL;
+    s->cur_block = NULL;
+    s->block_count = 0;
+    s->compile_ctx = NULL;
+    s->compile_start = 0;
+    s->compile_active = false;
+    s->emitted_count = 0;
+}
+
+static int append_phi_copy(struct lr_session *s, uint32_t pred_block_id,
+                           const lr_phi_copy_desc_t *copy,
+                           session_error_t *err) {
+    if (!s || !copy)
         return -1;
-    if (s->block_cap > 0)
-        memcpy(new_blocks, s->blocks, sizeof(*new_blocks) * s->block_cap);
-    free(s->blocks);
-    s->blocks = new_blocks;
-    s->block_cap = new_cap;
+    if (ensure_phi_copy_capacity(s, s->phi_copy_count + 1u) != 0) {
+        err_set(err, S_ERR_BACKEND, "phi copy allocation failed");
+        return -1;
+    }
+    s->phi_copies[s->phi_copy_count].pred_block_id = pred_block_id;
+    s->phi_copies[s->phi_copy_count].copy = *copy;
+    s->phi_copy_count++;
     return 0;
 }
 
@@ -608,21 +491,6 @@ static int ensure_block(struct lr_session *s, uint32_t block_id,
         }
         s->blocks[next_id] = b;
         s->block_count++;
-    }
-    return 0;
-}
-
-static int validate_function_blocks(struct lr_session *s,
-                                     session_error_t *err) {
-    uint32_t i;
-    if (!s || !s->cur_func)
-        return -1;
-    for (i = 0; i < s->block_count; i++) {
-        lr_block_t *b = s->blocks[i];
-        if (!b || !b->last || !is_terminator(b->last->op)) {
-            err_set(err, S_ERR_STATE, "block %u is not terminated", i);
-            return -1;
-        }
     }
     return 0;
 }
@@ -768,7 +636,6 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
         return NULL;
     }
 
-    stream_reset(&s->stream);
     return s;
 }
 
@@ -787,7 +654,9 @@ void lr_session_destroy(struct lr_session *s) {
         free(it);
         it = next;
     }
-    stream_reset(&s->stream);
+    free(s->phi_copies);
+    free(s->block_terminated);
+    free(s->block_seen);
     free(s->blocks);
     free(s);
 }
@@ -967,7 +836,16 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
 
     s->cur_block = NULL;
     s->block_count = 0;
-    stream_begin(s);
+    reset_phi_copies(s);
+    s->compile_ctx = NULL;
+    s->compile_start = 0;
+    s->compile_active = false;
+    s->emitted_count = 0;
+    if (begin_direct_compile(s, err) != 0) {
+        s->cur_func->is_decl = true;
+        finish_function_state(s);
+        return -1;
+    }
     return 0;
 }
 
@@ -975,6 +853,21 @@ uint32_t lr_session_param(struct lr_session *s, uint32_t idx) {
     if (!s || !s->cur_func || idx >= s->cur_func->num_params)
         return UINT32_MAX;
     return s->cur_func->param_vregs[idx];
+}
+
+int lr_session_add_phi_copy(struct lr_session *s, uint32_t pred_block_id,
+                            const lr_phi_copy_desc_t *copy,
+                            session_error_t *err) {
+    err_clear(err);
+    if (!s || !s->cur_func || !copy) {
+        err_set(err, S_ERR_ARGUMENT, "invalid phi copy arguments");
+        return -1;
+    }
+    if (ensure_block(s, pred_block_id, err) != 0)
+        return -1;
+    if (append_phi_copy(s, pred_block_id, copy, err) != 0)
+        return -1;
+    return 0;
 }
 
 int lr_session_func_end(struct lr_session *s, void **out_addr,
@@ -985,36 +878,17 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
         err_set(err, S_ERR_STATE, "no active function");
         return -1;
     }
-    if (s->stream.enabled) {
-        if (validate_stream_blocks(s, err) != 0)
-            return -1;
-
-        if (stream_can_compile_direct(s)) {
-            if (stream_compile_direct(s, out_addr, err) == 0) {
-                stream_reset(&s->stream);
-                s->cur_func = NULL;
-                s->cur_block = NULL;
-                s->block_count = 0;
-                return 0;
-            }
-            err_clear(err);
-        }
-
-        if (stream_replay_to_ir(s, err) != 0)
-            return -1;
-    }
-
-    if (validate_function_blocks(s, err) != 0)
+    if (validate_block_termination(s, err) != 0)
         return -1;
 
-    rc = compile_current_function(s, out_addr, err);
+    if (s->compile_active)
+        rc = finish_direct_compile(s, out_addr, err);
+    else
+        rc = compile_current_function(s, out_addr, err);
     if (rc != 0)
         return -1;
 
-    stream_reset(&s->stream);
-    s->cur_func = NULL;
-    s->cur_block = NULL;
-    s->block_count = 0;
+    finish_function_state(s);
     return 0;
 }
 
@@ -1027,6 +901,11 @@ uint32_t lr_session_block(struct lr_session *s) {
     id = s->block_count;
     if (ensure_block(s, id, NULL) != 0)
         return UINT32_MAX;
+    if (s->compile_active && s->emitted_count == 0 && s->block_count > 1) {
+        /* Current streaming bridge path is only used for single-block direct emission. */
+        s->compile_active = false;
+        s->compile_ctx = NULL;
+    }
     return id;
 }
 
@@ -1040,6 +919,14 @@ int lr_session_set_block(struct lr_session *s, uint32_t block_id,
     if (ensure_block(s, block_id, err) != 0)
         return -1;
     s->cur_block = s->blocks[block_id];
+    if (s->compile_active) {
+        if (!s->compile_ctx || !s->jit->target ||
+            !s->jit->target->compile_set_block ||
+            s->jit->target->compile_set_block(s->compile_ctx, block_id) != 0) {
+            err_set(err, S_ERR_BACKEND, "backend set-block failed");
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -1056,6 +943,8 @@ uint32_t lr_session_vreg(struct lr_session *s) {
 uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
                           session_error_t *err) {
     const session_inst_desc_t *inst = (const session_inst_desc_t *)inst_ptr;
+    lr_compile_inst_desc_t compile_desc;
+    lr_operand_desc_t *resolved_call_ops = NULL;
     lr_type_t *itype = NULL;
     uint32_t dest = 0;
     session_inst_desc_t normalized;
@@ -1102,17 +991,79 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
     normalized.type = itype;
     normalized.dest = dest;
 
-    if (s->stream.enabled) {
-        if (s->block_count != 1 || s->cur_block->id != 0 ||
-            !stream_inst_supported(&normalized))
-            s->stream.supported = false;
-        if (stream_append(s, &normalized, s->cur_block->id, err) != 0)
+    if (s->compile_active &&
+        normalized.op == LR_OP_CALL &&
+        normalized.num_operands > 0 &&
+        normalized.operands &&
+        normalized.operands[0].kind == LR_OP_KIND_GLOBAL) {
+        const char *callee_name = lr_module_symbol_name(
+            s->module, normalized.operands[0].global_id
+        );
+        void *callee_addr = NULL;
+        if (callee_name && s->jit)
+            callee_addr = lr_jit_get_function(s->jit, callee_name);
+
+        if (callee_addr) {
+            resolved_call_ops = (lr_operand_desc_t *)calloc(
+                normalized.num_operands, sizeof(*resolved_call_ops)
+            );
+            if (!resolved_call_ops) {
+                err_set(err, S_ERR_BACKEND, "call operand allocation failed");
+                return 0;
+            }
+            memcpy(resolved_call_ops, normalized.operands,
+                   sizeof(*resolved_call_ops) * normalized.num_operands);
+            resolved_call_ops[0].kind = LR_OP_KIND_IMM_I64;
+            resolved_call_ops[0].imm_i64 = (int64_t)(intptr_t)callee_addr;
+            resolved_call_ops[0].type = s->module->type_ptr;
+            resolved_call_ops[0].global_offset = 0;
+            normalized.operands = resolved_call_ops;
+        } else if (s->emitted_count == 0) {
+            /* Fall back before streaming emits so unresolved calls can use normal IR/JIT lowering. */
+            s->compile_active = false;
+            s->compile_ctx = NULL;
+        } else {
+            err_set(err, S_ERR_BACKEND,
+                    "direct call target unresolved after streaming began");
             return 0;
-        return dest;
+        }
     }
 
-    if (session_emit_ir_desc(s, &normalized, err, NULL) != 0)
-        return 0;
+    if (s->compile_active) {
+        if (!s->compile_ctx || !s->jit->target || !s->jit->target->compile_emit) {
+            err_set(err, S_ERR_STATE, "no active direct compile context");
+            free(resolved_call_ops);
+            return 0;
+        }
+        memset(&compile_desc, 0, sizeof(compile_desc));
+        compile_desc.op = normalized.op;
+        compile_desc.type = normalized.type;
+        compile_desc.dest = normalized.dest;
+        compile_desc.operands = normalized.operands;
+        compile_desc.num_operands = normalized.num_operands;
+        compile_desc.indices = normalized.indices;
+        compile_desc.num_indices = normalized.num_indices;
+        compile_desc.icmp_pred = normalized.icmp_pred;
+        compile_desc.fcmp_pred = normalized.fcmp_pred;
+        compile_desc.call_external_abi = normalized.call_external_abi;
+        compile_desc.call_vararg = normalized.call_vararg;
+        compile_desc.call_fixed_args = normalized.call_fixed_args;
+        if (s->jit->target->compile_emit(s->compile_ctx, &compile_desc) != 0) {
+            err_set(err, S_ERR_BACKEND, "backend emit failed");
+            free(resolved_call_ops);
+            return 0;
+        }
+    } else {
+        if (emit_ir_instruction(s, &normalized, err, NULL) != 0) {
+            free(resolved_call_ops);
+            return 0;
+        }
+    }
+    free(resolved_call_ops);
+
+    s->block_seen[s->cur_block->id] = true;
+    s->block_terminated[s->cur_block->id] = is_terminator(normalized.op);
+    s->emitted_count++;
     return dest;
 }
 

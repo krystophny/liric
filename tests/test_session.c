@@ -358,6 +358,46 @@ int test_session_stream_stencil_unsupported_fallback(void) {
     return 0;
 }
 
+int test_session_add_phi_copy_api(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    lr_phi_copy_desc_t copy;
+    lr_type_t *i32;
+    uint32_t b0;
+    int rc;
+    void *addr = NULL;
+    typedef int (*fn_t)(void);
+    fn_t fn;
+
+    TEST_ASSERT(s != NULL, "session create");
+    i32 = lr_type_i32_s(s);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    rc = lr_session_func_begin(s, "session_phi_copy_api", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    b0 = lr_session_block(s);
+    rc = lr_session_set_block(s, b0, &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    copy.dest_vreg = 999;
+    copy.src_op = LR_IMM(7, i32);
+    rc = lr_session_add_phi_copy(s, b0, &copy, &err);
+    TEST_ASSERT_EQ(rc, 0, "add phi copy");
+
+    lr_emit_ret(s, LR_IMM(42, i32));
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 42, "function result preserved after phi copy add");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_icmp_branch(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
