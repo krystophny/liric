@@ -3,6 +3,7 @@
 #include "jit.h"
 #include "liric.h"
 #include "module_emit.h"
+#include <liric/liric_session.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -64,9 +65,7 @@ typedef struct lc_module_compat {
     lc_value_t **func_values;
     uint32_t func_value_count;
     uint32_t func_value_cap;
-    lc_phi_node_t **pending_phis;
-    uint32_t phi_count;
-    uint32_t phi_cap;
+    lr_session_t *session;
     lr_block_t **detached_blocks;
     uint32_t detached_count;
     uint32_t detached_cap;
@@ -101,6 +100,8 @@ struct lc_phi_node {
     uint32_t num_incoming;
     uint32_t cap_incoming;
     bool finalized;
+    lr_inst_t *inst;
+    lr_session_t *session;
 };
 
 typedef struct lc_alloca_inst {
@@ -335,9 +336,8 @@ static lc_const_value_meta_t *ensure_const_value_meta(lc_module_compat_t *mod,
 
 lr_operand_desc_t lc_value_to_desc(lc_value_t *val) {
     lr_operand_desc_t d;
+    memset(&d, 0, sizeof(d));
     d.kind = LR_OP_KIND_NULL;
-    d.type = NULL;
-    d.imm_i64 = 0;
     if (!val) {
         return d;
     }
@@ -392,64 +392,73 @@ lr_operand_desc_t lc_value_to_desc(lc_value_t *val) {
     return d;
 }
 
-static inline lr_operand_t lc_value_to_op_fast(lc_value_t *val) {
+static lr_operand_t compat_desc_to_operand(const lr_operand_desc_t *d) {
     lr_operand_t op;
-    op.kind = LR_VAL_NULL;
-    op.type = NULL;
-    op.global_offset = 0;
-    op.imm_i64 = 0;
-    if (!val)
-        return op;
-
-    op.type = val->type;
-    switch (val->kind) {
-    case LC_VAL_VREG:
-        op.kind = LR_VAL_VREG;
-        op.vreg = val->vreg.id;
-        break;
-    case LC_VAL_CONST_INT:
-        op.kind = LR_VAL_IMM_I64;
-        op.imm_i64 = val->const_int.val;
-        break;
-    case LC_VAL_CONST_FP:
-        op.kind = LR_VAL_IMM_F64;
-        op.imm_f64 = val->const_fp.val;
-        break;
-    case LC_VAL_CONST_NULL:
-        op.kind = LR_VAL_NULL;
-        break;
-    case LC_VAL_CONST_UNDEF:
+    memset(&op, 0, sizeof(op));
+    if (!d) {
         op.kind = LR_VAL_UNDEF;
+        return op;
+    }
+    op.kind = (lr_operand_kind_t)d->kind;
+    op.type = d->type;
+    op.global_offset = d->global_offset;
+    switch (d->kind) {
+    case LR_OP_KIND_VREG:
+        op.vreg = d->vreg;
         break;
-    case LC_VAL_GLOBAL:
-        op.kind = LR_VAL_GLOBAL;
-        op.global_id = val->global.id;
+    case LR_OP_KIND_IMM_I64:
+        op.imm_i64 = d->imm_i64;
         break;
-    case LC_VAL_ARGUMENT:
-        if (val->argument.func && val->argument.func->param_vregs
-                && val->argument.param_idx < val->argument.func->num_params) {
-            op.kind = LR_VAL_VREG;
-            op.vreg = val->argument.func->param_vregs[val->argument.param_idx];
-        } else {
-            op.kind = LR_VAL_IMM_I64;
-            op.imm_i64 = 0;
-        }
+    case LR_OP_KIND_IMM_F64:
+        op.imm_f64 = d->imm_f64;
         break;
-    case LC_VAL_BLOCK:
-        if (val->block.block) {
-            op.kind = LR_VAL_BLOCK;
-            op.block_id = val->block.block->id;
-        } else {
-            op.kind = LR_VAL_IMM_I64;
-            op.imm_i64 = 0;
-        }
+    case LR_OP_KIND_BLOCK:
+        op.block_id = d->block_id;
         break;
-    case LC_VAL_CONST_AGGREGATE:
-        op.kind = LR_VAL_IMM_I64;
-        op.imm_i64 = 0;
+    case LR_OP_KIND_GLOBAL:
+        op.global_id = d->global_id;
+        break;
+    default:
         break;
     }
     return op;
+}
+
+static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                            lr_error_t *err) {
+    if (!mod || !mod->session || !b)
+        return -1;
+    if (!f)
+        f = b->func;
+    if (!f || b->func != f)
+        return -1;
+    return lr_session_bind_ir(mod->session, mod->mod, f, b, err);
+}
+
+static uint32_t compat_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                            const lr_inst_desc_t *inst) {
+    lr_error_t err;
+    memset(&err, 0, sizeof(err));
+    if (compat_bind_emit(mod, b, f, &err) != 0)
+        return 0;
+    return lr_session_emit(mod->session, inst, &err);
+}
+
+static lr_operand_desc_t block_operand_desc(lr_block_t *block) {
+    lr_operand_desc_t d;
+    memset(&d, 0, sizeof(d));
+    d.kind = LR_OP_KIND_BLOCK;
+    d.block_id = block ? block->id : 0;
+    return d;
+}
+
+static lr_operand_desc_t global_operand_desc(uint32_t id, lr_type_t *type) {
+    lr_operand_desc_t d;
+    memset(&d, 0, sizeof(d));
+    d.kind = LR_OP_KIND_GLOBAL;
+    d.global_id = id;
+    d.type = type;
+    return d;
 }
 
 /* ---- Context ---- */
@@ -491,13 +500,23 @@ void lc_context_destroy(lc_context_t *ctx) {
 lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     lc_module_compat_t *cm = (lc_module_compat_t *)calloc(
         1, sizeof(lc_module_compat_t));
+    lr_session_config_t cfg;
+    lr_arena_t *arena;
     if (!cm) return NULL;
 
-    lr_arena_t *arena = lr_arena_create(0);
+    arena = lr_arena_create(0);
     if (!arena) { free(cm); return NULL; }
 
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.mode = LR_MODE_IR;
+    cm->session = lr_session_create(&cfg, NULL);
+    if (!cm->session) {
+        lr_arena_destroy(arena);
+        free(cm);
+        return NULL;
+    }
     cm->cache_owner_mod = cm->mod;
 
     cm->ctx = ctx;
@@ -524,6 +543,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
 void lc_module_destroy(lc_module_compat_t *mod) {
     if (!mod) return;
     lr_arena_destroy(mod->mod->arena);
+    lr_session_destroy(mod->session);
     value_pool_free(mod);
     free(mod->func_values);
     free(mod->detached_blocks);
@@ -1306,37 +1326,6 @@ bool lc_block_has_terminator(lr_block_t *block) {
         || op == LR_OP_CONDBR || op == LR_OP_UNREACHABLE;
 }
 
-static void block_insert_before_terminator(lr_block_t *block, lr_inst_t *inst) {
-    lr_inst_t *prev;
-    if (!block || !inst)
-        return;
-    if (!block->first) {
-        block->first = inst;
-        block->last = inst;
-        return;
-    }
-    if (!lc_block_has_terminator(block)) {
-        lr_block_append(block, inst);
-        return;
-    }
-
-    if (block->first == block->last) {
-        inst->next = block->last;
-        block->first = inst;
-        return;
-    }
-
-    prev = block->first;
-    while (prev && prev->next != block->last)
-        prev = prev->next;
-    if (!prev) {
-        lr_block_append(block, inst);
-        return;
-    }
-    inst->next = block->last;
-    prev->next = inst;
-}
-
 /* ---- Global variable ---- */
 
 static size_t global_storage_size(const lr_global_t *g) {
@@ -1531,24 +1520,33 @@ static lc_value_t *wrap_vreg(lc_module_compat_t *mod, uint32_t vreg_id,
     return lc_value_vreg(mod, vreg_id, type, func);
 }
 
-static uint32_t build_binop(lr_module_t *m, lr_block_t *b, lr_func_t *f,
-                              lr_opcode_t op, lr_type_t *ty,
-                              lr_operand_t lhs, lr_operand_t rhs) {
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[2] = { lhs, rhs };
-    lr_inst_t *inst = lr_inst_create(m->arena, op, ty, dest, ops, 2);
-    lr_block_append(b, inst);
-    return dest;
+static uint32_t build_binop(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                            lr_opcode_t op, lr_type_t *ty,
+                            lr_operand_desc_t lhs, lr_operand_desc_t rhs) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[2];
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lhs;
+    ops[1] = rhs;
+    inst.op = op;
+    inst.type = ty;
+    inst.operands = ops;
+    inst.num_operands = 2;
+    return compat_emit(mod, b, f, &inst);
 }
 
-static uint32_t build_cast(lr_module_t *m, lr_block_t *b, lr_func_t *f,
-                             lr_opcode_t op, lr_type_t *to_type,
-                             lr_operand_t val) {
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[1] = { val };
-    lr_inst_t *inst = lr_inst_create(m->arena, op, to_type, dest, ops, 1);
-    lr_block_append(b, inst);
-    return dest;
+static uint32_t build_cast(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                           lr_opcode_t op, lr_type_t *to_type,
+                           lr_operand_desc_t val) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = val;
+    inst.op = op;
+    inst.type = to_type;
+    inst.operands = ops;
+    inst.num_operands = 1;
+    return compat_emit(mod, b, f, &inst);
 }
 
 static lc_value_t *compat_binop(lc_module_compat_t *mod, lr_block_t *b,
@@ -1556,8 +1554,8 @@ static lc_value_t *compat_binop(lc_module_compat_t *mod, lr_block_t *b,
                                   lc_value_t *lhs, lc_value_t *rhs) {
     if (!mod || !b || !f || !lhs) return safe_undef(mod);
     lr_type_t *ty = lhs->type ? lhs->type : mod->mod->type_i64;
-    uint32_t v = build_binop(mod->mod, b, f, op, ty,
-                             lc_value_to_op_fast(lhs), lc_value_to_op_fast(rhs));
+    uint32_t v = build_binop(mod, b, f, op, ty,
+                             lc_value_to_desc(lhs), lc_value_to_desc(rhs));
     return wrap_vreg(mod, v, ty, f);
 }
 
@@ -1565,37 +1563,46 @@ static lc_value_t *compat_cast(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, lr_opcode_t op,
                                  lc_value_t *val, lr_type_t *to_type) {
     if (!mod || !b || !f || !val) return safe_undef(mod);
-    uint32_t v = build_cast(mod->mod, b, f, op, to_type,
-                            lc_value_to_op_fast(val));
+    uint32_t v = build_cast(mod, b, f, op, to_type, lc_value_to_desc(val));
     return wrap_vreg(mod, v, to_type, f);
 }
 
 static lc_value_t *compat_icmp(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, int pred,
                                  lc_value_t *lhs, lc_value_t *rhs) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[2];
+    uint32_t dest;
     if (!mod || !b || !f) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[2] = { lc_value_to_op_fast(lhs), lc_value_to_op_fast(rhs) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_ICMP, m->type_i1,
-                                      dest, ops, 2);
-    inst->icmp_pred = (lr_icmp_pred_t)pred;
-    lr_block_append(b, inst);
-    return wrap_vreg(mod, dest, m->type_i1, f);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(lhs);
+    ops[1] = lc_value_to_desc(rhs);
+    inst.op = LR_OP_ICMP;
+    inst.type = mod->mod->type_i1;
+    inst.operands = ops;
+    inst.num_operands = 2;
+    inst.icmp_pred = pred;
+    dest = compat_emit(mod, b, f, &inst);
+    return wrap_vreg(mod, dest, mod->mod->type_i1, f);
 }
 
 static lc_value_t *compat_fcmp(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, int pred,
                                  lc_value_t *lhs, lc_value_t *rhs) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[2];
+    uint32_t dest;
     if (!mod || !b || !f) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[2] = { lc_value_to_op_fast(lhs), lc_value_to_op_fast(rhs) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_FCMP, m->type_i1,
-                                      dest, ops, 2);
-    inst->fcmp_pred = (lr_fcmp_pred_t)pred;
-    lr_block_append(b, inst);
-    return wrap_vreg(mod, dest, m->type_i1, f);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(lhs);
+    ops[1] = lc_value_to_desc(rhs);
+    inst.op = LR_OP_FCMP;
+    inst.type = mod->mod->type_i1;
+    inst.operands = ops;
+    inst.num_operands = 2;
+    inst.fcmp_pred = pred;
+    dest = compat_emit(mod, b, f, &inst);
+    return wrap_vreg(mod, dest, mod->mod->type_i1, f);
 }
 
 /* ---- Arithmetic ---- */
@@ -1899,32 +1906,32 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
                                     lr_func_t *f, lr_type_t *type,
                                     lc_value_t *array_size,
                                     const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
+    uint32_t dest;
+    lc_alloca_inst_t *ai;
+    lc_value_t *result;
     (void)name;
     if (!mod || !b || !f || !type) {
-        lc_alloca_inst_t *ai = (lc_alloca_inst_t *)calloc(1, sizeof(*ai));
+        ai = (lc_alloca_inst_t *)calloc(1, sizeof(*ai));
         if (!ai) return NULL;
         ai->result = safe_undef(mod);
         ai->alloc_type = type;
         return ai;
     }
-    lr_module_t *m = mod->mod;
-    uint32_t dest = lr_vreg_new(f);
-
+    memset(&inst, 0, sizeof(inst));
+    inst.op = LR_OP_ALLOCA;
+    inst.type = type;
     if (array_size) {
-        lr_operand_t ops[1] = { lc_value_to_op_fast(array_size) };
-        lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_ALLOCA,
-                                          m->type_ptr, dest, ops, 1);
-        inst->type = type;
-        block_insert_before_terminator(b, inst);
-    } else {
-        lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_ALLOCA,
-                                          m->type_ptr, dest, NULL, 0);
-        inst->type = type;
-        block_insert_before_terminator(b, inst);
+        ops[0] = lc_value_to_desc(array_size);
+        inst.operands = ops;
+        inst.num_operands = 1;
     }
-
-    lc_alloca_inst_t *ai = (lc_alloca_inst_t *)malloc(sizeof(*ai));
-    lc_value_t *result = wrap_vreg(mod, dest, m->type_ptr, f);
+    dest = compat_emit(mod, b, f, &inst);
+    ai = (lc_alloca_inst_t *)malloc(sizeof(*ai));
+    if (!ai)
+        return NULL;
+    result = wrap_vreg(mod, dest, mod->mod->type_ptr, f);
     result->vreg.alloc_type = type;
     ai->result = result;
     ai->alloc_type = type;
@@ -1934,47 +1941,61 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_load(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lr_type_t *ty, lc_value_t *ptr,
                             const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
+    uint32_t dest;
     (void)name;
     if (!mod || !b || !f) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[1] = { lc_value_to_op_fast(ptr) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_LOAD, ty,
-                                      dest, ops, 1);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(ptr);
+    inst.op = LR_OP_LOAD;
+    inst.type = ty;
+    inst.operands = ops;
+    inst.num_operands = 1;
+    dest = compat_emit(mod, b, f, &inst);
     return wrap_vreg(mod, dest, ty, f);
 }
 
 void lc_create_store(lc_module_compat_t *mod, lr_block_t *b,
                      lc_value_t *val, lc_value_t *ptr) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[2];
     if (!mod || !b) return;
-    lr_module_t *m = mod->mod;
-    lr_operand_t ops[2] = { lc_value_to_op_fast(val), lc_value_to_op_fast(ptr) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_STORE,
-                                      m->type_void, 0, ops, 2);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(val);
+    ops[1] = lc_value_to_desc(ptr);
+    inst.op = LR_OP_STORE;
+    inst.type = mod->mod->type_void;
+    inst.operands = ops;
+    inst.num_operands = 2;
+    (void)compat_emit(mod, b, b->func, &inst);
 }
 
 lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lr_type_t *base_type,
                            lc_value_t *base_ptr, lc_value_t **indices,
                            unsigned num_indices, const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t *ops;
+    uint32_t nops = 1 + num_indices;
+    uint32_t dest;
     (void)name;
     if (!mod || !b || !f) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
-    uint32_t dest = lr_vreg_new(f);
-    uint32_t nops = 1 + num_indices;
-    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
-    ops[0] = lc_value_to_op_fast(base_ptr);
+    ops = (lr_operand_desc_t *)calloc(nops, sizeof(*ops));
+    if (!ops)
+        return safe_undef(mod);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(base_ptr);
     for (unsigned i = 0; i < num_indices; i++) {
-        lr_operand_t idx = lc_value_to_op_fast(indices[i]);
-        ops[1 + i] = lr_canonicalize_gep_index(m, b, f, idx);
+        ops[1 + i] = lc_value_to_desc(indices ? indices[i] : NULL);
     }
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_GEP,
-                                      m->type_ptr, dest, ops, nops);
-    inst->type = base_type;
-    lr_block_append(b, inst);
-    return wrap_vreg(mod, dest, m->type_ptr, f);
+    inst.op = LR_OP_GEP;
+    inst.type = base_type;
+    inst.operands = ops;
+    inst.num_operands = nops;
+    dest = compat_emit(mod, b, f, &inst);
+    free(ops);
+    return wrap_vreg(mod, dest, mod->mod->type_ptr, f);
 }
 
 lc_value_t *lc_create_inbounds_gep(lc_module_compat_t *mod, lr_block_t *b,
@@ -2001,53 +2022,65 @@ lc_value_t *lc_create_struct_gep(lc_module_compat_t *mod, lr_block_t *b,
 
 void lc_create_ret(lc_module_compat_t *mod, lr_block_t *b,
                    lc_value_t *val) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
     if (!mod || !b || !val) return;
-    lr_module_t *m = mod->mod;
-    lr_operand_t ops[1] = { lc_value_to_op_fast(val) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_RET,
-                                      val->type, 0, ops, 1);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(val);
+    inst.op = LR_OP_RET;
+    inst.type = val->type;
+    inst.operands = ops;
+    inst.num_operands = 1;
+    (void)compat_emit(mod, b, b->func, &inst);
 }
 
 void lc_create_ret_void(lc_module_compat_t *mod, lr_block_t *b) {
+    lr_inst_desc_t inst;
     if (!mod || !b) return;
-    lr_module_t *m = mod->mod;
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_RET_VOID,
-                                      m->type_void, 0, NULL, 0);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    inst.op = LR_OP_RET_VOID;
+    inst.type = mod->mod->type_void;
+    (void)compat_emit(mod, b, b->func, &inst);
 }
 
 void lc_create_br(lc_module_compat_t *mod, lr_block_t *b,
                   lr_block_t *target) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
     if (!mod || !b || !target) return;
-    lr_module_t *m = mod->mod;
-    lr_operand_t ops[1] = { lr_op_block(target->id) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_BR,
-                                      m->type_void, 0, ops, 1);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = block_operand_desc(target);
+    inst.op = LR_OP_BR;
+    inst.type = mod->mod->type_void;
+    inst.operands = ops;
+    inst.num_operands = 1;
+    (void)compat_emit(mod, b, b->func, &inst);
 }
 
 void lc_create_cond_br(lc_module_compat_t *mod, lr_block_t *b,
                        lc_value_t *cond, lr_block_t *true_bb,
                        lr_block_t *false_bb) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[3];
     if (!mod || !b || !cond || !true_bb || !false_bb) return;
-    lr_module_t *m = mod->mod;
-    lr_operand_t ops[3] = {
-        lc_value_to_op_fast(cond),
-        lr_op_block(true_bb->id),
-        lr_op_block(false_bb->id)
-    };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_CONDBR,
-                                      m->type_void, 0, ops, 3);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(cond);
+    ops[1] = block_operand_desc(true_bb);
+    ops[2] = block_operand_desc(false_bb);
+    inst.op = LR_OP_CONDBR;
+    inst.type = mod->mod->type_void;
+    inst.operands = ops;
+    inst.num_operands = 3;
+    (void)compat_emit(mod, b, b->func, &inst);
 }
 
 void lc_create_unreachable(lc_module_compat_t *mod, lr_block_t *b) {
+    lr_inst_desc_t inst;
     if (!mod || !b) return;
-    lr_module_t *m = mod->mod;
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_UNREACHABLE,
-                                      m->type_void, 0, NULL, 0);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    inst.op = LR_OP_UNREACHABLE;
+    inst.type = mod->mod->type_void;
+    (void)compat_emit(mod, b, b->func, &inst);
 }
 
 /* ---- Calls ---- */
@@ -2056,43 +2089,39 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lr_type_t *func_type,
                             lc_value_t *callee, lc_value_t **args,
                             unsigned num_args, const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t *ops;
+    uint32_t nops = 1 + num_args;
+    uint32_t dest;
     (void)name;
     if (!mod || !b || !f || !func_type) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
     lr_type_t *ret_type = func_type->func.ret;
-    if (!ret_type) ret_type = m->type_void;
+    if (!ret_type) ret_type = mod->mod->type_void;
     bool is_void = ret_type->kind == LR_TYPE_VOID;
 
-    uint32_t nops = 1 + num_args;
-    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
-    ops[0] = lc_value_to_op_fast(callee);
-    for (unsigned i = 0; i < num_args; i++) {
-        ops[1 + i] = lc_value_to_op_fast(args[i]);
-    }
-
-    lr_inst_t *inst = NULL;
-    uint32_t dest = 0;
-    if (is_void) {
-        inst = lr_inst_create(m->arena, LR_OP_CALL,
-                               m->type_void, 0, ops, nops);
-    } else {
-        dest = lr_vreg_new(f);
-        inst = lr_inst_create(m->arena, LR_OP_CALL,
-                               ret_type, dest, ops, nops);
-    }
-    if (!inst)
+    ops = (lr_operand_desc_t *)calloc(nops, sizeof(*ops));
+    if (!ops)
         return safe_undef(mod);
-
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(callee);
+    for (unsigned i = 0; i < num_args; i++) {
+        ops[1 + i] = lc_value_to_desc(args ? args[i] : NULL);
+    }
+    inst.op = LR_OP_CALL;
+    inst.type = is_void ? mod->mod->type_void : ret_type;
+    inst.operands = ops;
+    inst.num_operands = nops;
     if (func_type && func_type->kind == LR_TYPE_FUNC) {
-        inst->call_vararg = func_type->func.vararg;
-        inst->call_fixed_args = func_type->func.num_params;
+        inst.call_vararg = func_type->func.vararg;
+        inst.call_fixed_args = func_type->func.num_params;
     }
 
     /* Indirect calls (e.g. bitcasted function values) should use C ABI. */
-    if (ops[0].kind != LR_VAL_GLOBAL)
-        inst->call_external_abi = true;
+    if (ops[0].kind != LR_OP_KIND_GLOBAL)
+        inst.call_external_abi = true;
 
-    lr_block_append(b, inst);
+    dest = compat_emit(mod, b, f, &inst);
+    free(ops);
     if (is_void)
         return NULL;
     return wrap_vreg(mod, dest, ret_type, f);
@@ -2100,60 +2129,88 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
 
 /* ---- PHI ---- */
 
-static void block_insert_phi(lr_block_t *block, lr_inst_t *phi_inst) {
-    lr_inst_t *cur;
-    if (!block || !phi_inst)
+static lr_inst_t *find_phi_inst(lr_block_t *block, uint32_t dest_vreg) {
+    lr_inst_t *it;
+    if (!block)
+        return NULL;
+    for (it = block->first; it; it = it->next) {
+        if (it->op == LR_OP_PHI && it->dest == dest_vreg)
+            return it;
+    }
+    return NULL;
+}
+
+static void phi_refresh_operands(lc_phi_node_t *phi) {
+    uint32_t n;
+    lr_operand_t *ops;
+    if (!phi || !phi->mod || !phi->inst || !phi->incoming_vals ||
+        !phi->incoming_block_ids)
         return;
-    if (!block->first) {
-        block->first = phi_inst;
-        block->last = phi_inst;
+    n = phi->num_incoming;
+    if (n == 0) {
+        phi->inst->operands = NULL;
+        phi->inst->num_operands = 0;
         return;
     }
-    if (block->first->op != LR_OP_PHI) {
-        phi_inst->next = block->first;
-        block->first = phi_inst;
+    ops = lr_arena_array(phi->mod->arena, lr_operand_t, n * 2u);
+    if (!ops)
         return;
+    for (uint32_t i = 0; i < n; i++) {
+        lr_operand_desc_t src = lc_value_to_desc(phi->incoming_vals[i]);
+        lr_operand_desc_t pred;
+        memset(&pred, 0, sizeof(pred));
+        pred.kind = LR_OP_KIND_BLOCK;
+        pred.block_id = phi->incoming_block_ids[i];
+        ops[i * 2u] = compat_desc_to_operand(&src);
+        ops[i * 2u + 1u] = compat_desc_to_operand(&pred);
     }
-    cur = block->first;
-    while (cur->next && cur->next->op == LR_OP_PHI)
-        cur = cur->next;
-    phi_inst->next = cur->next;
-    cur->next = phi_inst;
-    if (!phi_inst->next)
-        block->last = phi_inst;
+    phi->inst->operands = ops;
+    phi->inst->num_operands = n * 2u;
 }
 
 lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lr_type_t *ty,
                               const char *name) {
+    lr_inst_desc_t inst;
+    uint32_t dest_vreg;
+    lc_phi_node_t *phi;
     (void)name;
-    uint32_t vreg_id = lr_vreg_new(f);
+    if (!mod || !b || !f || !ty)
+        return NULL;
+    memset(&inst, 0, sizeof(inst));
+    inst.op = LR_OP_PHI;
+    inst.type = ty;
+    dest_vreg = compat_emit(mod, b, f, &inst);
 
-    lc_phi_node_t *phi = (lc_phi_node_t *)calloc(1, sizeof(lc_phi_node_t));
-    phi->result = wrap_vreg(mod, vreg_id, ty, f);
+    phi = (lc_phi_node_t *)calloc(1, sizeof(lc_phi_node_t));
+    if (!phi)
+        return NULL;
+    phi->result = wrap_vreg(mod, dest_vreg, ty, f);
     phi->result->vreg.phi_node = phi;
+    phi->inst = find_phi_inst(b, dest_vreg);
     phi->type = ty;
     phi->block = b;
     phi->func = f;
     phi->mod = mod->mod;
+    phi->session = mod->session;
     phi->cap_incoming = LC_INITIAL_PHI_CAP;
     phi->incoming_vals = (lc_value_t **)calloc(
         phi->cap_incoming, sizeof(lc_value_t *));
     phi->incoming_block_ids = (uint32_t *)calloc(
         phi->cap_incoming, sizeof(uint32_t));
-
-    if (mod->phi_count == mod->phi_cap) {
-        uint32_t new_cap = mod->phi_cap ? mod->phi_cap * 2 : 16;
-        mod->pending_phis = (lc_phi_node_t **)realloc(
-            mod->pending_phis, sizeof(lc_phi_node_t *) * new_cap);
-        mod->phi_cap = new_cap;
+    if (!phi->incoming_vals || !phi->incoming_block_ids) {
+        free(phi->incoming_vals);
+        free(phi->incoming_block_ids);
+        free(phi);
+        return NULL;
     }
-    mod->pending_phis[mod->phi_count++] = phi;
     return phi;
 }
 
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block) {
+    lr_phi_copy_desc_t copy;
+    lr_error_t err;
     if (!phi || !block || phi->finalized) return;
     if (!phi->incoming_vals || !phi->incoming_block_ids ||
         phi->cap_incoming == 0) return;
@@ -2168,50 +2225,20 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
     phi->incoming_vals[phi->num_incoming] = val;
     phi->incoming_block_ids[phi->num_incoming] = block->id;
     phi->num_incoming++;
+    memset(&copy, 0, sizeof(copy));
+    copy.dest_vreg = phi->result ? phi->result->vreg.id : 0;
+    copy.src_op = lc_value_to_desc(val);
+    memset(&err, 0, sizeof(err));
+    if (phi->session && lr_session_bind_ir(phi->session, phi->mod,
+                                           phi->func, phi->block, &err) == 0) {
+        (void)lr_session_add_phi_copy(phi->session, block->id, &copy, &err);
+    }
+    phi_refresh_operands(phi);
 }
 
 void lc_phi_finalize(lc_phi_node_t *phi) {
-    if (!phi || phi->finalized) return;
+    if (!phi) return;
     phi->finalized = true;
-
-    lr_module_t *m = phi->mod;
-    uint32_t n = phi->num_incoming;
-    uint32_t nops = n * 2;
-    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
-
-    for (uint32_t i = 0; i < n; i++) {
-        ops[i * 2]     = lc_value_to_op_fast(phi->incoming_vals[i]);
-        ops[i * 2 + 1] = lr_op_block(phi->incoming_block_ids[i]);
-    }
-
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_PHI, phi->type,
-                                      phi->result->vreg.id, ops, nops);
-    block_insert_phi(phi->block, inst);
-
-    free(phi->incoming_vals);
-    phi->incoming_vals = NULL;
-    free(phi->incoming_block_ids);
-    phi->incoming_block_ids = NULL;
-    phi->num_incoming = 0;
-    phi->cap_incoming = 0;
-    if (phi->result)
-        phi->result->vreg.phi_node = NULL;
-}
-
-void lc_module_finalize_phis(lc_module_compat_t *mod) {
-    if (!mod) return;
-    for (uint32_t i = 0; i < mod->phi_count; i++) {
-        lc_phi_node_t *phi = mod->pending_phis[i];
-        lc_phi_finalize(phi);
-        if (!phi) continue;
-        free(phi->incoming_vals);
-        free(phi->incoming_block_ids);
-        free(phi);
-    }
-    free(mod->pending_phis);
-    mod->pending_phis = NULL;
-    mod->phi_count = 0;
-    mod->phi_cap = 0;
 }
 
 /* ---- Select ---- */
@@ -2220,19 +2247,21 @@ lc_value_t *lc_create_select(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *cond,
                               lc_value_t *true_val, lc_value_t *false_val,
                               const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[3];
+    uint32_t dest;
     (void)name;
     if (!mod || !b || !f || !true_val) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
-    lr_type_t *ty = true_val->type ? true_val->type : m->type_i64;
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[3] = {
-        lc_value_to_op_fast(cond),
-        lc_value_to_op_fast(true_val),
-        lc_value_to_op_fast(false_val)
-    };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_SELECT, ty,
-                                      dest, ops, 3);
-    lr_block_append(b, inst);
+    lr_type_t *ty = true_val->type ? true_val->type : mod->mod->type_i64;
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(cond);
+    ops[1] = lc_value_to_desc(true_val);
+    ops[2] = lc_value_to_desc(false_val);
+    inst.op = LR_OP_SELECT;
+    inst.type = ty;
+    inst.operands = ops;
+    inst.num_operands = 3;
+    dest = compat_emit(mod, b, f, &inst);
     return wrap_vreg(mod, dest, ty, f);
 }
 
@@ -2350,6 +2379,9 @@ lc_value_t *lc_create_extractvalue(lc_module_compat_t *mod, lr_block_t *b,
                                     lr_func_t *f, lc_value_t *agg,
                                     unsigned *indices, unsigned num_indices,
                                     const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
+    uint32_t dest;
     (void)name;
     if (!mod || !b || !f || !agg) return safe_undef(mod);
     lr_module_t *m = mod->mod;
@@ -2364,14 +2396,15 @@ lc_value_t *lc_create_extractvalue(lc_module_compat_t *mod, lr_block_t *b,
         }
     }
 
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[1] = { lc_value_to_op_fast(agg) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_EXTRACTVALUE,
-                                      result_ty, dest, ops, 1);
-    inst->indices = lr_arena_array(m->arena, uint32_t, num_indices);
-    memcpy(inst->indices, indices, sizeof(uint32_t) * num_indices);
-    inst->num_indices = num_indices;
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(agg);
+    inst.op = LR_OP_EXTRACTVALUE;
+    inst.type = result_ty;
+    inst.operands = ops;
+    inst.num_operands = 1;
+    inst.indices = indices;
+    inst.num_indices = num_indices;
+    dest = compat_emit(mod, b, f, &inst);
     return wrap_vreg(mod, dest, result_ty, f);
 }
 
@@ -2379,17 +2412,21 @@ lc_value_t *lc_create_insertvalue(lc_module_compat_t *mod, lr_block_t *b,
                                    lr_func_t *f, lc_value_t *agg,
                                    lc_value_t *val, unsigned *indices,
                                    unsigned num_indices, const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[2];
+    uint32_t dest;
     (void)name;
     if (!mod || !b || !f || !agg) return safe_undef(mod);
-    lr_module_t *m = mod->mod;
-    uint32_t dest = lr_vreg_new(f);
-    lr_operand_t ops[2] = { lc_value_to_op_fast(agg), lc_value_to_op_fast(val) };
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_INSERTVALUE,
-                                      agg->type, dest, ops, 2);
-    inst->indices = lr_arena_array(m->arena, uint32_t, num_indices);
-    memcpy(inst->indices, indices, sizeof(uint32_t) * num_indices);
-    inst->num_indices = num_indices;
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(agg);
+    ops[1] = lc_value_to_desc(val);
+    inst.op = LR_OP_INSERTVALUE;
+    inst.type = agg->type;
+    inst.operands = ops;
+    inst.num_operands = 2;
+    inst.indices = indices;
+    inst.num_indices = num_indices;
+    dest = compat_emit(mod, b, f, &inst);
     return wrap_vreg(mod, dest, agg->type, f);
 }
 
@@ -2414,6 +2451,8 @@ static lr_func_t *ensure_libc_decl(lc_module_compat_t *mod, const char *name,
 
 void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[4];
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
@@ -2423,21 +2462,23 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
 
     (void)decl;
 
-    uint32_t nops = 4;
-    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
-    ops[0] = lr_op_global(sym_id, m->type_ptr);
-    ops[1] = lc_value_to_op_fast(dst);
-    ops[2] = lc_value_to_op_fast(src);
-    ops[3] = lc_value_to_op_fast(size);
-
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_CALL,
-                                      m->type_ptr, lr_vreg_new(f),
-                                      ops, nops);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = global_operand_desc(sym_id, m->type_ptr);
+    ops[1] = lc_value_to_desc(dst);
+    ops[2] = lc_value_to_desc(src);
+    ops[3] = lc_value_to_desc(size);
+    inst.op = LR_OP_CALL;
+    inst.type = m->type_ptr;
+    inst.operands = ops;
+    inst.num_operands = 4;
+    inst.call_fixed_args = 3;
+    (void)compat_emit(mod, b, f, &inst);
 }
 
 void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *val, lc_value_t *size) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[4];
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_i32, m->type_i64 };
@@ -2447,21 +2488,23 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
 
     (void)decl;
 
-    uint32_t nops = 4;
-    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
-    ops[0] = lr_op_global(sym_id, m->type_ptr);
-    ops[1] = lc_value_to_op_fast(dst);
-    ops[2] = lc_value_to_op_fast(val);
-    ops[3] = lc_value_to_op_fast(size);
-
-    lr_inst_t *inst = lr_inst_create(m->arena, LR_OP_CALL,
-                                      m->type_ptr, lr_vreg_new(f),
-                                      ops, nops);
-    lr_block_append(b, inst);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = global_operand_desc(sym_id, m->type_ptr);
+    ops[1] = lc_value_to_desc(dst);
+    ops[2] = lc_value_to_desc(val);
+    ops[3] = lc_value_to_desc(size);
+    inst.op = LR_OP_CALL;
+    inst.type = m->type_ptr;
+    inst.operands = ops;
+    inst.num_operands = 4;
+    inst.call_fixed_args = 3;
+    (void)compat_emit(mod, b, f, &inst);
 }
 
 void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                        lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[4];
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
@@ -2470,22 +2513,21 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!decl || sym_id == UINT32_MAX) return;
     (void)decl;
 
-    uint32_t nops = 4;
-    lr_operand_t *ops = lr_arena_array(m->arena, lr_operand_t, nops);
-    ops[0] = lr_op_global(sym_id, m->type_ptr);
-    ops[1] = lc_value_to_op_fast(dst);
-    ops[2] = lc_value_to_op_fast(src);
-    ops[3] = lc_value_to_op_fast(size);
-
-    lr_inst_t *inst2 = lr_inst_create(m->arena, LR_OP_CALL,
-                                       m->type_ptr, lr_vreg_new(f),
-                                       ops, nops);
-    lr_block_append(b, inst2);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = global_operand_desc(sym_id, m->type_ptr);
+    ops[1] = lc_value_to_desc(dst);
+    ops[2] = lc_value_to_desc(src);
+    ops[3] = lc_value_to_desc(size);
+    inst.op = LR_OP_CALL;
+    inst.type = m->type_ptr;
+    inst.operands = ops;
+    inst.num_operands = 4;
+    inst.call_fixed_args = 3;
+    (void)compat_emit(mod, b, f, &inst);
 }
 
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (!mod || !jit) return -1;
-    lc_module_finalize_phis(mod);
     {
         const char *dump_path = getenv("LIRIC_COMPAT_DUMP_FINAL_IR");
         if (dump_path && dump_path[0]) {

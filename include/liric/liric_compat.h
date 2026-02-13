@@ -92,7 +92,6 @@ void lc_context_destroy(lc_context_t *ctx);
 /* ---- Module ---- */
 lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name);
 void lc_module_destroy(lc_module_compat_t *mod);
-void lc_module_finalize_phis(lc_module_compat_t *mod);
 lr_module_t *lc_module_get_ir(lc_module_compat_t *mod);
 void lc_module_dump(lc_module_compat_t *mod);
 void lc_module_print(lc_module_compat_t *mod, FILE *out);
@@ -368,8 +367,7 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lr_type_t *ty, const char *name);
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block);
-/* Finalization is idempotent; lc_module_finalize_phis owns lc_phi_node_t
-   lifetime and releases nodes at module materialization time. */
+/* Finalization is idempotent and may be a no-op in streaming mode. */
 void lc_phi_finalize(lc_phi_node_t *phi);
 
 /* Select */
