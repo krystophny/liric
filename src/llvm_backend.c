@@ -2,6 +2,7 @@
 
 #include "jit.h"
 #include "liric.h"
+#include "platform/platform_os.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -47,8 +48,6 @@ typedef LLVMOrcJITTargetAddress lr_llvm_orc_addr_t;
 #endif
 
 #if defined(__unix__) || defined(__APPLE__)
-#include <sys/wait.h>
-#include <unistd.h>
 #define LR_LLVM_BACKEND_CAN_LINK 1
 #else
 #define LR_LLVM_BACKEND_CAN_LINK 0
@@ -329,7 +328,6 @@ static int link_executable_from_object(const char *obj_path, const char *out_pat
                                        char *err, size_t err_cap) {
     const char *cc_env = getenv("CC");
     const char *cc = (cc_env && cc_env[0]) ? cc_env : "cc";
-    pid_t pid;
     int status = 0;
     char *const argv[] = {
         (char *)cc,
@@ -339,20 +337,11 @@ static int link_executable_from_object(const char *obj_path, const char *out_pat
         NULL
     };
 
-    pid = fork();
-    if (pid < 0) {
-        set_err(err, err_cap, "fork failed while linking executable");
+    if (lr_platform_run_process(argv, false, &status) != 0) {
+        set_err(err, err_cap, "failed to launch linker process");
         return -1;
     }
-    if (pid == 0) {
-        execvp(cc, argv);
-        _exit(127);
-    }
-    if (waitpid(pid, &status, 0) < 0) {
-        set_err(err, err_cap, "waitpid failed while linking executable");
-        return -1;
-    }
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+    if (status != 0) {
         set_err(err, err_cap, "linker failed with status=%d", status);
         return -1;
     }

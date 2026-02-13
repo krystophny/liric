@@ -6,48 +6,27 @@
 #include "objfile.h"
 #include "target.h"
 #include "platform/platform.h"
+#include "platform/platform_os.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <sys/mman.h>
-#include <dlfcn.h>
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
-#include <unistd.h>
 #define LR_HAS_PTHREADS 1
 #else
 #define LR_HAS_PTHREADS 0
 #endif
 
 #ifdef LR_JIT_PROFILE
-#ifdef __APPLE__
-#include <mach/mach_time.h>
 static double lr_jit_now_us(void) {
-    static mach_timebase_info_data_t info = {0, 0};
-    if (info.denom == 0) mach_timebase_info(&info);
-    uint64_t t = mach_absolute_time();
-    return (double)(t * info.numer / info.denom) / 1e3;
+    return (double)lr_platform_time_ns() / 1e3;
 }
-#else
-#include <time.h>
-static double lr_jit_now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
-}
-#endif
 #define JIT_PROF_START(name) double _prof_##name = lr_jit_now_us()
 #define JIT_PROF_END(name) fprintf(stderr, "  jit-prof %-20s %7.2f us\n", #name, lr_jit_now_us() - _prof_##name)
 #else
 #define JIT_PROF_START(name) ((void)0)
 #define JIT_PROF_END(name) ((void)0)
-#endif
-
-#if defined(__APPLE__) && defined(__aarch64__) && defined(MAP_JIT)
-#define LR_CAN_USE_MAP_JIT 1
-#else
-#define LR_CAN_USE_MAP_JIT 0
 #endif
 
 #define CODE_PAGE_SIZE (16 * 1024 * 1024)
@@ -770,34 +749,16 @@ static size_t align_up(size_t value, size_t align) {
 }
 
 static int make_writable(lr_jit_t *j) {
-    if (j->map_jit_enabled) {
-#if LR_CAN_USE_MAP_JIT
-        pthread_jit_write_protect_np(0);
-        return 0;
-#else
-        return -1;
-#endif
-    }
-    return mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_WRITE);
+    return lr_platform_jit_make_writable(j->code_buf, j->code_cap, j->map_jit_enabled);
 }
 
 static int make_executable_from(lr_jit_t *j, size_t clear_from) {
     if (clear_from > j->code_size)
         clear_from = j->code_size;
-    if (clear_from < j->code_size) {
-        __builtin___clear_cache((char *)(j->code_buf + clear_from),
-                                (char *)(j->code_buf + j->code_size));
-    }
-
-    if (j->map_jit_enabled) {
-#if LR_CAN_USE_MAP_JIT
-        pthread_jit_write_protect_np(1);
-        return 0;
-#else
-        return -1;
-#endif
-    }
-    return mprotect(j->code_buf, j->code_cap, PROT_READ | PROT_EXEC);
+    const void *clear_begin = (clear_from < j->code_size) ? (j->code_buf + clear_from) : NULL;
+    const void *clear_end = (clear_from < j->code_size) ? (j->code_buf + j->code_size) : NULL;
+    return lr_platform_jit_make_executable(j->code_buf, j->code_cap, j->map_jit_enabled,
+                                           clear_begin, clear_end);
 }
 
 static int make_executable(lr_jit_t *j) {
@@ -846,42 +807,20 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     }
 
     j->code_cap = CODE_PAGE_SIZE;
-    int code_prot = PROT_READ | PROT_WRITE;
-    int code_flags = MAP_PRIVATE | MAP_ANONYMOUS;
-
-#if LR_CAN_USE_MAP_JIT
-    code_prot |= PROT_EXEC;
-    code_flags |= MAP_JIT;
-#endif
-
-    j->code_buf = mmap(NULL, j->code_cap, code_prot, code_flags, -1, 0);
-    if (j->code_buf == MAP_FAILED) {
-#if LR_CAN_USE_MAP_JIT
-        j->code_buf = mmap(NULL, j->code_cap, PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        j->map_jit_enabled = false;
-        if (j->code_buf == MAP_FAILED)
-#endif
-        {
-            free(j->lazy_func_buckets);
-            free(j->miss_buckets);
-            free(j->sym_buckets);
-            lr_arena_destroy(j->arena);
-            free(j);
-            return NULL;
-        }
-    } else {
-#if LR_CAN_USE_MAP_JIT
-        j->map_jit_enabled = true;
-        pthread_jit_write_protect_np(0);
-#endif
+    j->code_buf = lr_platform_alloc_jit_code(j->code_cap, &j->map_jit_enabled);
+    if (!j->code_buf) {
+        free(j->lazy_func_buckets);
+        free(j->miss_buckets);
+        free(j->sym_buckets);
+        lr_arena_destroy(j->arena);
+        free(j);
+        return NULL;
     }
 
     j->data_cap = DATA_PAGE_SIZE;
-    j->data_buf = mmap(NULL, j->data_cap, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (j->data_buf == MAP_FAILED) {
-        munmap(j->code_buf, j->code_cap);
+    j->data_buf = lr_platform_alloc_rw(j->data_cap);
+    if (!j->data_buf) {
+        (void)lr_platform_free_pages(j->code_buf, j->code_cap);
         free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
@@ -891,8 +830,8 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     }
 
     if (make_executable(j) != 0) {
-        munmap(j->data_buf, j->data_cap);
-        munmap(j->code_buf, j->code_cap);
+        (void)lr_platform_free_pages(j->data_buf, j->data_cap);
+        (void)lr_platform_free_pages(j->code_buf, j->code_cap);
         free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
@@ -902,8 +841,8 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     }
 
     if (register_default_symbol_providers(j) != 0) {
-        munmap(j->data_buf, j->data_cap);
-        munmap(j->code_buf, j->code_cap);
+        (void)lr_platform_free_pages(j->data_buf, j->data_cap);
+        (void)lr_platform_free_pages(j->code_buf, j->code_cap);
         free(j->lazy_func_buckets);
         free(j->miss_buckets);
         free(j->sym_buckets);
@@ -1147,7 +1086,7 @@ static void register_builtin_symbols(lr_jit_t *j) {
 int lr_jit_load_library(lr_jit_t *j, const char *path) {
     if (!j || !path || !path[0])
         return -1;
-    void *handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+    void *handle = lr_platform_dlopen(path);
     if (!handle)
         return -1;
     lr_lib_entry_t *entry = lr_arena_new(j->arena, lr_lib_entry_t);
@@ -1164,7 +1103,7 @@ static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name)
     if (!j || !name || !name[0])
         return NULL;
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
-        void *addr = dlsym(l->handle, name);
+        void *addr = lr_platform_dlsym(l->handle, name);
         if (addr)
             return addr;
     }
@@ -1175,7 +1114,7 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
     (void)j;
     if (!name || !name[0])
         return NULL;
-    return dlsym(RTLD_DEFAULT, name);
+    return lr_platform_dlsym_default(name);
 }
 
 static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) {
@@ -2538,12 +2477,12 @@ void lr_jit_destroy(lr_jit_t *j) {
     lr_llvm_jit_dispose(j);
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
         if (l->handle)
-            dlclose(l->handle);
+            (void)lr_platform_dlclose(l->handle);
     }
-    if (j->code_buf && j->code_buf != MAP_FAILED)
-        munmap(j->code_buf, j->code_cap);
-    if (j->data_buf && j->data_buf != MAP_FAILED)
-        munmap(j->data_buf, j->data_cap);
+    if (j->code_buf)
+        (void)lr_platform_free_pages(j->code_buf, j->code_cap);
+    if (j->data_buf)
+        (void)lr_platform_free_pages(j->data_buf, j->data_cap);
     free(j->lazy_func_buckets);
     free(j->miss_buckets);
     free(j->sym_buckets);

@@ -3,15 +3,11 @@
 #include "objfile_elf.h"
 #include "liric.h"
 #include "platform/platform.h"
+#include "platform/platform_os.h"
 #include "arena.h"
 #include <stdlib.h>
 #include <string.h>
-#ifdef __APPLE__
-#include <errno.h>
-#include <fcntl.h>
-#endif
 #if !defined(_WIN32)
-#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -355,42 +351,16 @@ static int write_object_payload(FILE *out, const lr_target_t *target,
 }
 
 #ifdef __APPLE__
-static int run_process_quiet(char *const argv[]) {
-    pid_t pid;
-    int status = 0;
-    if (!argv || !argv[0])
-        return -1;
-    pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            (void)dup2(devnull, STDOUT_FILENO);
-            (void)dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    while (waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR)
-            return -1;
-    }
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-        return 128 + WTERMSIG(status);
-    return -1;
-}
-
 static int run_codesign_adhoc(const char *path) {
     char *const argv[] = {
         "/usr/bin/codesign", "--force", "--sign", "-", (char *)path, NULL
     };
+    int status = -1;
     if (!path || !path[0])
         return -1;
-    return run_process_quiet(argv);
+    if (lr_platform_run_process(argv, true, &status) != 0)
+        return -1;
+    return status;
 }
 
 static int copy_file_to_stream(const char *path, FILE *out) {
