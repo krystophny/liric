@@ -28,6 +28,65 @@ static inline void fn_ptr_cast(void *dst, void *src) {
     do { void *_p = lr_jit_get_function((jit), (name)); \
          fn_ptr_cast(&(fn_var), _p); } while (0)
 
+static void set_compile_mode_env(const char *value) {
+#if defined(_WIN32)
+    if (value) {
+        (void)_putenv_s("LIRIC_COMPILE_MODE", value);
+    } else {
+        (void)_putenv_s("LIRIC_COMPILE_MODE", "");
+    }
+#else
+    if (value) {
+        (void)setenv("LIRIC_COMPILE_MODE", value, 1);
+    } else {
+        (void)unsetenv("LIRIC_COMPILE_MODE");
+    }
+#endif
+}
+
+static int build_compat_ret_module(lc_module_compat_t *mod, const char *name, int rv) {
+    lr_module_t *ir = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *fn_ty = NULL;
+    lc_value_t *fn_val = NULL;
+    lr_func_t *fn = NULL;
+    lc_value_t *entry_val = NULL;
+    lr_block_t *entry = NULL;
+    lc_value_t *retv = NULL;
+
+    if (!mod || !name)
+        return -1;
+
+    ir = lc_module_get_ir(mod);
+    i32 = lc_get_int_type(mod, 32);
+    if (!ir || !i32)
+        return -1;
+
+    fn_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+    if (!fn_ty)
+        return -1;
+
+    fn_val = lc_func_create(mod, name, fn_ty);
+    if (!fn_val)
+        return -1;
+    fn = lc_value_get_func(fn_val);
+    if (!fn)
+        return -1;
+
+    entry_val = lc_block_create(mod, fn, "entry");
+    if (!entry_val)
+        return -1;
+    entry = lc_value_get_block(entry_val);
+    if (!entry)
+        return -1;
+
+    retv = lc_value_const_int(mod, i32, rv, 32);
+    if (!retv)
+        return -1;
+    lc_create_ret(mod, entry, retv);
+    return 0;
+}
+
 int test_builder_compat_add_to_jit(void) {
     lc_context_t *ctx = lc_context_create();
     TEST_ASSERT(ctx != NULL, "context create");
@@ -233,4 +292,143 @@ int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void) {
     lc_module_destroy(mod);
     lc_context_destroy(ctx);
     return 0;
+}
+
+int test_builder_compat_emit_object_to_file(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_emit_obj_file");
+    TEST_ASSERT(mod != NULL, "compat module create");
+    TEST_ASSERT_EQ(build_compat_ret_module(mod, "main", 42), 0, "build module");
+
+    FILE *tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile create");
+
+    int rc = lc_module_emit_object_to_file(mod, tmp);
+    TEST_ASSERT_EQ(rc, 0, "emit object to stream");
+    TEST_ASSERT_EQ(fseek(tmp, 0, SEEK_END), 0, "seek end");
+    long sz = ftell(tmp);
+    TEST_ASSERT(sz > 0, "object stream non-empty");
+
+    fclose(tmp);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
+int test_builder_compat_emit_object_llvm_mode_contract(void) {
+    int rc = -1;
+    int result = 1;
+    const char *path = "/tmp/liric_test_compat_emit_obj_llvm.o";
+    char prev_mode[64] = {0};
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+
+    if (old_mode)
+        (void)snprintf(prev_mode, sizeof(prev_mode), "%s", old_mode);
+    set_compile_mode_env("llvm");
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    mod = lc_module_create(ctx, "compat_emit_obj_llvm");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+    if (build_compat_ret_module(mod, "main", 42) != 0) {
+        fprintf(stderr, "  FAIL: build module\n");
+        goto cleanup;
+    }
+
+    rc = lc_module_emit_object(mod, path);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: llvm mode object emission expected success\n");
+        goto cleanup;
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode object emission expected failure when backend disabled\n");
+        goto cleanup;
+    }
+#endif
+    result = 0;
+
+cleanup:
+    if (old_mode && old_mode[0]) {
+        set_compile_mode_env(prev_mode);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    remove(path);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    return result;
+}
+
+int test_builder_compat_emit_executable_llvm_mode_contract(void) {
+    int rc = -1;
+    int result = 1;
+    const char *path = "/tmp/liric_test_compat_emit_exe_llvm";
+    char prev_mode[64] = {0};
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    static const char *runtime_ll =
+        "define i32 @__lfortran_rt_dummy() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+
+    if (old_mode)
+        (void)snprintf(prev_mode, sizeof(prev_mode), "%s", old_mode);
+    set_compile_mode_env("llvm");
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    mod = lc_module_create(ctx, "compat_emit_exe_llvm");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+    if (build_compat_ret_module(mod, "main", 42) != 0) {
+        fprintf(stderr, "  FAIL: build module\n");
+        goto cleanup;
+    }
+
+    rc = lc_module_emit_executable(mod, path, runtime_ll, strlen(runtime_ll));
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: llvm mode executable emission expected success\n");
+        goto cleanup;
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode executable emission expected failure when backend disabled\n");
+        goto cleanup;
+    }
+#endif
+    result = 0;
+
+cleanup:
+    if (old_mode && old_mode[0]) {
+        set_compile_mode_env(prev_mode);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    remove(path);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    return result;
 }

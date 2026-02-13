@@ -1,17 +1,12 @@
 #include "ir.h"
 #include "arena.h"
-#include "compile_mode.h"
 #include "jit.h"
 #include "liric.h"
-#include "llvm_backend.h"
-#include "objfile.h"
+#include "module_emit.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
-#if defined(__unix__) || defined(__APPLE__)
-#include <unistd.h>
-#endif
 
 /* ---- Compat types (must match the public header exactly) ---- */
 
@@ -196,27 +191,6 @@ static void ensure_cache_owner(lc_module_compat_t *mod) {
     if (mod->cache_owner_mod != mod->mod)
         clear_symbol_caches(mod);
 }
-
-#if defined(__unix__) || defined(__APPLE__)
-static int copy_file_to_stream(const char *path, FILE *out) {
-    FILE *in = NULL;
-    uint8_t buf[8192];
-    size_t n = 0;
-    if (!path || !out)
-        return -1;
-    in = fopen(path, "rb");
-    if (!in)
-        return -1;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) {
-            fclose(in);
-            return -1;
-        }
-    }
-    fclose(in);
-    return ferror(out) ? -1 : 0;
-}
-#endif
 
 static int ensure_symbol_cache_cap(lc_module_compat_t *mod, uint32_t min_cap) {
     if (!mod) return -1;
@@ -2520,70 +2494,24 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
 }
 
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
-    lr_compile_mode_t mode;
-    const lr_target_t *target;
+    char emit_err[256] = {0};
     if (!mod || !out) return -1;
-    target = lr_target_host();
-    if (!target) return -1;
-    mode = lr_compile_mode_from_env();
-    if (mode == LR_COMPILE_LLVM) {
-#if defined(__unix__) || defined(__APPLE__)
-        char tmp_tpl[] = "/tmp/liric_compat_obj_XXXXXX";
-        char backend_err[256] = {0};
-        int fd = mkstemp(tmp_tpl);
-        int rc = -1;
-        if (fd < 0)
-            return -1;
-        close(fd);
-        rc = lr_llvm_emit_object_path(mod->mod, target, tmp_tpl,
-                                      backend_err, sizeof(backend_err));
-        if (rc == 0)
-            rc = copy_file_to_stream(tmp_tpl, out);
-        unlink(tmp_tpl);
-        return rc;
-#else
-        return -1;
-#endif
-    }
-    return lr_emit_object(mod->mod, target, out);
+    return lr_emit_module_object_stream(mod->mod, NULL, out,
+                                        emit_err, sizeof(emit_err));
 }
 
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
-    lr_compile_mode_t mode;
-    const lr_target_t *target;
-    char backend_err[256] = {0};
+    char emit_err[256] = {0};
     if (!mod || !filename) return -1;
-    target = lr_target_host();
-    if (!target) return -1;
-    mode = lr_compile_mode_from_env();
-    if (mode == LR_COMPILE_LLVM) {
-        return lr_llvm_emit_object_path(mod->mod, target, filename,
-                                        backend_err, sizeof(backend_err));
-    }
-    FILE *f = fopen(filename, "wb");
-    if (!f) return -1;
-    int rc = lc_module_emit_object_to_file(mod, f);
-    fclose(f);
-    return rc;
+    return lr_emit_module_object_path(mod->mod, NULL, filename,
+                                      emit_err, sizeof(emit_err));
 }
 
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
-    lr_compile_mode_t mode;
+    char emit_err[256] = {0};
     if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
-    const lr_target_t *target = lr_target_host();
-    if (!target) return -1;
-    mode = lr_compile_mode_from_env();
-    if (mode == LR_COMPILE_LLVM) {
-        char backend_err[256] = {0};
-        return lr_llvm_emit_executable_path(mod->mod, runtime_ll, runtime_len,
-                                            target, filename, "main",
-                                            backend_err, sizeof(backend_err));
-    }
-    FILE *f = fopen(filename, "wb");
-    if (!f) return -1;
-    int rc = lr_emit_executable_with_runtime(mod->mod, runtime_ll, runtime_len,
-                                              target, f, "main");
-    fclose(f);
-    return rc;
+    return lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
+                                          runtime_ll, runtime_len,
+                                          emit_err, sizeof(emit_err));
 }
