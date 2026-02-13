@@ -255,6 +255,8 @@ int test_cp_shift_ops(void);
 int test_cp_sdiv_srem(void);
 int test_cp_fallback_to_isel(void);
 int test_cp_immediate_operand(void);
+int test_cp_add_ret_supernode_i32(void);
+int test_cp_add_ret_supernode_i64(void);
 #endif
 
 #if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))
@@ -524,6 +526,8 @@ int main(void) {
     RUN_TEST(test_cp_sdiv_srem);
     RUN_TEST(test_cp_fallback_to_isel);
     RUN_TEST(test_cp_immediate_operand);
+    RUN_TEST(test_cp_add_ret_supernode_i32);
+    RUN_TEST(test_cp_add_ret_supernode_i64);
 #endif
 
 #if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))

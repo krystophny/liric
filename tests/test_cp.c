@@ -28,6 +28,19 @@ static lr_module_t *parse(const char *src, lr_arena_t *arena) {
     return m;
 }
 
+static size_t count_pattern(const uint8_t *buf, size_t buf_len,
+                            const uint8_t *pat, size_t pat_len) {
+    size_t count = 0;
+    size_t i;
+    if (!buf || !pat || pat_len == 0 || buf_len < pat_len)
+        return 0;
+    for (i = 0; i + pat_len <= buf_len; i++) {
+        if (memcmp(buf + i, pat, pat_len) == 0)
+            count++;
+    }
+    return count;
+}
+
 /*
  * Create a JIT instance in copy-and-patch mode by temporarily setting
  * the LIRIC_COMPILE_MODE env var.
@@ -261,6 +274,86 @@ int test_cp_immediate_operand(void) {
 
     TEST_ASSERT_EQ(fn(42), 142, "add_imm(42)");
     TEST_ASSERT_EQ(fn(-100), 0, "add_imm(-100)");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_cp_add_ret_supernode_i32(void) {
+    const char *fused_src =
+        "define i32 @fused(i32 %a, i32 %b) {\n"
+        "entry:\n"
+        "  %c = add i32 %a, %b\n"
+        "  ret i32 %c\n"
+        "}\n";
+    const uint8_t mov_rdi_rbp[] = {0x48, 0x89, 0xEF};
+    size_t code_off = 0;
+    size_t code_len = 0;
+    uint8_t *start = NULL;
+
+    lr_arena_t *arena_fused = lr_arena_create(0);
+    lr_module_t *m_fused = parse(fused_src, arena_fused);
+    TEST_ASSERT(m_fused != NULL, "parse fused");
+
+    lr_jit_t *jit_fused = create_cp_jit();
+    TEST_ASSERT(jit_fused != NULL, "create fused jit");
+    TEST_ASSERT_EQ(lr_jit_add_module(jit_fused, m_fused), 0, "add fused module");
+
+    {
+        typedef int (*fn_t)(int, int);
+        fn_t fn;
+        LR_JIT_GET_FN(fn, jit_fused, "fused");
+        TEST_ASSERT(fn != NULL, "lookup fused");
+        TEST_ASSERT_EQ(fn(20, 22), 42, "fused(20,22)");
+    }
+    start = (uint8_t *)lr_jit_get_function(jit_fused, "fused");
+    TEST_ASSERT(start != NULL, "fused code start");
+    code_off = (size_t)(start - jit_fused->code_buf);
+    TEST_ASSERT(code_off < jit_fused->code_size, "fused code offset");
+    code_len = jit_fused->code_size - code_off;
+    TEST_ASSERT(count_pattern(start, code_len, mov_rdi_rbp, sizeof(mov_rdi_rbp)) == 0,
+                "fused add+ret bypasses stencil move setup");
+
+    lr_jit_destroy(jit_fused);
+    lr_arena_destroy(arena_fused);
+    return 0;
+}
+
+int test_cp_add_ret_supernode_i64(void) {
+    const char *src =
+        "define i64 @fused64(i64 %a, i64 %b) {\n"
+        "entry:\n"
+        "  %c = add i64 %a, %b\n"
+        "  ret i64 %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = create_cp_jit();
+    TEST_ASSERT(jit != NULL, "create jit");
+    TEST_ASSERT_EQ(lr_jit_add_module(jit, m), 0, "jit add module");
+
+    {
+        const uint8_t store_rax_dest[] = {0x48, 0x89, 0x85};
+        size_t code_off = 0;
+        size_t code_len = 0;
+        uint8_t *start = NULL;
+        typedef long long (*fn_t)(long long, long long);
+        fn_t fn;
+        LR_JIT_GET_FN(fn, jit, "fused64");
+        TEST_ASSERT(fn != NULL, "function lookup");
+        TEST_ASSERT_EQ(fn(40, 2), 42, "fused64(40,2)");
+        TEST_ASSERT_EQ(fn(-2, 2), 0, "fused64(-2,2)");
+        start = (uint8_t *)lr_jit_get_function(jit, "fused64");
+        TEST_ASSERT(start != NULL, "fused64 code start");
+        code_off = (size_t)(start - jit->code_buf);
+        TEST_ASSERT(code_off < jit->code_size, "fused64 code offset");
+        code_len = jit->code_size - code_off;
+        TEST_ASSERT(count_pattern(start, code_len, store_rax_dest, sizeof(store_rax_dest)) == 0,
+                    "fused64 add+ret omits intermediate stack store");
+    }
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);

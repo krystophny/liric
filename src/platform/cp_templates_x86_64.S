@@ -74,6 +74,30 @@ lr_cp_add_i32_begin:
     mov [rbp + 0x33333333], eax
 lr_cp_add_i32_end:
 
+/* ---- add+ret i64 supernode ---- */
+
+.globl lr_cp_add_ret_i64_begin
+.globl lr_cp_add_ret_i64_end
+lr_cp_add_ret_i64_begin:
+    mov rax, [rbp + 0x11111111]
+    add rax, [rbp + 0x22222222]
+    mov rsp, rbp
+    pop rbp
+    ret
+lr_cp_add_ret_i64_end:
+
+/* ---- add+ret i32 supernode ---- */
+
+.globl lr_cp_add_ret_i32_begin
+.globl lr_cp_add_ret_i32_end
+lr_cp_add_ret_i32_begin:
+    mov eax, [rbp + 0x11111111]
+    add eax, [rbp + 0x22222222]
+    mov rsp, rbp
+    pop rbp
+    ret
+lr_cp_add_ret_i32_end:
+
 /* ---- sub i64 ---- */
 
 .globl lr_cp_sub_i64_begin
