@@ -198,9 +198,11 @@ static void stream_begin(struct lr_session *s) {
     stream_reset(&s->stream);
     can_stream = (s->cfg.mode == SESSION_MODE_DIRECT &&
                   s->jit &&
-                  s->jit->mode == LR_COMPILE_COPY_PATCH &&
                   s->jit->target &&
-                  s->jit->target->compile_func_cp);
+                  ((s->jit->mode == LR_COMPILE_COPY_PATCH &&
+                    s->jit->target->compile_func_cp) ||
+                   (s->jit->mode == LR_COMPILE_ISEL &&
+                    s->jit->target->compile_func)));
     s->stream.enabled = can_stream;
     s->stream.supported = can_stream;
 }
@@ -335,18 +337,27 @@ static int validate_stream_blocks(struct lr_session *s, session_error_t *err) {
 }
 
 static int stream_can_compile_direct(struct lr_session *s) {
-#if !defined(__x86_64__) && !defined(_M_X64)
-    (void)s;
-    return 0;
-#else
+    bool use_copy_patch = false;
     bool saw_terminator = false;
     session_stream_inst_t *it;
 
     if (!s || !s->stream.enabled || !s->stream.supported || !s->jit ||
-        !s->jit->target || !s->jit->target->compile_func_cp || !s->cur_func)
+        !s->jit->target || !s->cur_func)
         return 0;
+
+    use_copy_patch = s->jit->mode == LR_COMPILE_COPY_PATCH;
+    if (use_copy_patch && !s->jit->target->compile_func_cp)
+        return 0;
+    if (!use_copy_patch && s->jit->mode == LR_COMPILE_ISEL &&
+        !s->jit->target->compile_func)
+        return 0;
+    if (s->jit->mode != LR_COMPILE_COPY_PATCH &&
+        s->jit->mode != LR_COMPILE_ISEL)
+        return 0;
+
     if (s->block_count != 1 || s->cur_func->num_params > 6 || s->cur_func->vararg)
         return 0;
+
     for (it = s->stream.first; it; it = it->next) {
         if (it->block_id != 0 || !stream_inst_supported(&it->desc))
             return 0;
@@ -356,17 +367,12 @@ static int stream_can_compile_direct(struct lr_session *s) {
             saw_terminator = true;
     }
     return saw_terminator ? 1 : 0;
-#endif
 }
 
 static int stream_compile_direct(struct lr_session *s, void **out_addr,
                                  session_error_t *err) {
-#if !defined(__x86_64__) && !defined(_M_X64)
-    (void)s;
-    (void)out_addr;
-    err_set(err, S_ERR_BACKEND, "stream direct compile not supported on this target");
-    return -1;
-#else
+    int (*compile_func_direct)(lr_func_t *, lr_module_t *, uint8_t *, size_t,
+                               size_t *, lr_arena_t *) = NULL;
     lr_jit_t *j = NULL;
     session_stream_inst_t *it = NULL;
     lr_inst_t *insts = NULL;
@@ -380,13 +386,22 @@ static int stream_compile_direct(struct lr_session *s, void **out_addr,
     size_t code_len = 0;
     bool opened_update = false;
 
-    if (!s || !s->cur_func || !s->jit || !s->jit->target ||
-        !s->jit->target->compile_func_cp || !s->cur_func->name) {
+    if (!s || !s->cur_func || !s->jit || !s->jit->target || !s->cur_func->name) {
         err_set(err, S_ERR_STATE, "stream direct compile unavailable");
         return -1;
     }
 
     j = s->jit;
+    if (j->mode == LR_COMPILE_COPY_PATCH)
+        compile_func_direct = j->target->compile_func_cp;
+    else if (j->mode == LR_COMPILE_ISEL)
+        compile_func_direct = j->target->compile_func;
+
+    if (!compile_func_direct) {
+        err_set(err, S_ERR_MODE, "stream direct compile unsupported in this mode");
+        return -1;
+    }
+
     insts = (lr_inst_t *)calloc(s->stream.count, sizeof(*insts));
     inst_ptrs = (lr_inst_t **)calloc(s->stream.count, sizeof(*inst_ptrs));
     inst_operands = (lr_operand_t **)calloc(s->stream.count, sizeof(*inst_operands));
@@ -411,11 +426,14 @@ static int stream_compile_direct(struct lr_session *s, void **out_addr,
                 inst_operands[i][oi] = desc_to_op(&it->desc.operands[oi]);
             insts[i].operands = inst_operands[i];
         }
+        insts[i].next = (i + 1 < s->stream.count) ? &insts[i + 1] : NULL;
         inst_ptrs[i] = &insts[i];
     }
 
     memset(&block, 0, sizeof(block));
     block.id = 0;
+    block.first = s->stream.count > 0 ? &insts[0] : NULL;
+    block.last = s->stream.count > 0 ? &insts[s->stream.count - 1] : NULL;
     block.inst_array = inst_ptrs;
     block.num_insts = s->stream.count;
 
@@ -427,7 +445,10 @@ static int stream_compile_direct(struct lr_session *s, void **out_addr,
     func.vararg = s->cur_func->vararg;
     func.next_vreg = s->cur_func->next_vreg;
     func.num_blocks = 1;
+    func.first_block = &block;
+    func.last_block = &block;
     func.block_array = blocks;
+    block.func = &func;
 
     if (!j->update_active) {
         lr_jit_begin_update(j);
@@ -441,8 +462,8 @@ static int stream_compile_direct(struct lr_session *s, void **out_addr,
     {
         size_t free_space = j->code_cap - j->code_size;
         uint8_t *func_start = j->code_buf + j->code_size;
-        rc = j->target->compile_func_cp(&func, s->module, func_start,
-                                        free_space, &code_len, j->arena);
+        rc = compile_func_direct(&func, s->module, func_start,
+                                 free_space, &code_len, j->arena);
         if (rc != 0 || code_len > free_space) {
             err_set(err, S_ERR_BACKEND, "stream direct compile failed");
             rc = -1;
@@ -469,7 +490,6 @@ cleanup:
     free(inst_ptrs);
     free(insts);
     return rc;
-#endif
 }
 
 static int session_emit_ir_desc(struct lr_session *s, const session_inst_desc_t *inst,
@@ -1130,15 +1150,60 @@ int lr_session_dump_ir(struct lr_session *s, FILE *out, session_error_t *err) {
     return 0;
 }
 
+static int session_compile_parsed_module(struct lr_session *s, lr_module_t *m,
+                                         const char *input_kind,
+                                         void **out_addr,
+                                         session_error_t *err) {
+    lr_func_t *last_def = NULL;
+    lr_owned_module_t *node = NULL;
+    int rc;
+
+    if (!s || !s->jit || !m) {
+        err_set(err, S_ERR_ARGUMENT, "invalid compiled module arguments");
+        return -1;
+    }
+
+    rc = lr_jit_add_module(s->jit, m);
+    if (rc != 0) {
+        lr_module_free(m);
+        err_set(err, S_ERR_BACKEND, "%s module code generation failed",
+                input_kind ? input_kind : "input");
+        return -1;
+    }
+
+    node = (lr_owned_module_t *)calloc(1, sizeof(*node));
+    if (!node) {
+        lr_module_free(m);
+        err_set(err, S_ERR_BACKEND, "module ownership registration failed");
+        return -1;
+    }
+    node->module = m;
+    node->next = s->owned_modules;
+    s->owned_modules = node;
+
+    if (!out_addr)
+        return 0;
+
+    *out_addr = NULL;
+    for (last_def = m->first_func; last_def; last_def = last_def->next) {
+        if (!last_def->is_decl && last_def->name && last_def->name[0])
+            *out_addr = lr_jit_get_function(s->jit, last_def->name);
+    }
+
+    if (!*out_addr) {
+        err_set(err, S_ERR_NOT_FOUND, "no defined function found in %s input",
+                input_kind ? input_kind : "module");
+        return -1;
+    }
+    return 0;
+}
+
 /* ---- Convenience: parse+compile .ll text ------------------------------- */
 
 int lr_session_compile_ll(struct lr_session *s, const char *src, size_t len,
                            void **out_addr, session_error_t *err) {
     char parse_err[256];
     lr_module_t *m = NULL;
-    lr_func_t *last_def = NULL;
-    lr_owned_module_t *node = NULL;
-    int rc;
 
     err_clear(err);
     if (out_addr)
@@ -1160,35 +1225,63 @@ int lr_session_compile_ll(struct lr_session *s, const char *src, size_t len,
         return -1;
     }
 
-    rc = lr_jit_add_module(s->jit, m);
-    if (rc != 0) {
-        lr_module_free(m);
-        err_set(err, S_ERR_BACKEND, "ll module code generation failed");
+    return session_compile_parsed_module(s, m, "ll", out_addr, err);
+}
+
+int lr_session_compile_bc(struct lr_session *s, const uint8_t *data, size_t len,
+                          void **out_addr, session_error_t *err) {
+    char parse_err[256];
+    lr_module_t *m = NULL;
+
+    err_clear(err);
+    if (out_addr)
+        *out_addr = NULL;
+    if (!s || !s->jit || !data || len == 0) {
+        err_set(err, S_ERR_ARGUMENT, "invalid bc input");
+        return -1;
+    }
+    if (s->cur_func) {
+        err_set(err, S_ERR_STATE, "cannot parse bc during active function");
         return -1;
     }
 
-    node = (lr_owned_module_t *)calloc(1, sizeof(*node));
-    if (!node) {
-        lr_module_free(m);
-        err_set(err, S_ERR_BACKEND, "module ownership registration failed");
+    parse_err[0] = '\0';
+    m = lr_parse_bc(data, len, parse_err, sizeof(parse_err));
+    if (!m) {
+        err_set(err, S_ERR_PARSE, "bc parse failed: %s",
+                parse_err[0] ? parse_err : "unknown error");
         return -1;
     }
-    node->module = m;
-    node->next = s->owned_modules;
-    s->owned_modules = node;
 
-    for (last_def = m->first_func; last_def; last_def = last_def->next) {
-        if (!last_def->is_decl && last_def->name && last_def->name[0]) {
-            if (out_addr)
-                *out_addr = lr_jit_get_function(s->jit, last_def->name);
-        }
-    }
+    return session_compile_parsed_module(s, m, "bc", out_addr, err);
+}
 
-    if (out_addr && !*out_addr) {
-        err_set(err, S_ERR_NOT_FOUND, "no defined function found in ll input");
+int lr_session_compile_auto(struct lr_session *s, const uint8_t *data, size_t len,
+                            void **out_addr, session_error_t *err) {
+    char parse_err[256];
+    lr_module_t *m = NULL;
+
+    err_clear(err);
+    if (out_addr)
+        *out_addr = NULL;
+    if (!s || !s->jit || !data || len == 0) {
+        err_set(err, S_ERR_ARGUMENT, "invalid auto input");
         return -1;
     }
-    return 0;
+    if (s->cur_func) {
+        err_set(err, S_ERR_STATE, "cannot parse input during active function");
+        return -1;
+    }
+
+    parse_err[0] = '\0';
+    m = lr_parse_auto(data, len, parse_err, sizeof(parse_err));
+    if (!m) {
+        err_set(err, S_ERR_PARSE, "auto parse failed: %s",
+                parse_err[0] ? parse_err : "unknown error");
+        return -1;
+    }
+
+    return session_compile_parsed_module(s, m, "auto", out_addr, err);
 }
 
 /* ---- Output ------------------------------------------------------------ */
