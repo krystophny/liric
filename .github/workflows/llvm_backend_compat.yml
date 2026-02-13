@@ -87,3 +87,50 @@ jobs:
             -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
           cmake --build build -j"$(nproc)"
           ctest --test-dir build --output-on-failure
+
+  llvm-backend-legacy:
+    name: LLVM backend (legacy apt llvm-${{ matrix.llvm-version }})
+    runs-on: ubuntu-latest
+    container: ubuntu:16.04
+    strategy:
+      fail-fast: false
+      matrix:
+        llvm-version: ["3.8", "3.9", "4.0"]
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            git ca-certificates wget \
+            gcc g++ make ninja-build \
+            zlib1g-dev libtinfo-dev \
+            llvm-${{ matrix.llvm-version }}-dev
+          wget -qO /tmp/cmake.tar.gz \
+            "https://github.com/Kitware/CMake/releases/download/v3.28.0/cmake-3.28.0-linux-x86_64.tar.gz"
+          tar xf /tmp/cmake.tar.gz -C /opt
+          ln -s /opt/cmake-3.28.0-linux-x86_64/bin/cmake /usr/local/bin/cmake
+          ln -s /opt/cmake-3.28.0-linux-x86_64/bin/ctest /usr/local/bin/ctest
+
+      - name: Checkout
+        run: |
+          git init
+          git remote add origin "https://github.com/${{ github.repository }}.git"
+          git fetch --depth=1 origin "${{ github.ref }}"
+          git checkout FETCH_HEAD
+
+      - name: Build and test
+        run: |
+          llvm_config="$(command -v llvm-config-${{ matrix.llvm-version }} || command -v llvm-config || true)"
+          if [ -z "${llvm_config}" ]; then
+            echo "llvm-config not found" >&2
+            exit 1
+          fi
+          cmake -S . -B build -G Ninja \
+            -DWITH_REAL_LLVM_BACKEND=ON \
+            -DWITH_LLVM_COMPAT=OFF \
+            -DWITH_BENCH_TCC=OFF \
+            -DWITH_BENCH_LLI_PHASES=OFF \
+            -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
+          cmake --build build -j"$(nproc)"
+          ctest --test-dir build --output-on-failure
