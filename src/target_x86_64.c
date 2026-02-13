@@ -1902,7 +1902,8 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                 if (inst->operands[0].kind == LR_VAL_GLOBAL) {
                     use_external_sysv_fp =
                         call_uses_external_sysv_abi(&ctx, inst, &callee_func);
-                    callee_vararg = callee_func && callee_func->vararg;
+                    callee_vararg = (callee_func && callee_func->vararg) ||
+                                    inst->call_vararg;
                 } else {
                     use_external_sysv_fp = inst->call_external_abi;
                     callee_vararg = inst->call_vararg;

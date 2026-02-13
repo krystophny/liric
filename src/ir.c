@@ -179,6 +179,7 @@ lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
     inst->num_indices = 0;
     inst->call_external_abi = false;
     inst->call_vararg = false;
+    inst->call_fixed_args = 0;
     inst->next = NULL;
     return inst;
 }
@@ -1116,6 +1117,7 @@ static void merge_deep_copy_func_body(lr_module_t *dest, lr_func_t *df,
             di->num_indices = si->num_indices;
             di->call_external_abi = si->call_external_abi;
             di->call_vararg = si->call_vararg;
+            di->call_fixed_args = si->call_fixed_args;
 
             if (si->num_indices > 0 && si->indices) {
                 di->indices = lr_arena_array(a, uint32_t, si->num_indices);

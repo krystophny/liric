@@ -561,6 +561,49 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
     return false;
 }
 
+#if defined(__APPLE__)
+static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
+    if (!mod || !name)
+        return NULL;
+    for (lr_func_t *f = mod->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static uint32_t call_fixed_arg_count(const a64_compile_ctx_t *ctx,
+                                     const lr_inst_t *inst,
+                                     uint32_t nargs) {
+    uint32_t fixed = 0;
+
+    if (!inst)
+        return 0;
+    fixed = inst->call_fixed_args;
+    if (fixed > nargs)
+        fixed = nargs;
+    if (fixed != 0)
+        return fixed;
+
+    if (!ctx || !ctx->mod || !inst->call_vararg || inst->num_operands == 0)
+        return fixed;
+    if (inst->operands[0].kind != LR_VAL_GLOBAL)
+        return fixed;
+
+    {
+        const char *sym_name = lr_module_symbol_name(ctx->mod,
+                                                     inst->operands[0].global_id);
+        lr_func_t *callee = find_module_function(ctx->mod, sym_name);
+        if (callee && callee->vararg)
+            fixed = callee->num_params;
+    }
+
+    if (fixed > nargs)
+        fixed = nargs;
+    return fixed;
+}
+#endif
+
 static void attach_obj_symbol_defined_cache(a64_compile_ctx_t *ctx) {
     if (!ctx || !ctx->obj_ctx)
         return;
@@ -1522,16 +1565,31 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                 };
                 uint32_t nargs = inst->num_operands - 1;
                 uint32_t gp_used = 0, fp_used = 0, stack_args = 0;
+                bool darwin_stack_varargs = false;
+                uint32_t fixed_args = 0;
 
                 bool use_fp_abi = inst->call_external_abi;
                 if (inst->operands[0].kind == LR_VAL_GLOBAL)
                     use_fp_abi = true;
 
+#if defined(__APPLE__)
+                if (use_fp_abi && inst->call_vararg) {
+                    darwin_stack_varargs = true;
+                    fixed_args = call_fixed_arg_count(&ctx, inst, nargs);
+                }
+#endif
+
                 if (use_fp_abi) {
                     for (uint32_t i = 0; i < nargs; i++) {
                         const lr_type_t *at = inst->operands[i + 1].type;
+                        bool is_variadic_stack_arg = darwin_stack_varargs &&
+                                                     i >= fixed_args;
                         bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
                                             at->kind == LR_TYPE_DOUBLE);
+                        if (is_variadic_stack_arg) {
+                            stack_args++;
+                            continue;
+                        }
                         if (is_fp) {
                             if (fp_used < 8) fp_used++; else stack_args++;
                         } else {
@@ -1551,11 +1609,18 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
                     gp_used = 0; fp_used = 0;
                     for (uint32_t i = 0; i < nargs; i++) {
                         const lr_operand_t *arg = &inst->operands[i + 1];
+                        bool is_variadic_stack_arg = darwin_stack_varargs &&
+                                                     i >= fixed_args;
                         bool is_fp = arg->type &&
                                      (arg->type->kind == LR_TYPE_FLOAT ||
                                       arg->type->kind == LR_TYPE_DOUBLE);
                         uint8_t fsz = (arg->type && arg->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                        if (is_fp && fp_used < 8) {
+                        if (is_variadic_stack_arg) {
+                            emit_load_operand(&ctx, arg, A64_X9);
+                            emit_store(ctx.buf, &ctx.pos, ctx.buflen,
+                                       A64_X9, A64_SP, (int32_t)(si * 8), 8);
+                            si++;
+                        } else if (is_fp && fp_used < 8) {
                             emit_load_fp_operand(&ctx, arg, call_fp_regs[fp_used], fsz);
                             fp_used++;
                         } else if (!is_fp && gp_used < 8) {

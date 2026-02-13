@@ -54,6 +54,7 @@ typedef struct session_inst_desc {
     int fcmp_pred;
     bool call_external_abi;
     bool call_vararg;
+    uint32_t call_fixed_args;
 } session_inst_desc_t;
 
 typedef struct lr_owned_module {
@@ -701,6 +702,7 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
     if (inst->op == LR_OP_CALL) {
         out->call_external_abi = inst->call_external_abi;
         out->call_vararg = inst->call_vararg;
+        out->call_fixed_args = inst->call_fixed_args;
     }
     if ((inst->op == LR_OP_EXTRACTVALUE || inst->op == LR_OP_INSERTVALUE) &&
         inst->num_indices > 0) {

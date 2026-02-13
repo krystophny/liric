@@ -1820,8 +1820,10 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
     if (!inst)
         return safe_undef(mod);
 
-    if (func_type && func_type->kind == LR_TYPE_FUNC)
+    if (func_type && func_type->kind == LR_TYPE_FUNC) {
         inst->call_vararg = func_type->func.vararg;
+        inst->call_fixed_args = func_type->func.num_params;
+    }
 
     /* Indirect calls (e.g. bitcasted function values) should use C ABI. */
     if (ops[0].kind != LR_VAL_GLOBAL)
