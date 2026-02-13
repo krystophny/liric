@@ -97,8 +97,12 @@ int test_target_copy_patch_entrypoints_available(void) {
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
         const lr_target_t *t = lr_target_by_name(names[i]);
         TEST_ASSERT(t != NULL, "target exists");
-        TEST_ASSERT(t->compile_func != NULL, "target has compile_func");
-        TEST_ASSERT(t->compile_func_cp != NULL, "target has compile_func_cp");
+        TEST_ASSERT(t->compile_begin != NULL, "target has compile_begin");
+        TEST_ASSERT(t->compile_emit != NULL, "target has compile_emit");
+        TEST_ASSERT(t->compile_set_block != NULL, "target has compile_set_block");
+        TEST_ASSERT(t->compile_end != NULL, "target has compile_end");
+        TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_ISEL), "target supports isel mode");
+        TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_COPY_PATCH), "target supports copy_patch mode");
     }
     return 0;
 }
@@ -128,15 +132,17 @@ int test_target_copy_patch_fallback_matches_isel_for_non_x86(void) {
         int rc_cp;
 
         TEST_ASSERT(t != NULL, "target exists");
-        TEST_ASSERT(t->compile_func != NULL, "target has compile_func");
-        TEST_ASSERT(t->compile_func_cp != NULL, "target has compile_func_cp");
+        TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_ISEL), "target supports isel mode");
+        TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_COPY_PATCH), "target supports copy_patch mode");
 
         a_isel = lr_arena_create(0);
         a_cp = lr_arena_create(0);
         TEST_ASSERT(a_isel != NULL && a_cp != NULL, "arena create");
 
-        rc_isel = t->compile_func(m->first_func, m, isel_buf, sizeof(isel_buf), &isel_len, a_isel);
-        rc_cp = t->compile_func_cp(m->first_func, m, cp_buf, sizeof(cp_buf), &cp_len, a_cp);
+        rc_isel = lr_target_compile(t, LR_COMPILE_ISEL, m->first_func, m,
+                                    isel_buf, sizeof(isel_buf), &isel_len, a_isel);
+        rc_cp = lr_target_compile(t, LR_COMPILE_COPY_PATCH, m->first_func, m,
+                                  cp_buf, sizeof(cp_buf), &cp_len, a_cp);
 
         lr_arena_destroy(a_isel);
         lr_arena_destroy(a_cp);

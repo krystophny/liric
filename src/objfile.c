@@ -432,10 +432,10 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
         uint32_t reloc_base = out->ctx.num_relocs;
 
         size_t func_len = 0;
-        int rc = target->compile_func(f, m,
-                                      out->code_buf + out->code_pos,
-                                      OBJ_CODE_BUF_SIZE - out->code_pos,
-                                      &func_len, arena);
+        int rc = lr_target_compile(target, LR_COMPILE_ISEL, f, m,
+                                   out->code_buf + out->code_pos,
+                                   OBJ_CODE_BUF_SIZE - out->code_pos,
+                                   &func_len, arena);
         if (rc != 0) {
             m->obj_ctx = NULL;
             lr_arena_destroy(arena);

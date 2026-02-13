@@ -34,7 +34,7 @@ int test_codegen_ret_42(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(code_len < 100, "code is reasonably small");
@@ -61,7 +61,7 @@ int test_codegen_add(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
 
@@ -162,7 +162,7 @@ int test_codegen_skip_redundant_immediate_reload(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(!has_immediate_store_reload_pair(code, code_len),
@@ -197,7 +197,7 @@ int test_codegen_reuse_cached_vreg_across_scratch_regs(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(has_mov_rcx_rax(code, code_len),
@@ -232,7 +232,7 @@ int test_codegen_keep_store_for_next_inst_multiuse_vreg(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(count_rax_store_to_rbp(code, code_len) >= 1,
@@ -263,7 +263,7 @@ int test_codegen_zero_immediate_uses_xor_when_flags_dead(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(has_xor_eax_eax(code, code_len), "ret i64 0 uses xor zeroing");
@@ -297,7 +297,7 @@ int test_codegen_select_zero_keeps_mov_for_flags(void) {
 
     uint8_t code[4096];
     size_t code_len = 0;
-    int rc = target->compile_func(m->first_func, m, code, sizeof(code), &code_len, arena);
+    int rc = lr_target_compile(target, LR_COMPILE_ISEL, m->first_func, m, code, sizeof(code), &code_len, arena);
     TEST_ASSERT_EQ(rc, 0, "compile succeeds");
     TEST_ASSERT(code_len > 0, "generated some code");
     TEST_ASSERT(has_mov_imm_zero_rax(code, code_len),

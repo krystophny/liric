@@ -14,7 +14,7 @@
  *
  * For each supported instruction, memcpy the pre-assembled template
  * into the code buffer and patch sentinel values with actual stack
- * offsets.  Falls back to ISel (compile_func) for any function that
+ * offsets.  Falls back to ISel for any function that
  * contains an unsupported opcode.
  */
 
@@ -61,7 +61,7 @@ DECL_TEMPLATE(store_param_r9);
 
 #undef DECL_TEMPLATE
 
-/* ISel fallback (defined in target_x86_64.c, exposed via target vtable) */
+/* ISel fallback target registration (defined in target_x86_64.c) */
 extern const lr_target_t *lr_target_x86_64(void);
 
 /* ---- template table (initialized once) ---- */
@@ -316,7 +316,8 @@ int x86_64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
 
     /* Fall back to ISel for unsupported functions. */
     if (!cp_function_supported(func))
-        return lr_target_x86_64()->compile_func(func, mod, buf, buflen, out_len, arena);
+        return lr_target_compile(lr_target_x86_64(), LR_COMPILE_ISEL, func, mod,
+                                 buf, buflen, out_len, arena);
 
     uint32_t initial = func->next_vreg > 64 ? func->next_vreg : 64;
     cp_ctx_t ctx = {
