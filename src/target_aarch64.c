@@ -25,7 +25,7 @@
 #define FP_SCRATCH0  A64_D0
 #define FP_SCRATCH1  A64_D1
 
-typedef struct { size_t insn_pos; uint32_t target; uint8_t kind; uint8_t cond; } a64_fixup_t;
+typedef struct { size_t insn_pos; uint32_t target; uint32_t source; uint8_t kind; uint8_t cond; } a64_fixup_t;
 
 typedef struct {
     uint8_t *buf;
@@ -1712,6 +1712,7 @@ typedef struct a64_stream_phi_copy {
     uint32_t pred_block_id;
     uint32_t dest_vreg;
     lr_operand_t src_op;
+    bool emitted;
 } a64_stream_phi_copy_t;
 
 typedef struct a64_deferred_term {
@@ -1841,6 +1842,7 @@ static void a64_direct_emit_phi_copies(a64_direct_ctx_t *ctx, uint32_t pred) {
             continue;
         emit_load_operand(cc, &ctx->phi_copies[i].src_op, A64_X9);
         emit_store_slot(cc, ctx->phi_copies[i].dest_vreg, A64_X9);
+        ctx->phi_copies[i].emitted = true;
     }
 }
 
@@ -1869,6 +1871,7 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
     case LR_OP_BR: {
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_a64(cc, dt->ops[0].block_id);
+        cc->fixups[cc->num_fixups - 1].source = dt->block_id;
         break;
     }
     case LR_OP_CONDBR: {
@@ -1877,8 +1880,10 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
                  enc_ands_reg(false, A64_X9, A64_X9));
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jcc_a64(cc, LR_CC_NE, dt->ops[1].block_id);
+        cc->fixups[cc->num_fixups - 1].source = dt->block_id;
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_a64(cc, dt->ops[2].block_id);
+        cc->fixups[cc->num_fixups - 1].source = dt->block_id;
         break;
     }
     default:
@@ -2693,7 +2698,59 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
 
     cc = &ctx->cc;
 
+    /* Late phi copy stubs: for fixups whose source block has unemitted phi
+       copies (registered after the terminator was flushed), emit stub code
+       that applies the copies then jumps to the original target.  Patch the
+       original branch instruction to redirect through the stub. */
+    {
+        uint32_t orig_num_fixups = cc->num_fixups;
+        for (uint32_t fi = 0; fi < orig_num_fixups; fi++) {
+            uint32_t source = cc->fixups[fi].source;
+            uint32_t target = cc->fixups[fi].target;
+            bool has_late = false;
+            for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
+                if (ctx->phi_copies[pi].pred_block_id == source &&
+                    !ctx->phi_copies[pi].emitted) {
+                    has_late = true;
+                    break;
+                }
+            }
+            if (!has_late)
+                continue;
+            size_t stub_pos = cc->pos;
+            for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
+                if (ctx->phi_copies[pi].pred_block_id != source)
+                    continue;
+                emit_load_operand(cc, &ctx->phi_copies[pi].src_op, A64_X9);
+                emit_store_slot(cc, ctx->phi_copies[pi].dest_vreg, A64_X9);
+            }
+            if (a64_direct_ensure_fixup_cap(ctx) != 0)
+                return -1;
+            emit_jmp_a64(cc, target);
+            cc->fixups[cc->num_fixups - 1].source = UINT32_MAX;
+            /* Patch original branch to jump to stub instead */
+            {
+                int64_t stub_imm = ((int64_t)stub_pos -
+                                    (int64_t)cc->fixups[fi].insn_pos) / 4;
+                if (cc->fixups[fi].kind == 0) {
+                    uint32_t insn = 0x14000000u
+                                  | ((uint32_t)stub_imm & 0x03FFFFFFu);
+                    patch_u32(cc->buf, cc->buflen,
+                              cc->fixups[fi].insn_pos, insn);
+                } else {
+                    uint32_t insn = 0x54000000u
+                                  | (((uint32_t)stub_imm & 0x7FFFFu) << 5)
+                                  | (cc->fixups[fi].cond & 0xF);
+                    patch_u32(cc->buf, cc->buflen,
+                              cc->fixups[fi].insn_pos, insn);
+                }
+            }
+            cc->fixups[fi].target = UINT32_MAX;
+        }
+    }
+
     for (uint32_t i = 0; i < cc->num_fixups; i++) {
+        if (cc->fixups[i].target == UINT32_MAX) continue;
         if (cc->fixups[i].target >= cc->num_block_offsets) continue;
 
         int64_t target_pos = (int64_t)cc->block_offsets[cc->fixups[i].target];
@@ -2740,6 +2797,7 @@ static int aarch64_compile_add_phi_copy(void *compile_ctx,
     entry->pred_block_id = pred_block_id;
     entry->dest_vreg = dest_vreg;
     entry->src_op = a64_operand_from_desc(src_op);
+    entry->emitted = false;
     return 0;
 }
 
