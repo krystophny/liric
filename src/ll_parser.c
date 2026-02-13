@@ -449,9 +449,15 @@ static lr_type_t *resolve_or_create_forward_type(lr_parser_t *p, const char *nam
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
 
-static lr_type_t *call_result_type(lr_type_t *ty) {
-    if (ty && ty->kind == LR_TYPE_FUNC)
-        return ty->func.ret;
+static lr_type_t *call_result_type(lr_type_t *ty, bool *is_vararg_out) {
+    if (is_vararg_out)
+        *is_vararg_out = false;
+    if (ty && ty->kind == LR_TYPE_FUNC) {
+        if (is_vararg_out)
+            *is_vararg_out = ty->func.vararg;
+        if (ty->func.ret)
+            return ty->func.ret;
+    }
     return ty;
 }
 static void skip_balanced_parens(lr_parser_t *p);
@@ -943,17 +949,36 @@ static void skip_balanced_brackets(lr_parser_t *p) {
         error(p, "unterminated array constant");
 }
 
-static void skip_optional_callee_signature(lr_parser_t *p) {
+static bool skip_optional_callee_signature(lr_parser_t *p) {
+    bool has_vararg = false;
     /*
      * Accept typed callee signatures like:
      *   call ptr (ptr, i64, ...) @foo(...)
      *   call i32 (i32)* @fn(i32 1)
      */
     if (check(p, LR_TOK_LPAREN)) {
-        skip_balanced_parens(p);
+        uint32_t depth = 0;
+        expect(p, LR_TOK_LPAREN);
+        depth = 1;
+        while (depth > 0 && !check(p, LR_TOK_EOF)) {
+            if (match(p, LR_TOK_LPAREN)) {
+                depth++;
+                continue;
+            }
+            if (match(p, LR_TOK_RPAREN)) {
+                depth--;
+                continue;
+            }
+            if (depth == 1 && check(p, LR_TOK_DOTDOTDOT))
+                has_vararg = true;
+            next(p);
+        }
+        if (depth != 0)
+            error(p, "unterminated parenthesized type in call");
         while (match(p, LR_TOK_STAR)) {}
         skip_attrs(p);
     }
+    return has_vararg;
 }
 
 static bool is_integer_type(const lr_type_t *ty) {
@@ -1128,9 +1153,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             }
 
             case LR_TOK_CALL: {
-                lr_type_t *ret_ty = call_result_type(parse_type(p));
+                bool call_sig_vararg = false;
+                lr_type_t *ret_ty = call_result_type(parse_type(p),
+                                                     &call_sig_vararg);
                 skip_attrs(p);
-                skip_optional_callee_signature(p);
+                call_sig_vararg = call_sig_vararg ||
+                                  skip_optional_callee_signature(p);
                 lr_operand_t callee = parse_operand(p, p->module->type_ptr);
                 expect(p, LR_TOK_LPAREN);
                 lr_operand_t args[64];
@@ -1150,6 +1178,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     all_ops[i + 1] = args[i];
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
                     ret_ty, dest, all_ops, nargs + 1);
+                inst->call_vararg = call_sig_vararg;
+                if (callee.kind != LR_VAL_GLOBAL)
+                    inst->call_external_abi = true;
                 lr_block_append(block, inst);
                 /* skip trailing attribute groups */
                 skip_attrs(p);
@@ -1365,9 +1396,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             }
 
             case LR_TOK_INVOKE: {
-                lr_type_t *ret_ty = call_result_type(parse_type(p));
+                bool call_sig_vararg = false;
+                lr_type_t *ret_ty = call_result_type(parse_type(p),
+                                                     &call_sig_vararg);
                 skip_attrs(p);
-                skip_optional_callee_signature(p);
+                call_sig_vararg = call_sig_vararg ||
+                                  skip_optional_callee_signature(p);
                 lr_operand_t callee = parse_operand(p, p->module->type_ptr);
                 expect(p, LR_TOK_LPAREN);
                 lr_operand_t args[64];
@@ -1386,6 +1420,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     all_ops[i + 1] = args[i];
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
                     ret_ty, dest, all_ops, nargs + 1);
+                inst->call_vararg = call_sig_vararg;
+                if (callee.kind != LR_VAL_GLOBAL)
+                    inst->call_external_abi = true;
                 lr_block_append(block, inst);
                 skip_attrs(p);
                 /* to label %normal unwind label %except */
@@ -1628,9 +1665,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
     /* void call */
     if (op_tok == LR_TOK_CALL) {
         next(p);
-        lr_type_t *ret_ty = call_result_type(parse_type(p));
+        bool call_sig_vararg = false;
+        lr_type_t *ret_ty = call_result_type(parse_type(p),
+                                             &call_sig_vararg);
         skip_attrs(p);
-        skip_optional_callee_signature(p);
+        call_sig_vararg = call_sig_vararg ||
+                          skip_optional_callee_signature(p);
         lr_operand_t callee = parse_operand(p, p->module->type_ptr);
         expect(p, LR_TOK_LPAREN);
         lr_operand_t args[64];
@@ -1649,6 +1689,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             all_ops[i + 1] = args[i];
         lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
             ret_ty, 0, all_ops, nargs + 1);
+        inst->call_vararg = call_sig_vararg;
+        if (callee.kind != LR_VAL_GLOBAL)
+            inst->call_external_abi = true;
         lr_block_append(block, inst);
         skip_attrs(p);
         return;
@@ -1657,9 +1700,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
     /* void invoke → lower to call + br to normal label */
     if (op_tok == LR_TOK_INVOKE) {
         next(p);
-        lr_type_t *ret_ty = call_result_type(parse_type(p));
+        bool call_sig_vararg = false;
+        lr_type_t *ret_ty = call_result_type(parse_type(p),
+                                             &call_sig_vararg);
         skip_attrs(p);
-        skip_optional_callee_signature(p);
+        call_sig_vararg = call_sig_vararg ||
+                          skip_optional_callee_signature(p);
         lr_operand_t callee = parse_operand(p, p->module->type_ptr);
         expect(p, LR_TOK_LPAREN);
         lr_operand_t args[64];
@@ -1678,6 +1724,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             all_ops[i + 1] = args[i];
         lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
             ret_ty, 0, all_ops, nargs + 1);
+        inst->call_vararg = call_sig_vararg;
+        if (callee.kind != LR_VAL_GLOBAL)
+            inst->call_external_abi = true;
         lr_block_append(block, inst);
         skip_attrs(p);
         expect(p, LR_TOK_TO);
