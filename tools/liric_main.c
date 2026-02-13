@@ -1,3 +1,5 @@
+#include "../src/arena.h"
+#include "../src/bc_decode.h"
 #include "../src/ir.h"
 #include "../src/jit.h"
 #include "../src/liric.h"
@@ -53,6 +55,107 @@ static bool module_has_main_definition(const lr_module_t *m) {
     return false;
 }
 
+static bool is_wasm_binary(const uint8_t *data, size_t len) {
+    return data && len >= 4 &&
+           data[0] == 0x00 &&
+           data[1] == 'a' &&
+           data[2] == 's' &&
+           data[3] == 'm';
+}
+
+static void dump_module_functions(lr_module_t *m, FILE *out) {
+    if (!m || !out)
+        return;
+    for (lr_func_t *f = m->first_func; f; f = f->next)
+        lr_dump_func(f, m, out);
+}
+
+typedef struct ll_dump_ctx {
+    FILE *out;
+} ll_dump_ctx_t;
+
+static int ll_dump_callback(lr_func_t *func, lr_module_t *mod, void *ctx_ptr) {
+    ll_dump_ctx_t *ctx = (ll_dump_ctx_t *)ctx_ptr;
+    if (!ctx || !ctx->out || !func || !mod)
+        return -1;
+    lr_dump_func(func, mod, ctx->out);
+    return 0;
+}
+
+static int dump_ir_ll_streaming(const char *src, size_t len,
+                                char *err, size_t err_cap) {
+    ll_dump_ctx_t ctx;
+    lr_module_t *m;
+    if (!src || len == 0)
+        return -1;
+    ctx.out = stdout;
+    m = lr_parse_ll_streaming(src, len, ll_dump_callback, &ctx, err, err_cap);
+    if (!m)
+        return -1;
+    lr_module_free(m);
+    return 0;
+}
+
+typedef struct bc_dump_ctx {
+    FILE *out;
+    const lr_func_t *cur_func;
+    const lr_block_t *cur_block;
+} bc_dump_ctx_t;
+
+static int bc_dump_callback(lr_func_t *func, lr_block_t *block,
+                            const lr_inst_t *inst, void *ctx_ptr) {
+    bc_dump_ctx_t *ctx = (bc_dump_ctx_t *)ctx_ptr;
+    if (!ctx || !ctx->out || !func || !block || !inst)
+        return -1;
+
+    if (ctx->cur_func != func) {
+        if (ctx->cur_func)
+            fprintf(ctx->out, "}\n");
+        lr_dump_func_signature(func, ctx->out);
+        fprintf(ctx->out, " {\n");
+        ctx->cur_func = func;
+        ctx->cur_block = NULL;
+    }
+    if (ctx->cur_block != block) {
+        lr_dump_block_label(block, ctx->out);
+        ctx->cur_block = block;
+    }
+    lr_dump_inst(inst, NULL, ctx->out);
+    return 0;
+}
+
+static int dump_ir_bc_streaming(const uint8_t *data, size_t len,
+                                char *err, size_t err_cap) {
+    bc_dump_ctx_t ctx;
+    lr_arena_t *arena;
+    lr_module_t *m;
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        if (err && err_cap > 0)
+            snprintf(err, err_cap, "arena allocation failed");
+        return -1;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.out = stdout;
+    m = lr_parse_bc_data_streaming(data, len, arena, bc_dump_callback, &ctx,
+                                   err, err_cap);
+    if (!m) {
+        lr_arena_destroy(arena);
+        return -1;
+    }
+
+    if (ctx.cur_func)
+        fprintf(ctx.out, "}\n");
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->is_decl || !f->first_block)
+            lr_dump_func(f, m, ctx.out);
+    }
+    lr_module_free(m);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     bool jit_mode = false;
     bool dump_ir = false;
@@ -102,6 +205,25 @@ int main(int argc, char **argv) {
     }
 
     char err[512] = {0};
+    if (dump_ir && !runtime_path) {
+        int dump_rc = -1;
+        if (lr_bc_is_bitcode((const uint8_t *)src, src_len)) {
+            dump_rc = dump_ir_bc_streaming((const uint8_t *)src, src_len,
+                                           err, sizeof(err));
+        } else if (!is_wasm_binary((const uint8_t *)src, src_len)) {
+            dump_rc = dump_ir_ll_streaming(src, src_len, err, sizeof(err));
+        }
+        if (dump_rc == 0) {
+            free(src);
+            return 0;
+        }
+        if (err[0] != '\0') {
+            fprintf(stderr, "parse error: %s\n", err);
+            free(src);
+            return 1;
+        }
+    }
+
     lr_module_t *m = lr_parse_auto((const uint8_t *)src, src_len, err, sizeof(err));
     if (!m) {
         fprintf(stderr, "parse error: %s\n", err);
@@ -138,7 +260,7 @@ int main(int argc, char **argv) {
     }
 
     if (dump_ir) {
-        lr_module_dump(m, stdout);
+        dump_module_functions(m, stdout);
         lr_module_free(m);
         free(src);
         return 0;

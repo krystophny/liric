@@ -6,6 +6,11 @@
 #include <stdint.h>
 
 lr_module_t *lr_parse_ll(const char *src, size_t len, char *err, size_t errlen);
+lr_module_t *lr_parse_ll_streaming(const char *src, size_t len,
+                                   int (*on_func)(lr_func_t *func,
+                                                  lr_module_t *mod,
+                                                  void *ctx),
+                                   void *ctx, char *err, size_t errlen);
 lr_module_t *lr_parse_bc(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_wasm(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t errlen);

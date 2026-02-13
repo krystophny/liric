@@ -1201,8 +1201,9 @@ int test_parser_streaming_callback_order(void) {
                                            collect_stream_callback, &ctx,
                                            err, sizeof(err));
     TEST_ASSERT(m != NULL, err);
-    TEST_ASSERT_EQ(ctx.calls, 2, "callback called for both definitions");
-    TEST_ASSERT(strcmp(ctx.names, "first,second") == 0, "callback order follows source order");
+    TEST_ASSERT_EQ(ctx.calls, 3, "callback called for declaration and definitions");
+    TEST_ASSERT(strcmp(ctx.names, "decl_only,first,second") == 0,
+                "callback order follows source order");
     TEST_ASSERT(ctx.saw_global_before_first_callback, "globals parsed before first callback");
 
     lr_module_free(m);

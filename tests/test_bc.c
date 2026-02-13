@@ -1,6 +1,7 @@
 #include "../src/liric.h"
 #include "../src/jit.h"
 #include "../src/bc_decode.h"
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -446,5 +447,82 @@ int test_bc_streaming_callback_abort_propagates_error(void) {
     TEST_ASSERT(strstr(err, "callback failed") != NULL, "callback error surfaced");
 
     lr_arena_destroy(arena);
+    return 0;
+}
+
+typedef struct {
+    FILE *out;
+    lr_func_t *cur_func;
+    lr_block_t *cur_block;
+} bc_stream_dump_t;
+
+static int bc_stream_dump_cb(lr_func_t *func, lr_block_t *block,
+                             const lr_inst_t *inst, void *ctx) {
+    bc_stream_dump_t *state = (bc_stream_dump_t *)ctx;
+    if (!state || !state->out || !func || !block || !inst)
+        return -1;
+
+    if (state->cur_func != func) {
+        if (state->cur_func)
+            fprintf(state->out, "}\n");
+        lr_dump_func_signature(func, state->out);
+        fprintf(state->out, " {\n");
+        state->cur_func = func;
+        state->cur_block = NULL;
+    }
+    if (state->cur_block != block) {
+        lr_dump_block_label(block, state->out);
+        state->cur_block = block;
+    }
+    lr_dump_inst(inst, NULL, state->out);
+    return 0;
+}
+
+int test_bc_streaming_callback_dump_text_shape(void) {
+    lr_arena_t *arena;
+    lr_module_t *m;
+    FILE *tmp;
+    char err[256] = {0};
+    bc_stream_dump_t state = {0};
+    char *buf;
+    long len;
+    size_t nread;
+
+    if (!lr_bc_parser_available())
+        return 0;
+
+    arena = lr_arena_create(0);
+    TEST_ASSERT(arena != NULL, "arena alloc");
+
+    tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile");
+    state.out = tmp;
+
+    m = lr_parse_bc_data_streaming(bc_ret42_data, bc_ret42_len, arena,
+                                   bc_stream_dump_cb, &state,
+                                   err, sizeof(err));
+    TEST_ASSERT(m != NULL, "streaming parse succeeds");
+    if (state.cur_func)
+        fprintf(tmp, "}\n");
+
+    fflush(tmp);
+    TEST_ASSERT(fseek(tmp, 0, SEEK_END) == 0, "seek end");
+    len = ftell(tmp);
+    TEST_ASSERT(len > 0, "dump emitted bytes");
+    TEST_ASSERT(fseek(tmp, 0, SEEK_SET) == 0, "seek start");
+
+    buf = (char *)malloc((size_t)len + 1u);
+    TEST_ASSERT(buf != NULL, "alloc dump buf");
+    nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read dump buf");
+    buf[len] = '\0';
+
+    TEST_ASSERT(strstr(buf, "define i32 @f(") != NULL, "dump has function header");
+    TEST_ASSERT(strstr(buf, ":\n") != NULL, "dump has at least one block label");
+    TEST_ASSERT(strstr(buf, "ret i32 42") != NULL, "dump has ret instruction");
+
+    free(buf);
+    fclose(tmp);
+    lr_module_free(m);
     return 0;
 }

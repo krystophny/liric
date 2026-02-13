@@ -202,6 +202,7 @@ int test_bc_parse_api_ret_42(void);
 int test_bc_parse_auto_loop_phi(void);
 int test_bc_streaming_callback_collects_opcodes(void);
 int test_bc_streaming_callback_abort_propagates_error(void);
+int test_bc_streaming_callback_dump_text_shape(void);
 int test_session_direct_ret_42(void);
 int test_session_add_args(void);
 int test_session_arithmetic_chain(void);
@@ -472,6 +473,7 @@ int main(void) {
     RUN_TEST(test_bc_parse_auto_loop_phi);
     RUN_TEST(test_bc_streaming_callback_collects_opcodes);
     RUN_TEST(test_bc_streaming_callback_abort_propagates_error);
+    RUN_TEST(test_bc_streaming_callback_dump_text_shape);
 
     fprintf(stderr, "\nSession API tests:\n");
     RUN_TEST(test_session_direct_ret_42);

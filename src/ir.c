@@ -1403,7 +1403,10 @@ static bool inst_has_dest(const lr_inst_t *inst) {
     }
 }
 
-static void dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
+void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
+    if (!inst || !out)
+        return;
+
     fprintf(out, "  ");
     if (inst_has_dest(inst))
         fprintf(out, "%%v%u = ", inst->dest);
@@ -1786,29 +1789,56 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
     return 0;
 }
 
-void lr_module_dump(lr_module_t *m, FILE *out) {
-    for (lr_func_t *f = m->first_func; f; f = f->next) {
-        bool is_decl = f->is_decl || !f->first_block;
-        fprintf(out, "%s ", is_decl ? "declare" : "define");
-        print_type(f->ret_type, out);
-        fprintf(out, " @%s(", f->name);
-        for (uint32_t i = 0; i < f->num_params; i++) {
-            if (i > 0) fprintf(out, ", ");
-            print_type(f->param_types[i], out);
-            if (!is_decl) fprintf(out, " %%v%u", f->param_vregs[i]);
-        }
-        if (f->vararg) {
-            if (f->num_params > 0) fprintf(out, ", ");
-            fprintf(out, "...");
-        }
-        fprintf(out, ")");
-        if (is_decl) { fprintf(out, "\n\n"); continue; }
-        fprintf(out, " {\n");
-        for (lr_block_t *b = f->first_block; b; b = b->next) {
-            fprintf(out, "%s:\n", b->name);
-            for (lr_inst_t *inst = b->first; inst; inst = inst->next)
-                dump_inst(inst, m, out);
-        }
-        fprintf(out, "}\n");
+void lr_dump_func_signature(const lr_func_t *f, FILE *out) {
+    bool is_decl;
+    if (!f || !out)
+        return;
+
+    is_decl = f->is_decl || !f->first_block;
+    fprintf(out, "%s ", is_decl ? "declare" : "define");
+    print_type(f->ret_type, out);
+    fprintf(out, " @%s(", f->name);
+    for (uint32_t i = 0; i < f->num_params; i++) {
+        if (i > 0) fprintf(out, ", ");
+        print_type(f->param_types[i], out);
+        if (!is_decl) fprintf(out, " %%v%u", f->param_vregs[i]);
     }
+    if (f->vararg) {
+        if (f->num_params > 0) fprintf(out, ", ");
+        fprintf(out, "...");
+    }
+    fprintf(out, ")");
+}
+
+void lr_dump_block_label(const lr_block_t *b, FILE *out) {
+    if (!b || !out)
+        return;
+    fprintf(out, "%s:\n", b->name);
+}
+
+void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
+    bool is_decl;
+    if (!f || !out)
+        return;
+
+    is_decl = f->is_decl || !f->first_block;
+    lr_dump_func_signature(f, out);
+    if (is_decl) {
+        fprintf(out, "\n\n");
+        return;
+    }
+    fprintf(out, " {\n");
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        lr_dump_block_label(b, out);
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next)
+            lr_dump_inst(inst, m, out);
+    }
+    fprintf(out, "}\n");
+}
+
+void lr_module_dump(lr_module_t *m, FILE *out) {
+    if (!m || !out)
+        return;
+    for (lr_func_t *f = m->first_func; f; f = f->next)
+        lr_dump_func(f, m, out);
 }

@@ -1070,6 +1070,7 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
 /* ---- IR-mode only ------------------------------------------------------ */
 
 int lr_session_dump_ir(struct lr_session *s, FILE *out, session_error_t *err) {
+    lr_func_t *f;
     err_clear(err);
     if (!s || !out) {
         err_set(err, S_ERR_ARGUMENT, "invalid dump arguments");
@@ -1083,7 +1084,8 @@ int lr_session_dump_ir(struct lr_session *s, FILE *out, session_error_t *err) {
         err_set(err, S_ERR_STATE, "cannot dump during active function");
         return -1;
     }
-    lr_module_dump(s->module, out);
+    for (f = s->module->first_func; f; f = f->next)
+        lr_dump_func(f, s->module, out);
     return 0;
 }
 

@@ -537,12 +537,20 @@ lr_module_t *lc_module_get_ir(lc_module_compat_t *mod) {
     return mod->mod;
 }
 
+static void compat_dump_module(lr_module_t *m, FILE *out) {
+    lr_func_t *f;
+    if (!m || !out)
+        return;
+    for (f = m->first_func; f; f = f->next)
+        lr_dump_func(f, m, out);
+}
+
 void lc_module_dump(lc_module_compat_t *mod) {
-    lr_module_dump(mod->mod, stderr);
+    compat_dump_module(mod->mod, stderr);
 }
 
 void lc_module_print(lc_module_compat_t *mod, FILE *out) {
-    lr_module_dump(mod->mod, out ? out : stdout);
+    compat_dump_module(mod->mod, out ? out : stdout);
 }
 
 char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
@@ -550,7 +558,7 @@ char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
     if (!f) return NULL;
-    lr_module_dump(mod->mod, f);
+    compat_dump_module(mod->mod, f);
     fclose(f);
     if (out_len) *out_len = len;
     return buf;
@@ -2484,7 +2492,7 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
             FILE *f = fopen(dump_path, "a");
             if (f) {
                 fprintf(f, "; ---- module ----\n");
-                lr_module_dump(mod->mod, f);
+                compat_dump_module(mod->mod, f);
                 fprintf(f, "\n");
                 fclose(f);
             }

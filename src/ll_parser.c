@@ -2243,7 +2243,7 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
     if (!is_decl)
         parse_function_body(p, func, param_names);
 
-    if (!is_decl && !p->had_error && p->on_func) {
+    if (!p->had_error && p->on_func) {
         if (p->on_func(func, p->module, p->on_func_ctx) != 0)
             error(p, "function callback failed for '%s'", func->name);
     }
