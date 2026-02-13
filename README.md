@@ -33,31 +33,11 @@ ctest --test-dir build --output-on-failure
 
 Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=ON` (LLVM C API backend).
 
-### LLVM Backend/Compat Policy
+### LLVM Backend
 
-- One LLVM major version is selected at configure time via `llvm-config`.
-- Backend selection is link-time only; no runtime `dlopen` dispatch is required.
-- Unsupported mixed mode now fails fast at configure time.
+When building with `-DWITH_REAL_LLVM_BACKEND=ON`, one LLVM major version is selected at configure time via `llvm-config`. LLVM 7+ supported; C++ compat headers (`-DWITH_LLVM_COMPAT=ON`) require LLVM 11+.
 
-| LLVM major | `WITH_REAL_LLVM_BACKEND=ON` | `WITH_REAL_LLVM_BACKEND=ON` + `WITH_LLVM_COMPAT=ON` |
-|------------|-----------------------------|------------------------------------------------------|
-| 7-10 | Supported | Unsupported (configure-time error) |
-| 11+ | Supported | Supported |
-
-Conda compatibility sweep:
-
-- `tools/llvm_backend_matrix.sh` requests LLVM majors `1..22` by default.
-- The script discovers published `llvmdev` majors from conda-forge and skips missing versions (for example, majors that are not published yet).
-- Majors `<7` are reported as unsupported by liric policy and skipped unless `--strict-versions` is passed.
-- `--list-available` prints discoverable conda `llvmdev` majors without building.
-
-Examples:
-
-```bash
-tools/llvm_backend_matrix.sh
-tools/llvm_backend_matrix.sh --list-available
-tools/llvm_backend_matrix.sh --versions "7 11 21" --strict-versions
-```
+`tools/llvm_backend_matrix.sh` runs a conda-forge compatibility sweep across LLVM 7-21.
 
 ## Usage
 
@@ -134,73 +114,28 @@ Intrinsic blobs are hand-written assembly for LLVM intrinsics (sqrt, exp, memcpy
 
 ## Performance
 
-Measured on February 13, 2026:
+Liric vs LLVM ORC JIT (LLJIT). Repo `tests/ll/` corpus, 8 `@main` tests, 2.42 KiB IR total.
+AMD Ryzen 9 5950X, Linux 6.18, GCC 15.2, LLVM 21.1.
 
-- CPU: AMD Ryzen 9 5950X 16-Core Processor
-- OS: Linux 6.18.9-2-cachyos x86_64
-- Compiler: GCC 15.2.1
+Liric: `liric_probe_runner --timing` (parse_us + compile_us).
+LLVM ORC: `bench_lli_phases --json` (parse_ms + compile_ms, where compile = add_module + lookup since LLJIT compiles lazily on first symbol lookup).
 
-### LLVM IR Corpus (repo `tests/ll`, 8 `@main` tests, 2.42 KiB IR)
+| Phase | liric (ms) | LLVM ORC (ms) | Speedup |
+|-------|------------|---------------|---------|
+| Parse | 0.575 | 0.666 | 1.2x |
+| Compile | 0.165 | 15.85 | **96x** |
+| Total (parse+compile) | 0.740 | 16.52 | **22x** |
 
-Liric metrics are from `liric_probe_runner --timing` (`parse_us`, `compile_us`).
-LLVM metrics are from `bench_lli_phases --json` (`parse_ms`, `jit_ms`).
-`Total JIT` is `parse + compile`.
+Liric compile averages 21 us/function. LLVM ORC averages 1.98 ms/function.
 
-| Phase | liric (ms, sum) | LLVM ORC (ms, sum) | Speedup |
-|-------|------------------|--------------------|---------|
-| Parse | 0.601600 | 0.860941 | 1.43x |
-| Compile | 0.384100 | 0.015428 | 0.04x |
-| Total JIT | 0.985700 | 0.876369 | 0.89x |
-
-Per-test distribution (nearest-rank):
-
-| Metric (`parse+compile`) | liric (ms) | LLVM ORC (ms) | Speedup |
-|--------------------------|------------|---------------|---------|
-| p50 | 0.094900 | 0.098966 | 1.04x |
-| p95 | 0.215900 | 0.182233 | 0.84x |
-| slowest | 0.215900 | 0.182233 | 0.84x |
-
-### Micro-benchmarks (`bench_tcc`, 5 cases, best-of-5)
-
-| Metric | tcc | liric | Ratio |
-|--------|-----|-------|-------|
-| Wall-clock exe mode (us, sum) | 7329 | 22443 | 0.33x |
-| In-process compile+reloc (us, sum) | 1033.2 | 48.1 | 21.5x |
-
-### LFortran Integration Bench Commands
-
-The canonical integration commands are:
+### Benchmarks
 
 ```bash
-./build/bench_compat_check --timeout 15
-./build/bench_ll --iters 3
-./build/bench_api --iters 3
-./build/bench_corpus --iters 3
-```
-
-On this snapshot, `bench_compat_check --limit 50` produced `compat_ll.txt` with
-0 tests (`liric_match=0` in that sample), so `bench_ll` and `bench_api` ran with
-empty corpora (`Benchmarking 0 tests`). Artifacts were still written to
-`/tmp/liric_bench/`.
-
-### Reproduction
-
-```bash
-# 1) Bounded compat sweep (writes /tmp/liric_bench/*.txt and *.jsonl)
-timeout 600 ./build/bench_compat_check --timeout 15 --limit 50
-
-# 2) Canonical benchmark binaries
-./build/bench_ll --iters 1
-./build/bench_api --iters 1
-./build/bench_tcc --iters 5
-./build/bench_corpus --iters 1
-
-# 3) Phase breakdown used for the table above (repo tests/ll corpus)
-for f in tests/ll/*.ll; do
-  rg -q 'define\\s+[^@]+@main\\s*\\(' "$f" || continue
-  ./build/liric_probe_runner --timing --ignore-retcode --func main --sig i32 "$f"
-  ./build/bench_lli_phases --json --iters 1 --func main --sig i32 "$f"
-done
+./build/bench_compat_check --timeout 15   # correctness gate
+./build/bench_ll --iters 3                # liric JIT vs lli
+./build/bench_api --iters 3               # lfortran LLVM vs lfortran+liric
+./build/bench_corpus --iters 3            # 100-case focused corpus
+./build/bench_tcc --iters 10              # liric vs TCC micro-benchmarks
 ```
 
 ## Source Map

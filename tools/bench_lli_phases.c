@@ -328,28 +328,33 @@ int main(int argc, char **argv) {
         LLVMContextDispose(ctx);
     }
 
+    double iters_d = (double)a.iters;
+    double avg_parse = parse_total / iters_d;
+    double avg_add = jit_total / iters_d;
+    double avg_lookup = lookup_total / iters_d;
+    double avg_exec = exec_total / iters_d;
+    double avg_compile = avg_add + avg_lookup;
+    double avg_total = avg_parse + avg_add + avg_lookup + avg_exec;
+
     if (a.json_output) {
         printf("{\"file\":\"%s\",\"iters\":%d,"
-               "\"parse_ms\":%.6f,\"jit_ms\":%.6f,\"lookup_ms\":%.6f,\"exec_ms\":%.6f,"
+               "\"parse_ms\":%.6f,\"add_module_ms\":%.6f,\"lookup_ms\":%.6f,"
+               "\"compile_ms\":%.6f,\"exec_ms\":%.6f,"
                "\"total_ms\":%.6f,\"retcode\":%d}\n",
-               a.input_file,
-               a.iters,
-               parse_total / (double)a.iters,
-               jit_total / (double)a.iters,
-               lookup_total / (double)a.iters,
-               exec_total / (double)a.iters,
-               (parse_total + jit_total + lookup_total + exec_total) / (double)a.iters,
-               retcode_last);
+               a.input_file, a.iters,
+               avg_parse, avg_add, avg_lookup,
+               avg_compile, avg_exec,
+               avg_total, retcode_last);
     } else {
-        printf("file:      %s\n", a.input_file);
-        printf("iters:     %d\n", a.iters);
-        printf("parse:     %.6f ms\n", parse_total / (double)a.iters);
-        printf("jit:       %.6f ms\n", jit_total / (double)a.iters);
-        printf("lookup:    %.6f ms\n", lookup_total / (double)a.iters);
-        printf("exec:      %.6f ms\n", exec_total / (double)a.iters);
-        printf("total:     %.6f ms\n",
-               (parse_total + jit_total + lookup_total + exec_total) / (double)a.iters);
-        printf("retcode:   %d\n", retcode_last);
+        printf("file:       %s\n", a.input_file);
+        printf("iters:      %d\n", a.iters);
+        printf("parse:      %.6f ms\n", avg_parse);
+        printf("add_module: %.6f ms  (lazy registration)\n", avg_add);
+        printf("lookup:     %.6f ms  (triggers lazy compile)\n", avg_lookup);
+        printf("compile:    %.6f ms  (add_module + lookup)\n", avg_compile);
+        printf("exec:       %.6f ms\n", avg_exec);
+        printf("total:      %.6f ms\n", avg_total);
+        printf("retcode:    %d\n", retcode_last);
     }
 
     free(src);
