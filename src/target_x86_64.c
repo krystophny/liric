@@ -2,6 +2,7 @@
 #include "target_common.h"
 #include "target_shared.h"
 #include "objfile.h"
+#include "jit.h"
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -24,7 +25,7 @@
 #define FP_SCRATCH0  X86_XMM0
 #define FP_SCRATCH1  X86_XMM1
 
-typedef struct { size_t pos; uint32_t target; } x86_fixup_t;
+typedef struct { size_t pos; uint32_t target; uint32_t source; } x86_fixup_t;
 
 /* Backend-local compile context replacing the old MIR linked-list state */
 typedef struct {
@@ -60,6 +61,7 @@ typedef struct {
     bool func_is_vararg;
     int32_t vararg_rsa_off;
     uint32_t vararg_named_gp;
+    lr_jit_t *jit;
 } x86_compile_ctx_t;
 
 static void invalidate_cached_reg(x86_compile_ctx_t *ctx, uint8_t reg) {
@@ -672,6 +674,17 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
         emit_mov_imm(ctx, reg, imm_bits, preserve_flags);
     } else if (op->kind == LR_VAL_NULL || op->kind == LR_VAL_UNDEF) {
         emit_mov_imm(ctx, reg, 0, preserve_flags);
+    } else if (op->kind == LR_VAL_GLOBAL && ctx->jit && !ctx->obj_ctx) {
+        const char *sym_name = lr_module_symbol_name(ctx->mod,
+                                                      op->global_id);
+        void *addr = NULL;
+        if (sym_name)
+            addr = lr_jit_get_function(ctx->jit, sym_name);
+        int64_t val = (int64_t)(uintptr_t)addr;
+        if (op->global_offset != 0)
+            val += op->global_offset;
+        emit_mov_imm(ctx, reg, val, preserve_flags);
+        invalidate_cached_reg(ctx, reg);
     } else if (op->kind == LR_VAL_GLOBAL && ctx->obj_ctx) {
         const char *sym_name = lr_module_symbol_name(ctx->mod,
                                                       op->global_id);
@@ -1012,26 +1025,38 @@ static void emit_load_vreg_mem_sized(x86_compile_ctx_t *ctx, uint32_t src_vreg,
     emit_mem_load_sized(ctx, reg, X86_RBP, src_off, size);
 }
 
-static void emit_jmp(x86_compile_ctx_t *ctx, uint32_t target_block) {
+static void emit_jmp_sourced(x86_compile_ctx_t *ctx, uint32_t target_block,
+                             uint32_t source_block) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xE9);
     if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].pos = ctx->pos;
         ctx->fixups[ctx->num_fixups].target = target_block;
+        ctx->fixups[ctx->num_fixups].source = source_block;
         ctx->num_fixups++;
     }
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
 }
 
-static void emit_jcc(x86_compile_ctx_t *ctx, uint8_t cc, uint32_t target_block) {
+static void emit_jmp(x86_compile_ctx_t *ctx, uint32_t target_block) {
+    emit_jmp_sourced(ctx, target_block, UINT32_MAX);
+}
+
+static void emit_jcc_sourced(x86_compile_ctx_t *ctx, uint8_t cc,
+                              uint32_t target_block, uint32_t source_block) {
     uint8_t x86cc = lr_cc_to_x86(cc);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x0F);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(0x80 + x86cc));
     if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].pos = ctx->pos;
         ctx->fixups[ctx->num_fixups].target = target_block;
+        ctx->fixups[ctx->num_fixups].source = source_block;
         ctx->num_fixups++;
     }
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+}
+
+static void emit_jcc(x86_compile_ctx_t *ctx, uint8_t cc, uint32_t target_block) {
+    emit_jcc_sourced(ctx, cc, target_block, UINT32_MAX);
 }
 
 static void emit_call_r10(x86_compile_ctx_t *ctx) {
@@ -2110,6 +2135,7 @@ typedef struct x86_stream_phi_copy {
     uint32_t pred_block_id;
     uint32_t dest_vreg;
     lr_operand_t src_op;
+    bool emitted;
 } x86_stream_phi_copy_t;
 
 /* Saved terminator for deferred emission (allows phi copies registered
@@ -2241,6 +2267,7 @@ static void direct_emit_phi_copies(x86_direct_ctx_t *ctx, uint32_t pred) {
             continue;
         emit_load_operand(cc, &ctx->phi_copies[i].src_op, X86_RAX);
         emit_store_slot(cc, ctx->phi_copies[i].dest_vreg, X86_RAX);
+        ctx->phi_copies[i].emitted = true;
     }
 }
 
@@ -2305,7 +2332,7 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
     case LR_OP_BR: {
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         uint32_t target_id = dt->ops[0].block_id;
-        emit_jmp(cc, target_id);
+        emit_jmp_sourced(cc, target_id, dt->block_id);
         break;
     }
     case LR_OP_CONDBR: {
@@ -2315,9 +2342,9 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         uint32_t true_id = dt->ops[1].block_id;
         uint32_t false_id = dt->ops[2].block_id;
-        emit_jcc(cc, LR_CC_NE, true_id);
+        emit_jcc_sourced(cc, LR_CC_NE, true_id, dt->block_id);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
-        emit_jmp(cc, false_id);
+        emit_jmp_sourced(cc, false_id, dt->block_id);
         break;
     }
     default:
@@ -2428,6 +2455,7 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->arena = arena;
     cc->obj_ctx = NULL;
     cc->mod = mod;
+    cc->jit = func_meta ? func_meta->jit : NULL;
     cc->sym_defined = NULL;
     cc->sym_funcs = NULL;
     cc->sym_count = 0;
@@ -2488,10 +2516,9 @@ static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
         return -1;
     if (direct_ensure_block_offsets(ctx, block_id) != 0)
         return -1;
-    /* Defer both the previous block's terminator and this block's offset
-       recording. PHI instructions in the new block will register phi copies
-       for predecessor blocks; the deferred terminator and block offset are
-       materialized when the first non-PHI instruction is emitted. */
+    /* Defer the previous block's terminator and this block's offset.
+       PHI instructions register phi copies before the deferred
+       terminator is flushed by the first non-PHI instruction. */
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
     ctx->block_offset_pending = true;
@@ -2512,11 +2539,9 @@ static int x86_64_compile_emit(void *compile_ctx,
     if (desc->num_indices > 0 && !desc->indices)
         return -1;
 
-    /* PHI instructions only register phi copies and allocate slots; they
-       do not emit code and must not flush the deferred terminator. For
-       all other instructions: flush the deferred terminator from the
-       previous block (now that PHI copies are registered), then record
-       this block's offset so branch fixups target the right position. */
+    /* PHI instructions register phi copies without flushing the deferred
+       terminator. The first non-PHI instruction flushes it (applying any
+       registered phi copies) then records the block offset. */
     if (desc->op != LR_OP_PHI) {
         if (ctx->deferred.pending) {
             if (flush_deferred_terminator(ctx) != 0)
@@ -3354,9 +3379,52 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
 
     cc = &ctx->cc;
 
+    {
+        uint32_t orig_num_fixups = cc->num_fixups;
+        for (uint32_t fi = 0; fi < orig_num_fixups; fi++) {
+            uint32_t source = cc->fixups[fi].source;
+            uint32_t target = cc->fixups[fi].target;
+            bool has_late = false;
+            if (source == UINT32_MAX)
+                continue;
+            for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
+                if (ctx->phi_copies[pi].pred_block_id == source &&
+                    !ctx->phi_copies[pi].emitted) {
+                    has_late = true;
+                    break;
+                }
+            }
+            if (!has_late)
+                continue;
+            size_t stub_pos = cc->pos;
+            for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
+                if (ctx->phi_copies[pi].pred_block_id != source)
+                    continue;
+                emit_load_operand(cc, &ctx->phi_copies[pi].src_op,
+                                  X86_RAX);
+                emit_store_slot(cc, ctx->phi_copies[pi].dest_vreg,
+                                X86_RAX);
+            }
+            if (direct_ensure_fixup_cap(ctx) != 0)
+                return -1;
+            emit_jmp(cc, target);
+            cc->fixups[fi].target = UINT32_MAX;
+            if (cc->fixups[fi].pos + 4 <= cc->buflen) {
+                int32_t rel = (int32_t)((int64_t)stub_pos -
+                                        (int64_t)(cc->fixups[fi].pos + 4));
+                cc->buf[cc->fixups[fi].pos + 0] = (uint8_t)(rel);
+                cc->buf[cc->fixups[fi].pos + 1] = (uint8_t)(rel >> 8);
+                cc->buf[cc->fixups[fi].pos + 2] = (uint8_t)(rel >> 16);
+                cc->buf[cc->fixups[fi].pos + 3] = (uint8_t)(rel >> 24);
+            }
+        }
+    }
+
     for (uint32_t i = 0; i < cc->num_fixups; i++) {
         size_t fix_pos = cc->fixups[i].pos;
         uint32_t target = cc->fixups[i].target;
+        if (target == UINT32_MAX)
+            continue;
         if (target < cc->num_block_offsets && fix_pos + 4 <= cc->buflen) {
             int32_t rel = (int32_t)((int64_t)cc->block_offsets[target] -
                                     (int64_t)(fix_pos + 4));
@@ -3395,6 +3463,7 @@ static int x86_64_compile_add_phi_copy(void *compile_ctx,
     entry->pred_block_id = pred_block_id;
     entry->dest_vreg = dest_vreg;
     entry->src_op = operand_from_desc(src_op);
+    entry->emitted = false;
     return 0;
 }
 

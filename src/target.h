@@ -13,6 +13,8 @@ typedef enum lr_compile_mode {
     LR_COMPILE_LLVM       = 2,  /* Mode C: translate to real LLVM (optional) */
 } lr_compile_mode_t;
 
+typedef struct lr_jit lr_jit_t;
+
 typedef struct lr_compile_func_meta {
     lr_func_t *func;
     lr_type_t *ret_type;
@@ -22,6 +24,7 @@ typedef struct lr_compile_func_meta {
     uint32_t num_blocks;
     uint32_t next_vreg;
     lr_compile_mode_t mode;
+    lr_jit_t *jit;
 } lr_compile_func_meta_t;
 
 typedef struct lr_compile_inst_desc {

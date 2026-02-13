@@ -424,15 +424,41 @@ static lr_operand_t compat_desc_to_operand(const lr_operand_desc_t *d) {
     return op;
 }
 
+static int compat_finish_active_func(lc_module_compat_t *mod) {
+    lr_error_t err;
+    if (!mod || !mod->session)
+        return -1;
+    if (!lr_session_cur_func(mod->session))
+        return 0;
+    memset(&err, 0, sizeof(err));
+    return lr_session_func_end(mod->session, NULL, &err);
+}
+
 static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                             lr_error_t *err) {
+    lr_session_t *s;
+    lr_func_t *active;
     if (!mod || !mod->session || !b)
         return -1;
     if (!f)
         f = b->func;
     if (!f || b->func != f)
         return -1;
-    return lr_session_bind_ir(mod->session, mod->mod, f, b, err);
+    s = mod->session;
+
+    if (!lr_session_is_direct(s))
+        return lr_session_bind_ir(s, mod->mod, f, b, err);
+
+    active = lr_session_cur_func(s);
+    if (active != f) {
+        if (active && compat_finish_active_func(mod) != 0)
+            return -1;
+        if (lr_session_func_begin_existing(s, mod->mod, f, err) != 0)
+            return -1;
+    }
+    if (lr_session_cur_block(s) == b)
+        return 0;
+    return lr_session_adopt_block(s, b->id, b, err);
 }
 
 static uint32_t compat_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
@@ -510,7 +536,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
     memset(&cfg, 0, sizeof(cfg));
-    cfg.mode = LR_MODE_IR;
+    cfg.mode = LR_MODE_DIRECT;
     cm->session = lr_session_create(&cfg, NULL);
     if (!cm->session) {
         lr_arena_destroy(arena);
@@ -2229,11 +2255,19 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
     copy.dest_vreg = phi->result ? phi->result->vreg.id : 0;
     copy.src_op = lc_value_to_desc(val);
     memset(&err, 0, sizeof(err));
-    if (phi->session && lr_session_bind_ir(phi->session, phi->mod,
-                                           phi->func, phi->block, &err) == 0) {
-        (void)lr_session_add_phi_copy(phi->session, block->id, &copy, &err);
+    if (phi->session) {
+        if (lr_session_is_direct(phi->session)) {
+            (void)lr_session_add_phi_copy(phi->session, block->id,
+                                          &copy, &err);
+        } else if (lr_session_bind_ir(phi->session, phi->mod,
+                                      phi->func, phi->block,
+                                      &err) == 0) {
+            (void)lr_session_add_phi_copy(phi->session, block->id,
+                                          &copy, &err);
+        }
     }
-    phi_refresh_operands(phi);
+    if (!phi->session || !lr_session_is_direct(phi->session))
+        phi_refresh_operands(phi);
 }
 
 void lc_phi_finalize(lc_phi_node_t *phi) {
@@ -2526,6 +2560,28 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     (void)compat_emit(mod, b, f, &inst);
 }
 
+static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
+    lr_jit_t *session_jit;
+    lr_func_t *f;
+    int rc;
+
+    if (compat_finish_active_func(mod) != 0)
+        return -1;
+
+    session_jit = lr_session_jit(mod->session);
+
+    for (f = mod->mod->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0])
+            continue;
+        void *addr = lr_jit_get_function(session_jit, f->name);
+        if (addr)
+            lr_jit_add_symbol(jit, f->name, addr);
+    }
+
+    rc = lr_jit_add_module(jit, mod->mod);
+    return rc;
+}
+
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (!mod || !jit) return -1;
     {
@@ -2540,6 +2596,8 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
             }
         }
     }
+    if (lr_session_is_direct(mod->session))
+        return compat_add_to_jit_direct(mod, jit);
     return lr_jit_add_module(jit, mod->mod);
 }
 

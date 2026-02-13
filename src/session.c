@@ -275,6 +275,7 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     meta.num_blocks = s->block_count;
     meta.next_vreg = s->cur_func->next_vreg;
     meta.mode = s->jit->mode;
+    meta.jit = s->jit;
 
     s->compile_start = align_up_size(s->jit->code_size, 16u);
     if (s->compile_start >= s->jit->code_cap) {
@@ -875,6 +876,39 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
     return 0;
 }
 
+int lr_session_func_begin_existing(struct lr_session *s, lr_module_t *module,
+                                    lr_func_t *func, session_error_t *err) {
+    err_clear(err);
+    if (!s || !module || !func) {
+        err_set(err, S_ERR_ARGUMENT,
+                "invalid func_begin_existing arguments");
+        return -1;
+    }
+    if (s->cur_func) {
+        err_set(err, S_ERR_STATE, "function already active");
+        return -1;
+    }
+
+    s->module = module;
+    s->cur_func = func;
+    s->cur_block = NULL;
+    s->block_count = 0;
+    reset_phi_copies(s);
+    s->compile_ctx = NULL;
+    s->compile_start = 0;
+    s->compile_active = false;
+    s->emitted_count = 0;
+
+    if (module->first_global)
+        lr_jit_materialize_globals(s->jit, module);
+
+    if (begin_direct_compile(s, err) != 0) {
+        finish_function_state(s);
+        return -1;
+    }
+    return 0;
+}
+
 uint32_t lr_session_param(struct lr_session *s, uint32_t idx) {
     if (!s || !s->cur_func || idx >= s->cur_func->num_params)
         return UINT32_MAX;
@@ -1393,4 +1427,24 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
 
 lr_module_t *lr_session_module(struct lr_session *s) {
     return s ? s->module : NULL;
+}
+
+bool lr_session_is_direct(struct lr_session *s) {
+    return s && s->cfg.mode == SESSION_MODE_DIRECT;
+}
+
+bool lr_session_is_compiling(struct lr_session *s) {
+    return s && s->compile_active;
+}
+
+lr_func_t *lr_session_cur_func(struct lr_session *s) {
+    return s ? s->cur_func : NULL;
+}
+
+lr_block_t *lr_session_cur_block(struct lr_session *s) {
+    return s ? s->cur_block : NULL;
+}
+
+lr_jit_t *lr_session_jit(struct lr_session *s) {
+    return s ? s->jit : NULL;
 }
