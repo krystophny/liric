@@ -87,38 +87,6 @@ static void set_cached_reg_vreg(x86_compile_ctx_t *ctx, uint8_t reg, uint32_t vr
     if (reg == X86_RCX) ctx->rcx_holds_vreg = vreg;
 }
 
-static void count_vreg_use(uint32_t *counts, uint32_t num_counts,
-                           const lr_operand_t *op) {
-    if (!counts || !op || op->kind != LR_VAL_VREG)
-        return;
-    if (op->vreg < num_counts)
-        counts[op->vreg]++;
-}
-
-static uint32_t *build_vreg_use_counts(lr_arena_t *arena, lr_func_t *func,
-                                       lr_block_phi_copies_t *phi_copies) {
-    if (!arena || !func || func->next_vreg == 0)
-        return NULL;
-
-    uint32_t *counts = lr_arena_array(arena, uint32_t, func->next_vreg);
-
-    for (uint32_t ii = 0; ii < func->num_linear_insts; ii++) {
-        lr_inst_t *inst = func->linear_inst_array[ii];
-        for (uint32_t oi = 0; oi < inst->num_operands; oi++)
-            count_vreg_use(counts, func->next_vreg, &inst->operands[oi]);
-    }
-
-    if (phi_copies) {
-        for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-            for (uint32_t ci = 0; ci < phi_copies[bi].count; ci++)
-                count_vreg_use(counts, func->next_vreg,
-                               &phi_copies[bi].copies[ci].src_op);
-        }
-    }
-
-    return counts;
-}
-
 static bool inst_produces_elidable_rax_value(const lr_inst_t *inst) {
     if (!inst)
         return false;
@@ -1173,12 +1141,8 @@ static int32_t ensure_static_alloca_offset_cb(void *ctx, const lr_inst_t *inst) 
     return ensure_static_alloca_offset((x86_compile_ctx_t *)ctx, inst);
 }
 
-static void reserve_phi_dest_slots(x86_compile_ctx_t *ctx, lr_block_phi_copies_t *phi_copies,
-                                   uint32_t num_blocks) {
-    for (uint32_t bi = 0; bi < num_blocks; bi++) {
-        for (uint32_t ci = 0; ci < phi_copies[bi].count; ci++)
-            alloc_slot(ctx, phi_copies[bi].copies[ci].dest_vreg, 8, 8);
-    }
+static void reserve_phi_dest_slot_cb(void *ctx, uint32_t dest_vreg) {
+    (void)alloc_slot((x86_compile_ctx_t *)ctx, dest_vreg, 8, 8);
 }
 
 /*
@@ -1189,6 +1153,7 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                                 uint8_t *buf, size_t buflen, size_t *out_len,
                                 lr_arena_t *arena) {
     lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
+    lr_target_func_analysis_t analysis;
     uint32_t initial_stack_slots = func->next_vreg > 64 ? func->next_vreg : 64;
 
     uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
@@ -1234,11 +1199,13 @@ static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
     lr_block_phi_copies_t *phi_copies = lr_build_phi_copies(ctx.arena, func);
     if (!phi_copies)
         return -1;
-    ctx.vreg_use_counts = build_vreg_use_counts(ctx.arena, func, phi_copies);
-    ctx.num_vreg_use_counts = func->next_vreg;
-    reserve_phi_dest_slots(&ctx, phi_copies, nb);
-    lr_target_prescan_static_alloca_offsets(func, layout_arena, &ctx,
-                                            ensure_static_alloca_offset_cb);
+    if (lr_target_analyze_function(func, layout_arena, phi_copies,
+                                   &ctx, ensure_static_alloca_offset_cb,
+                                   &ctx, reserve_phi_dest_slot_cb,
+                                   &analysis) != 0)
+        return -1;
+    ctx.vreg_use_counts = analysis.vreg_use_counts;
+    ctx.num_vreg_use_counts = analysis.num_vregs;
 
     /* Emit prologue and patch stack size once frame growth is complete. */
     size_t prologue_stack_patch_pos = emit_prologue(&ctx);

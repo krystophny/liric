@@ -87,6 +87,8 @@ int test_parse_auto_selects_bc_frontend(void);
 int test_symbol_provider_prefers_jit_table(void);
 int test_target_shared_static_alloca_table(void);
 int test_target_shared_prescan_filters_dynamic_alloca(void);
+int test_target_shared_analyze_function_merges_prescans(void);
+int test_target_shared_analyze_function_handles_empty(void);
 int test_ir_finalize_builds_dense_arrays(void);
 int test_ir_finalize_peephole_constant_identity_and_branch(void);
 int test_ir_finalize_redundant_load_elimination(void);
@@ -298,6 +300,8 @@ int main(void) {
     RUN_TEST(test_symbol_provider_prefers_jit_table);
     RUN_TEST(test_target_shared_static_alloca_table);
     RUN_TEST(test_target_shared_prescan_filters_dynamic_alloca);
+    RUN_TEST(test_target_shared_analyze_function_merges_prescans);
+    RUN_TEST(test_target_shared_analyze_function_handles_empty);
     RUN_TEST(test_ir_finalize_builds_dense_arrays);
     RUN_TEST(test_ir_finalize_peephole_constant_identity_and_branch);
     RUN_TEST(test_ir_finalize_redundant_load_elimination);
