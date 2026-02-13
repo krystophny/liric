@@ -1,6 +1,7 @@
 #include "../src/jit.h"
 #include "../src/liric.h"
 #include "../src/target.h"
+#include "../src/arena.h"
 #include "../src/bc_decode.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -88,6 +89,65 @@ int test_target_riscv64_split_resolves(void) {
     TEST_ASSERT(strcmp(im->name, "riscv64im") == 0, "im canonical target name");
     TEST_ASSERT(strcmp(rv64gc->name, gc->name) == 0, "rv64gc alias maps to riscv64gc");
     TEST_ASSERT(strcmp(rv64im->name, im->name) == 0, "rv64im alias maps to riscv64im");
+    return 0;
+}
+
+int test_target_copy_patch_entrypoints_available(void) {
+    const char *names[] = {"x86_64", "aarch64", "riscv64gc", "riscv64im"};
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        const lr_target_t *t = lr_target_by_name(names[i]);
+        TEST_ASSERT(t != NULL, "target exists");
+        TEST_ASSERT(t->compile_func != NULL, "target has compile_func");
+        TEST_ASSERT(t->compile_func_cp != NULL, "target has compile_func_cp");
+    }
+    return 0;
+}
+
+int test_target_copy_patch_fallback_matches_isel_for_non_x86(void) {
+    const char *src =
+        "define i64 @sum(i64 %a, i64 %b) {\n"
+        "entry:\n"
+        "  %c = add i64 %a, %b\n"
+        "  ret i64 %c\n"
+        "}\n";
+    const char *targets[] = {"aarch64", "riscv64gc", "riscv64im"};
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll(src, strlen(src), err, sizeof(err));
+    TEST_ASSERT(m != NULL, "parse module");
+    TEST_ASSERT(m->first_func != NULL, "module has function");
+
+    for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
+        const lr_target_t *t = lr_target_by_name(targets[i]);
+        lr_arena_t *a_isel = NULL;
+        lr_arena_t *a_cp = NULL;
+        uint8_t isel_buf[4096];
+        uint8_t cp_buf[4096];
+        size_t isel_len = 0;
+        size_t cp_len = 0;
+        int rc_isel;
+        int rc_cp;
+
+        TEST_ASSERT(t != NULL, "target exists");
+        TEST_ASSERT(t->compile_func != NULL, "target has compile_func");
+        TEST_ASSERT(t->compile_func_cp != NULL, "target has compile_func_cp");
+
+        a_isel = lr_arena_create(0);
+        a_cp = lr_arena_create(0);
+        TEST_ASSERT(a_isel != NULL && a_cp != NULL, "arena create");
+
+        rc_isel = t->compile_func(m->first_func, m, isel_buf, sizeof(isel_buf), &isel_len, a_isel);
+        rc_cp = t->compile_func_cp(m->first_func, m, cp_buf, sizeof(cp_buf), &cp_len, a_cp);
+
+        lr_arena_destroy(a_isel);
+        lr_arena_destroy(a_cp);
+
+        TEST_ASSERT(rc_isel == 0, "isel compile succeeds");
+        TEST_ASSERT(rc_cp == 0, "copy-patch compile succeeds");
+        TEST_ASSERT(isel_len == cp_len, "fallback length matches isel");
+        TEST_ASSERT(memcmp(isel_buf, cp_buf, cp_len) == 0, "fallback bytes match isel");
+    }
+
+    lr_module_free(m);
     return 0;
 }
 
