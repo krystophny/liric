@@ -1,4 +1,5 @@
 #include "arena.h"
+#include "bc_decode.h"
 #include "ir.h"
 #include "jit.h"
 #include "liric.h"
@@ -1170,6 +1171,7 @@ int lr_session_compile_ll(struct lr_session *s, const char *src, size_t len,
 int lr_session_compile_bc(struct lr_session *s, const uint8_t *data, size_t len,
                           void **out_addr, session_error_t *err) {
     char parse_err[256];
+    lr_arena_t *arena = NULL;
     lr_module_t *m = NULL;
 
     err_clear(err);
@@ -1185,8 +1187,14 @@ int lr_session_compile_bc(struct lr_session *s, const uint8_t *data, size_t len,
     }
 
     parse_err[0] = '\0';
-    m = lr_parse_bc(data, len, parse_err, sizeof(parse_err));
+    arena = lr_arena_create(0);
+    if (!arena) {
+        err_set(err, S_ERR_BACKEND, "arena allocation failed");
+        return -1;
+    }
+    m = lr_parse_bc_streaming(data, len, arena, NULL, NULL, parse_err, sizeof(parse_err));
     if (!m) {
+        lr_arena_destroy(arena);
         err_set(err, S_ERR_PARSE, "bc parse failed: %s",
                 parse_err[0] ? parse_err : "unknown error");
         return -1;

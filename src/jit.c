@@ -2275,8 +2275,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
 
     if (j->runtime_bc_data && !j->runtime_bc_loaded) {
         char rt_err[256] = {0};
-        lr_module_t *rt = lr_parse_bc_data(j->runtime_bc_data, j->runtime_bc_len,
-                                            m->arena, rt_err, sizeof(rt_err));
+        lr_module_t *rt = lr_parse_bc_with_arena(j->runtime_bc_data, j->runtime_bc_len,
+                                                 m->arena, rt_err, sizeof(rt_err));
         if (!rt) {
             fprintf(stderr, "runtime bitcode parse failed: %s\n",
                     rt_err[0] ? rt_err : "unknown parse error");
