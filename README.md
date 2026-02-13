@@ -132,17 +132,76 @@ The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends w
 
 Intrinsic blobs are hand-written assembly for LLVM intrinsics (sqrt, exp, memcpy, etc.), embedded into JIT buffers and executables.
 
-## Benchmarks
+## Performance
+
+Measured on February 13, 2026:
+
+- CPU: AMD Ryzen 9 5950X 16-Core Processor
+- OS: Linux 6.18.9-2-cachyos x86_64
+- Compiler: GCC 15.2.1
+
+### LLVM IR Corpus (repo `tests/ll`, 8 `@main` tests, 2.42 KiB IR)
+
+Liric metrics are from `liric_probe_runner --timing` (`parse_us`, `compile_us`).
+LLVM metrics are from `bench_lli_phases --json` (`parse_ms`, `jit_ms`).
+`Total JIT` is `parse + compile`.
+
+| Phase | liric (ms, sum) | LLVM ORC (ms, sum) | Speedup |
+|-------|------------------|--------------------|---------|
+| Parse | 0.601600 | 0.860941 | 1.43x |
+| Compile | 0.384100 | 0.015428 | 0.04x |
+| Total JIT | 0.985700 | 0.876369 | 0.89x |
+
+Per-test distribution (nearest-rank):
+
+| Metric (`parse+compile`) | liric (ms) | LLVM ORC (ms) | Speedup |
+|--------------------------|------------|---------------|---------|
+| p50 | 0.094900 | 0.098966 | 1.04x |
+| p95 | 0.215900 | 0.182233 | 0.84x |
+| slowest | 0.215900 | 0.182233 | 0.84x |
+
+### Micro-benchmarks (`bench_tcc`, 5 cases, best-of-5)
+
+| Metric | tcc | liric | Ratio |
+|--------|-----|-------|-------|
+| Wall-clock exe mode (us, sum) | 7329 | 22443 | 0.33x |
+| In-process compile+reloc (us, sum) | 1033.2 | 48.1 | 21.5x |
+
+### LFortran Integration Bench Commands
+
+The canonical integration commands are:
 
 ```bash
-./build/bench_compat_check --timeout 15   # correctness sweep, creates corpus
-./build/bench_ll --iters 3                # liric JIT vs lli
-./build/bench_api --iters 3               # liric vs lfortran LLVM native
-./build/bench_tcc --iters 10              # liric vs TCC
-./build/bench_corpus --top 10 --iters 3   # 100-case focused corpus
+./build/bench_compat_check --timeout 15
+./build/bench_ll --iters 3
+./build/bench_api --iters 3
+./build/bench_corpus --iters 3
 ```
 
-Outputs to `/tmp/liric_bench/`.
+On this snapshot, `bench_compat_check --limit 50` produced `compat_ll.txt` with
+0 tests (`liric_match=0` in that sample), so `bench_ll` and `bench_api` ran with
+empty corpora (`Benchmarking 0 tests`). Artifacts were still written to
+`/tmp/liric_bench/`.
+
+### Reproduction
+
+```bash
+# 1) Bounded compat sweep (writes /tmp/liric_bench/*.txt and *.jsonl)
+timeout 600 ./build/bench_compat_check --timeout 15 --limit 50
+
+# 2) Canonical benchmark binaries
+./build/bench_ll --iters 1
+./build/bench_api --iters 1
+./build/bench_tcc --iters 5
+./build/bench_corpus --iters 1
+
+# 3) Phase breakdown used for the table above (repo tests/ll corpus)
+for f in tests/ll/*.ll; do
+  rg -q 'define\\s+[^@]+@main\\s*\\(' "$f" || continue
+  ./build/liric_probe_runner --timing --ignore-retcode --func main --sig i32 "$f"
+  ./build/bench_lli_phases --json --iters 1 --func main --sig i32 "$f"
+done
+```
 
 ## Source Map
 
