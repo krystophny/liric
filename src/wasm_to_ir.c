@@ -1,5 +1,6 @@
 #include "wasm_to_ir.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* WASM value types */
@@ -101,6 +102,9 @@
 
 #define MAX_STACK 256
 #define MAX_CTRL  64
+
+typedef int (*lr_wasm_inst_callback_t)(lr_func_t *func, lr_block_t *block,
+                                       const lr_inst_t *inst, void *ctx);
 
 typedef struct {
     uint32_t vregs[MAX_STACK];
@@ -805,11 +809,11 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
 
 /* ---- Module-level conversion ---- */
 
-lr_module_t *lr_wasm_to_ir_streaming(const lr_wasm_module_t *wmod,
-                                     lr_arena_t *arena,
-                                     lr_wasm_inst_callback_t on_inst,
-                                     void *on_inst_ctx,
-                                     char *err, size_t errlen) {
+static lr_module_t *wasm_build_module_streaming(const lr_wasm_module_t *wmod,
+                                                lr_arena_t *arena,
+                                                lr_wasm_inst_callback_t on_inst,
+                                                void *on_inst_ctx,
+                                                char *err, size_t errlen) {
     lr_module_t *m;
     if (!wmod || !arena) {
         if (err && errlen > 0)
@@ -903,7 +907,342 @@ lr_module_t *lr_wasm_to_ir_streaming(const lr_wasm_module_t *wmod,
     return m;
 }
 
-lr_module_t *lr_wasm_to_ir(const lr_wasm_module_t *wmod,
-                           lr_arena_t *arena, char *err, size_t errlen) {
-    return lr_wasm_to_ir_streaming(wmod, arena, NULL, NULL, err, errlen);
+lr_module_t *lr_wasm_build_module(const lr_wasm_module_t *wmod,
+                                  lr_arena_t *arena,
+                                  char *err, size_t errlen) {
+    return wasm_build_module_streaming(wmod, arena, NULL, NULL, err, errlen);
+}
+
+static void session_err_set(lr_error_t *err, int code, const char *msg) {
+    if (!err)
+        return;
+    err->code = code;
+    if (msg)
+        snprintf(err->msg, sizeof(err->msg), "%s", msg);
+    else
+        err->msg[0] = '\0';
+}
+
+static lr_type_t *map_type_to_session(lr_session_t *session,
+                                      const lr_type_t *src_type) {
+    if (!session || !src_type)
+        return NULL;
+    switch (src_type->kind) {
+    case LR_TYPE_VOID: return lr_type_void_s(session);
+    case LR_TYPE_I1: return lr_type_i1_s(session);
+    case LR_TYPE_I8: return lr_type_i8_s(session);
+    case LR_TYPE_I16: return lr_type_i16_s(session);
+    case LR_TYPE_I32: return lr_type_i32_s(session);
+    case LR_TYPE_I64: return lr_type_i64_s(session);
+    case LR_TYPE_FLOAT: return lr_type_f32_s(session);
+    case LR_TYPE_DOUBLE: return lr_type_f64_s(session);
+    case LR_TYPE_PTR: return lr_type_ptr_s(session);
+    default:
+        return NULL;
+    }
+}
+
+static lr_operand_desc_t map_operand_to_session(const lr_operand_t *src_op,
+                                                lr_session_t *session,
+                                                const lr_module_t *src_mod,
+                                                const uint32_t *func_sym_ids,
+                                                uint32_t func_sym_count) {
+    lr_operand_desc_t out;
+    memset(&out, 0, sizeof(out));
+    if (!src_op || !session)
+        return out;
+    out.type = map_type_to_session(session, src_op->type);
+    out.global_offset = src_op->global_offset;
+    switch (src_op->kind) {
+    case LR_VAL_VREG:
+        out.kind = LR_OP_KIND_VREG;
+        out.vreg = src_op->vreg;
+        break;
+    case LR_VAL_IMM_I64:
+        out.kind = LR_OP_KIND_IMM_I64;
+        out.imm_i64 = src_op->imm_i64;
+        break;
+    case LR_VAL_IMM_F64:
+        out.kind = LR_OP_KIND_IMM_F64;
+        out.imm_f64 = src_op->imm_f64;
+        break;
+    case LR_VAL_BLOCK:
+        out.kind = LR_OP_KIND_BLOCK;
+        out.block_id = src_op->block_id;
+        break;
+    case LR_VAL_GLOBAL: {
+        uint32_t mapped = src_op->global_id;
+        const char *sym_name = NULL;
+        out.kind = LR_OP_KIND_GLOBAL;
+        if (mapped < func_sym_count && func_sym_ids) {
+            uint32_t sid = func_sym_ids[mapped];
+            if (sid != UINT32_MAX)
+                mapped = sid;
+        } else if (src_mod) {
+            sym_name = lr_module_symbol_name(src_mod, mapped);
+            if (sym_name) {
+                uint32_t sid = lr_session_intern(session, sym_name);
+                if (sid != UINT32_MAX)
+                    mapped = sid;
+            }
+        }
+        out.global_id = mapped;
+        break;
+    }
+    case LR_VAL_NULL:
+        out.kind = LR_OP_KIND_NULL;
+        break;
+    case LR_VAL_UNDEF:
+    default:
+        out.kind = LR_OP_KIND_UNDEF;
+        break;
+    }
+    return out;
+}
+
+static bool opcode_has_dest(lr_opcode_t op, lr_type_t *type) {
+    switch (op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_UNREACHABLE:
+    case LR_OP_STORE:
+        return false;
+    case LR_OP_CALL:
+        return type && type->kind != LR_TYPE_VOID;
+    default:
+        return true;
+    }
+}
+
+static int replay_function_to_session(const lr_module_t *src_mod,
+                                      const lr_func_t *src_func,
+                                      lr_session_t *session,
+                                      const uint32_t *func_sym_ids,
+                                      uint32_t func_sym_count,
+                                      void **out_addr,
+                                      lr_error_t *err) {
+    lr_type_t **params = NULL;
+    lr_type_t *ret_type = NULL;
+    int rc = 0;
+    uint32_t i;
+    const lr_block_t *block;
+
+    if (out_addr)
+        *out_addr = NULL;
+    if (!src_mod || !src_func || !session) {
+        session_err_set(err, LR_ERR_ARGUMENT, "invalid replay arguments");
+        return -1;
+    }
+
+    ret_type = map_type_to_session(session, src_func->ret_type);
+    if (!ret_type) {
+        session_err_set(err, LR_ERR_PARSE, "unsupported wasm return type");
+        return -1;
+    }
+    if (src_func->num_params > 0) {
+        params = (lr_type_t **)calloc(src_func->num_params, sizeof(*params));
+        if (!params) {
+            session_err_set(err, LR_ERR_BACKEND, "param allocation failed");
+            return -1;
+        }
+        for (i = 0; i < src_func->num_params; i++) {
+            params[i] = map_type_to_session(session, src_func->param_types[i]);
+            if (!params[i]) {
+                free(params);
+                session_err_set(err, LR_ERR_PARSE, "unsupported wasm param type");
+                return -1;
+            }
+        }
+    }
+
+    rc = lr_session_func_begin(session, src_func->name, ret_type, params,
+                               src_func->num_params, src_func->vararg, err);
+    free(params);
+    if (rc != 0)
+        return -1;
+
+    for (i = 0; i < src_func->num_blocks; i++) {
+        uint32_t block_id = lr_session_block(session);
+        if (block_id != i) {
+            session_err_set(err, LR_ERR_STATE, "session block allocation mismatch");
+            return -1;
+        }
+    }
+
+    for (block = src_func->first_block; block; block = block->next) {
+        const lr_inst_t *inst;
+        rc = lr_session_set_block(session, block->id, err);
+        if (rc != 0)
+            return -1;
+
+        for (inst = block->first; inst; inst = inst->next) {
+            lr_inst_desc_t desc;
+            lr_operand_desc_t *ops = NULL;
+            lr_error_t emit_err = {0};
+            uint32_t emit_dest;
+
+            memset(&desc, 0, sizeof(desc));
+            desc.op = inst->op;
+            desc.type = map_type_to_session(session, inst->type);
+            desc.dest = inst->dest;
+            desc.num_operands = inst->num_operands;
+            desc.num_indices = inst->num_indices;
+            desc.indices = inst->indices;
+            desc.icmp_pred = inst->icmp_pred;
+            desc.fcmp_pred = inst->fcmp_pred;
+            desc.call_external_abi = inst->call_external_abi;
+            desc.call_vararg = inst->call_vararg;
+            desc.call_fixed_args = inst->call_fixed_args;
+
+            if (desc.num_operands > 0) {
+                uint32_t j;
+                ops = (lr_operand_desc_t *)calloc(desc.num_operands, sizeof(*ops));
+                if (!ops) {
+                    session_err_set(err, LR_ERR_BACKEND, "operand allocation failed");
+                    return -1;
+                }
+                for (j = 0; j < desc.num_operands; j++) {
+                    ops[j] = map_operand_to_session(&inst->operands[j], session,
+                                                    src_mod, func_sym_ids,
+                                                    func_sym_count);
+                }
+                desc.operands = ops;
+            }
+
+            emit_dest = lr_session_emit(session, &desc, &emit_err);
+            free(ops);
+            if (emit_err.code != LR_OK) {
+                if (err)
+                    *err = emit_err;
+                return -1;
+            }
+            if (opcode_has_dest(desc.op, desc.type) &&
+                desc.dest != 0 &&
+                emit_dest != desc.dest) {
+                session_err_set(err, LR_ERR_BACKEND, "vreg replay mismatch");
+                return -1;
+            }
+        }
+    }
+
+    rc = lr_session_func_end(session, out_addr, err);
+    if (rc != 0)
+        return -1;
+    return 0;
+}
+
+int lr_wasm_to_session(const lr_wasm_module_t *wmod,
+                       lr_session_t *session,
+                       void **out_last_addr,
+                       lr_error_t *err) {
+    lr_arena_t *tmp_arena = NULL;
+    lr_module_t *tmp_mod = NULL;
+    lr_func_t *func;
+    uint32_t *func_sym_ids = NULL;
+    uint32_t func_count = 0;
+    uint32_t idx = 0;
+    char parse_err[256] = {0};
+    void *last_addr = NULL;
+
+    if (out_last_addr)
+        *out_last_addr = NULL;
+    if (err) {
+        err->code = LR_OK;
+        err->msg[0] = '\0';
+    }
+    if (!wmod || !session) {
+        session_err_set(err, LR_ERR_ARGUMENT, "invalid wasm session conversion input");
+        return -1;
+    }
+
+    tmp_arena = lr_arena_create(0);
+    if (!tmp_arena) {
+        session_err_set(err, LR_ERR_BACKEND, "arena allocation failed");
+        return -1;
+    }
+    tmp_mod = wasm_build_module_streaming(wmod, tmp_arena, NULL, NULL,
+                                          parse_err, sizeof(parse_err));
+    if (!tmp_mod) {
+        lr_arena_destroy(tmp_arena);
+        session_err_set(err, LR_ERR_PARSE, parse_err[0] ? parse_err
+                                                        : "wasm to module conversion failed");
+        return -1;
+    }
+
+    for (func = tmp_mod->first_func; func; func = func->next)
+        func_count++;
+    if (func_count > 0) {
+        func_sym_ids = (uint32_t *)calloc(func_count, sizeof(*func_sym_ids));
+        if (!func_sym_ids) {
+            lr_arena_destroy(tmp_arena);
+            session_err_set(err, LR_ERR_BACKEND, "symbol map allocation failed");
+            return -1;
+        }
+        idx = 0;
+        for (func = tmp_mod->first_func; func; func = func->next) {
+            func_sym_ids[idx++] = lr_session_intern(session, func->name);
+        }
+    }
+
+    idx = 0;
+    for (func = tmp_mod->first_func; func; func = func->next, idx++) {
+        lr_type_t **params = NULL;
+        lr_type_t *ret_type = map_type_to_session(session, func->ret_type);
+        int rc;
+
+        if (!ret_type) {
+            free(func_sym_ids);
+            lr_arena_destroy(tmp_arena);
+            session_err_set(err, LR_ERR_PARSE, "unsupported wasm return type");
+            return -1;
+        }
+        if (func->num_params > 0) {
+            uint32_t i;
+            params = (lr_type_t **)calloc(func->num_params, sizeof(*params));
+            if (!params) {
+                free(func_sym_ids);
+                lr_arena_destroy(tmp_arena);
+                session_err_set(err, LR_ERR_BACKEND, "param allocation failed");
+                return -1;
+            }
+            for (i = 0; i < func->num_params; i++) {
+                params[i] = map_type_to_session(session, func->param_types[i]);
+                if (!params[i]) {
+                    free(params);
+                    free(func_sym_ids);
+                    lr_arena_destroy(tmp_arena);
+                    session_err_set(err, LR_ERR_PARSE, "unsupported wasm param type");
+                    return -1;
+                }
+            }
+        }
+
+        if (func->is_decl) {
+            rc = lr_session_declare(session, func->name, ret_type, params,
+                                    func->num_params, func->vararg, err);
+            free(params);
+            if (rc != 0) {
+                free(func_sym_ids);
+                lr_arena_destroy(tmp_arena);
+                return -1;
+            }
+            continue;
+        }
+        free(params);
+
+        if (replay_function_to_session(tmp_mod, func, session, func_sym_ids,
+                                       func_count, &last_addr, err) != 0) {
+            free(func_sym_ids);
+            lr_arena_destroy(tmp_arena);
+            return -1;
+        }
+    }
+
+    if (out_last_addr)
+        *out_last_addr = last_addr;
+    free(func_sym_ids);
+    lr_arena_destroy(tmp_arena);
+    return 0;
 }

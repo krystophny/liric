@@ -4,6 +4,7 @@
 #include "../src/wasm_to_ir.h"
 #include "../src/liric.h"
 #include "../src/jit.h"
+#include <liric/liric_session.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -22,27 +23,6 @@
         return 1; \
     } \
 } while (0)
-
-typedef struct {
-    lr_opcode_t ops[128];
-    uint32_t count;
-    uint32_t fail_after;
-} wasm_stream_cb_ctx_t;
-
-static int collect_wasm_stream_callback(lr_func_t *func, lr_block_t *block,
-                                        const lr_inst_t *inst, void *ctx_ptr) {
-    wasm_stream_cb_ctx_t *ctx = (wasm_stream_cb_ctx_t *)ctx_ptr;
-    (void)func;
-    (void)block;
-    if (!ctx || !inst)
-        return -1;
-    if (ctx->count < (uint32_t)(sizeof(ctx->ops) / sizeof(ctx->ops[0])))
-        ctx->ops[ctx->count] = inst->op;
-    ctx->count++;
-    if (ctx->fail_after > 0 && ctx->count >= ctx->fail_after)
-        return -1;
-    return 0;
-}
 
 /* ---- LEB128 tests ---- */
 
@@ -227,7 +207,7 @@ int test_wasm_ir_ret_42(void) {
     char err[256] = {0};
     lr_wasm_module_t *wmod = lr_wasm_decode(wasm, sizeof(wasm), arena, err, sizeof(err));
     TEST_ASSERT(wmod != NULL, "decode ret_42");
-    lr_module_t *m = lr_wasm_to_ir(wmod, arena, err, sizeof(err));
+    lr_module_t *m = lr_wasm_build_module(wmod, arena, err, sizeof(err));
     TEST_ASSERT(m != NULL, "ir ret_42");
     TEST_ASSERT(m->first_func != NULL, "has function");
     TEST_ASSERT(strcmp(m->first_func->name, "f") == 0, "func name");
@@ -254,7 +234,7 @@ int test_wasm_ir_add_args(void) {
     char err[256] = {0};
     lr_wasm_module_t *wmod = lr_wasm_decode(wasm, sizeof(wasm), arena, err, sizeof(err));
     TEST_ASSERT(wmod != NULL, "decode add_args");
-    lr_module_t *m = lr_wasm_to_ir(wmod, arena, err, sizeof(err));
+    lr_module_t *m = lr_wasm_build_module(wmod, arena, err, sizeof(err));
     TEST_ASSERT(m != NULL, "ir add_args");
     lr_func_t *f = m->first_func;
     TEST_ASSERT(f != NULL, "has function");
@@ -270,7 +250,14 @@ int test_wasm_ir_add_args(void) {
     return 0;
 }
 
-int test_wasm_streaming_callback_collects_opcodes(void) {
+int test_wasm_to_session_builds_function_ir(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t sess_err = {0};
+    lr_session_t *session;
+    lr_func_t *f;
+    bool found_add = false;
+    bool found_ret = false;
+    void *last_addr = NULL;
     /* Function adding two i32 params */
     uint8_t wasm[] = {
         0x00, 0x61, 0x73, 0x6D,
@@ -285,27 +272,39 @@ int test_wasm_streaming_callback_collects_opcodes(void) {
         0x0A, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B,
     };
     lr_arena_t *arena = lr_arena_create(0);
-    wasm_stream_cb_ctx_t cb_ctx = {0};
     char err[256] = {0};
-    bool saw_add = false;
-    bool saw_ret = false;
     lr_wasm_module_t *wmod = lr_wasm_decode(wasm, sizeof(wasm), arena, err, sizeof(err));
     TEST_ASSERT(wmod != NULL, "decode add_args");
-    lr_module_t *m = lr_wasm_to_ir_streaming(wmod, arena, collect_wasm_stream_callback,
-                                             &cb_ctx, err, sizeof(err));
-    TEST_ASSERT(m != NULL, "streaming ir add_args");
-    TEST_ASSERT(cb_ctx.count > 0, "callback invoked for emitted instructions");
-    for (uint32_t i = 0; i < cb_ctx.count && i < (uint32_t)(sizeof(cb_ctx.ops) / sizeof(cb_ctx.ops[0])); i++) {
-        if (cb_ctx.ops[i] == LR_OP_ADD) saw_add = true;
-        if (cb_ctx.ops[i] == LR_OP_RET) saw_ret = true;
+
+    cfg.mode = LR_MODE_IR;
+    session = lr_session_create(&cfg, &sess_err);
+    TEST_ASSERT(session != NULL, "session create");
+
+    TEST_ASSERT_EQ(lr_wasm_to_session(wmod, session, &last_addr, &sess_err), 0,
+                   "wasm to session conversion");
+    TEST_ASSERT(last_addr != NULL, "conversion returns last compiled function address");
+
+    f = lr_session_module(session)->first_func;
+    TEST_ASSERT(f != NULL, "session module has function");
+    TEST_ASSERT(strcmp(f->name, "add") == 0, "session function name");
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op == LR_OP_ADD)
+                found_add = true;
+            if (inst->op == LR_OP_RET)
+                found_ret = true;
+        }
     }
-    TEST_ASSERT(saw_add, "callback saw add opcode");
-    TEST_ASSERT(saw_ret, "callback saw ret opcode");
+    TEST_ASSERT(found_add, "session IR contains add");
+    TEST_ASSERT(found_ret, "session IR contains ret");
+
+    lr_session_destroy(session);
     lr_arena_destroy(arena);
     return 0;
 }
 
-int test_wasm_streaming_callback_abort_propagates_error(void) {
+int test_wasm_to_session_invalid_arguments(void) {
+    lr_error_t sess_err = {0};
     /* Function returning constant 42 */
     uint8_t wasm[] = {
         0x00, 0x61, 0x73, 0x6D,
@@ -320,17 +319,15 @@ int test_wasm_streaming_callback_abort_propagates_error(void) {
         0x0A, 0x06, 0x01, 0x04, 0x00, 0x41, 0x2A, 0x0B,
     };
     lr_arena_t *arena = lr_arena_create(0);
-    wasm_stream_cb_ctx_t cb_ctx = {0};
     char err[256] = {0};
     lr_wasm_module_t *wmod = lr_wasm_decode(wasm, sizeof(wasm), arena, err, sizeof(err));
     TEST_ASSERT(wmod != NULL, "decode ret_42");
 
-    cb_ctx.fail_after = 1;
-    lr_module_t *m = lr_wasm_to_ir_streaming(wmod, arena, collect_wasm_stream_callback,
-                                             &cb_ctx, err, sizeof(err));
-    TEST_ASSERT(m == NULL, "streaming callback failure aborts conversion");
-    TEST_ASSERT(strstr(err, "wasm streaming callback failed") != NULL,
-                "streaming callback failure error message");
+    TEST_ASSERT_EQ(lr_wasm_to_session(wmod, NULL, NULL, &sess_err), -1,
+                   "null session rejected");
+    TEST_ASSERT_EQ(sess_err.code, LR_ERR_ARGUMENT, "null session error code");
+    TEST_ASSERT(strstr(sess_err.msg, "invalid wasm session conversion input") != NULL,
+                "null session error message");
     lr_arena_destroy(arena);
     return 0;
 }

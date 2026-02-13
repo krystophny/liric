@@ -35,7 +35,7 @@ static lr_module_t *parse_wasm_with_arena(const uint8_t *data, size_t len,
     lr_wasm_module_t *wmod = lr_wasm_decode(data, len, arena, err, errlen);
     if (!wmod)
         return NULL;
-    return lr_wasm_to_ir(wmod, arena, err, errlen);
+    return lr_wasm_build_module(wmod, arena, err, errlen);
 }
 
 static lr_module_t *parse_bc_input_with_arena(const uint8_t *data, size_t len,
