@@ -5,16 +5,52 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define VREG_MAP_CAP 65536u
-#define BLOCK_MAP_CAP 4096u
-#define GLOBAL_MAP_CAP 4096u
-#define FUNC_MAP_CAP 1024u
-#define TYPE_MAP_CAP 256u
+#define VREG_MAP_INIT_CAP 4096u
+#define BLOCK_MAP_INIT_CAP 1024u
+#define GLOBAL_MAP_INIT_CAP 1024u
+#define FUNC_MAP_INIT_CAP 256u
+#define TYPE_MAP_INIT_CAP 256u
 
-#define VREG_INDEX_CAP 131072u
-#define BLOCK_INDEX_CAP 8192u
-#define GLOBAL_INDEX_CAP 8192u
-#define VREG_NUMERIC_CAP VREG_MAP_CAP
+#define VREG_INDEX_INIT_CAP 8192u
+#define BLOCK_INDEX_INIT_CAP 2048u
+#define GLOBAL_INDEX_INIT_CAP 2048u
+#define VREG_NUMERIC_INIT_CAP 4096u
+
+#define INDEX_MAX_LOAD_NUM 7u
+#define INDEX_MAX_LOAD_DEN 10u
+
+typedef struct {
+    char *name;
+    size_t name_len;
+    uint32_t id;
+    uint32_t hash;
+} vreg_map_entry_t;
+
+typedef struct {
+    char *name;
+    size_t name_len;
+    uint32_t id;
+    lr_block_t *block;
+    uint32_t hash;
+} block_map_entry_t;
+
+typedef struct {
+    char *name;
+    size_t name_len;
+    uint32_t id;
+    uint32_t hash;
+} global_map_entry_t;
+
+typedef struct {
+    char *name;
+    lr_func_t *func;
+} func_map_entry_t;
+
+typedef struct {
+    char *name;
+    lr_type_t *type;
+    bool placeholder;
+} type_map_entry_t;
 
 typedef struct lr_parser {
     lr_lexer_t lex;
@@ -27,34 +63,37 @@ typedef struct lr_parser {
     bool had_error;
 
     /* vreg name -> id mapping for current function */
-    struct { char *name; size_t name_len; uint32_t id; uint32_t hash; } vreg_map[VREG_MAP_CAP];
+    vreg_map_entry_t *vreg_map;
     uint32_t vreg_map_count;
-    int32_t vreg_index[VREG_INDEX_CAP];
-    uint32_t vreg_used_slots[VREG_MAP_CAP];
-    uint32_t vreg_used_slot_count;
-    uint32_t vreg_numeric[VREG_NUMERIC_CAP];
-    uint32_t vreg_numeric_used_slots[VREG_MAP_CAP];
-    uint32_t vreg_numeric_used_slot_count;
+    uint32_t vreg_map_cap;
+    int32_t *vreg_index;
+    uint32_t vreg_index_cap;
+    uint32_t *vreg_numeric;
+    uint32_t vreg_numeric_cap;
 
     /* block name -> id mapping for current function */
-    struct { char *name; size_t name_len; uint32_t id; lr_block_t *block; uint32_t hash; } block_map[BLOCK_MAP_CAP];
+    block_map_entry_t *block_map;
     uint32_t block_map_count;
-    int32_t block_index[BLOCK_INDEX_CAP];
-    uint32_t block_used_slots[BLOCK_MAP_CAP];
-    uint32_t block_used_slot_count;
+    uint32_t block_map_cap;
+    int32_t *block_index;
+    uint32_t block_index_cap;
 
     /* global/function symbol name -> id mapping */
-    struct { char *name; size_t name_len; uint32_t id; uint32_t hash; } global_map[GLOBAL_MAP_CAP];
+    global_map_entry_t *global_map;
     uint32_t global_map_count;
-    int32_t global_index[GLOBAL_INDEX_CAP];
+    uint32_t global_map_cap;
+    int32_t *global_index;
+    uint32_t global_index_cap;
 
     /* function name -> func mapping */
-    struct { char *name; lr_func_t *func; } func_map[FUNC_MAP_CAP];
+    func_map_entry_t *func_map;
     uint32_t func_map_count;
+    uint32_t func_map_cap;
 
     /* named type alias mapping (e.g. %string_descriptor -> struct type) */
-    struct { char *name; lr_type_t *type; bool placeholder; } type_map[TYPE_MAP_CAP];
+    type_map_entry_t *type_map;
     uint32_t type_map_count;
+    uint32_t type_map_cap;
 
     lr_func_t *cur_func;
 } lr_parser_t;
@@ -63,14 +102,18 @@ static void error(lr_parser_t *p, const char *fmt, ...) {
     if (p->had_error) return;
     p->had_error = true;
     if (p->err && p->errlen > 0) {
-        uint32_t line, col;
-        lr_lexer_compute_loc(&p->lex, p->cur.start, &line, &col);
+        uint32_t line = 0, col = 0;
         va_list ap;
         va_start(ap, fmt);
-        int n = snprintf(p->err, p->errlen, "line %u col %u: ",
-                         line, col);
+        int n = 0;
+        if (p->cur.start) {
+            lr_lexer_compute_loc(&p->lex, p->cur.start, &line, &col);
+            n = snprintf(p->err, p->errlen, "line %u col %u: ", line, col);
+        }
         if (n > 0 && (size_t)n < p->errlen)
             vsnprintf(p->err + n, p->errlen - n, fmt, ap);
+        else if (n == 0)
+            vsnprintf(p->err, p->errlen, fmt, ap);
         va_end(ap);
     }
 }
@@ -164,27 +207,212 @@ static void clear_u32_map(uint32_t *map, size_t n) {
         map[i] = UINT32_MAX;
 }
 
-static void reset_used_index_slots(int32_t *index, const uint32_t *slots, uint32_t count) {
-    for (uint32_t i = 0; i < count; i++)
-        index[slots[i]] = -1;
+static uint32_t next_pow2_u32(uint32_t v) {
+    uint32_t p2 = 1u;
+    if (v <= 1u)
+        return 1u;
+    while (p2 < v && p2 <= (UINT32_MAX / 2u))
+        p2 <<= 1u;
+    return p2 >= v ? p2 : UINT32_MAX;
 }
 
-static void reset_used_u32_slots(uint32_t *map, const uint32_t *slots, uint32_t count) {
-    for (uint32_t i = 0; i < count; i++)
-        map[slots[i]] = UINT32_MAX;
+static bool ensure_array_capacity(lr_parser_t *p, void **arr, uint32_t *cap,
+                                  uint32_t min_cap, uint32_t init_cap,
+                                  size_t elem_size, const char *what) {
+    uint32_t new_cap;
+    void *new_arr;
+    if (*cap >= min_cap)
+        return true;
+    new_cap = (*cap == 0) ? init_cap : *cap;
+    while (new_cap < min_cap) {
+        if (new_cap > (UINT32_MAX / 2u)) {
+            error(p, "%s capacity overflow", what);
+            return false;
+        }
+        new_cap <<= 1u;
+    }
+    new_arr = realloc(*arr, (size_t)new_cap * elem_size);
+    if (!new_arr) {
+        error(p, "out of memory growing %s to %u entries", what, new_cap);
+        return false;
+    }
+    *arr = new_arr;
+    *cap = new_cap;
+    return true;
 }
 
-static void register_vreg_numeric_slot(lr_parser_t *p, uint32_t numeric, uint32_t id) {
-    if (numeric >= VREG_NUMERIC_CAP)
-        return;
-    if (p->vreg_numeric[numeric] == UINT32_MAX &&
-            p->vreg_numeric_used_slot_count < VREG_MAP_CAP)
-        p->vreg_numeric_used_slots[p->vreg_numeric_used_slot_count++] = numeric;
+static bool ensure_vreg_map_capacity(lr_parser_t *p, uint32_t min_cap) {
+    return ensure_array_capacity(p, (void **)&p->vreg_map, &p->vreg_map_cap, min_cap,
+                                 VREG_MAP_INIT_CAP, sizeof(*p->vreg_map), "vreg map");
+}
+
+static bool ensure_block_map_capacity(lr_parser_t *p, uint32_t min_cap) {
+    return ensure_array_capacity(p, (void **)&p->block_map, &p->block_map_cap, min_cap,
+                                 BLOCK_MAP_INIT_CAP, sizeof(*p->block_map), "block map");
+}
+
+static bool ensure_global_map_capacity(lr_parser_t *p, uint32_t min_cap) {
+    return ensure_array_capacity(p, (void **)&p->global_map, &p->global_map_cap, min_cap,
+                                 GLOBAL_MAP_INIT_CAP, sizeof(*p->global_map), "global map");
+}
+
+static bool ensure_func_map_capacity(lr_parser_t *p, uint32_t min_cap) {
+    return ensure_array_capacity(p, (void **)&p->func_map, &p->func_map_cap, min_cap,
+                                 FUNC_MAP_INIT_CAP, sizeof(*p->func_map), "function map");
+}
+
+static bool ensure_type_map_capacity(lr_parser_t *p, uint32_t min_cap) {
+    return ensure_array_capacity(p, (void **)&p->type_map, &p->type_map_cap, min_cap,
+                                 TYPE_MAP_INIT_CAP, sizeof(*p->type_map), "type map");
+}
+
+static bool ensure_vreg_numeric_capacity(lr_parser_t *p, uint32_t min_cap) {
+    uint32_t old_cap = p->vreg_numeric_cap;
+    if (!ensure_array_capacity(p, (void **)&p->vreg_numeric, &p->vreg_numeric_cap, min_cap,
+                               VREG_NUMERIC_INIT_CAP, sizeof(*p->vreg_numeric),
+                               "vreg numeric map")) {
+        return false;
+    }
+    for (uint32_t i = old_cap; i < p->vreg_numeric_cap; i++)
+        p->vreg_numeric[i] = UINT32_MAX;
+    return true;
+}
+
+static bool rehash_vreg_index(lr_parser_t *p, uint32_t min_cap) {
+    uint32_t cap = next_pow2_u32(min_cap < 16u ? 16u : min_cap);
+    int32_t *idx;
+    uint32_t mask;
+    if (cap == UINT32_MAX) {
+        error(p, "vreg index capacity overflow");
+        return false;
+    }
+    idx = malloc((size_t)cap * sizeof(*idx));
+    if (!idx) {
+        error(p, "out of memory growing vreg index to %u entries", cap);
+        return false;
+    }
+    clear_index(idx, cap);
+    mask = cap - 1u;
+    for (uint32_t i = 0; i < p->vreg_map_count; i++) {
+        uint32_t slot = p->vreg_map[i].hash & mask;
+        while (idx[slot] >= 0)
+            slot = (slot + 1u) & mask;
+        idx[slot] = (int32_t)i;
+    }
+    free(p->vreg_index);
+    p->vreg_index = idx;
+    p->vreg_index_cap = cap;
+    return true;
+}
+
+static bool rehash_block_index(lr_parser_t *p, uint32_t min_cap) {
+    uint32_t cap = next_pow2_u32(min_cap < 16u ? 16u : min_cap);
+    int32_t *idx;
+    uint32_t mask;
+    if (cap == UINT32_MAX) {
+        error(p, "block index capacity overflow");
+        return false;
+    }
+    idx = malloc((size_t)cap * sizeof(*idx));
+    if (!idx) {
+        error(p, "out of memory growing block index to %u entries", cap);
+        return false;
+    }
+    clear_index(idx, cap);
+    mask = cap - 1u;
+    for (uint32_t i = 0; i < p->block_map_count; i++) {
+        uint32_t slot = p->block_map[i].hash & mask;
+        while (idx[slot] >= 0)
+            slot = (slot + 1u) & mask;
+        idx[slot] = (int32_t)i;
+    }
+    free(p->block_index);
+    p->block_index = idx;
+    p->block_index_cap = cap;
+    return true;
+}
+
+static bool rehash_global_index(lr_parser_t *p, uint32_t min_cap) {
+    uint32_t cap = next_pow2_u32(min_cap < 16u ? 16u : min_cap);
+    int32_t *idx;
+    uint32_t mask;
+    if (cap == UINT32_MAX) {
+        error(p, "global index capacity overflow");
+        return false;
+    }
+    idx = malloc((size_t)cap * sizeof(*idx));
+    if (!idx) {
+        error(p, "out of memory growing global index to %u entries", cap);
+        return false;
+    }
+    clear_index(idx, cap);
+    mask = cap - 1u;
+    for (uint32_t i = 0; i < p->global_map_count; i++) {
+        uint32_t slot = p->global_map[i].hash & mask;
+        while (idx[slot] >= 0)
+            slot = (slot + 1u) & mask;
+        idx[slot] = (int32_t)i;
+    }
+    free(p->global_index);
+    p->global_index = idx;
+    p->global_index_cap = cap;
+    return true;
+}
+
+static bool ensure_vreg_index_room(lr_parser_t *p, uint32_t next_count) {
+    uint32_t need = p->vreg_index_cap ? p->vreg_index_cap : VREG_INDEX_INIT_CAP;
+    while ((uint64_t)next_count * INDEX_MAX_LOAD_DEN >=
+           (uint64_t)need * INDEX_MAX_LOAD_NUM) {
+        if (need > (UINT32_MAX / 2u)) {
+            error(p, "vreg index capacity overflow");
+            return false;
+        }
+        need <<= 1u;
+    }
+    if (p->vreg_index_cap >= need)
+        return true;
+    return rehash_vreg_index(p, need);
+}
+
+static bool ensure_block_index_room(lr_parser_t *p, uint32_t next_count) {
+    uint32_t need = p->block_index_cap ? p->block_index_cap : BLOCK_INDEX_INIT_CAP;
+    while ((uint64_t)next_count * INDEX_MAX_LOAD_DEN >=
+           (uint64_t)need * INDEX_MAX_LOAD_NUM) {
+        if (need > (UINT32_MAX / 2u)) {
+            error(p, "block index capacity overflow");
+            return false;
+        }
+        need <<= 1u;
+    }
+    if (p->block_index_cap >= need)
+        return true;
+    return rehash_block_index(p, need);
+}
+
+static bool ensure_global_index_room(lr_parser_t *p, uint32_t next_count) {
+    uint32_t need = p->global_index_cap ? p->global_index_cap : GLOBAL_INDEX_INIT_CAP;
+    while ((uint64_t)next_count * INDEX_MAX_LOAD_DEN >=
+           (uint64_t)need * INDEX_MAX_LOAD_NUM) {
+        if (need > (UINT32_MAX / 2u)) {
+            error(p, "global index capacity overflow");
+            return false;
+        }
+        need <<= 1u;
+    }
+    if (p->global_index_cap >= need)
+        return true;
+    return rehash_global_index(p, need);
+}
+
+static bool register_vreg_numeric_slot(lr_parser_t *p, uint32_t numeric, uint32_t id) {
+    if (!ensure_vreg_numeric_capacity(p, numeric + 1u))
+        return false;
     p->vreg_numeric[numeric] = id;
+    return true;
 }
 
 static uint32_t index_find_vreg_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
-    uint32_t slot = hash & (VREG_INDEX_CAP - 1u);
+    uint32_t slot = hash & (p->vreg_index_cap - 1u);
     for (;;) {
         int32_t idx = p->vreg_index[slot];
         if (idx < 0)
@@ -193,21 +421,19 @@ static uint32_t index_find_vreg_n(const lr_parser_t *p, const char *name, size_t
                 p->vreg_map[idx].name_len == name_len &&
                 memcmp(p->vreg_map[idx].name, name, name_len) == 0)
             return (uint32_t)idx;
-        slot = (slot + 1u) & (VREG_INDEX_CAP - 1u);
+        slot = (slot + 1u) & (p->vreg_index_cap - 1u);
     }
 }
 
 static void index_insert_vreg(lr_parser_t *p, uint32_t idx) {
-    uint32_t slot = p->vreg_map[idx].hash & (VREG_INDEX_CAP - 1u);
+    uint32_t slot = p->vreg_map[idx].hash & (p->vreg_index_cap - 1u);
     while (p->vreg_index[slot] >= 0)
-        slot = (slot + 1u) & (VREG_INDEX_CAP - 1u);
+        slot = (slot + 1u) & (p->vreg_index_cap - 1u);
     p->vreg_index[slot] = (int32_t)idx;
-    if (p->vreg_used_slot_count < VREG_MAP_CAP)
-        p->vreg_used_slots[p->vreg_used_slot_count++] = slot;
 }
 
 static uint32_t index_find_block_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
-    uint32_t slot = hash & (BLOCK_INDEX_CAP - 1u);
+    uint32_t slot = hash & (p->block_index_cap - 1u);
     for (;;) {
         int32_t idx = p->block_index[slot];
         if (idx < 0)
@@ -216,21 +442,19 @@ static uint32_t index_find_block_n(const lr_parser_t *p, const char *name, size_
                 p->block_map[idx].name_len == name_len &&
                 memcmp(p->block_map[idx].name, name, name_len) == 0)
             return (uint32_t)idx;
-        slot = (slot + 1u) & (BLOCK_INDEX_CAP - 1u);
+        slot = (slot + 1u) & (p->block_index_cap - 1u);
     }
 }
 
 static void index_insert_block(lr_parser_t *p, uint32_t idx) {
-    uint32_t slot = p->block_map[idx].hash & (BLOCK_INDEX_CAP - 1u);
+    uint32_t slot = p->block_map[idx].hash & (p->block_index_cap - 1u);
     while (p->block_index[slot] >= 0)
-        slot = (slot + 1u) & (BLOCK_INDEX_CAP - 1u);
+        slot = (slot + 1u) & (p->block_index_cap - 1u);
     p->block_index[slot] = (int32_t)idx;
-    if (p->block_used_slot_count < BLOCK_MAP_CAP)
-        p->block_used_slots[p->block_used_slot_count++] = slot;
 }
 
 static uint32_t index_find_global_n(const lr_parser_t *p, const char *name, size_t name_len, uint32_t hash) {
-    uint32_t slot = hash & (GLOBAL_INDEX_CAP - 1u);
+    uint32_t slot = hash & (p->global_index_cap - 1u);
     for (;;) {
         int32_t idx = p->global_index[slot];
         if (idx < 0)
@@ -239,15 +463,54 @@ static uint32_t index_find_global_n(const lr_parser_t *p, const char *name, size
                 p->global_map[idx].name_len == name_len &&
                 memcmp(p->global_map[idx].name, name, name_len) == 0)
             return (uint32_t)idx;
-        slot = (slot + 1u) & (GLOBAL_INDEX_CAP - 1u);
+        slot = (slot + 1u) & (p->global_index_cap - 1u);
     }
 }
 
 static void index_insert_global(lr_parser_t *p, uint32_t idx) {
-    uint32_t slot = p->global_map[idx].hash & (GLOBAL_INDEX_CAP - 1u);
+    uint32_t slot = p->global_map[idx].hash & (p->global_index_cap - 1u);
     while (p->global_index[slot] >= 0)
-        slot = (slot + 1u) & (GLOBAL_INDEX_CAP - 1u);
+        slot = (slot + 1u) & (p->global_index_cap - 1u);
     p->global_index[slot] = (int32_t)idx;
+}
+
+static bool parser_init_work_buffers(lr_parser_t *p) {
+    if (!ensure_vreg_map_capacity(p, VREG_MAP_INIT_CAP))
+        return false;
+    if (!ensure_block_map_capacity(p, BLOCK_MAP_INIT_CAP))
+        return false;
+    if (!ensure_global_map_capacity(p, GLOBAL_MAP_INIT_CAP))
+        return false;
+    if (!ensure_func_map_capacity(p, FUNC_MAP_INIT_CAP))
+        return false;
+    if (!ensure_type_map_capacity(p, TYPE_MAP_INIT_CAP))
+        return false;
+    if (!ensure_vreg_numeric_capacity(p, VREG_NUMERIC_INIT_CAP))
+        return false;
+    if (!rehash_vreg_index(p, VREG_INDEX_INIT_CAP))
+        return false;
+    if (!rehash_block_index(p, BLOCK_INDEX_INIT_CAP))
+        return false;
+    if (!rehash_global_index(p, GLOBAL_INDEX_INIT_CAP))
+        return false;
+
+    clear_index(p->vreg_index, p->vreg_index_cap);
+    clear_index(p->block_index, p->block_index_cap);
+    clear_index(p->global_index, p->global_index_cap);
+    clear_u32_map(p->vreg_numeric, p->vreg_numeric_cap);
+    return true;
+}
+
+static void parser_free_work_buffers(lr_parser_t *p) {
+    free(p->vreg_map);
+    free(p->vreg_index);
+    free(p->vreg_numeric);
+    free(p->block_map);
+    free(p->block_index);
+    free(p->global_map);
+    free(p->global_index);
+    free(p->func_map);
+    free(p->type_map);
 }
 
 static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
@@ -256,10 +519,10 @@ static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
     size_t name_len;
     uint32_t numeric_name;
 
-    if (p->vreg_map_count >= VREG_MAP_CAP) {
-        error(p, "too many vregs in function (capacity %u)", VREG_MAP_CAP);
+    if (!ensure_vreg_map_capacity(p, p->vreg_map_count + 1u))
         return;
-    }
+    if (!ensure_vreg_index_room(p, p->vreg_map_count + 1u))
+        return;
 
     name_len = strlen(name);
     hash = hash_name(name);
@@ -271,7 +534,7 @@ static void register_vreg_name(lr_parser_t *p, char *name, uint32_t id) {
     index_insert_vreg(p, idx);
 
     if (parse_u32_decimal_n(name, name_len, &numeric_name))
-        register_vreg_numeric_slot(p, numeric_name, id);
+        (void)register_vreg_numeric_slot(p, numeric_name, id);
 }
 
 static void register_vreg_number(lr_parser_t *p, uint32_t number, uint32_t id) {
@@ -286,7 +549,9 @@ static void register_vreg_number(lr_parser_t *p, uint32_t number, uint32_t id) {
 
 static uint32_t resolve_vreg_n(lr_parser_t *p, const char *name, size_t name_len) {
     uint32_t numeric_name;
-    if (parse_u32_decimal_n(name, name_len, &numeric_name) && numeric_name < VREG_NUMERIC_CAP) {
+    if (parse_u32_decimal_n(name, name_len, &numeric_name)) {
+        if (!ensure_vreg_numeric_capacity(p, numeric_name + 1u))
+            return 0;
         if (p->vreg_numeric[numeric_name] != UINT32_MAX)
             return p->vreg_numeric[numeric_name];
         /* auto-create common numeric vreg names without hash probe */
@@ -315,15 +580,17 @@ static uint32_t resolve_block_n(lr_parser_t *p, const char *name, size_t name_le
     /* forward reference: create block */
     char *owned_name = lr_arena_strdup(p->arena, name, name_len);
     lr_block_t *b = lr_block_create(p->cur_func, p->arena, owned_name);
-    if (p->block_map_count < BLOCK_MAP_CAP) {
-        uint32_t ins = p->block_map_count++;
-        p->block_map[ins].name = owned_name;
-        p->block_map[ins].name_len = name_len;
-        p->block_map[ins].id = b->id;
-        p->block_map[ins].block = b;
-        p->block_map[ins].hash = hash;
-        index_insert_block(p, ins);
-    }
+    if (!ensure_block_map_capacity(p, p->block_map_count + 1u))
+        return b->id;
+    if (!ensure_block_index_room(p, p->block_map_count + 1u))
+        return b->id;
+    uint32_t ins = p->block_map_count++;
+    p->block_map[ins].name = owned_name;
+    p->block_map[ins].name_len = name_len;
+    p->block_map[ins].id = b->id;
+    p->block_map[ins].block = b;
+    p->block_map[ins].hash = hash;
+    index_insert_block(p, ins);
     return b->id;
 }
 
@@ -335,15 +602,17 @@ static lr_block_t *resolve_block_ptr_n(lr_parser_t *p, const char *name, size_t 
 
     char *owned_name = lr_arena_strdup(p->arena, name, name_len);
     lr_block_t *b = lr_block_create(p->cur_func, p->arena, owned_name);
-    if (p->block_map_count < BLOCK_MAP_CAP) {
-        uint32_t ins = p->block_map_count++;
-        p->block_map[ins].name = owned_name;
-        p->block_map[ins].name_len = name_len;
-        p->block_map[ins].id = b->id;
-        p->block_map[ins].block = b;
-        p->block_map[ins].hash = hash;
-        index_insert_block(p, ins);
-    }
+    if (!ensure_block_map_capacity(p, p->block_map_count + 1u))
+        return b;
+    if (!ensure_block_index_room(p, p->block_map_count + 1u))
+        return b;
+    uint32_t ins = p->block_map_count++;
+    p->block_map[ins].name = owned_name;
+    p->block_map[ins].name_len = name_len;
+    p->block_map[ins].id = b->id;
+    p->block_map[ins].block = b;
+    p->block_map[ins].hash = hash;
+    index_insert_block(p, ins);
     return b;
 }
 
@@ -362,14 +631,16 @@ static uint32_t resolve_global(lr_parser_t *p, const char *name) {
 }
 
 static void register_global_n(lr_parser_t *p, const char *name, size_t name_len, uint32_t id) {
-    if (p->global_map_count < GLOBAL_MAP_CAP) {
-        uint32_t idx = p->global_map_count++;
-        p->global_map[idx].name = lr_arena_strdup(p->arena, name, name_len);
-        p->global_map[idx].name_len = name_len;
-        p->global_map[idx].id = id;
-        p->global_map[idx].hash = hash_name_n(name, name_len);
-        index_insert_global(p, idx);
-    }
+    if (!ensure_global_map_capacity(p, p->global_map_count + 1u))
+        return;
+    if (!ensure_global_index_room(p, p->global_map_count + 1u))
+        return;
+    uint32_t idx = p->global_map_count++;
+    p->global_map[idx].name = lr_arena_strdup(p->arena, name, name_len);
+    p->global_map[idx].name_len = name_len;
+    p->global_map[idx].id = id;
+    p->global_map[idx].hash = hash_name_n(name, name_len);
+    index_insert_global(p, idx);
 }
 
 static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
@@ -377,11 +648,11 @@ static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
 }
 
 static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
-    if (p->func_map_count < FUNC_MAP_CAP) {
-        p->func_map[p->func_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->func_map[p->func_map_count].func = f;
-        p->func_map_count++;
-    }
+    if (!ensure_func_map_capacity(p, p->func_map_count + 1u))
+        return;
+    p->func_map[p->func_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
+    p->func_map[p->func_map_count].func = f;
+    p->func_map_count++;
 }
 
 static int32_t find_type_index_n(lr_parser_t *p, const char *name, size_t name_len) {
@@ -410,12 +681,12 @@ static void register_type(lr_parser_t *p, const char *name, lr_type_t *ty) {
         return;
     }
 
-    if (p->type_map_count < TYPE_MAP_CAP) {
-        p->type_map[p->type_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
-        p->type_map[p->type_map_count].type = ty;
-        p->type_map[p->type_map_count].placeholder = false;
-        p->type_map_count++;
-    }
+    if (!ensure_type_map_capacity(p, p->type_map_count + 1u))
+        return;
+    p->type_map[p->type_map_count].name = lr_arena_strdup(p->arena, name, strlen(name));
+    p->type_map[p->type_map_count].type = ty;
+    p->type_map[p->type_map_count].placeholder = false;
+    p->type_map_count++;
 }
 
 static lr_type_t *resolve_type(lr_parser_t *p, const char *name) {
@@ -435,13 +706,13 @@ static lr_type_t *resolve_or_create_forward_type(lr_parser_t *p, const char *nam
     placeholder->struc.packed = false;
     placeholder->struc.name = lr_arena_strdup(p->arena, name, strlen(name));
 
-    if (p->type_map_count < TYPE_MAP_CAP) {
-        p->type_map[p->type_map_count].name =
-            lr_arena_strdup(p->arena, name, strlen(name));
-        p->type_map[p->type_map_count].type = placeholder;
-        p->type_map[p->type_map_count].placeholder = true;
-        p->type_map_count++;
-    }
+    if (!ensure_type_map_capacity(p, p->type_map_count + 1u))
+        return placeholder;
+    p->type_map[p->type_map_count].name =
+        lr_arena_strdup(p->arena, name, strlen(name));
+    p->type_map[p->type_map_count].type = placeholder;
+    p->type_map[p->type_map_count].placeholder = true;
+    p->type_map_count++;
 
     return placeholder;
 }
@@ -1823,12 +2094,9 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     p->cur_func = func;
     p->vreg_map_count = 0;
     p->block_map_count = 0;
-    reset_used_index_slots(p->vreg_index, p->vreg_used_slots, p->vreg_used_slot_count);
-    reset_used_index_slots(p->block_index, p->block_used_slots, p->block_used_slot_count);
-    reset_used_u32_slots(p->vreg_numeric, p->vreg_numeric_used_slots, p->vreg_numeric_used_slot_count);
-    p->vreg_used_slot_count = 0;
-    p->block_used_slot_count = 0;
-    p->vreg_numeric_used_slot_count = 0;
+    clear_index(p->vreg_index, p->vreg_index_cap);
+    clear_index(p->block_index, p->block_index_cap);
+    clear_u32_map(p->vreg_numeric, p->vreg_numeric_cap);
 
     /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
@@ -2345,20 +2613,19 @@ static void parse_global(lr_parser_t *p) {
 lr_module_t *lr_parse_ll_text(const char *src, size_t len,
                                lr_arena_t *arena, char *err, size_t errlen) {
     lr_parser_t p = {0};
+    lr_module_t *out = NULL;
     lr_lexer_init(&p.lex, src, len);
     p.arena = arena;
     p.err = err;
     p.errlen = errlen;
     if (err && errlen > 0) err[0] = '\0';
 
+    if (!parser_init_work_buffers(&p)) {
+        parser_free_work_buffers(&p);
+        return NULL;
+    }
+
     p.module = lr_module_create(arena);
-    clear_index(p.vreg_index, VREG_INDEX_CAP);
-    clear_index(p.block_index, BLOCK_INDEX_CAP);
-    clear_index(p.global_index, GLOBAL_INDEX_CAP);
-    clear_u32_map(p.vreg_numeric, VREG_NUMERIC_CAP);
-    p.vreg_used_slot_count = 0;
-    p.block_used_slot_count = 0;
-    p.vreg_numeric_used_slot_count = 0;
     next(&p);
 
     while (!check(&p, LR_TOK_EOF) && !p.had_error) {
@@ -2389,6 +2656,8 @@ lr_module_t *lr_parse_ll_text(const char *src, size_t len,
         }
     }
 
-    if (p.had_error) return NULL;
-    return p.module;
+    if (!p.had_error)
+        out = p.module;
+    parser_free_work_buffers(&p);
+    return out;
 }
