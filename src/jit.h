@@ -82,6 +82,7 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr);
 int lr_jit_load_library(lr_jit_t *j, const char *path);
 void lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len);
 void lr_jit_begin_update(lr_jit_t *j);
+int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m);
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
 void lr_jit_end_update(lr_jit_t *j);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);

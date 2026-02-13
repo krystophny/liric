@@ -1204,7 +1204,7 @@ static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
     return 0;
 }
 
-static int materialize_module_globals(lr_jit_t *j, lr_module_t *m) {
+int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m) {
     /* First pass: allocate space and copy raw init_data for all globals */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->name || !g->name[0])
@@ -2332,7 +2332,7 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
 
     JIT_PROF_START(globals);
-    if (materialize_module_globals(j, m) != 0) goto done;
+    if (lr_jit_materialize_globals(j, m) != 0) goto done;
     JIT_PROF_END(globals);
 
     uint32_t nfuncs = 0;
