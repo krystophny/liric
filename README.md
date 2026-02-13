@@ -44,6 +44,21 @@ Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=
 | 7-10 | Supported | Unsupported (configure-time error) |
 | 11+ | Supported | Supported |
 
+Conda compatibility sweep:
+
+- `tools/llvm_backend_matrix.sh` requests LLVM majors `1..22` by default.
+- The script discovers published `llvmdev` majors from conda-forge and skips missing versions (for example, majors that are not published yet).
+- Majors `<7` are reported as unsupported by liric policy and skipped unless `--strict-versions` is passed.
+- `--list-available` prints discoverable conda `llvmdev` majors without building.
+
+Examples:
+
+```bash
+tools/llvm_backend_matrix.sh
+tools/llvm_backend_matrix.sh --list-available
+tools/llvm_backend_matrix.sh --versions "7 11 21" --strict-versions
+```
+
 ## Usage
 
 ```bash
