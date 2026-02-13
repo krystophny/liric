@@ -9,6 +9,9 @@
 #include <sys/wait.h>
 #endif
 
+extern const uint8_t bc_ret42_data[];
+extern const size_t bc_ret42_len;
+
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
         fprintf(stderr, "  FAIL: %s (line %d)\n", msg, __LINE__); \
@@ -211,6 +214,67 @@ int test_session_stream_stencil_fast_path(void) {
     TEST_ASSERT(f->is_decl, "direct mode marks function declared after JIT");
     TEST_ASSERT(f->first_block != NULL, "function block exists");
     TEST_ASSERT(f->first_block->first == NULL, "fast path skips IR instruction construction");
+
+    lr_session_destroy(s);
+    if (prev_mode) {
+        set_compile_mode_env(prev_mode);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    return 0;
+#endif
+}
+
+int test_session_stream_isel_fast_path(void) {
+#if !defined(__x86_64__) && !defined(_M_X64) && !defined(__aarch64__)
+    return 0;
+#else
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
+    lr_module_t *m;
+    lr_func_t *f;
+    lr_session_t *s;
+    lr_type_t *i32;
+    lr_type_t *params[2];
+    int rc;
+    uint32_t a, b, sum;
+    void *addr = NULL;
+    typedef int (*fn_t)(int, int);
+    fn_t fn;
+
+    set_compile_mode_env("isel");
+    cfg.mode = LR_MODE_DIRECT;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i32 = lr_type_i32_s(s);
+    params[0] = i32;
+    params[1] = i32;
+    rc = lr_session_func_begin(s, "session_stream_isel_fast", i32, params, 2, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    a = lr_session_param(s, 0);
+    b = lr_session_param(s, 1);
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    sum = lr_emit_add(s, i32, LR_VREG(a, i32), LR_VREG(b, i32));
+    lr_emit_ret(s, LR_VREG(sum, i32));
+
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(20, 22), 42, "stream isel add result");
+
+    m = lr_session_module(s);
+    f = find_func_by_name(m, "session_stream_isel_fast");
+    TEST_ASSERT(f != NULL, "function exists in module");
+    TEST_ASSERT(f->is_decl, "direct mode marks function declared after JIT");
+    TEST_ASSERT(f->first_block != NULL, "function block exists");
+    TEST_ASSERT(f->first_block->first == NULL, "isel fast path skips IR instruction construction");
 
     lr_session_destroy(s);
     if (prev_mode) {
@@ -583,6 +647,60 @@ int test_session_ll_compile(void) {
     fn_t fn;
     fn_ptr_cast(&fn, addr);
     TEST_ASSERT_EQ(fn(), 42, "session_ll_ret_42() == 42");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_bc_compile(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    void *addr = NULL;
+    int rc = lr_session_compile_bc(s, bc_ret42_data, bc_ret42_len, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "compile bc");
+    TEST_ASSERT(addr != NULL, "bc compiled address");
+
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(), 42, "session_bc_ret_42() == 42");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_auto_compile_ll_and_bc(void) {
+    static const char *src =
+        "define i32 @session_auto_ll_ret_42() {\n"
+        "entry:\n"
+        "  ret i32 42\n"
+        "}\n";
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    void *addr_ll = NULL;
+    int rc = lr_session_compile_auto(s, (const uint8_t *)src, strlen(src), &addr_ll, &err);
+    TEST_ASSERT_EQ(rc, 0, "compile auto ll");
+    TEST_ASSERT(addr_ll != NULL, "auto ll compiled address");
+
+    typedef int (*fn_t)(void);
+    fn_t fn_ll;
+    fn_ptr_cast(&fn_ll, addr_ll);
+    TEST_ASSERT_EQ(fn_ll(), 42, "session_auto_ll_ret_42() == 42");
+
+    void *addr_bc = NULL;
+    rc = lr_session_compile_auto(s, bc_ret42_data, bc_ret42_len, &addr_bc, &err);
+    TEST_ASSERT_EQ(rc, 0, "compile auto bc");
+    TEST_ASSERT(addr_bc != NULL, "auto bc compiled address");
+
+    fn_t fn_bc;
+    fn_ptr_cast(&fn_bc, addr_bc);
+    TEST_ASSERT_EQ(fn_bc(), 42, "session_auto_bc_ret_42() == 42");
 
     lr_session_destroy(s);
     return 0;

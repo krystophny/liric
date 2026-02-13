@@ -199,6 +199,7 @@ int test_session_direct_ret_42(void);
 int test_session_add_args(void);
 int test_session_arithmetic_chain(void);
 int test_session_stream_stencil_fast_path(void);
+int test_session_stream_isel_fast_path(void);
 int test_session_stream_stencil_unsupported_fallback(void);
 int test_session_icmp_branch(void);
 int test_session_alloca_load_store(void);
@@ -207,6 +208,8 @@ int test_session_call(void);
 int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_ll_compile(void);
+int test_session_bc_compile(void);
+int test_session_auto_compile_ll_and_bc(void);
 int test_session_multiple_functions(void);
 int test_session_emit_object_llvm_mode_contract(void);
 int test_merge_two_independent_functions(void);
@@ -457,6 +460,7 @@ int main(void) {
     RUN_TEST(test_session_add_args);
     RUN_TEST(test_session_arithmetic_chain);
     RUN_TEST(test_session_stream_stencil_fast_path);
+    RUN_TEST(test_session_stream_isel_fast_path);
     RUN_TEST(test_session_stream_stencil_unsupported_fallback);
     RUN_TEST(test_session_icmp_branch);
     RUN_TEST(test_session_alloca_load_store);
@@ -465,6 +469,8 @@ int main(void) {
     RUN_TEST(test_session_select);
     RUN_TEST(test_session_ir_print);
     RUN_TEST(test_session_ll_compile);
+    RUN_TEST(test_session_bc_compile);
+    RUN_TEST(test_session_auto_compile_ll_and_bc);
     RUN_TEST(test_session_multiple_functions);
     RUN_TEST(test_session_emit_object_llvm_mode_contract);
 

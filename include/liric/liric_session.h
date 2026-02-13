@@ -137,6 +137,10 @@ int lr_session_dump_ir(lr_session_t *s, FILE *out, lr_error_t *err);
 
 int lr_session_compile_ll(lr_session_t *s, const char *src, size_t len,
                           void **out_addr, lr_error_t *err);
+int lr_session_compile_bc(lr_session_t *s, const uint8_t *data, size_t len,
+                          void **out_addr, lr_error_t *err);
+int lr_session_compile_auto(lr_session_t *s, const uint8_t *data, size_t len,
+                            void **out_addr, lr_error_t *err);
 
 /* ---- Output ------------------------------------------------------------ */
 
