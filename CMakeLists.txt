@@ -339,6 +339,16 @@ add_test(
 )
 
 add_test(
+    NAME liric_cli_output_flag_o_suffix_forces_obj
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:liric_bin>
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_forced.o
+        -DMODE=force_object_suffix
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
+)
+
+add_test(
     NAME liric_cli_default_emits_exe
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
