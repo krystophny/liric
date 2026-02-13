@@ -1606,15 +1606,32 @@ static int aarch64_compile_emit(void *compile_ctx,
         uint32_t stack_bytes;
 
         bool use_fp_abi = desc->call_external_abi;
+        bool darwin_stack_varargs = false;
+        uint32_t fixed_args = 0;
         if (ops[0].kind == LR_VAL_GLOBAL)
             use_fp_abi = true;
+
+#if defined(__APPLE__)
+        if (use_fp_abi && desc->call_vararg) {
+            darwin_stack_varargs = true;
+            fixed_args = desc->call_fixed_args;
+            if (fixed_args > nargs)
+                fixed_args = nargs;
+        }
+#endif
 
         if (use_fp_abi) {
             uint32_t fp_used_count = 0;
             for (uint32_t i = 0; i < nargs; i++) {
                 const lr_type_t *at = ops[i + 1].type;
+                bool is_variadic_stack_arg = darwin_stack_varargs &&
+                                             i >= fixed_args;
                 bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
                                     at->kind == LR_TYPE_DOUBLE);
+                if (is_variadic_stack_arg) {
+                    stack_args++;
+                    continue;
+                }
                 if (is_fp) {
                     if (fp_used_count < 8) fp_used_count++;
                     else stack_args++;
@@ -1640,12 +1657,25 @@ static int aarch64_compile_emit(void *compile_ctx,
             gp_used = 0;
             uint32_t fp_used_emit = 0;
             for (uint32_t i = 0; i < nargs; i++) {
+                bool is_variadic_stack_arg = darwin_stack_varargs &&
+                                             i >= fixed_args;
                 bool is_fp = ops[i + 1].type &&
                              (ops[i + 1].type->kind == LR_TYPE_FLOAT ||
                               ops[i + 1].type->kind == LR_TYPE_DOUBLE);
                 uint8_t fsz = (ops[i + 1].type &&
                                ops[i + 1].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                if (is_fp && fp_used_emit < 8) {
+                if (is_variadic_stack_arg) {
+                    if (is_fp) {
+                        emit_load_fp_operand(cc, &ops[i + 1], A64_D0, fsz);
+                        emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                                      A64_D0, A64_SP, (int32_t)(si * 8), fsz);
+                    } else {
+                        emit_load_operand(cc, &ops[i + 1], A64_X9);
+                        emit_store(cc->buf, &cc->pos, cc->buflen,
+                                   A64_X9, A64_SP, (int32_t)(si * 8), 8);
+                    }
+                    si++;
+                } else if (is_fp && fp_used_emit < 8) {
                     emit_load_fp_operand(cc, &ops[i + 1],
                                          call_fp_regs[fp_used_emit], fsz);
                     fp_used_emit++;
