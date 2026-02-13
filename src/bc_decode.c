@@ -535,7 +535,7 @@ typedef struct {
     const uint8_t *strtab_data;
     size_t strtab_len;
     uint32_t bc_version;
-    lr_bc_inst_callback_t on_inst;
+    lr_bc_stream_callback_t on_inst;
     void *on_inst_ctx;
     char *err;
     size_t errlen;
@@ -1130,17 +1130,92 @@ static bool bc_map_fcmp_pred(uint32_t pred, lr_fcmp_pred_t *out) {
     }
 }
 
+static lr_operand_desc_t bc_operand_to_desc(const lr_operand_t *op) {
+    lr_operand_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    if (!op)
+        return desc;
+
+    desc.type = op->type;
+    desc.global_offset = op->global_offset;
+    switch (op->kind) {
+    case LR_VAL_VREG:
+        desc.kind = LR_OP_KIND_VREG;
+        desc.vreg = op->vreg;
+        break;
+    case LR_VAL_IMM_I64:
+        desc.kind = LR_OP_KIND_IMM_I64;
+        desc.imm_i64 = op->imm_i64;
+        break;
+    case LR_VAL_IMM_F64:
+        desc.kind = LR_OP_KIND_IMM_F64;
+        desc.imm_f64 = op->imm_f64;
+        break;
+    case LR_VAL_BLOCK:
+        desc.kind = LR_OP_KIND_BLOCK;
+        desc.block_id = op->block_id;
+        break;
+    case LR_VAL_GLOBAL:
+        desc.kind = LR_OP_KIND_GLOBAL;
+        desc.global_id = op->global_id;
+        break;
+    case LR_VAL_NULL:
+        desc.kind = LR_OP_KIND_NULL;
+        break;
+    case LR_VAL_UNDEF:
+        desc.kind = LR_OP_KIND_UNDEF;
+        break;
+    }
+    return desc;
+}
+
 static bool bc_emit_inst(bc_decoder_t *d, lr_func_t *func,
                          lr_block_t *block, lr_inst_t *inst) {
+    lr_operand_desc_t *op_descs = NULL;
+    lr_bc_inst_desc_t desc;
     if (!d || !func || !block || !inst) {
         if (d)
             bc_dec_error(d, "failed to materialize instruction");
         return false;
     }
-    if (d->on_inst && d->on_inst(func, block, inst, d->on_inst_ctx) != 0) {
-        bc_dec_error(d, "bitcode streaming callback failed");
-        return false;
+    if (d->on_inst) {
+        uint32_t i;
+        memset(&desc, 0, sizeof(desc));
+        if (inst->num_operands > 0) {
+            op_descs = (lr_operand_desc_t *)malloc(
+                (size_t)inst->num_operands * sizeof(lr_operand_desc_t));
+            if (!op_descs) {
+                bc_dec_error(d, "bitcode streaming callback allocation failed");
+                return false;
+            }
+            for (i = 0; i < inst->num_operands; i++)
+                op_descs[i] = bc_operand_to_desc(&inst->operands[i]);
+        }
+
+        desc.op = inst->op;
+        desc.type = inst->type;
+        desc.dest = inst->dest;
+        desc.operands = op_descs;
+        desc.num_operands = inst->num_operands;
+        desc.indices = inst->indices;
+        desc.num_indices = inst->num_indices;
+        desc.icmp_pred = 0;
+        desc.fcmp_pred = 0;
+        if (inst->op == LR_OP_ICMP)
+            desc.icmp_pred = (int)inst->icmp_pred;
+        if (inst->op == LR_OP_FCMP)
+            desc.fcmp_pred = (int)inst->fcmp_pred;
+        desc.call_external_abi = inst->call_external_abi;
+        desc.call_vararg = inst->call_vararg;
+        desc.call_fixed_args = inst->call_fixed_args;
+
+        if (d->on_inst(func, block, &desc, d->on_inst_ctx) != 0) {
+            free(op_descs);
+            bc_dec_error(d, "bitcode streaming callback failed");
+            return false;
+        }
     }
+    free(op_descs);
     lr_block_append(block, inst);
     return true;
 }
@@ -2219,10 +2294,10 @@ static void bc_scan_strtab(bc_decoder_t *d, bc_reader_t *r) {
     r->has_error = false;
 }
 
-lr_module_t *lr_parse_bc_data_streaming(const uint8_t *data, size_t len,
-                                        lr_arena_t *arena,
-                                        lr_bc_inst_callback_t on_inst, void *ctx,
-                                        char *err, size_t errlen) {
+lr_module_t *lr_parse_bc_streaming(const uint8_t *data, size_t len,
+                                   lr_arena_t *arena,
+                                   lr_bc_stream_callback_t on_inst, void *ctx,
+                                   char *err, size_t errlen) {
     bc_reader_t reader;
     bc_decoder_t decoder;
     const uint8_t *bc_data = data;
@@ -2410,7 +2485,7 @@ cleanup_fail:
     return NULL;
 }
 
-lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
-                              lr_arena_t *arena, char *err, size_t errlen) {
-    return lr_parse_bc_data_streaming(data, len, arena, NULL, NULL, err, errlen);
+lr_module_t *lr_parse_bc_with_arena(const uint8_t *data, size_t len,
+                                    lr_arena_t *arena, char *err, size_t errlen) {
+    return lr_parse_bc_streaming(data, len, arena, NULL, NULL, err, errlen);
 }

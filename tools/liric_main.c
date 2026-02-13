@@ -103,7 +103,7 @@ typedef struct bc_dump_ctx {
 } bc_dump_ctx_t;
 
 static int bc_dump_callback(lr_func_t *func, lr_block_t *block,
-                            const lr_inst_t *inst, void *ctx_ptr) {
+                            const lr_bc_inst_desc_t *inst, void *ctx_ptr) {
     bc_dump_ctx_t *ctx = (bc_dump_ctx_t *)ctx_ptr;
     if (!ctx || !ctx->out || !func || !block || !inst)
         return -1;
@@ -120,7 +120,20 @@ static int bc_dump_callback(lr_func_t *func, lr_block_t *block,
         lr_dump_block_label(block, ctx->out);
         ctx->cur_block = block;
     }
-    lr_dump_inst(inst, NULL, ctx->out);
+
+    if (inst->op == LR_OP_RET_VOID) {
+        fprintf(ctx->out, "  ret void\n");
+    } else if (inst->op == LR_OP_RET &&
+               inst->num_operands == 1 &&
+               inst->operands &&
+               inst->operands[0].kind == LR_OP_KIND_IMM_I64 &&
+               inst->operands[0].type &&
+               inst->operands[0].type->kind == LR_TYPE_I32) {
+        fprintf(ctx->out, "  ret i32 %lld\n",
+                (long long)inst->operands[0].imm_i64);
+    } else {
+        fprintf(ctx->out, "  ; op %u\n", (unsigned)inst->op);
+    }
     return 0;
 }
 
@@ -139,8 +152,8 @@ static int dump_ir_bc_streaming(const uint8_t *data, size_t len,
 
     memset(&ctx, 0, sizeof(ctx));
     ctx.out = stdout;
-    m = lr_parse_bc_data_streaming(data, len, arena, bc_dump_callback, &ctx,
-                                   err, err_cap);
+    m = lr_parse_bc_streaming(data, len, arena, bc_dump_callback, &ctx,
+                              err, err_cap);
     if (!m) {
         lr_arena_destroy(arena);
         return -1;

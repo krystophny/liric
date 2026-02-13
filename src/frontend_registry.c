@@ -38,9 +38,9 @@ static lr_module_t *parse_wasm_with_arena(const uint8_t *data, size_t len,
     return lr_wasm_to_ir(wmod, arena, err, errlen);
 }
 
-static lr_module_t *parse_bc_with_arena(const uint8_t *data, size_t len,
-                                        lr_arena_t *arena, char *err, size_t errlen) {
-    return lr_parse_bc_data(data, len, arena, err, errlen);
+static lr_module_t *parse_bc_input_with_arena(const uint8_t *data, size_t len,
+                                              lr_arena_t *arena, char *err, size_t errlen) {
+    return lr_parse_bc_with_arena(data, len, arena, err, errlen);
 }
 
 static const lr_frontend_t g_frontends[] = {
@@ -52,7 +52,7 @@ static const lr_frontend_t g_frontends[] = {
     {
         .name = "bc",
         .matches_input = match_bc_magic,
-        .parse_with_arena = parse_bc_with_arena,
+        .parse_with_arena = parse_bc_input_with_arena,
     },
     {
         .name = "ll",

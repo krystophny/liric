@@ -370,7 +370,7 @@ typedef struct {
 } bc_stream_stats_t;
 
 static int bc_stream_collect_cb(lr_func_t *func, lr_block_t *block,
-                                const lr_inst_t *inst, void *ctx) {
+                                const lr_bc_inst_desc_t *inst, void *ctx) {
     bc_stream_stats_t *stats = (bc_stream_stats_t *)ctx;
     (void)func;
     (void)block;
@@ -391,7 +391,7 @@ typedef struct {
 } bc_stream_abort_t;
 
 static int bc_stream_abort_cb(lr_func_t *func, lr_block_t *block,
-                              const lr_inst_t *inst, void *ctx) {
+                              const lr_bc_inst_desc_t *inst, void *ctx) {
     bc_stream_abort_t *state = (bc_stream_abort_t *)ctx;
     (void)func;
     (void)block;
@@ -414,9 +414,9 @@ int test_bc_streaming_callback_collects_opcodes(void) {
     arena = lr_arena_create(0);
     TEST_ASSERT(arena != NULL, "arena alloc");
 
-    m = lr_parse_bc_data_streaming(bc_loop_data, bc_loop_len, arena,
-                                   bc_stream_collect_cb, &stats,
-                                   err, sizeof(err));
+    m = lr_parse_bc_streaming(bc_loop_data, bc_loop_len, arena,
+                              bc_stream_collect_cb, &stats,
+                              err, sizeof(err));
     TEST_ASSERT(m != NULL, "streaming parse succeeds");
     TEST_ASSERT(stats.total > 0, "stream callback saw instructions");
     TEST_ASSERT(stats.ret_count > 0, "stream callback saw return");
@@ -439,9 +439,9 @@ int test_bc_streaming_callback_abort_propagates_error(void) {
     arena = lr_arena_create(0);
     TEST_ASSERT(arena != NULL, "arena alloc");
 
-    m = lr_parse_bc_data_streaming(bc_ret42_data, bc_ret42_len, arena,
-                                   bc_stream_abort_cb, &state,
-                                   err, sizeof(err));
+    m = lr_parse_bc_streaming(bc_ret42_data, bc_ret42_len, arena,
+                              bc_stream_abort_cb, &state,
+                              err, sizeof(err));
     TEST_ASSERT(m == NULL, "stream callback abort fails parse");
     TEST_ASSERT(state.calls > 0, "stream callback invoked");
     TEST_ASSERT(strstr(err, "callback failed") != NULL, "callback error surfaced");
@@ -456,8 +456,26 @@ typedef struct {
     lr_block_t *cur_block;
 } bc_stream_dump_t;
 
+static void bc_stream_dump_inst(FILE *out, const lr_bc_inst_desc_t *inst) {
+    if (!out || !inst)
+        return;
+
+    if (inst->op == LR_OP_RET_VOID) {
+        fprintf(out, "  ret void\n");
+        return;
+    }
+    if (inst->op == LR_OP_RET && inst->num_operands == 1 && inst->operands) {
+        const lr_operand_desc_t *op = &inst->operands[0];
+        if (op->kind == LR_OP_KIND_IMM_I64 && op->type && op->type->kind == LR_TYPE_I32) {
+            fprintf(out, "  ret i32 %lld\n", (long long)op->imm_i64);
+            return;
+        }
+    }
+    fprintf(out, "  ; op %u\n", (unsigned)inst->op);
+}
+
 static int bc_stream_dump_cb(lr_func_t *func, lr_block_t *block,
-                             const lr_inst_t *inst, void *ctx) {
+                             const lr_bc_inst_desc_t *inst, void *ctx) {
     bc_stream_dump_t *state = (bc_stream_dump_t *)ctx;
     if (!state || !state->out || !func || !block || !inst)
         return -1;
@@ -474,7 +492,7 @@ static int bc_stream_dump_cb(lr_func_t *func, lr_block_t *block,
         lr_dump_block_label(block, state->out);
         state->cur_block = block;
     }
-    lr_dump_inst(inst, NULL, state->out);
+    bc_stream_dump_inst(state->out, inst);
     return 0;
 }
 
@@ -498,9 +516,9 @@ int test_bc_streaming_callback_dump_text_shape(void) {
     TEST_ASSERT(tmp != NULL, "tmpfile");
     state.out = tmp;
 
-    m = lr_parse_bc_data_streaming(bc_ret42_data, bc_ret42_len, arena,
-                                   bc_stream_dump_cb, &state,
-                                   err, sizeof(err));
+    m = lr_parse_bc_streaming(bc_ret42_data, bc_ret42_len, arena,
+                              bc_stream_dump_cb, &state,
+                              err, sizeof(err));
     TEST_ASSERT(m != NULL, "streaming parse succeeds");
     if (state.cur_func)
         fprintf(tmp, "}\n");
