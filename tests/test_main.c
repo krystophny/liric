@@ -207,6 +207,7 @@ int test_session_icmp_branch(void);
 int test_session_alloca_load_store(void);
 int test_session_loop_phi(void);
 int test_session_call(void);
+int test_session_operand_global_offset_propagates_to_ir(void);
 int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_ll_compile(void);
@@ -472,6 +473,7 @@ int main(void) {
     RUN_TEST(test_session_alloca_load_store);
     RUN_TEST(test_session_loop_phi);
     RUN_TEST(test_session_call);
+    RUN_TEST(test_session_operand_global_offset_propagates_to_ir);
     RUN_TEST(test_session_select);
     RUN_TEST(test_session_ir_print);
     RUN_TEST(test_session_ll_compile);

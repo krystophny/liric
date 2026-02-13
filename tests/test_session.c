@@ -539,6 +539,55 @@ int test_session_call(void) {
     return 0;
 }
 
+int test_session_operand_global_offset_propagates_to_ir(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    lr_type_t *i64;
+    lr_type_t *ptr;
+    lr_module_t *m;
+    lr_func_t *f;
+    lr_inst_t *inst;
+    lr_operand_desc_t base;
+    uint32_t gid;
+    int rc;
+
+    cfg.mode = LR_MODE_IR;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i64 = lr_type_i64_s(s);
+    ptr = lr_type_ptr_s(s);
+    gid = lr_session_global_extern(s, "session_global_offset_anchor", ptr);
+
+    rc = lr_session_func_begin(s, "session_global_offset_ir", i64, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    base = LR_GLOBAL(gid, ptr);
+    base.global_offset = 24;
+    lr_emit_ret(s, LR_VREG(lr_emit_ptrtoint(s, i64, base), i64));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    m = lr_session_module(s);
+    f = find_func_by_name(m, "session_global_offset_ir");
+    TEST_ASSERT(f != NULL, "function exists in module");
+    TEST_ASSERT(f->first_block != NULL, "function has block");
+    inst = f->first_block->first;
+    TEST_ASSERT(inst != NULL, "function has first instruction");
+    TEST_ASSERT_EQ(inst->op, LR_OP_PTRTOINT, "first instruction is ptrtoint");
+    TEST_ASSERT_EQ(inst->num_operands, 1, "ptrtoint has one operand");
+    TEST_ASSERT_EQ(inst->operands[0].kind, LR_VAL_GLOBAL, "operand kind is global");
+    TEST_ASSERT_EQ(inst->operands[0].global_id, gid, "operand global id preserved");
+    TEST_ASSERT_EQ(inst->operands[0].global_offset, 24, "operand global_offset preserved");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_select(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;

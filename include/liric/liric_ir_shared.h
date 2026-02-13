@@ -71,7 +71,13 @@ typedef struct lr_operand_desc {
         uint32_t global_id;
     };
     struct lr_type *type;
+    int64_t global_offset;
 } lr_operand_desc_t;
+
+typedef struct lr_phi_copy_desc {
+    uint32_t dest_vreg;
+    lr_operand_desc_t src_op;
+} lr_phi_copy_desc_t;
 
 enum {
     LR_OP_KIND_VREG    = 0,

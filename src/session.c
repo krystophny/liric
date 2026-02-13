@@ -150,6 +150,7 @@ static lr_operand_t desc_to_op(const lr_operand_desc_t *d) {
     }
     op.kind = (lr_operand_kind_t)d->kind;
     op.type = d->type;
+    op.global_offset = d->global_offset;
     switch (d->kind) {
     case LR_OP_KIND_VREG:
         op.vreg = d->vreg;

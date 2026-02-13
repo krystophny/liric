@@ -45,13 +45,20 @@ lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
                               lr_type_t **params, uint32_t num_params,
                               bool vararg);
 
-#define LR_VREG(v, t)    ((lr_operand_desc_t){ .kind = LR_OP_KIND_VREG, .vreg = (v), .type = (t) })
-#define LR_IMM(v, t)     ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t) })
-#define LR_IMM_F(v, t)   ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t) })
-#define LR_BLOCK(id)     ((lr_operand_desc_t){ .kind = LR_OP_KIND_BLOCK, .block_id = (id), .type = NULL })
-#define LR_GLOBAL(id, t) ((lr_operand_desc_t){ .kind = LR_OP_KIND_GLOBAL, .global_id = (id), .type = (t) })
-#define LR_NULL(t)       ((lr_operand_desc_t){ .kind = LR_OP_KIND_NULL, .type = (t) })
-#define LR_UNDEF(t)      ((lr_operand_desc_t){ .kind = LR_OP_KIND_UNDEF, .type = (t) })
+#define LR_VREG(v, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_VREG, .vreg = (v), .type = (t), .global_offset = 0 })
+#define LR_IMM(v, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t), .global_offset = 0 })
+#define LR_IMM_F(v, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t), .global_offset = 0 })
+#define LR_BLOCK(id) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_BLOCK, .block_id = (id), .type = NULL, .global_offset = 0 })
+#define LR_GLOBAL(id, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_GLOBAL, .global_id = (id), .type = (t), .global_offset = 0 })
+#define LR_NULL(t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_NULL, .type = (t), .global_offset = 0 })
+#define LR_UNDEF(t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_UNDEF, .type = (t), .global_offset = 0 })
 
 /* Comparison predicates */
 enum {
