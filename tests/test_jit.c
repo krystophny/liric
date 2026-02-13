@@ -2142,6 +2142,35 @@ int test_jit_llvm_intrinsic_fabs_f32(void) {
     return 0;
 }
 
+int test_jit_llvm_intrinsic_extended_blob_coverage(void) {
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+    static const char *names[] = {
+        "llvm.sin.f32", "llvm.sin.f64",
+        "llvm.cos.f32", "llvm.cos.f64",
+        "llvm.log.f32", "llvm.log.f64",
+        "llvm.log2.f32", "llvm.log2.f64",
+        "llvm.log10.f32", "llvm.log10.f64",
+        "llvm.exp2.f32", "llvm.exp2.f64",
+        "llvm.floor.f32", "llvm.floor.f64",
+        "llvm.ceil.f32", "llvm.ceil.f64",
+        "llvm.trunc.f32", "llvm.trunc.f64",
+        "llvm.round.f32", "llvm.round.f64",
+        "llvm.rint.f32", "llvm.rint.f64",
+        "llvm.nearbyint.f32", "llvm.nearbyint.f64",
+        "llvm.fma.f32", "llvm.fma.f64",
+        "llvm.fmuladd.f32", "llvm.fmuladd.f64",
+        "llvm.minnum.f32", "llvm.minnum.f64",
+        "llvm.maxnum.f32", "llvm.maxnum.f64",
+        "llvm.abs.i32", "llvm.abs.i64",
+        "llvm.is.fpclass.f32", "llvm.is.fpclass.f64",
+    };
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        TEST_ASSERT(lr_platform_intrinsic_supported(names[i]), names[i]);
+    }
+#endif
+    return 0;
+}
+
 int test_jit_llvm_intrinsic_powi_f32_i32(void) {
     if (!require_intrinsic_blob("llvm.powi.f32.i32"))
         return 0;
