@@ -1,6 +1,7 @@
 #include "../src/arena.h"
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
+#include <liric/liric.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -59,6 +60,40 @@ static int appendf(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
         *buf = new_buf;
         *cap = new_cap;
     }
+}
+
+typedef struct {
+    char names[128];
+    int calls;
+    int fail_on_call;
+    bool saw_global_before_first_callback;
+} stream_cb_ctx_t;
+
+static int collect_stream_callback(lr_func_t *func, lr_module_t *mod, void *ctx_ptr) {
+    stream_cb_ctx_t *ctx = (stream_cb_ctx_t *)ctx_ptr;
+    size_t used;
+    int n;
+
+    if (!ctx || !func || !mod)
+        return -1;
+
+    if (ctx->calls == 0 && mod->first_global != NULL)
+        ctx->saw_global_before_first_callback = true;
+
+    used = strlen(ctx->names);
+    if (ctx->calls > 0 && used + 1 < sizeof(ctx->names)) {
+        ctx->names[used] = ',';
+        ctx->names[used + 1] = '\0';
+        used++;
+    }
+    n = snprintf(ctx->names + used, sizeof(ctx->names) - used, "%s", func->name);
+    if (n < 0 || (size_t)n >= sizeof(ctx->names) - used)
+        return -1;
+
+    ctx->calls++;
+    if (ctx->fail_on_call > 0 && ctx->calls >= ctx->fail_on_call)
+        return -1;
+    return 0;
 }
 
 int test_parser_ret_i32(void) {
@@ -1143,5 +1178,58 @@ int test_parser_cast_expr_in_aggregate_init(void) {
     }
 
     lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_streaming_callback_order(void) {
+    const char *src =
+        "@g = global i32 7\n"
+        "declare i32 @decl_only(i32)\n"
+        "define i32 @first(i32 %x) {\n"
+        "entry:\n"
+        "  %y = add i32 %x, 1\n"
+        "  ret i32 %y\n"
+        "}\n"
+        "define i32 @second() {\n"
+        "entry:\n"
+        "  ret i32 2\n"
+        "}\n";
+    char err[256] = {0};
+    stream_cb_ctx_t ctx = {0};
+
+    lr_module_t *m = lr_parse_ll_streaming(src, strlen(src),
+                                           collect_stream_callback, &ctx,
+                                           err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+    TEST_ASSERT_EQ(ctx.calls, 2, "callback called for both definitions");
+    TEST_ASSERT(strcmp(ctx.names, "first,second") == 0, "callback order follows source order");
+    TEST_ASSERT(ctx.saw_global_before_first_callback, "globals parsed before first callback");
+
+    lr_module_free(m);
+    return 0;
+}
+
+int test_parser_streaming_callback_error_propagates(void) {
+    const char *src =
+        "define i32 @first() {\n"
+        "entry:\n"
+        "  ret i32 1\n"
+        "}\n"
+        "define i32 @second() {\n"
+        "entry:\n"
+        "  ret i32 2\n"
+        "}\n";
+    char err[256] = {0};
+    stream_cb_ctx_t ctx = {0};
+    ctx.fail_on_call = 2;
+
+    lr_module_t *m = lr_parse_ll_streaming(src, strlen(src),
+                                           collect_stream_callback, &ctx,
+                                           err, sizeof(err));
+    TEST_ASSERT(m == NULL, "streaming parser fails when callback fails");
+    TEST_ASSERT(strstr(err, "function callback failed") != NULL,
+                "callback failure reports parser error");
+    TEST_ASSERT(strstr(err, "second") != NULL, "error message identifies failing function");
+
     return 0;
 }

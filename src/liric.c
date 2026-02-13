@@ -1,6 +1,7 @@
 #include "arena.h"
 #include "frontend_registry.h"
 #include "ir.h"
+#include "ll_parser.h"
 #include <stdio.h>
 
 static void set_err(char *err, size_t errlen, const char *msg) {
@@ -32,9 +33,44 @@ static lr_module_t *parse_with_frontend(const lr_frontend_t *frontend,
     return m;
 }
 
+typedef struct {
+    int (*on_func)(lr_func_t *func, lr_module_t *mod, void *ctx);
+    void *ctx;
+} ll_stream_cb_ctx_t;
+
+static int ll_stream_cb_adapter(lr_func_t *func, lr_module_t *mod, void *ctx) {
+    ll_stream_cb_ctx_t *adapt = (ll_stream_cb_ctx_t *)ctx;
+    if (!adapt || !adapt->on_func)
+        return 0;
+    return adapt->on_func(func, mod, adapt->ctx);
+}
+
+lr_module_t *lr_parse_ll_streaming(const char *src, size_t len,
+                                   int (*on_func)(lr_func_t *func,
+                                                  lr_module_t *mod,
+                                                  void *ctx),
+                                   void *ctx,
+                                   char *err, size_t errlen) {
+    lr_arena_t *arena = lr_arena_create(0);
+    if (!arena) {
+        set_err(err, errlen, "arena allocation failed");
+        return NULL;
+    }
+
+    ll_stream_cb_ctx_t cb_ctx = { on_func, ctx };
+    lr_module_t *m = lr_parse_ll_text_streaming(
+        src, len, arena,
+        on_func ? ll_stream_cb_adapter : NULL,
+        &cb_ctx, err, errlen);
+    if (!m) {
+        lr_arena_destroy(arena);
+        return NULL;
+    }
+    return m;
+}
+
 lr_module_t *lr_parse_ll(const char *src, size_t len, char *err, size_t errlen) {
-    const lr_frontend_t *frontend = lr_frontend_by_name("ll");
-    return parse_with_frontend(frontend, (const uint8_t *)src, len, err, errlen);
+    return lr_parse_ll_streaming(src, len, NULL, NULL, err, errlen);
 }
 
 lr_module_t *lr_parse_bc(const uint8_t *data, size_t len, char *err, size_t errlen) {
@@ -73,4 +109,3 @@ lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
                               bool vararg) {
     return lr_type_func(m->arena, ret, params, num_params, vararg);
 }
-
