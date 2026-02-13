@@ -1,9 +1,11 @@
 #include "llvm_backend.h"
 
+#include "jit.h"
 #include "liric.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,9 +14,37 @@
 
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Core.h>
+#include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
+
+#if defined(__has_include)
+#if __has_include(<llvm-c/LLJIT.h>)
+#include <llvm-c/LLJIT.h>
+#define LIRIC_HAVE_LLVM_C_LLJIT 1
+#else
+#define LIRIC_HAVE_LLVM_C_LLJIT 0
+#endif
+#else
+#define LIRIC_HAVE_LLVM_C_LLJIT 0
+#endif
+
+#if LIRIC_HAVE_LLVM_C_LLJIT
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    (LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 21)
+#define LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT 1
+#else
+#define LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT 0
+#endif
+
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    (LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 13)
+typedef LLVMOrcExecutorAddress lr_llvm_orc_addr_t;
+#else
+typedef LLVMOrcJITTargetAddress lr_llvm_orc_addr_t;
+#endif
+#endif
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/wait.h>
@@ -171,6 +201,21 @@ static int ensure_llvm_target_init(char *err, size_t err_cap) {
     return 0;
 }
 
+#if LIRIC_HAVE_LLVM_C_LLJIT
+static int set_err_from_llvm_error(char *err, size_t err_cap,
+                                   const char *prefix, LLVMErrorRef llvm_err) {
+    char *msg = NULL;
+    if (!llvm_err)
+        return 0;
+    msg = LLVMGetErrorMessage(llvm_err);
+    set_err(err, err_cap, "%s: %s", prefix,
+            (msg && msg[0]) ? msg : "unknown error");
+    if (msg)
+        LLVMDisposeErrorMessage(msg);
+    return -1;
+}
+#endif
+
 static int emit_object_from_ll_text(const char *ll, size_t ll_len,
                                     const char *path, char *err,
                                     size_t err_cap) {
@@ -319,6 +364,172 @@ int lr_llvm_backend_is_available(void) {
     return 1;
 }
 
+int lr_llvm_jit_is_available(void) {
+#if LIRIC_HAVE_LLVM_C_LLJIT
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
+                           char *err, size_t err_cap) {
+#if !LIRIC_HAVE_LLVM_C_LLJIT
+    (void)j;
+    (void)m;
+    set_err(err, err_cap, "llvm mode JIT requires llvm-c/LLJIT.h");
+    return -1;
+#else
+    const lr_target_t *host = lr_target_host();
+    LLVMOrcLLJITRef lljit = NULL;
+    LLVMOrcJITDylibRef dylib;
+    LLVMContextRef parse_ctx = NULL;
+    int parse_ctx_owned = 0;
+    LLVMMemoryBufferRef mem = NULL;
+    LLVMModuleRef mod = NULL;
+    LLVMOrcThreadSafeContextRef ts_ctx = NULL;
+    LLVMOrcThreadSafeModuleRef ts_mod = NULL;
+    char *parse_msg = NULL;
+    char *ll = NULL;
+    size_t ll_len = 0;
+    int rc = -1;
+
+    if (!err_cap)
+        err_cap = LR_LLVM_ERRBUF_DEFAULT;
+    if (err && err_cap)
+        err[0] = '\0';
+
+    if (!j || !m) {
+        set_err(err, err_cap, "invalid llvm jit inputs");
+        return -1;
+    }
+    if (!host || !j->target || strcmp(host->name, j->target->name) != 0) {
+        set_err(err, err_cap, "llvm jit currently supports host target only");
+        return -1;
+    }
+    if (ensure_llvm_target_init(err, err_cap) != 0)
+        return -1;
+
+    lljit = (LLVMOrcLLJITRef)j->llvm_orc_jit;
+    if (!lljit) {
+        LLVMErrorRef create_err = LLVMOrcCreateLLJIT(&lljit, NULL);
+        if (set_err_from_llvm_error(err, err_cap, "LLVMOrcCreateLLJIT failed",
+                                    create_err) != 0) {
+            return -1;
+        }
+        j->llvm_orc_jit = lljit;
+    }
+
+    ll = module_to_ll_text(m, &ll_len);
+    if (!ll) {
+        set_err(err, err_cap, "failed to materialize module text");
+        goto done;
+    }
+
+#if LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT
+    parse_ctx = LLVMContextCreate();
+    parse_ctx_owned = 1;
+    if (!parse_ctx) {
+        set_err(err, err_cap, "LLVMContextCreate failed");
+        goto done;
+    }
+#else
+    ts_ctx = LLVMOrcCreateNewThreadSafeContext();
+    if (!ts_ctx) {
+        set_err(err, err_cap, "LLVMOrcCreateNewThreadSafeContext failed");
+        goto done;
+    }
+    parse_ctx = LLVMOrcThreadSafeContextGetContext(ts_ctx);
+    if (!parse_ctx) {
+        set_err(err, err_cap, "LLVMOrcThreadSafeContextGetContext failed");
+        goto done;
+    }
+#endif
+
+    mem = LLVMCreateMemoryBufferWithMemoryRangeCopy(ll, ll_len, "liric_module");
+    if (!mem) {
+        set_err(err, err_cap, "LLVMCreateMemoryBufferWithMemoryRangeCopy failed");
+        goto done;
+    }
+
+    if (LLVMParseIRInContext(parse_ctx, mem, &mod, &parse_msg) != 0 || !mod) {
+        set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
+                parse_msg ? parse_msg : "unknown parse error");
+        goto done;
+    }
+    mem = NULL;
+
+#if LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT
+    ts_ctx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(parse_ctx);
+    if (!ts_ctx) {
+        set_err(err, err_cap, "LLVMOrcCreateNewThreadSafeContextFromLLVMContext failed");
+        goto done;
+    }
+    parse_ctx = NULL;
+    parse_ctx_owned = 0;
+#endif
+
+    ts_mod = LLVMOrcCreateNewThreadSafeModule(mod, ts_ctx);
+    if (!ts_mod) {
+        set_err(err, err_cap, "LLVMOrcCreateNewThreadSafeModule failed");
+        goto done;
+    }
+    mod = NULL;
+
+    LLVMOrcDisposeThreadSafeContext(ts_ctx);
+    ts_ctx = NULL;
+
+    dylib = LLVMOrcLLJITGetMainJITDylib(lljit);
+    LLVMErrorRef add_err = LLVMOrcLLJITAddLLVMIRModule(lljit, dylib, ts_mod);
+    if (set_err_from_llvm_error(err, err_cap, "LLVMOrcLLJITAddLLVMIRModule failed",
+                                add_err) != 0) {
+        goto done;
+    }
+    ts_mod = NULL;
+
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->is_decl || !f->name || !f->name[0] || !f->first_block)
+            continue;
+        lr_llvm_orc_addr_t addr = 0;
+        LLVMErrorRef lookup_err = LLVMOrcLLJITLookup(lljit, &addr, f->name);
+        if (set_err_from_llvm_error(err, err_cap, "LLVMOrcLLJITLookup failed",
+                                    lookup_err) != 0) {
+            goto done;
+        }
+        lr_jit_add_symbol(j, f->name, (void *)(uintptr_t)addr);
+    }
+
+    rc = 0;
+
+done:
+    free(ll);
+    if (parse_msg)
+        LLVMDisposeMessage(parse_msg);
+    if (ts_mod)
+        LLVMOrcDisposeThreadSafeModule(ts_mod);
+    if (ts_ctx)
+        LLVMOrcDisposeThreadSafeContext(ts_ctx);
+    if (mod)
+        LLVMDisposeModule(mod);
+    if (mem)
+        LLVMDisposeMemoryBuffer(mem);
+    if (parse_ctx_owned && parse_ctx)
+        LLVMContextDispose(parse_ctx);
+    return rc;
+#endif
+}
+
+void lr_llvm_jit_dispose(struct lr_jit *j) {
+#if LIRIC_HAVE_LLVM_C_LLJIT
+    if (!j || !j->llvm_orc_jit)
+        return;
+    LLVMOrcDisposeLLJIT((LLVMOrcLLJITRef)j->llvm_orc_jit);
+    j->llvm_orc_jit = NULL;
+#else
+    (void)j;
+#endif
+}
+
 int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
                              const char *path, char *err, size_t err_cap) {
     const lr_target_t *host = lr_target_host();
@@ -418,6 +629,23 @@ done:
 
 int lr_llvm_backend_is_available(void) {
     return 0;
+}
+
+int lr_llvm_jit_is_available(void) {
+    return 0;
+}
+
+int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
+                           char *err, size_t err_cap) {
+    (void)j;
+    (void)m;
+    if (err && err_cap > 0)
+        (void)snprintf(err, err_cap, "real llvm backend is not enabled");
+    return -1;
+}
+
+void lr_llvm_jit_dispose(struct lr_jit *j) {
+    (void)j;
 }
 
 int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,

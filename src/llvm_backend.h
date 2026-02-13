@@ -5,7 +5,14 @@
 #include "target.h"
 #include <stddef.h>
 
+struct lr_jit;
+
 int lr_llvm_backend_is_available(void);
+int lr_llvm_jit_is_available(void);
+
+int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
+                           char *err, size_t err_cap);
+void lr_llvm_jit_dispose(struct lr_jit *j);
 
 int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
                              const char *path, char *err, size_t err_cap);

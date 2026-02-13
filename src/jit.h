@@ -71,6 +71,7 @@ typedef struct lr_jit {
     const uint8_t *runtime_bc_data;
     size_t runtime_bc_len;
     bool runtime_bc_loaded;
+    void *llvm_orc_jit;
 } lr_jit_t;
 
 lr_jit_t *lr_jit_create(void);
