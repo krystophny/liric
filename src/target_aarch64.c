@@ -445,49 +445,6 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
     return false;
 }
 
-#if defined(__APPLE__)
-static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
-    if (!mod || !name)
-        return NULL;
-    for (lr_func_t *f = mod->first_func; f; f = f->next) {
-        if (f->name && strcmp(f->name, name) == 0)
-            return f;
-    }
-    return NULL;
-}
-
-static uint32_t call_fixed_arg_count(const a64_compile_ctx_t *ctx,
-                                     const lr_inst_t *inst,
-                                     uint32_t nargs) {
-    uint32_t fixed = 0;
-
-    if (!inst)
-        return 0;
-    fixed = inst->call_fixed_args;
-    if (fixed > nargs)
-        fixed = nargs;
-    if (fixed != 0)
-        return fixed;
-
-    if (!ctx || !ctx->mod || !inst->call_vararg || inst->num_operands == 0)
-        return fixed;
-    if (inst->operands[0].kind != LR_VAL_GLOBAL)
-        return fixed;
-
-    {
-        const char *sym_name = lr_module_symbol_name(ctx->mod,
-                                                     inst->operands[0].global_id);
-        lr_func_t *callee = find_module_function(ctx->mod, sym_name);
-        if (callee && callee->vararg)
-            fixed = callee->num_params;
-    }
-
-    if (fixed > nargs)
-        fixed = nargs;
-    return fixed;
-}
-#endif
-
 static uint8_t int_type_width_bits(const lr_type_t *type) {
     size_t fallback_bits = 64;
     if (!type)
