@@ -732,7 +732,7 @@ int main(int argc, char **argv) {
                 ri = run_cmd(ph_argv, cfg.timeout_sec, NULL, work_dir);
                 if (ri.rc != 0 ||
                     !json_get_number(ri.stdout_text, "\"parse_ms\"", &lli_parse_ms) ||
-                    !json_get_number(ri.stdout_text, "\"jit_ms\"", &lli_jit_ms) ||
+                    !json_get_number(ri.stdout_text, "\"add_module_ms\"", &lli_jit_ms) ||
                     !json_get_number(ri.stdout_text, "\"lookup_ms\"", &lli_lookup_ms)) {
                     skipped = 1;
                     free_cmd_result(&ri);
