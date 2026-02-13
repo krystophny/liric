@@ -335,12 +335,13 @@ static int validate_stream_blocks(struct lr_session *s, session_error_t *err) {
 }
 
 static int stream_can_compile_direct(struct lr_session *s) {
-    bool saw_terminator = false;
-    session_stream_inst_t *it;
 #if !defined(__x86_64__) && !defined(_M_X64)
     (void)s;
     return 0;
 #else
+    bool saw_terminator = false;
+    session_stream_inst_t *it;
+
     if (!s || !s->stream.enabled || !s->stream.supported || !s->jit ||
         !s->jit->target || !s->jit->target->compile_func_cp || !s->cur_func)
         return 0;
