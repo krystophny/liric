@@ -3,8 +3,12 @@
 #include "../src/ir.h"
 #include "../src/jit.h"
 #include "../src/liric.h"
+#include "../src/ll_parser.h"
 #include "../src/objfile.h"
 #include "../src/target.h"
+#include "../src/wasm_decode.h"
+#include "../src/wasm_to_ir.h"
+#include <liric/liric_session.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -243,6 +247,163 @@ int main(int argc, char **argv) {
             free(src);
             return 1;
         }
+    }
+
+    bool is_ll_text = !is_wasm_binary((const uint8_t *)src, src_len) &&
+                       !lr_bc_is_bitcode((const uint8_t *)src, src_len);
+
+    if (jit_mode && is_ll_text && !runtime_path) {
+        lr_session_config_t cfg = {0};
+        cfg.mode = LR_MODE_DIRECT;
+        cfg.target = target_name;
+        lr_error_t serr;
+        lr_session_t *sess = lr_session_create(&cfg, &serr);
+        if (!sess) {
+            fprintf(stderr, "session creation failed: %s\n", serr.msg);
+            free(src);
+            return 1;
+        }
+
+        for (int i = 0; i < num_load_libs; i++) {
+            lr_session_add_symbol(sess, load_libs[i], NULL);
+        }
+
+        int parse_rc = lr_parse_ll_to_session(src, src_len, sess,
+                                               err, sizeof(err));
+        if (parse_rc != 0) {
+            fprintf(stderr, "streaming parse error: %s\n", err);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        void *fn_addr = lr_session_lookup(sess, func_name);
+        if (!fn_addr) {
+            fprintf(stderr, "function '%s' not found\n", func_name);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        typedef int (*fn_t)(void);
+        fn_t fn;
+        memcpy(&fn, &fn_addr, sizeof(fn_addr));
+        int result = fn();
+        printf("%d\n", result);
+
+        lr_session_destroy(sess);
+        free(src);
+        return 0;
+    }
+
+    bool is_bc = lr_bc_is_bitcode((const uint8_t *)src, src_len);
+    if (jit_mode && is_bc && !runtime_path) {
+        lr_session_config_t cfg = {0};
+        cfg.mode = LR_MODE_DIRECT;
+        cfg.target = target_name;
+        lr_error_t serr;
+        lr_session_t *sess = lr_session_create(&cfg, &serr);
+        if (!sess) {
+            fprintf(stderr, "session creation failed: %s\n", serr.msg);
+            free(src);
+            return 1;
+        }
+
+        for (int i = 0; i < num_load_libs; i++) {
+            lr_session_add_symbol(sess, load_libs[i], NULL);
+        }
+
+        int parse_rc = lr_parse_bc_to_session((const uint8_t *)src, src_len,
+                                               sess, err, sizeof(err));
+        if (parse_rc != 0) {
+            fprintf(stderr, "bc streaming parse error: %s\n", err);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        void *fn_addr = lr_session_lookup(sess, func_name);
+        if (!fn_addr) {
+            fprintf(stderr, "function '%s' not found\n", func_name);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        typedef int (*fn_t)(void);
+        fn_t fn;
+        memcpy(&fn, &fn_addr, sizeof(fn_addr));
+        int result = fn();
+        printf("%d\n", result);
+
+        lr_session_destroy(sess);
+        free(src);
+        return 0;
+    }
+
+    bool is_wasm = is_wasm_binary((const uint8_t *)src, src_len);
+    if (jit_mode && is_wasm && !runtime_path) {
+        lr_session_config_t cfg = {0};
+        cfg.mode = LR_MODE_DIRECT;
+        cfg.target = target_name;
+        lr_error_t serr;
+        lr_session_t *sess = lr_session_create(&cfg, &serr);
+        if (!sess) {
+            fprintf(stderr, "session creation failed: %s\n", serr.msg);
+            free(src);
+            return 1;
+        }
+
+        for (int i = 0; i < num_load_libs; i++) {
+            lr_session_add_symbol(sess, load_libs[i], NULL);
+        }
+
+        lr_arena_t *wasm_arena = lr_arena_create(0);
+        if (!wasm_arena) {
+            fprintf(stderr, "arena allocation failed\n");
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        lr_wasm_module_t *wmod = lr_wasm_decode((const uint8_t *)src, src_len,
+                                                 wasm_arena, err, sizeof(err));
+        if (!wmod) {
+            fprintf(stderr, "wasm decode error: %s\n", err);
+            lr_arena_destroy(wasm_arena);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        void *last_addr = NULL;
+        lr_error_t wasm_err = {0};
+        int wasm_rc = lr_wasm_to_session(wmod, sess, &last_addr, &wasm_err);
+        lr_arena_destroy(wasm_arena);
+        if (wasm_rc != 0) {
+            fprintf(stderr, "wasm streaming error: %s\n", wasm_err.msg);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        void *fn_addr = lr_session_lookup(sess, func_name);
+        if (!fn_addr) {
+            fprintf(stderr, "function '%s' not found\n", func_name);
+            lr_session_destroy(sess);
+            free(src);
+            return 1;
+        }
+
+        typedef int (*fn_t)(void);
+        fn_t fn;
+        memcpy(&fn, &fn_addr, sizeof(fn_addr));
+        int result = fn();
+        printf("%d\n", result);
+
+        lr_session_destroy(sess);
+        free(src);
+        return 0;
     }
 
     lr_module_t *m = lr_parse_auto((const uint8_t *)src, src_len, err, sizeof(err));

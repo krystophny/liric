@@ -122,6 +122,8 @@ int lr_session_func_end(lr_session_t *s, void **out_addr, lr_error_t *err);
 
 uint32_t lr_session_block(lr_session_t *s);
 int lr_session_set_block(lr_session_t *s, uint32_t block_id, lr_error_t *err);
+int lr_session_adopt_block(lr_session_t *s, uint32_t block_id,
+                           lr_block_t *block, lr_error_t *err);
 int lr_session_bind_ir(lr_session_t *s, lr_module_t *module,
                        lr_func_t *func, lr_block_t *block,
                        lr_error_t *err);

@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+typedef struct lr_session lr_session_t;
+
 /* Recognizes raw LLVM bitcode and the LLVM bitcode wrapper container. */
 bool lr_bc_is_bitcode(const uint8_t *data, size_t len);
 
@@ -40,5 +42,10 @@ lr_module_t *lr_parse_bc_streaming(const uint8_t *data, size_t len,
 /* Parses LLVM bitcode into an lr_module_t (native reader, zero dependencies). */
 lr_module_t *lr_parse_bc_with_arena(const uint8_t *data, size_t len,
                                     lr_arena_t *arena, char *err, size_t errlen);
+
+/* Parses LLVM bitcode and streams through the session API. */
+int lr_parse_bc_to_session(const uint8_t *data, size_t len,
+                           lr_session_t *session,
+                           char *err, size_t errlen);
 
 #endif
