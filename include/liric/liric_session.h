@@ -113,6 +113,9 @@ int lr_session_func_begin(lr_session_t *s, const char *name, lr_type_t *ret,
                           lr_type_t **params, uint32_t n, bool vararg,
                           lr_error_t *err);
 uint32_t lr_session_param(lr_session_t *s, uint32_t idx);
+int lr_session_add_phi_copy(lr_session_t *s, uint32_t pred_block_id,
+                            const lr_phi_copy_desc_t *copy,
+                            lr_error_t *err);
 int lr_session_func_end(lr_session_t *s, void **out_addr, lr_error_t *err);
 
 /* ---- Blocks ------------------------------------------------------------ */
