@@ -1,7 +1,9 @@
 #include "../src/arena.h"
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -20,6 +22,44 @@
         return 1; \
     } \
 } while (0)
+
+static int appendf(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
+    va_list ap;
+    int need;
+
+    if (!buf || !len || !cap || !fmt)
+        return -1;
+    if (!*buf) {
+        *cap = 1024;
+        *buf = malloc(*cap);
+        if (!*buf)
+            return -1;
+        (*buf)[0] = '\0';
+        *len = 0;
+    }
+
+    while (1) {
+        va_start(ap, fmt);
+        need = vsnprintf(*buf + *len, *cap - *len, fmt, ap);
+        va_end(ap);
+        if (need < 0)
+            return -1;
+        if ((size_t)need < (*cap - *len)) {
+            *len += (size_t)need;
+            return 0;
+        }
+
+        size_t min_cap = *len + (size_t)need + 1;
+        size_t new_cap = (*cap < 1024) ? 1024 : *cap;
+        while (new_cap < min_cap)
+            new_cap *= 2;
+        char *new_buf = realloc(*buf, new_cap);
+        if (!new_buf)
+            return -1;
+        *buf = new_buf;
+        *cap = new_cap;
+    }
+}
 
 int test_parser_ret_i32(void) {
     const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
@@ -874,6 +914,161 @@ int test_parser_high_numeric_vregs(void) {
     TEST_ASSERT_EQ(ret->operands[0].kind, LR_VAL_VREG, "ret operand is vreg");
     TEST_ASSERT_EQ(ret->operands[0].vreg, add1->dest, "ret references second add result");
 
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_dynamic_vreg_map_growth(void) {
+    const uint32_t n_vregs = 66000u;
+    char *src = NULL;
+    size_t src_len = 0;
+    size_t src_cap = 0;
+
+    if (appendf(&src, &src_len, &src_cap, "define i32 @f() {\nentry:\n") != 0) {
+        free(src);
+        TEST_ASSERT(false, "failed to allocate vreg test source");
+    }
+    for (uint32_t i = 0; i < n_vregs; i++) {
+        if (i == 0) {
+            if (appendf(&src, &src_len, &src_cap, "  %%0 = add i32 1, 2\n") != 0) {
+                free(src);
+                TEST_ASSERT(false, "failed to build vreg test source");
+            }
+        } else {
+            if (appendf(&src, &src_len, &src_cap,
+                        "  %%%u = add i32 %%%u, 1\n", i, i - 1u) != 0) {
+                free(src);
+                TEST_ASSERT(false, "failed to build vreg test source");
+            }
+        }
+    }
+    if (appendf(&src, &src_len, &src_cap, "  ret i32 %%%u\n}\n", n_vregs - 1u) != 0) {
+        free(src);
+        TEST_ASSERT(false, "failed to finalize vreg test source");
+    }
+
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll_text(src, src_len, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT(f->next_vreg >= n_vregs, "all generated vregs are allocated");
+
+    free(src);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_dynamic_block_map_growth(void) {
+    const uint32_t n_blocks = 4200u;
+    char *src = NULL;
+    size_t src_len = 0;
+    size_t src_cap = 0;
+
+    if (appendf(&src, &src_len, &src_cap, "define i32 @f() {\nentry:\n  br label %%b0\n") != 0) {
+        free(src);
+        TEST_ASSERT(false, "failed to allocate block test source");
+    }
+    for (uint32_t i = 0; i < n_blocks; i++) {
+        if (appendf(&src, &src_len, &src_cap, "b%u:\n", i) != 0) {
+            free(src);
+            TEST_ASSERT(false, "failed to build block labels");
+        }
+        if (i + 1u < n_blocks) {
+            if (appendf(&src, &src_len, &src_cap, "  br label %%b%u\n", i + 1u) != 0) {
+                free(src);
+                TEST_ASSERT(false, "failed to build block branches");
+            }
+        } else {
+            if (appendf(&src, &src_len, &src_cap, "  ret i32 42\n") != 0) {
+                free(src);
+                TEST_ASSERT(false, "failed to build terminal block");
+            }
+        }
+    }
+    if (appendf(&src, &src_len, &src_cap, "}\n") != 0) {
+        free(src);
+        TEST_ASSERT(false, "failed to finalize block test source");
+    }
+
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll_text(src, src_len, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT_EQ(f->num_blocks, n_blocks + 1u, "all block labels resolve without duplicates");
+
+    free(src);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_dynamic_global_map_growth(void) {
+    const uint32_t n_globals = 4500u;
+    char *src = NULL;
+    size_t src_len = 0;
+    size_t src_cap = 0;
+
+    for (uint32_t i = 0; i < n_globals; i++) {
+        if (appendf(&src, &src_len, &src_cap, "@g%u = global i32 %u\n", i, i) != 0) {
+            free(src);
+            TEST_ASSERT(false, "failed to build global declarations");
+        }
+    }
+    if (appendf(&src, &src_len, &src_cap,
+                "define i32 @f() {\nentry:\n  %%0 = load i32, i32* @g%u\n  ret i32 %%0\n}\n",
+                n_globals - 1u) != 0) {
+        free(src);
+        TEST_ASSERT(false, "failed to finalize global test source");
+    }
+
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll_text(src, src_len, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    uint32_t global_count = 0;
+    for (lr_global_t *g = m->first_global; g; g = g->next)
+        global_count++;
+    TEST_ASSERT_EQ(global_count, n_globals, "all globals are parsed");
+
+    free(src);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_dynamic_func_map_growth(void) {
+    const uint32_t n_funcs = 1200u;
+    char *src = NULL;
+    size_t src_len = 0;
+    size_t src_cap = 0;
+
+    for (uint32_t i = 0; i < n_funcs; i++) {
+        if (appendf(&src, &src_len, &src_cap, "declare i32 @fn%u()\n", i) != 0) {
+            free(src);
+            TEST_ASSERT(false, "failed to build function declarations");
+        }
+    }
+    if (appendf(&src, &src_len, &src_cap, "define i32 @main() {\nentry:\n  ret i32 0\n}\n") != 0) {
+        free(src);
+        TEST_ASSERT(false, "failed to finalize function test source");
+    }
+
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll_text(src, src_len, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    uint32_t func_count = 0;
+    for (lr_func_t *f = m->first_func; f; f = f->next)
+        func_count++;
+    TEST_ASSERT_EQ(func_count, n_funcs + 1u, "all functions are parsed");
+
+    free(src);
     lr_arena_destroy(arena);
     return 0;
 }
