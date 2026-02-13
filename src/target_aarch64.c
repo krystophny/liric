@@ -1712,11 +1712,69 @@ static int aarch64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
     return aarch64_compile_func(func, mod, buf, buflen, out_len, arena);
 }
 
+typedef struct a64_stream_bridge_ctx {
+    lr_func_t *func;
+    lr_module_t *mod;
+    uint8_t *buf;
+    size_t buflen;
+    lr_arena_t *arena;
+    lr_compile_mode_t mode;
+} a64_stream_bridge_ctx_t;
+
+static int aarch64_compile_begin(void **compile_ctx,
+                                 const lr_compile_func_meta_t *func_meta,
+                                 lr_module_t *mod,
+                                 uint8_t *buf, size_t buflen,
+                                 lr_arena_t *arena) {
+    a64_stream_bridge_ctx_t *ctx = NULL;
+    if (!compile_ctx || !func_meta || !func_meta->func || !mod || !arena)
+        return -1;
+    ctx = lr_arena_new(arena, a64_stream_bridge_ctx_t);
+    if (!ctx)
+        return -1;
+    ctx->func = func_meta->func;
+    ctx->mod = mod;
+    ctx->buf = buf;
+    ctx->buflen = buflen;
+    ctx->arena = arena;
+    ctx->mode = func_meta->mode;
+    *compile_ctx = ctx;
+    return 0;
+}
+
+static int aarch64_compile_emit(void *compile_ctx,
+                                const lr_compile_inst_desc_t *inst_desc) {
+    (void)compile_ctx;
+    (void)inst_desc;
+    return 0;
+}
+
+static int aarch64_compile_set_block(void *compile_ctx, uint32_t block_id) {
+    (void)compile_ctx;
+    (void)block_id;
+    return 0;
+}
+
+static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
+    a64_stream_bridge_ctx_t *ctx = (a64_stream_bridge_ctx_t *)compile_ctx;
+    if (!ctx || !out_len)
+        return -1;
+    if (ctx->mode == LR_COMPILE_COPY_PATCH)
+        return aarch64_compile_func_cp(ctx->func, ctx->mod, ctx->buf, ctx->buflen,
+                                       out_len, ctx->arena);
+    if (ctx->mode == LR_COMPILE_ISEL)
+        return aarch64_compile_func(ctx->func, ctx->mod, ctx->buf, ctx->buflen,
+                                    out_len, ctx->arena);
+    return -1;
+}
+
 static const lr_target_t aarch64_target = {
     .name = "aarch64",
     .ptr_size = 8,
-    .compile_func = aarch64_compile_func,
-    .compile_func_cp = aarch64_compile_func_cp,
+    .compile_begin = aarch64_compile_begin,
+    .compile_emit = aarch64_compile_emit,
+    .compile_set_block = aarch64_compile_set_block,
+    .compile_end = aarch64_compile_end,
 };
 
 const lr_target_t *lr_target_aarch64(void) {

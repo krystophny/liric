@@ -200,10 +200,7 @@ static void stream_begin(struct lr_session *s) {
     can_stream = (s->cfg.mode == SESSION_MODE_DIRECT &&
                   s->jit &&
                   s->jit->target &&
-                  ((s->jit->mode == LR_COMPILE_COPY_PATCH &&
-                    s->jit->target->compile_func_cp) ||
-                   (s->jit->mode == LR_COMPILE_ISEL &&
-                    s->jit->target->compile_func)));
+                  lr_target_can_compile(s->jit->target, s->jit->mode));
     s->stream.enabled = can_stream;
     s->stream.supported = can_stream;
 }
@@ -338,7 +335,6 @@ static int validate_stream_blocks(struct lr_session *s, session_error_t *err) {
 }
 
 static int stream_can_compile_direct(struct lr_session *s) {
-    bool use_copy_patch = false;
     bool saw_terminator = false;
     session_stream_inst_t *it;
 
@@ -346,14 +342,10 @@ static int stream_can_compile_direct(struct lr_session *s) {
         !s->jit->target || !s->cur_func)
         return 0;
 
-    use_copy_patch = s->jit->mode == LR_COMPILE_COPY_PATCH;
-    if (use_copy_patch && !s->jit->target->compile_func_cp)
-        return 0;
-    if (!use_copy_patch && s->jit->mode == LR_COMPILE_ISEL &&
-        !s->jit->target->compile_func)
-        return 0;
     if (s->jit->mode != LR_COMPILE_COPY_PATCH &&
         s->jit->mode != LR_COMPILE_ISEL)
+        return 0;
+    if (!lr_target_can_compile(s->jit->target, s->jit->mode))
         return 0;
 
     if (s->block_count != 1 || s->cur_func->num_params > 6 || s->cur_func->vararg)
@@ -372,8 +364,6 @@ static int stream_can_compile_direct(struct lr_session *s) {
 
 static int stream_compile_direct(struct lr_session *s, void **out_addr,
                                  session_error_t *err) {
-    int (*compile_func_direct)(lr_func_t *, lr_module_t *, uint8_t *, size_t,
-                               size_t *, lr_arena_t *) = NULL;
     lr_jit_t *j = NULL;
     session_stream_inst_t *it = NULL;
     lr_inst_t *insts = NULL;
@@ -393,12 +383,7 @@ static int stream_compile_direct(struct lr_session *s, void **out_addr,
     }
 
     j = s->jit;
-    if (j->mode == LR_COMPILE_COPY_PATCH)
-        compile_func_direct = j->target->compile_func_cp;
-    else if (j->mode == LR_COMPILE_ISEL)
-        compile_func_direct = j->target->compile_func;
-
-    if (!compile_func_direct) {
+    if (!lr_target_can_compile(j->target, j->mode)) {
         err_set(err, S_ERR_MODE, "stream direct compile unsupported in this mode");
         return -1;
     }
@@ -463,8 +448,8 @@ static int stream_compile_direct(struct lr_session *s, void **out_addr,
     {
         size_t free_space = j->code_cap - j->code_size;
         uint8_t *func_start = j->code_buf + j->code_size;
-        rc = compile_func_direct(&func, s->module, func_start,
-                                 free_space, &code_len, j->arena);
+        rc = lr_target_compile(j->target, j->mode, &func, s->module,
+                               func_start, free_space, &code_len, j->arena);
         if (rc != 0 || code_len > free_space) {
             err_set(err, S_ERR_BACKEND, "stream direct compile failed");
             rc = -1;

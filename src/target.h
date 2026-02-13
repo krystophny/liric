@@ -3,6 +3,7 @@
 
 #include "ir.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Compilation mode: how IR becomes machine code */
@@ -11,6 +12,32 @@ typedef enum lr_compile_mode {
     LR_COMPILE_COPY_PATCH = 1,  /* Mode A: copy-and-patch templates */
     LR_COMPILE_LLVM       = 2,  /* Mode C: translate to real LLVM (optional) */
 } lr_compile_mode_t;
+
+typedef struct lr_compile_func_meta {
+    lr_func_t *func;
+    lr_type_t *ret_type;
+    lr_type_t **param_types;
+    uint32_t num_params;
+    bool vararg;
+    uint32_t num_blocks;
+    uint32_t next_vreg;
+    lr_compile_mode_t mode;
+} lr_compile_func_meta_t;
+
+typedef struct lr_compile_inst_desc {
+    lr_opcode_t op;
+    lr_type_t *type;
+    uint32_t dest;
+    const lr_operand_desc_t *operands;
+    uint32_t num_operands;
+    const uint32_t *indices;
+    uint32_t num_indices;
+    int icmp_pred;
+    int fcmp_pred;
+    bool call_external_abi;
+    bool call_vararg;
+    uint32_t call_fixed_args;
+} lr_compile_inst_desc_t;
 
 /* Target-neutral condition codes used by backends */
 enum {
@@ -28,15 +55,15 @@ typedef struct lr_target {
     const char *name;
     uint8_t ptr_size;
 
-    /* Mode B: ISel + encoding (always available) */
-    int (*compile_func)(lr_func_t *func, lr_module_t *mod,
-                        uint8_t *buf, size_t buflen, size_t *out_len,
-                        lr_arena_t *arena);
-
-    /* Mode A: copy-and-patch (NULL if not implemented for this target) */
-    int (*compile_func_cp)(lr_func_t *func, lr_module_t *mod,
-                           uint8_t *buf, size_t buflen, size_t *out_len,
-                           lr_arena_t *arena);
+    int (*compile_begin)(void **compile_ctx,
+                         const lr_compile_func_meta_t *func_meta,
+                         lr_module_t *mod,
+                         uint8_t *buf, size_t buflen,
+                         lr_arena_t *arena);
+    int (*compile_emit)(void *compile_ctx,
+                        const lr_compile_inst_desc_t *inst_desc);
+    int (*compile_set_block)(void *compile_ctx, uint32_t block_id);
+    int (*compile_end)(void *compile_ctx, size_t *out_len);
 } lr_target_t;
 
 const lr_target_t *lr_target_x86_64(void);
@@ -47,5 +74,10 @@ const lr_target_t *lr_target_riscv64im(void);
 const lr_target_t *lr_target_by_name(const char *name);
 const lr_target_t *lr_target_host(void);
 bool lr_target_is_host_compatible(const lr_target_t *t);
+bool lr_target_can_compile(const lr_target_t *target, lr_compile_mode_t mode);
+int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
+                      lr_func_t *func, lr_module_t *mod,
+                      uint8_t *buf, size_t buflen, size_t *out_len,
+                      lr_arena_t *arena);
 
 #endif

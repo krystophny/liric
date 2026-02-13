@@ -1627,10 +1627,10 @@ static int compile_one_function(lr_jit_t *j, lr_module_t *m, lr_func_t *f,
     int rc;
     if (j->mode == LR_COMPILE_LLVM) {
         rc = -1; /* JIT mode-c is intentionally unsupported for now. */
-    } else if (j->mode == LR_COMPILE_COPY_PATCH && j->target->compile_func_cp)
-        rc = j->target->compile_func_cp(f, m, func_start, free_space, &code_len, j->arena);
-    else
-        rc = j->target->compile_func(f, m, func_start, free_space, &code_len, j->arena);
+    } else {
+        rc = lr_target_compile(j->target, j->mode, f, m, func_start,
+                               free_space, &code_len, j->arena);
+    }
     JIT_PROF_END(compile);
     if (rc != 0)
         return rc;
