@@ -29,6 +29,7 @@ add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
 option(WITH_REAL_LLVM_BACKEND "Enable real LLVM C API backend for mode 'llvm'" OFF)
 set(LIRIC_LLVM_CONFIG_EXE "" CACHE FILEPATH "Path to llvm-config for real LLVM backend")
+set(LIRIC_LLVM_COMPAT_MIN_MAJOR "11")
 
 set(LIRIC_REAL_LLVM_INCLUDE_DIR "")
 set(LIRIC_REAL_LLVM_CFLAGS_LIST "")
@@ -98,11 +99,12 @@ endif()
 
 option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
 if(WITH_REAL_LLVM_BACKEND AND WITH_LLVM_COMPAT)
-    if(LIRIC_BACKEND_LLVM_VERSION_MAJOR LESS 11)
-        message(WARNING
-            "WITH_LLVM_COMPAT is disabled for real backend with LLVM < 11 "
-            "(known static-link C++ symbol collision in llvmdev packages).")
-        set(WITH_LLVM_COMPAT OFF CACHE BOOL "Build LLVM C++ compatibility layer tests" FORCE)
+    if(LIRIC_BACKEND_LLVM_VERSION_MAJOR LESS LIRIC_LLVM_COMPAT_MIN_MAJOR)
+        message(FATAL_ERROR
+            "Unsupported configuration: WITH_REAL_LLVM_BACKEND=ON and WITH_LLVM_COMPAT=ON "
+            "requires LLVM >= ${LIRIC_LLVM_COMPAT_MIN_MAJOR}, but detected LLVM "
+            "${LIRIC_BACKEND_LLVM_VERSION}. Reconfigure with -DWITH_LLVM_COMPAT=OFF for this LLVM version."
+        )
     endif()
 endif()
 
@@ -551,6 +553,21 @@ add_test(
         -DRUNNER=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/nightly_mass.sh
         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_shell_runner.cmake
+)
+
+add_test(
+    NAME llvm_backend_compat_policy
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_llvm_backend_compat_policy.cmake
+)
+
+add_test(
+    NAME llvm_backend_workflow_contract
+    COMMAND ${CMAKE_COMMAND}
+        -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/llvm_backend_compat.yml
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_llvm_backend_workflow_contract.cmake
 )
 
 if(CMAKE_NM AND NOT WITH_REAL_LLVM_BACKEND)
