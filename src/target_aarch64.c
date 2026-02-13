@@ -921,8 +921,8 @@ static void patch_prologue_stack_adjust(a64_compile_ctx_t *ctx, size_t imm_pos,
  * Replaces the old two-phase isel_func + encode_func approach.
  */
 static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
-                                 uint8_t *buf, size_t buflen, size_t *out_len,
-                                 lr_arena_t *arena) {
+                                uint8_t *buf, size_t buflen, size_t *out_len,
+                                lr_arena_t *arena) {
     lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
     lr_target_func_analysis_t analysis;
 
@@ -1706,11 +1706,17 @@ static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
     return 0;
 }
 
+static int aarch64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
+                                   uint8_t *buf, size_t buflen, size_t *out_len,
+                                   lr_arena_t *arena) {
+    return aarch64_compile_func(func, mod, buf, buflen, out_len, arena);
+}
+
 static const lr_target_t aarch64_target = {
     .name = "aarch64",
     .ptr_size = 8,
     .compile_func = aarch64_compile_func,
-    .compile_func_cp = NULL,
+    .compile_func_cp = aarch64_compile_func_cp,
 };
 
 const lr_target_t *lr_target_aarch64(void) {

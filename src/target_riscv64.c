@@ -650,18 +650,30 @@ static int rv_compile_func_rv64gc(lr_func_t *func, lr_module_t *mod,
     return rv_compile_func_with_features(func, mod, buf, buflen, out_len, arena, &feat);
 }
 
+static int rv_compile_func_cp_rv64im(lr_func_t *func, lr_module_t *mod,
+                                     uint8_t *buf, size_t buflen, size_t *out_len,
+                                     lr_arena_t *arena) {
+    return rv_compile_func_rv64im(func, mod, buf, buflen, out_len, arena);
+}
+
+static int rv_compile_func_cp_rv64gc(lr_func_t *func, lr_module_t *mod,
+                                     uint8_t *buf, size_t buflen, size_t *out_len,
+                                     lr_arena_t *arena) {
+    return rv_compile_func_rv64gc(func, mod, buf, buflen, out_len, arena);
+}
+
 static const lr_target_t target_riscv64gc = {
     .name = "riscv64gc",
     .ptr_size = 8,
     .compile_func = rv_compile_func_rv64gc,
-    .compile_func_cp = NULL,
+    .compile_func_cp = rv_compile_func_cp_rv64gc,
 };
 
 static const lr_target_t target_riscv64im = {
     .name = "riscv64im",
     .ptr_size = 8,
     .compile_func = rv_compile_func_rv64im,
-    .compile_func_cp = NULL,
+    .compile_func_cp = rv_compile_func_cp_rv64im,
 };
 
 const lr_target_t *lr_target_riscv64(void) {
