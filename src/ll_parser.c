@@ -1578,11 +1578,19 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
             case LR_TOK_PHI: {
                 lr_type_t *ty = parse_type(p);
-                lr_operand_t ops[64];
+                lr_operand_t *ops = NULL;
                 uint32_t nops = 0;
+                uint32_t ops_cap = 0;
                 /* [ val, %label ] pairs */
                 do {
                     expect(p, LR_TOK_LBRACKET);
+                    if (!ensure_array_capacity(p, (void **)&ops, &ops_cap,
+                                               nops + 2u, 8u,
+                                               sizeof(*ops),
+                                               "phi operand list")) {
+                        free(ops);
+                        return;
+                    }
                     ops[nops++] = parse_operand(p, ty);
                     expect(p, LR_TOK_COMMA);
                     /* block label */
@@ -1591,12 +1599,17 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                         next(p);
                         uint32_t bid = resolve_block_n(p, bname.s, bname.len);
                         ops[nops++] = lr_op_block(bid);
+                    } else {
+                        free(ops);
+                        error(p, "expected incoming block label in phi");
+                        return;
                     }
                     expect(p, LR_TOK_RBRACKET);
                 } while (match(p, LR_TOK_COMMA));
                 lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_PHI,
                     ty, dest, ops, nops);
                 lr_block_append(block, inst);
+                free(ops);
                 break;
             }
 

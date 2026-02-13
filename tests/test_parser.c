@@ -626,6 +626,84 @@ int test_parser_canonical_phi_pairs(void) {
     return 0;
 }
 
+int test_parser_phi_many_incoming_pairs(void) {
+    const uint32_t npreds = 40;
+    char *src = NULL;
+    size_t src_len = 0;
+    size_t src_cap = 0;
+    lr_arena_t *arena = NULL;
+    lr_module_t *m = NULL;
+    lr_func_t *f = NULL;
+    lr_block_t *b = NULL;
+    lr_inst_t *phi = NULL;
+    char err[256] = {0};
+
+    if (appendf(&src, &src_len, &src_cap,
+                "define i32 @f(i32 %%x) {\n"
+                "entry:\n"
+                "  br label %%b0\n") != 0) {
+        free(src);
+        return 1;
+    }
+
+    for (uint32_t i = 0; i < npreds; i++) {
+        if (appendf(&src, &src_len, &src_cap,
+                    "b%u:\n"
+                    "  br label %%merge\n", i) != 0) {
+            free(src);
+            return 1;
+        }
+    }
+
+    if (appendf(&src, &src_len, &src_cap,
+                "merge:\n"
+                "  %%p = phi i32 ") != 0) {
+        free(src);
+        return 1;
+    }
+    for (uint32_t i = 0; i < npreds; i++) {
+        if (appendf(&src, &src_len, &src_cap,
+                    "%s[%u, %%b%u]", i == 0 ? "" : ", ", i + 1u, i) != 0) {
+            free(src);
+            return 1;
+        }
+    }
+    if (appendf(&src, &src_len, &src_cap,
+                "\n"
+                "  ret i32 %%p\n"
+                "}\n") != 0) {
+        free(src);
+        return 1;
+    }
+
+    arena = lr_arena_create(0);
+    m = lr_parse_ll_text(src, src_len, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    b = f->first_block;
+    while (b && strcmp(b->name, "merge") != 0)
+        b = b->next;
+    TEST_ASSERT(b != NULL, "merge block exists");
+
+    phi = b->first;
+    TEST_ASSERT(phi != NULL, "phi instruction exists");
+    TEST_ASSERT_EQ(phi->op, LR_OP_PHI, "merge begins with phi");
+    TEST_ASSERT_EQ(phi->num_operands, npreds * 2u,
+                   "phi stores all incoming value/block pairs");
+    TEST_ASSERT_EQ(phi->operands[0].kind, LR_VAL_IMM_I64,
+                   "first incoming value preserved");
+    TEST_ASSERT_EQ(phi->operands[(npreds * 2u) - 2u].kind, LR_VAL_IMM_I64,
+                   "last incoming value preserved");
+    TEST_ASSERT_EQ(phi->operands[(npreds * 2u) - 1u].kind, LR_VAL_BLOCK,
+                   "last incoming block preserved");
+
+    lr_arena_destroy(arena);
+    free(src);
+    return 0;
+}
+
 int test_parser_select_with_ptr_operands(void) {
     const char *src =
         "@a = global i32 0\n"
