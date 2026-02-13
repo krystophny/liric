@@ -295,8 +295,13 @@ int test_target_x86_streaming_hooks_copy_patch_smoke(void) {
     ret_desc.num_operands = 1;
     TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &ret_desc), 0, "emit ret");
 
+#if defined(__x86_64__) || defined(_M_X64)
     TEST_ASSERT_EQ(t->compile_end(compile_ctx, &code_len), 0, "compile_end succeeds");
     TEST_ASSERT(code_len > 0, "generated code");
+#else
+    TEST_ASSERT_EQ(t->compile_end(compile_ctx, &code_len), -1,
+                   "compile_end reports unsupported x86 copy-patch backend");
+#endif
 
     lr_arena_destroy(arena);
     return 0;
