@@ -33,6 +33,17 @@ ctest --test-dir build --output-on-failure
 
 Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=ON` (LLVM C API backend).
 
+### LLVM Backend/Compat Policy
+
+- One LLVM major version is selected at configure time via `llvm-config`.
+- Backend selection is link-time only; no runtime `dlopen` dispatch is required.
+- Unsupported mixed mode now fails fast at configure time.
+
+| LLVM major | `WITH_REAL_LLVM_BACKEND=ON` | `WITH_REAL_LLVM_BACKEND=ON` + `WITH_LLVM_COMPAT=ON` |
+|------------|-----------------------------|------------------------------------------------------|
+| 7-10 | Supported | Unsupported (configure-time error) |
+| 11+ | Supported | Supported |
+
 ## Usage
 
 ```bash

@@ -456,6 +456,19 @@ Key mappings:
 - `llvm::orc::LLJIT` -> wraps `lr_jit_t`
 - `llvm::TargetMachine::emitToFile()` -> calls [`lc_module_emit_object_to_file()`](https://github.com/krystophny/liric/blob/200b29c/src/liric_compat.c#L1663)
 
+### Real LLVM Backend + Compat Policy
+
+Liric enforces a strict build-time policy for real LLVM backend + C++ compat:
+
+- LLVM version is fixed at configure time from one `llvm-config`.
+- No runtime backend/plugin `dlopen` is required for LLVM mode selection.
+- Unsupported combined mode fails fast during configure.
+
+| LLVM major | Real backend | Real backend + C++ compat |
+|------------|--------------|---------------------------|
+| 7-10 | Supported | Rejected at configure time |
+| 11+ | Supported | Supported |
+
 ## Platform Support
 
 | Platform | JIT | Object Files | Notes |
