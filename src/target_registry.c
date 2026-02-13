@@ -248,11 +248,6 @@ int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
     if (!lr_func_is_finalized(func) && lr_func_finalize(func, layout_arena) != 0)
         return -1;
 
-    /* Prefer direct non-streaming path when available (has lookahead
-       optimizations like should_elide_store_slot). */
-    if (target->compile_func && mode == LR_COMPILE_ISEL)
-        return target->compile_func(func, mod, buf, buflen, out_len, arena);
-
     memset(&meta, 0, sizeof(meta));
     meta.func = func;
     meta.ret_type = func->ret_type;
