@@ -27,11 +27,11 @@ jobs:
           versions="$(
             micromamba search -c conda-forge llvmdev --json \
               | sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-              | awk -F. '$1 ~ /^[0-9]+$/ && $1 >= 7 && $1 <= 22 {print $1}' \
+              | awk -F. '$1 ~ /^[0-9]+$/ && $1 >= 5 && $1 <= 22 {print $1}' \
               | sort -n -u
           )"
           if [[ -z "${versions}" ]]; then
-            echo "No llvmdev majors found in supported CI range 7..22" >&2
+            echo "No llvmdev majors found in supported CI range 5..22" >&2
             exit 1
           fi
           versions_json="$(
@@ -71,7 +71,10 @@ jobs:
           if [[ "${{ matrix.llvm-version }}" -ge 11 ]]; then
             with_compat=ON
           fi
-          llvm_config="$(command -v llvm-config)"
+          llvm_config="$(command -v llvm-config || true)"
+          if [[ -z "${llvm_config}" ]]; then
+            llvm_config="$(command -v llvm-config-${{ matrix.llvm-version }} || true)"
+          fi
           if [[ -z "${llvm_config}" ]]; then
             echo "llvm-config not found" >&2
             exit 1
