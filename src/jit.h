@@ -87,6 +87,9 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
 void lr_jit_end_update(lr_jit_t *j);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);
 void lr_jit_destroy(lr_jit_t *j);
+struct lr_objfile_ctx;
+int lr_jit_patch_relocs(lr_jit_t *j, const struct lr_objfile_ctx *ctx);
+
 void lr_jit_materialize_cache_invalidate_all(void);
 uint32_t lr_jit_materialize_cache_epoch(void);
 void lr_jit_materialize_cache_reset_stats(void);

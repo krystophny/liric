@@ -2,27 +2,22 @@
 
 JIT compiler and native code emitter for LLVM IR and WebAssembly. C11, zero dependencies.
 
+There are two compilation paths. Both produce JIT, object files, or executables.
+
+**IR path** -- parse .ll/.bc/.wasm into SSA IR, then batch-compile:
+
 ```
-         .ll text    .bc bitcode    .wasm binary       Session / Compat API
-             |            |              |                      |
-             v            v              v                      |
-          ll_lexer    bc_decode     wasm_decode                 |
-          ll_parser                 wasm_to_ir                  |
-             |            |              |                      |
-             +------------+--------------+----------------------+
-                                         |
-                                    lr_module_t
-                                    (SSA IR, 45 ops)
-                                         |
-                     +-------------------+-------------------+
-                     |                   |                   |
-                   ISel           Copy-and-patch          Real LLVM
-                (single-pass)    (template memcpy)      (LLVM C API)
-                     |                   |                   |
-                     +-------------------+-------------------+
-                     |                   |                   |
-                    JIT            Object file (.o)      Executable
+  .ll / .bc / .wasm  -->  lr_module_t (SSA IR)  -->  ISel / C&P / LLVM  -->  JIT, .o, exe
 ```
+
+**DIRECT path** -- stream instructions from the programmatic API, no IR:
+
+```
+  Session API  -->  ISel / C&P (streaming)  -->  JIT + blob capture  -->  JIT, .o, exe
+```
+
+The IR path is used by the CLI and `lr_session_compile_*()`. The DIRECT path is
+used by the C++/C compat API (lfortran integration) for lowest-latency compilation.
 
 ## Build
 
@@ -78,12 +73,14 @@ ISel uses stack-based register allocation (every vreg gets a stack slot, computa
 
 ## Output Modes
 
-| Mode | Flag | Formats |
-|------|------|---------|
-| Executable | default / `-o` (when `@main` exists) | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) |
-| JIT | `--jit` | mmap'd code, W^X, dlsym symbol resolution |
-| Object file | `-o` (when `@main` is absent) | ELF64, Mach-O |
-| IR dump | `--dump-ir` | LLVM IR text |
+| Mode | Flag | Formats | Source |
+|------|------|---------|--------|
+| Executable | default / `-o` (when `@main` exists) | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) | IR or DIRECT blobs |
+| JIT | `--jit` | mmap'd code, W^X, dlsym symbol resolution | IR or DIRECT streaming |
+| Object file | `-o` (when `@main` is absent) | ELF64, Mach-O | IR or DIRECT blobs |
+| IR dump | `--dump-ir` | LLVM IR text | IR mode only |
+
+DIRECT mode captures relocatable machine code blobs during streaming compilation. These blobs are used directly for exe/obj emission without constructing IR.
 
 ## Programmatic APIs
 
@@ -100,6 +97,8 @@ C core                ir.h, jit.h      (lr_module_t, lr_jit_t, arena allocator)
 ```
 
 The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
+
+**DIRECT mode** streams instructions directly to the backend (compile_begin/emit/end) without constructing persistent IR. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
 
 ## Platform Support
 
@@ -152,7 +151,7 @@ All C source is in `src/`. Public headers in `include/liric/`. C++ compat header
 | aarch64 ISel | `target_aarch64.c` |
 | riscv64 ISel | `target_riscv64.c` |
 | JIT engine | `jit.c` |
-| Object/exe emission | `objfile.c`, `objfile_elf.c`, `objfile_macho.c` |
+| Object/exe emission | `objfile.c`, `objfile_elf.c`, `objfile_macho.c`, `module_emit.c` |
 | Intrinsic stubs | `platform/*.S` |
 | Session API | `session.c` |
 | Compat API | `liric_compat.c` |

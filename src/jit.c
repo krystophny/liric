@@ -66,12 +66,6 @@ typedef struct lr_sig_buf {
     size_t cap;
 } lr_sig_buf_t;
 
-typedef struct lr_cached_reloc {
-    uint32_t offset;
-    uint8_t type;
-    const char *symbol_name;
-} lr_cached_reloc_t;
-
 typedef struct lr_mat_cache_entry {
     uint64_t key_hash;
     uint32_t epoch;
@@ -2485,6 +2479,10 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
             return NULL;
     }
     return lookup_symbol_hashed(j, name, hash);
+}
+
+int lr_jit_patch_relocs(lr_jit_t *j, const struct lr_objfile_ctx *ctx) {
+    return apply_jit_relocs(j, ctx, NULL);
 }
 
 void lr_jit_destroy(lr_jit_t *j) {
