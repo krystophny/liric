@@ -1,4 +1,5 @@
 #include "ir.h"
+#include <limits.h>
 #include <string.h>
 
 static uint32_t symbol_hash(const char *name) {
@@ -176,6 +177,7 @@ lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
     }
 
     inst->num_operands = nops;
+    inst->indices = NULL;
     inst->num_indices = 0;
     inst->call_external_abi = false;
     inst->call_vararg = false;
@@ -196,6 +198,527 @@ void lr_block_append(lr_block_t *b, lr_inst_t *inst) {
         f->block_inst_offsets = NULL;
         f->num_linear_insts = 0;
     }
+}
+
+typedef struct lr_opt_replacement {
+    bool known;
+    lr_operand_t op;
+} lr_opt_replacement_t;
+
+typedef struct lr_load_cache_entry {
+    lr_operand_t ptr;
+    lr_type_t *load_type;
+    uint32_t value_vreg;
+} lr_load_cache_entry_t;
+
+static uint8_t int_type_width_bits(const lr_type_t *type) {
+    size_t fallback_bits = 64;
+    if (!type)
+        return (uint8_t)fallback_bits;
+
+    switch (type->kind) {
+    case LR_TYPE_I1:  return 1;
+    case LR_TYPE_I8:  return 8;
+    case LR_TYPE_I16: return 16;
+    case LR_TYPE_I32: return 32;
+    case LR_TYPE_I64: return 64;
+    default:
+        break;
+    }
+
+    fallback_bits = lr_type_size(type) * 8;
+    if (fallback_bits == 0 || fallback_bits > 64)
+        fallback_bits = 64;
+    return (uint8_t)fallback_bits;
+}
+
+static uint64_t int_mask_for_bits(uint8_t bits) {
+    if (bits >= 64)
+        return UINT64_MAX;
+    if (bits == 0)
+        return 0;
+    return (UINT64_C(1) << bits) - UINT64_C(1);
+}
+
+static uint64_t int_to_unsigned_bits(int64_t val, uint8_t bits) {
+    return ((uint64_t)val) & int_mask_for_bits(bits);
+}
+
+static int64_t int_sign_extend_bits(uint64_t val, uint8_t bits) {
+    if (bits >= 64)
+        return (int64_t)val;
+    if (bits == 0)
+        return 0;
+    uint64_t mask = int_mask_for_bits(bits);
+    uint64_t sign = UINT64_C(1) << (bits - 1u);
+    uint64_t v = val & mask;
+    return (int64_t)((v ^ sign) - sign);
+}
+
+static bool operand_equal(const lr_operand_t *a, const lr_operand_t *b) {
+    uint64_t a_bits = 0;
+    uint64_t b_bits = 0;
+
+    if (!a || !b)
+        return false;
+    if (a->kind != b->kind || a->type != b->type || a->global_offset != b->global_offset)
+        return false;
+
+    switch (a->kind) {
+    case LR_VAL_VREG:   return a->vreg == b->vreg;
+    case LR_VAL_IMM_I64:return a->imm_i64 == b->imm_i64;
+    case LR_VAL_IMM_F64:
+        memcpy(&a_bits, &a->imm_f64, sizeof(a_bits));
+        memcpy(&b_bits, &b->imm_f64, sizeof(b_bits));
+        return a_bits == b_bits;
+    case LR_VAL_BLOCK:  return a->block_id == b->block_id;
+    case LR_VAL_GLOBAL: return a->global_id == b->global_id;
+    case LR_VAL_NULL:
+    case LR_VAL_UNDEF:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool operand_resolve(const lr_opt_replacement_t *repl, uint32_t nrepl,
+                            lr_operand_t *op) {
+    bool changed = false;
+    uint32_t guard = 0;
+
+    if (!repl || !op)
+        return false;
+
+    while (op->kind == LR_VAL_VREG && op->vreg < nrepl &&
+           repl[op->vreg].known && guard++ <= nrepl) {
+        lr_operand_t next = repl[op->vreg].op;
+        if (next.kind == LR_VAL_VREG && next.vreg == op->vreg)
+            break;
+        *op = next;
+        changed = true;
+    }
+
+    return changed;
+}
+
+static bool inst_defines_dest(const lr_inst_t *inst) {
+    if (!inst)
+        return false;
+
+    switch (inst->op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_UNREACHABLE:
+    case LR_OP_STORE:
+        return false;
+    case LR_OP_CALL:
+        return inst->type && inst->type->kind != LR_TYPE_VOID;
+    default:
+        return inst->type && inst->type->kind != LR_TYPE_VOID;
+    }
+}
+
+static bool inst_dead_def_eliminable(const lr_inst_t *inst) {
+    if (!inst_defines_dest(inst))
+        return false;
+
+    switch (inst->op) {
+    case LR_OP_ALLOCA:
+    case LR_OP_LOAD:
+    case LR_OP_CALL:
+        return false;
+    default:
+        return true;
+    }
+}
+
+static bool fold_int_binop_immediates(const lr_inst_t *inst, lr_operand_t *out) {
+    const lr_operand_t *lhs;
+    const lr_operand_t *rhs;
+    uint8_t bits;
+    uint64_t mask;
+    uint64_t u_lhs;
+    uint64_t u_rhs;
+    uint64_t u_res = 0;
+    int64_t s_lhs;
+    int64_t s_rhs;
+    int64_t s_res;
+
+    if (!inst || !out || inst->num_operands < 2)
+        return false;
+
+    lhs = &inst->operands[0];
+    rhs = &inst->operands[1];
+    if (lhs->kind != LR_VAL_IMM_I64 || rhs->kind != LR_VAL_IMM_I64)
+        return false;
+
+    bits = int_type_width_bits(inst->type);
+    mask = int_mask_for_bits(bits);
+    u_lhs = int_to_unsigned_bits(lhs->imm_i64, bits);
+    u_rhs = int_to_unsigned_bits(rhs->imm_i64, bits);
+    s_lhs = int_sign_extend_bits(u_lhs, bits);
+    s_rhs = int_sign_extend_bits(u_rhs, bits);
+
+    switch (inst->op) {
+    case LR_OP_ADD:
+        u_res = (u_lhs + u_rhs) & mask;
+        break;
+    case LR_OP_SUB:
+        u_res = (u_lhs - u_rhs) & mask;
+        break;
+    case LR_OP_MUL:
+        u_res = (u_lhs * u_rhs) & mask;
+        break;
+    case LR_OP_AND:
+        u_res = (u_lhs & u_rhs) & mask;
+        break;
+    case LR_OP_OR:
+        u_res = (u_lhs | u_rhs) & mask;
+        break;
+    case LR_OP_XOR:
+        u_res = (u_lhs ^ u_rhs) & mask;
+        break;
+    case LR_OP_SHL:
+        if (u_rhs >= bits)
+            return false;
+        u_res = (u_lhs << u_rhs) & mask;
+        break;
+    case LR_OP_LSHR:
+        if (u_rhs >= bits)
+            return false;
+        u_res = (u_lhs >> u_rhs) & mask;
+        break;
+    case LR_OP_ASHR:
+        if (u_rhs >= bits)
+            return false;
+        s_res = (s_lhs >> u_rhs);
+        u_res = ((uint64_t)s_res) & mask;
+        break;
+    case LR_OP_SDIV:
+        if (s_rhs == 0)
+            return false;
+        if (bits == 64 && s_lhs == INT64_MIN && s_rhs == -1)
+            return false;
+        s_res = s_lhs / s_rhs;
+        u_res = ((uint64_t)s_res) & mask;
+        break;
+    case LR_OP_SREM:
+        if (s_rhs == 0)
+            return false;
+        if (bits == 64 && s_lhs == INT64_MIN && s_rhs == -1)
+            return false;
+        s_res = s_lhs % s_rhs;
+        u_res = ((uint64_t)s_res) & mask;
+        break;
+    default:
+        return false;
+    }
+
+    *out = lr_op_imm_i64(int_sign_extend_bits(u_res, bits), inst->type);
+    return true;
+}
+
+static bool fold_icmp_immediates(const lr_inst_t *inst, lr_operand_t *out) {
+    const lr_operand_t *lhs;
+    const lr_operand_t *rhs;
+    lr_type_t *cmp_ty;
+    uint8_t bits;
+    uint64_t u_lhs;
+    uint64_t u_rhs;
+    int64_t s_lhs;
+    int64_t s_rhs;
+    int64_t pred = 0;
+
+    if (!inst || !out || inst->op != LR_OP_ICMP || inst->num_operands < 2)
+        return false;
+
+    lhs = &inst->operands[0];
+    rhs = &inst->operands[1];
+    if (lhs->kind != LR_VAL_IMM_I64 || rhs->kind != LR_VAL_IMM_I64)
+        return false;
+
+    cmp_ty = lhs->type ? lhs->type : inst->type;
+    bits = int_type_width_bits(cmp_ty);
+    u_lhs = int_to_unsigned_bits(lhs->imm_i64, bits);
+    u_rhs = int_to_unsigned_bits(rhs->imm_i64, bits);
+    s_lhs = int_sign_extend_bits(u_lhs, bits);
+    s_rhs = int_sign_extend_bits(u_rhs, bits);
+
+    switch (inst->icmp_pred) {
+    case LR_ICMP_EQ: pred = (u_lhs == u_rhs); break;
+    case LR_ICMP_NE: pred = (u_lhs != u_rhs); break;
+    case LR_ICMP_SGT: pred = (s_lhs > s_rhs); break;
+    case LR_ICMP_SGE: pred = (s_lhs >= s_rhs); break;
+    case LR_ICMP_SLT: pred = (s_lhs < s_rhs); break;
+    case LR_ICMP_SLE: pred = (s_lhs <= s_rhs); break;
+    case LR_ICMP_UGT: pred = (u_lhs > u_rhs); break;
+    case LR_ICMP_UGE: pred = (u_lhs >= u_rhs); break;
+    case LR_ICMP_ULT: pred = (u_lhs < u_rhs); break;
+    case LR_ICMP_ULE: pred = (u_lhs <= u_rhs); break;
+    default:
+        return false;
+    }
+
+    *out = lr_op_imm_i64(pred ? 1 : 0, inst->type);
+    return true;
+}
+
+static bool fold_identity_int_binop(const lr_inst_t *inst, lr_operand_t *out) {
+    const lr_operand_t *lhs;
+    const lr_operand_t *rhs;
+    uint8_t bits;
+    uint64_t mask;
+
+    if (!inst || !out || inst->num_operands < 2)
+        return false;
+
+    lhs = &inst->operands[0];
+    rhs = &inst->operands[1];
+    bits = int_type_width_bits(inst->type);
+    mask = int_mask_for_bits(bits);
+
+    switch (inst->op) {
+    case LR_OP_ADD:
+        if (lhs->kind == LR_VAL_IMM_I64 && lhs->imm_i64 == 0) { *out = *rhs; return true; }
+        if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 0) { *out = *lhs; return true; }
+        return false;
+    case LR_OP_SUB:
+        if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 0) { *out = *lhs; return true; }
+        return false;
+    case LR_OP_MUL:
+        if (lhs->kind == LR_VAL_IMM_I64 && lhs->imm_i64 == 1) { *out = *rhs; return true; }
+        if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 1) { *out = *lhs; return true; }
+        return false;
+    case LR_OP_SDIV:
+        if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 1) { *out = *lhs; return true; }
+        return false;
+    case LR_OP_AND:
+        if (lhs->kind == LR_VAL_IMM_I64 &&
+            (((uint64_t)lhs->imm_i64 & mask) == mask)) { *out = *rhs; return true; }
+        if (rhs->kind == LR_VAL_IMM_I64 &&
+            (((uint64_t)rhs->imm_i64 & mask) == mask)) { *out = *lhs; return true; }
+        return false;
+    case LR_OP_OR:
+    case LR_OP_XOR:
+        if (lhs->kind == LR_VAL_IMM_I64 && lhs->imm_i64 == 0) { *out = *rhs; return true; }
+        if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 0) { *out = *lhs; return true; }
+        return false;
+    case LR_OP_SHL:
+    case LR_OP_LSHR:
+    case LR_OP_ASHR:
+        if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 0) { *out = *lhs; return true; }
+        return false;
+    default:
+        return false;
+    }
+}
+
+static bool fold_select(const lr_inst_t *inst, lr_operand_t *out) {
+    if (!inst || !out || inst->op != LR_OP_SELECT || inst->num_operands < 3)
+        return false;
+
+    if (inst->operands[0].kind == LR_VAL_IMM_I64) {
+        *out = inst->operands[inst->operands[0].imm_i64 ? 1u : 2u];
+        return true;
+    }
+
+    if (operand_equal(&inst->operands[1], &inst->operands[2])) {
+        *out = inst->operands[1];
+        return true;
+    }
+
+    return false;
+}
+
+static bool try_inst_replacement(const lr_inst_t *inst, lr_operand_t *out) {
+    if (fold_select(inst, out))
+        return true;
+    if (fold_icmp_immediates(inst, out))
+        return true;
+    if (fold_int_binop_immediates(inst, out))
+        return true;
+    if (fold_identity_int_binop(inst, out))
+        return true;
+    return false;
+}
+
+static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
+    uint32_t nrepl;
+    lr_opt_replacement_t *repl;
+    lr_load_cache_entry_t *load_cache;
+    uint32_t *use_counts;
+    bool changed_any = false;
+
+    if (!f || !a || f->num_blocks == 0)
+        return 0;
+
+    nrepl = f->next_vreg > 0 ? f->next_vreg : 1u;
+    repl = lr_arena_array(a, lr_opt_replacement_t, nrepl);
+    load_cache = lr_arena_array(a, lr_load_cache_entry_t, nrepl);
+    use_counts = lr_arena_array(a, uint32_t, nrepl);
+    if (!repl || !load_cache || !use_counts)
+        return -1;
+
+    for (uint32_t iter = 0; iter < 6; iter++) {
+        bool iter_changed = false;
+
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            lr_block_t *b = f->block_array[bi];
+            lr_inst_t *prev = NULL;
+            uint32_t load_count = 0;
+
+            if (!b)
+                return -1;
+
+            for (lr_inst_t *inst = b->first; inst; ) {
+                lr_inst_t *next = inst->next;
+                bool remove_inst = false;
+                lr_operand_t replacement = {0};
+
+                for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
+                    if (operand_resolve(repl, nrepl, &inst->operands[oi]))
+                        iter_changed = true;
+                }
+
+                if (inst->op == LR_OP_CONDBR &&
+                    inst->num_operands >= 3 &&
+                    inst->operands[0].kind == LR_VAL_IMM_I64) {
+                    lr_operand_t target = inst->operands[inst->operands[0].imm_i64 ? 1u : 2u];
+                    inst->op = LR_OP_BR;
+                    inst->num_operands = 1;
+                    inst->operands[0] = target;
+                    iter_changed = true;
+                }
+
+                if (try_inst_replacement(inst, &replacement)) {
+                    remove_inst = true;
+                } else if (inst->op == LR_OP_LOAD &&
+                           inst->num_operands >= 1 &&
+                           inst_defines_dest(inst)) {
+                    for (uint32_t li = 0; li < load_count; li++) {
+                        if (load_cache[li].load_type == inst->type &&
+                            operand_equal(&load_cache[li].ptr, &inst->operands[0])) {
+                            replacement = lr_op_vreg(load_cache[li].value_vreg, inst->type);
+                            remove_inst = true;
+                            break;
+                        }
+                    }
+                    if (!remove_inst && load_count < nrepl) {
+                        load_cache[load_count].ptr = inst->operands[0];
+                        load_cache[load_count].load_type = inst->type;
+                        load_cache[load_count].value_vreg = inst->dest;
+                        load_count++;
+                    }
+                }
+
+                if (!remove_inst &&
+                    (inst->op == LR_OP_STORE || inst->op == LR_OP_CALL))
+                    load_count = 0;
+
+                if (remove_inst && inst_defines_dest(inst) && inst->dest < nrepl) {
+                    if (!(replacement.kind == LR_VAL_VREG &&
+                          replacement.vreg == inst->dest)) {
+                        if (replacement.type == NULL &&
+                            (replacement.kind == LR_VAL_VREG ||
+                             replacement.kind == LR_VAL_IMM_I64 ||
+                             replacement.kind == LR_VAL_IMM_F64 ||
+                             replacement.kind == LR_VAL_NULL ||
+                             replacement.kind == LR_VAL_UNDEF)) {
+                            replacement.type = inst->type;
+                        }
+                        repl[inst->dest].known = true;
+                        repl[inst->dest].op = replacement;
+                    }
+
+                    if (prev)
+                        prev->next = next;
+                    else
+                        b->first = next;
+                    if (b->last == inst)
+                        b->last = prev;
+
+                    iter_changed = true;
+                    changed_any = true;
+                    inst = next;
+                    continue;
+                }
+
+                prev = inst;
+                inst = next;
+            }
+
+            if (!b->first)
+                b->last = NULL;
+        }
+
+        if (!iter_changed)
+            break;
+    }
+
+    for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+        lr_block_t *b = f->block_array[bi];
+        if (!b)
+            return -1;
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            for (uint32_t oi = 0; oi < inst->num_operands; oi++)
+                operand_resolve(repl, nrepl, &inst->operands[oi]);
+        }
+    }
+
+    for (uint32_t iter = 0; iter < 8; iter++) {
+        bool removed_any = false;
+        memset(use_counts, 0, sizeof(uint32_t) * nrepl);
+
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            lr_block_t *b = f->block_array[bi];
+            if (!b)
+                return -1;
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
+                    if (inst->operands[oi].kind == LR_VAL_VREG &&
+                        inst->operands[oi].vreg < nrepl)
+                        use_counts[inst->operands[oi].vreg]++;
+                }
+            }
+        }
+
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            lr_block_t *b = f->block_array[bi];
+            lr_inst_t *prev = NULL;
+            if (!b)
+                return -1;
+
+            for (lr_inst_t *inst = b->first; inst; ) {
+                lr_inst_t *next = inst->next;
+                if (inst_dead_def_eliminable(inst) &&
+                    inst->dest < nrepl &&
+                    use_counts[inst->dest] == 0) {
+                    if (prev)
+                        prev->next = next;
+                    else
+                        b->first = next;
+                    if (b->last == inst)
+                        b->last = prev;
+                    removed_any = true;
+                    changed_any = true;
+                    inst = next;
+                    continue;
+                }
+                prev = inst;
+                inst = next;
+            }
+            if (!b->first)
+                b->last = NULL;
+        }
+
+        if (!removed_any)
+            break;
+    }
+
+    (void)changed_any;
+    return 0;
 }
 
 int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
@@ -227,17 +750,19 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         }
     }
 
+    if (run_func_peephole_passes(f, a) != 0)
+        return -1;
+
     for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
         lr_block_t *b = f->block_array[bi];
         uint32_t n = 0, j = 0;
         if (!b)
             return -1;
-        if (b->inst_array)
-            continue;
 
         for (lr_inst_t *inst = b->first; inst; inst = inst->next)
             n++;
         b->num_insts = n;
+        b->inst_array = NULL;
         if (n == 0)
             continue;
 

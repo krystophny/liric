@@ -33,6 +33,17 @@ static int32_t capture_static_alloca(void *ctx, const lr_inst_t *inst) {
     return -(int32_t)capture->count;
 }
 
+static uint32_t count_block_opcode(const lr_block_t *block, lr_opcode_t op) {
+    uint32_t count = 0;
+    if (!block || !block->inst_array)
+        return 0;
+    for (uint32_t i = 0; i < block->num_insts; i++) {
+        if (block->inst_array[i]->op == op)
+            count++;
+    }
+    return count;
+}
+
 int test_target_shared_static_alloca_table(void) {
     lr_arena_t *arena = lr_arena_create(0);
     int32_t *offsets = NULL;
@@ -103,12 +114,13 @@ int test_target_shared_prescan_filters_dynamic_alloca(void) {
 int test_ir_finalize_builds_dense_arrays(void) {
     lr_arena_t *arena = lr_arena_create(0);
     lr_module_t *mod = lr_module_create(arena);
-    lr_func_t *func = lr_func_create(mod, "f", mod->type_i32, NULL, 0, false);
+    lr_type_t *params[1] = { mod->type_i32 };
+    lr_func_t *func = lr_func_create(mod, "f", mod->type_i32, params, 1, false);
     lr_block_t *entry = lr_block_create(func, arena, "entry");
     lr_block_t *exit = lr_block_create(func, arena, "exit");
 
     lr_operand_t add_ops[2] = {
-        lr_op_imm_i64(4, mod->type_i32),
+        lr_op_vreg(func->param_vregs[0], mod->type_i32),
         lr_op_imm_i64(5, mod->type_i32)
     };
     uint32_t sum_vreg = lr_vreg_new(func);
@@ -185,6 +197,168 @@ int test_ir_finalize_builds_dense_arrays(void) {
     return 0;
 }
 
+int test_ir_finalize_peephole_constant_identity_and_branch(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *mod = lr_module_create(arena);
+    lr_func_t *func = lr_func_create(mod, "peephole_fold", mod->type_i32, NULL, 0, false);
+    lr_block_t *entry = lr_block_create(func, arena, "entry");
+    lr_block_t *thenb = lr_block_create(func, arena, "then");
+    lr_block_t *elseb = lr_block_create(func, arena, "else");
+
+    uint32_t v0 = lr_vreg_new(func);
+    uint32_t v1 = lr_vreg_new(func);
+    uint32_t v2 = lr_vreg_new(func);
+    uint32_t v3 = lr_vreg_new(func);
+    uint32_t dead = lr_vreg_new(func);
+
+    lr_operand_t add_ops[2] = {
+        lr_op_imm_i64(4, mod->type_i32),
+        lr_op_imm_i64(5, mod->type_i32),
+    };
+    lr_operand_t add_zero_ops[2] = {
+        lr_op_vreg(v0, mod->type_i32),
+        lr_op_imm_i64(0, mod->type_i32),
+    };
+    lr_operand_t mul_one_ops[2] = {
+        lr_op_vreg(v1, mod->type_i32),
+        lr_op_imm_i64(1, mod->type_i32),
+    };
+    lr_operand_t add_one_ops[2] = {
+        lr_op_vreg(v2, mod->type_i32),
+        lr_op_imm_i64(1, mod->type_i32),
+    };
+    lr_operand_t dead_ops[2] = {
+        lr_op_imm_i64(7, mod->type_i32),
+        lr_op_imm_i64(8, mod->type_i32),
+    };
+    lr_operand_t condbr_ops[3] = {
+        lr_op_imm_i64(1, mod->type_i1),
+        lr_op_block(thenb->id),
+        lr_op_block(elseb->id),
+    };
+    lr_operand_t ret_then_ops[1] = { lr_op_vreg(v3, mod->type_i32) };
+    lr_operand_t ret_else_ops[1] = { lr_op_imm_i64(0, mod->type_i32) };
+
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, v0, add_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, v1, add_zero_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_MUL, mod->type_i32, v2, mul_one_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, v3, add_one_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, dead, dead_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_CONDBR, mod->type_void, 0, condbr_ops, 3));
+    lr_block_append(thenb, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_then_ops, 1));
+    lr_block_append(elseb, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_else_ops, 1));
+
+    TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize succeeds");
+    TEST_ASSERT_EQ(entry->num_insts, 1, "entry arithmetic chain is eliminated");
+    TEST_ASSERT_EQ(entry->inst_array[0]->op, LR_OP_BR, "constant condbr is simplified to br");
+    TEST_ASSERT_EQ(entry->inst_array[0]->operands[0].kind, LR_VAL_BLOCK,
+                   "simplified branch keeps block target");
+    TEST_ASSERT_EQ(entry->inst_array[0]->operands[0].block_id, thenb->id,
+                   "simplified branch targets true block");
+    TEST_ASSERT(thenb->inst_array != NULL, "then block cache is present");
+    TEST_ASSERT_EQ(thenb->num_insts, 1, "then block keeps return");
+    TEST_ASSERT_EQ(thenb->inst_array[0]->operands[0].kind, LR_VAL_IMM_I64,
+                   "ret operand is folded to immediate");
+    TEST_ASSERT_EQ(thenb->inst_array[0]->operands[0].imm_i64, 10,
+                   "constant chain folds to final value");
+    TEST_ASSERT_EQ(func->num_linear_insts, 3, "only one branch and two returns remain");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_ir_finalize_redundant_load_elimination(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *mod = lr_module_create(arena);
+    lr_func_t *func = lr_func_create(mod, "redundant_load", mod->type_i32, NULL, 0, false);
+    lr_block_t *entry = lr_block_create(func, arena, "entry");
+
+    uint32_t ptr = lr_vreg_new(func);
+    uint32_t load0 = lr_vreg_new(func);
+    uint32_t load1 = lr_vreg_new(func);
+    uint32_t sum = lr_vreg_new(func);
+
+    lr_operand_t store_ops[2] = {
+        lr_op_imm_i64(7, mod->type_i32),
+        lr_op_vreg(ptr, mod->type_ptr),
+    };
+    lr_operand_t load_ptr_ops[1] = { lr_op_vreg(ptr, mod->type_ptr) };
+    lr_operand_t add_ops[2] = {
+        lr_op_vreg(load0, mod->type_i32),
+        lr_op_vreg(load1, mod->type_i32),
+    };
+    lr_operand_t ret_ops[1] = { lr_op_vreg(sum, mod->type_i32) };
+
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ALLOCA, mod->type_i32, ptr, NULL, 0));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_STORE, mod->type_void, 0, store_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_LOAD, mod->type_i32, load0, load_ptr_ops, 1));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_LOAD, mod->type_i32, load1, load_ptr_ops, 1));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, sum, add_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_ops, 1));
+
+    TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize succeeds");
+    TEST_ASSERT_EQ(count_block_opcode(entry, LR_OP_LOAD), 1,
+                   "second load from same address is eliminated");
+    TEST_ASSERT_EQ(entry->inst_array[3]->op, LR_OP_ADD, "add stays in expected slot");
+    TEST_ASSERT_EQ(entry->inst_array[3]->operands[0].kind, LR_VAL_VREG, "add lhs remains vreg");
+    TEST_ASSERT_EQ(entry->inst_array[3]->operands[1].kind, LR_VAL_VREG, "add rhs remains vreg");
+    TEST_ASSERT_EQ(entry->inst_array[3]->operands[0].vreg, load0,
+                   "add lhs uses first load result");
+    TEST_ASSERT_EQ(entry->inst_array[3]->operands[1].vreg, load0,
+                   "add rhs reuses first load result");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_ir_finalize_redundant_load_kept_after_store(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *mod = lr_module_create(arena);
+    lr_func_t *func = lr_func_create(mod, "redundant_load_store_barrier",
+                                     mod->type_i32, NULL, 0, false);
+    lr_block_t *entry = lr_block_create(func, arena, "entry");
+
+    uint32_t ptr = lr_vreg_new(func);
+    uint32_t load0 = lr_vreg_new(func);
+    uint32_t load1 = lr_vreg_new(func);
+    uint32_t sum = lr_vreg_new(func);
+
+    lr_operand_t store0_ops[2] = {
+        lr_op_imm_i64(7, mod->type_i32),
+        lr_op_vreg(ptr, mod->type_ptr),
+    };
+    lr_operand_t store1_ops[2] = {
+        lr_op_imm_i64(8, mod->type_i32),
+        lr_op_vreg(ptr, mod->type_ptr),
+    };
+    lr_operand_t load_ptr_ops[1] = { lr_op_vreg(ptr, mod->type_ptr) };
+    lr_operand_t add_ops[2] = {
+        lr_op_vreg(load0, mod->type_i32),
+        lr_op_vreg(load1, mod->type_i32),
+    };
+    lr_operand_t ret_ops[1] = { lr_op_vreg(sum, mod->type_i32) };
+
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ALLOCA, mod->type_i32, ptr, NULL, 0));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_STORE, mod->type_void, 0, store0_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_LOAD, mod->type_i32, load0, load_ptr_ops, 1));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_STORE, mod->type_void, 0, store1_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_LOAD, mod->type_i32, load1, load_ptr_ops, 1));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, sum, add_ops, 2));
+    lr_block_append(entry, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_ops, 1));
+
+    TEST_ASSERT_EQ(lr_func_finalize(func, arena), 0, "finalize succeeds");
+    TEST_ASSERT_EQ(count_block_opcode(entry, LR_OP_LOAD), 2,
+                   "store invalidates load cache and keeps second load");
+    TEST_ASSERT_EQ(entry->inst_array[5]->op, LR_OP_ADD, "add stays in expected slot");
+    TEST_ASSERT_EQ(entry->inst_array[5]->operands[0].vreg, load0,
+                   "add lhs remains first load");
+    TEST_ASSERT_EQ(entry->inst_array[5]->operands[1].vreg, load1,
+                   "add rhs keeps second load");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_ir_inst_create_packs_operands_in_single_allocation(void) {
     lr_arena_t *arena = lr_arena_create(0);
     lr_module_t *mod = lr_module_create(arena);
@@ -219,14 +393,15 @@ int test_ir_inst_create_packs_operands_in_single_allocation(void) {
 int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
     lr_arena_t *arena = lr_arena_create(0);
     lr_module_t *mod = lr_module_create(arena);
-    lr_func_t *func = lr_func_create(mod, "phi_copies", mod->type_i32, NULL, 0, false);
+    lr_type_t *params[1] = { mod->type_i1 };
+    lr_func_t *func = lr_func_create(mod, "phi_copies", mod->type_i32, params, 1, false);
     lr_block_t *entry = lr_block_create(func, arena, "entry");
     lr_block_t *left = lr_block_create(func, arena, "left");
     lr_block_t *right = lr_block_create(func, arena, "right");
     lr_block_t *merge = lr_block_create(func, arena, "merge");
 
     lr_operand_t condbr_ops[3] = {
-        lr_op_imm_i64(1, mod->type_i1),
+        lr_op_vreg(func->param_vregs[0], mod->type_i1),
         lr_op_block(left->id),
         lr_op_block(right->id),
     };
@@ -252,7 +427,14 @@ int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
     };
     lr_block_append(merge, lr_inst_create(arena, LR_OP_PHI, mod->type_i32, phi1_dest, phi1_ops, 4));
 
-    lr_operand_t ret_ops[1] = { lr_op_vreg(phi1_dest, mod->type_i32) };
+    uint32_t phi_sum_dest = lr_vreg_new(func);
+    lr_operand_t phi_sum_ops[2] = {
+        lr_op_vreg(phi0_dest, mod->type_i32),
+        lr_op_vreg(phi1_dest, mod->type_i32),
+    };
+    lr_block_append(merge, lr_inst_create(arena, LR_OP_ADD, mod->type_i32, phi_sum_dest, phi_sum_ops, 2));
+
+    lr_operand_t ret_ops[1] = { lr_op_vreg(phi_sum_dest, mod->type_i32) };
     lr_block_append(merge, lr_inst_create(arena, LR_OP_RET, mod->type_i32, 0, ret_ops, 1));
 
     TEST_ASSERT(func->block_array == NULL, "phi copy build works without pre-finalize");
@@ -303,12 +485,15 @@ int test_ir_phi_copies_flat_arrays_preserve_emission_order(void) {
 
         lr_block_phi_copies_t *copies2 = lr_build_phi_copies(arena, func);
         TEST_ASSERT(copies2 != NULL, "phi copies rebuild after mutation");
-        TEST_ASSERT_EQ(copies2[left->id].count, 3, "left predecessor count updates after mutation");
-        TEST_ASSERT_EQ(copies2[right->id].count, 3, "right predecessor count updates after mutation");
-        TEST_ASSERT_EQ(copies2[left->id].copies[0].dest_vreg, phi2_dest,
-                       "new left phi copy appears first after rebuild");
-        TEST_ASSERT_EQ(copies2[right->id].copies[0].dest_vreg, phi2_dest,
-                       "new right phi copy appears first after rebuild");
+        TEST_ASSERT_EQ(copies2[left->id].count, 2,
+                       "unused phi remains eliminated after rebuild");
+        TEST_ASSERT_EQ(copies2[right->id].count, 2,
+                       "unused phi remains eliminated on right predecessor");
+        TEST_ASSERT_EQ(copies2[left->id].copies[0].dest_vreg, phi1_dest,
+                       "left copy order for live phis is preserved");
+        TEST_ASSERT_EQ(copies2[right->id].copies[0].dest_vreg, phi1_dest,
+                       "right copy order for live phis is preserved");
+        (void)phi2_dest;
     }
 
     lr_arena_destroy(arena);
