@@ -248,6 +248,13 @@ int test_cp_fallback_to_isel(void);
 int test_cp_immediate_operand(void);
 #endif
 
+#if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))
+int test_stencil_generated_lookup_core_entries(void);
+int test_stencil_generated_lookup_unknown_returns_null(void);
+int test_stencil_gen_deterministic_output(void);
+int test_stencil_gen_missing_input_fails(void);
+#endif
+
 int main(void) {
     fprintf(stderr, "liric test suite\n");
     fprintf(stderr, "================\n\n");
@@ -494,6 +501,14 @@ int main(void) {
     RUN_TEST(test_cp_sdiv_srem);
     RUN_TEST(test_cp_fallback_to_isel);
     RUN_TEST(test_cp_immediate_operand);
+#endif
+
+#if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))
+    fprintf(stderr, "\nStencil generator tests:\n");
+    RUN_TEST(test_stencil_generated_lookup_core_entries);
+    RUN_TEST(test_stencil_generated_lookup_unknown_returns_null);
+    RUN_TEST(test_stencil_gen_deterministic_output);
+    RUN_TEST(test_stencil_gen_missing_input_fails);
 #endif
 
     fprintf(stderr, "\n================\n");
