@@ -138,6 +138,7 @@ add_library(liric STATIC
     src/objfile_elf.c
     src/llvm_stubs.c
     src/platform/platform_intrinsics.c
+    src/platform/platform_os.c
 )
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     target_sources(liric PRIVATE
@@ -280,6 +281,7 @@ add_executable(test_liric
     tests/test_merge.c
     tests/test_objfile.c
     tests/test_cp.c
+    tests/test_platform_os.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
