@@ -2,6 +2,7 @@
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
 #include "../src/jit.h"
+#include "../src/llvm_backend.h"
 #include "../src/platform/platform.h"
 #include <stdio.h>
 #include <string.h>
@@ -93,6 +94,40 @@ static void restore_lazy_materialization_env(char *old_value, int had_old_value)
     free(old_value);
 }
 
+static int set_compile_mode_env(const char *value, char **old_value, int *had_old_value) {
+    const char *prev = getenv("LIRIC_COMPILE_MODE");
+    *had_old_value = (prev != NULL);
+    *old_value = NULL;
+    if (prev) {
+        *old_value = strdup(prev);
+        if (!*old_value)
+            return -1;
+    }
+    if (value) {
+        if (setenv("LIRIC_COMPILE_MODE", value, 1) != 0) {
+            free(*old_value);
+            *old_value = NULL;
+            *had_old_value = 0;
+            return -1;
+        }
+    } else if (unsetenv("LIRIC_COMPILE_MODE") != 0) {
+        free(*old_value);
+        *old_value = NULL;
+        *had_old_value = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static void restore_compile_mode_env(char *old_value, int had_old_value) {
+    if (had_old_value) {
+        (void)setenv("LIRIC_COMPILE_MODE", old_value ? old_value : "isel", 1);
+    } else {
+        (void)unsetenv("LIRIC_COMPILE_MODE");
+    }
+    free(old_value);
+}
+
 static int append_ir(char *buf, size_t cap, size_t *pos, const char *fmt, ...) {
     if (*pos >= cap)
         return -1;
@@ -178,6 +213,78 @@ int test_jit_ret_42(void) {
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
     return 0;
+}
+
+int test_jit_mode_llvm_contract(void) {
+    const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
+    char *old_mode = NULL;
+    int had_old_mode = 0;
+    int status = 1;
+    lr_arena_t *arena = NULL;
+    lr_module_t *m = NULL;
+    lr_jit_t *jit = NULL;
+
+    if (set_compile_mode_env("llvm", &old_mode, &had_old_mode) != 0) {
+        fprintf(stderr, "  FAIL: set compile mode env (line %d)\n", __LINE__);
+        return 1;
+    }
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        fprintf(stderr, "  FAIL: arena create (line %d)\n", __LINE__);
+        goto done;
+    }
+    m = parse(src, arena);
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse (line %d)\n", __LINE__);
+        goto done;
+    }
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create (line %d)\n", __LINE__);
+        goto done;
+    }
+
+    int rc = lr_jit_add_module(jit, m);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (lr_llvm_jit_is_available()) {
+        if (rc != 0) {
+            fprintf(stderr, "  FAIL: llvm mode jit expected success (line %d)\n", __LINE__);
+            goto done;
+        }
+        typedef int (*fn_t)(void);
+        fn_t fn = NULL;
+        LR_JIT_GET_FN(fn, jit, "f");
+        if (!fn) {
+            fprintf(stderr, "  FAIL: llvm mode function lookup (line %d)\n", __LINE__);
+            goto done;
+        }
+        if (fn() != 42) {
+            fprintf(stderr, "  FAIL: llvm mode execution result (line %d)\n", __LINE__);
+            goto done;
+        }
+    } else if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode jit expected failure without LLJIT API (line %d)\n",
+                __LINE__);
+        goto done;
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode jit expected failure when backend disabled (line %d)\n",
+                __LINE__);
+        goto done;
+    }
+#endif
+
+    status = 0;
+
+done:
+    if (jit)
+        lr_jit_destroy(jit);
+    if (arena)
+        lr_arena_destroy(arena);
+    restore_compile_mode_env(old_mode, had_old_mode);
+    return status;
 }
 
 int test_jit_lazy_repeated_lookup_returns_ready_symbol(void) {

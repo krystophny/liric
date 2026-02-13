@@ -2,6 +2,7 @@
 #include "bc_decode.h"
 #include "compile_mode.h"
 #include "ir.h"
+#include "llvm_backend.h"
 #include "objfile.h"
 #include "target.h"
 #include "platform/platform.h"
@@ -2349,6 +2350,15 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         j->runtime_bc_loaded = true;
     }
 
+    if (j->mode == LR_COMPILE_LLVM) {
+        char llvm_err[256] = {0};
+        int llvm_rc = lr_llvm_jit_add_module(j, m, llvm_err, sizeof(llvm_err));
+        if (llvm_rc != 0 && llvm_err[0]) {
+            fprintf(stderr, "llvm mode jit failed: %s\n", llvm_err);
+        }
+        return llvm_rc;
+    }
+
     bool own_wx_transition = !j->update_active;
     bool lazy_mode = jit_lazy_materialization_enabled();
     int rc = -1;
@@ -2525,6 +2535,7 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
 
 void lr_jit_destroy(lr_jit_t *j) {
     if (!j) return;
+    lr_llvm_jit_dispose(j);
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
         if (l->handle)
             dlclose(l->handle);

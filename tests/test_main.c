@@ -98,6 +98,7 @@ int test_ir_phi_copies_flat_arrays_preserve_emission_order(void);
 int test_headers_share_opcode_and_operand_types(void);
 int test_jit_add_symbol_updates_cached_lookup(void);
 int test_jit_ret_42(void);
+int test_jit_mode_llvm_contract(void);
 int test_jit_lazy_repeated_lookup_returns_ready_symbol(void);
 int test_jit_add_args(void);
 int test_jit_arithmetic(void);
@@ -313,6 +314,7 @@ int main(void) {
     fprintf(stderr, "\nJIT tests:\n");
     RUN_TEST(test_jit_add_symbol_updates_cached_lookup);
     RUN_TEST(test_jit_ret_42);
+    RUN_TEST(test_jit_mode_llvm_contract);
     RUN_TEST(test_jit_lazy_repeated_lookup_returns_ready_symbol);
     RUN_TEST(test_jit_add_args);
     RUN_TEST(test_jit_arithmetic);
