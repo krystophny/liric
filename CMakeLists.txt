@@ -286,12 +286,12 @@ target_include_directories(test_liric PRIVATE src)
 add_test(NAME liric_tests COMMAND test_liric)
 
 add_test(
-    NAME liric_cli_emit_obj_opt_in
+    NAME liric_cli_output_flag_auto_obj_no_main
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
-        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/no_main.ll
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_test.o
-        -DMODE=emit
+        -DMODE=auto_object
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
 
@@ -317,12 +317,22 @@ add_test(
 )
 
 add_test(
-    NAME liric_cli_emit_obj_jit_conflict
+    NAME liric_cli_output_flag_jit_conflict
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
         -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_conflict.o
         -DMODE=conflict
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
+)
+
+add_test(
+    NAME liric_cli_legacy_emit_obj_rejected
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:liric_bin>
+        -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_legacy.o
+        -DMODE=legacy_flag_rejected
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
 

@@ -38,9 +38,9 @@ Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=
 ```bash
 liric input.ll                       # emit executable (a.out)
 liric -o prog input.ll               # emit executable
+liric -o out.o no_main.ll            # emit relocatable object (no @main)
 liric --jit input.ll                 # JIT and run
 liric --jit input.ll --func f        # JIT, call f()
-liric --emit-obj out.o input.ll      # emit relocatable object
 liric --dump-ir input.ll             # round-trip IR dump
 liric -o prog input.ll --runtime rt.ll --load-lib ./libfoo.so
 ```
@@ -74,9 +74,9 @@ ISel uses stack-based register allocation (every vreg gets a stack slot, computa
 
 | Mode | Flag | Formats |
 |------|------|---------|
-| Executable | default / `-o` | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) |
+| Executable | default / `-o` (when `@main` exists) | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) |
 | JIT | `--jit` | mmap'd code, W^X, dlsym symbol resolution |
-| Object file | `--emit-obj` | ELF64, Mach-O |
+| Object file | `-o` (when `@main` is absent) | ELF64, Mach-O |
 | IR dump | `--dump-ir` | LLVM IR text |
 
 ## Programmatic APIs
