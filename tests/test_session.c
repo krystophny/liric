@@ -1100,4 +1100,159 @@ int test_session_ir_exe_loop(void) {
     return 0;
 }
 
+int test_session_direct_exe_ret_42(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_direct_ret42";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 42);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 42");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_direct_exe_branch(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t then_id = lr_session_block(s);
+    uint32_t else_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    uint32_t cmp = lr_emit_icmp(s, LR_CMP_SGT, LR_IMM(7, i32), LR_IMM(5, i32));
+    lr_emit_condbr(s, LR_VREG(cmp, i1), then_id, else_id);
+
+    lr_session_set_block(s, then_id, &err);
+    lr_emit_ret(s, LR_IMM(10, i32));
+
+    lr_session_set_block(s, else_id, &err);
+    lr_emit_ret(s, LR_IMM(20, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_direct_branch";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 10);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 10");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_direct_exe_call(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+
+    lr_type_t *h_params[] = {i32};
+    int rc = lr_session_func_begin(s, "helper", i32, h_params, 1, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "helper func begin");
+    uint32_t hx = lr_session_param(s, 0);
+    uint32_t hb = lr_session_block(s);
+    lr_session_set_block(s, hb, &err);
+    uint32_t hr = lr_emit_add(s, i32, LR_VREG(hx, i32), LR_IMM(10, i32));
+    lr_emit_ret(s, LR_VREG(hr, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "helper func end");
+
+    rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "_start func begin");
+    uint32_t sb = lr_session_block(s);
+    lr_session_set_block(s, sb, &err);
+    uint32_t helper_sym = lr_session_intern(s, "helper");
+    lr_operand_desc_t args[] = {LR_IMM(32, i32)};
+    uint32_t cr = lr_emit_call(s, i32, LR_GLOBAL(helper_sym, ptr), args, 1);
+    lr_emit_ret(s, LR_VREG(cr, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "_start func end");
+
+    const char *path = "/tmp/liric_test_direct_call";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 42);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 42");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_direct_jit_and_exe(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+
+    /* Compile a function and JIT-execute it */
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(99, i32));
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "jit addr");
+
+    /* Verify JIT works */
+    typedef int (*fn_t)(void);
+    fn_t fn;
+    memcpy(&fn, &addr, sizeof(fn));
+    TEST_ASSERT_EQ(fn(), 99, "jit call returns 99");
+
+    /* Also emit as executable */
+    const char *path = "/tmp/liric_test_direct_jit_and_exe";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 99);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 99");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
 #endif

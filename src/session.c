@@ -4,6 +4,7 @@
 #include "jit.h"
 #include "liric.h"
 #include "module_emit.h"
+#include "objfile.h"
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -86,6 +87,14 @@ struct lr_session {
     bool compile_active;
     bool compile_opened_update;
     uint32_t emitted_count;
+
+    /* DIRECT mode blob capture for exe/obj emission */
+    lr_objfile_ctx_t direct_obj_ctx;
+    bool direct_obj_ctx_active;
+    uint32_t direct_reloc_base;
+    lr_func_blob_t *blobs;
+    uint32_t blob_count;
+    uint32_t blob_cap;
 };
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
@@ -259,12 +268,59 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            lr_target_can_compile(s->jit->target, s->jit->mode);
 }
 
+static void free_direct_obj_ctx(lr_objfile_ctx_t *ctx) {
+    if (!ctx)
+        return;
+    free(ctx->relocs);
+    free(ctx->data_relocs);
+    free(ctx->symbols);
+    free(ctx->symbol_index);
+    free(ctx->module_sym_defined);
+    free(ctx->module_sym_funcs);
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
+    if (need <= s->blob_cap)
+        return 0;
+    uint32_t new_cap = s->blob_cap == 0 ? 8u : s->blob_cap;
+    while (new_cap < need)
+        new_cap *= 2u;
+    lr_func_blob_t *new_blobs = (lr_func_blob_t *)realloc(
+        s->blobs, sizeof(*new_blobs) * new_cap);
+    if (!new_blobs)
+        return -1;
+    s->blobs = new_blobs;
+    s->blob_cap = new_cap;
+    return 0;
+}
+
+static int init_direct_obj_ctx(struct lr_session *s) {
+    if (s->direct_obj_ctx_active)
+        return 0;
+    memset(&s->direct_obj_ctx, 0, sizeof(s->direct_obj_ctx));
+    if (lr_obj_build_symbol_cache(&s->direct_obj_ctx, s->module) != 0)
+        return -1;
+    s->direct_obj_ctx_active = true;
+    return 0;
+}
+
 static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     lr_compile_func_meta_t meta;
     int rc;
 
     if (!direct_mode_enabled(s) || !s->cur_func)
         return 0;
+
+    /* Initialize the obj_ctx for relocation capture on first function */
+    if (init_direct_obj_ctx(s) != 0) {
+        err_set(err, S_ERR_BACKEND, "obj_ctx initialization failed");
+        return -1;
+    }
+
+    /* Install obj_ctx so the backend emits relocatable code */
+    s->module->obj_ctx = &s->direct_obj_ctx;
+    s->direct_reloc_base = s->direct_obj_ctx.num_relocs;
 
     memset(&meta, 0, sizeof(meta));
     meta.func = s->cur_func;
@@ -280,7 +336,21 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     s->compile_start = align_up_size(s->jit->code_size, 16u);
     if (s->compile_start >= s->jit->code_cap) {
         err_set(err, S_ERR_BACKEND, "jit code buffer exhausted");
+        s->module->obj_ctx = NULL;
         return -1;
+    }
+
+    /* Register function symbol as defined in text section so
+       apply_jit_relocs can resolve intra-module references. */
+    if (s->cur_func->name && s->cur_func->name[0]) {
+        uint32_t sym_idx = lr_obj_ensure_symbol(
+            &s->direct_obj_ctx, s->cur_func->name,
+            true, 1, (uint32_t)s->compile_start);
+        if (sym_idx == UINT32_MAX) {
+            err_set(err, S_ERR_BACKEND, "function symbol registration failed");
+            s->module->obj_ctx = NULL;
+            return -1;
+        }
     }
 
     /* Transition JIT buffer to writable before compile_begin, which
@@ -292,6 +362,7 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     }
     if (!s->jit->update_active) {
         err_set(err, S_ERR_BACKEND, "jit update transition failed");
+        s->module->obj_ctx = NULL;
         return -1;
     }
 
@@ -304,6 +375,7 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     if (rc != 0 || !s->compile_ctx) {
         err_set(err, S_ERR_BACKEND, "backend compile begin failed");
         s->compile_ctx = NULL;
+        s->module->obj_ctx = NULL;
         if (s->compile_opened_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         s->compile_opened_update = false;
@@ -311,6 +383,56 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     }
 
     s->compile_active = true;
+    return 0;
+}
+
+static int capture_blob(struct lr_session *s, const uint8_t *code,
+                        size_t code_len) {
+    lr_objfile_ctx_t *oc = &s->direct_obj_ctx;
+    uint32_t num_relocs = oc->num_relocs - s->direct_reloc_base;
+
+    if (ensure_blob_capacity(s, s->blob_count + 1u) != 0)
+        return -1;
+
+    lr_func_blob_t *blob = &s->blobs[s->blob_count];
+    memset(blob, 0, sizeof(*blob));
+
+    blob->name = s->cur_func->name;
+
+    /* Copy pre-relocation code bytes */
+    uint8_t *code_copy = (uint8_t *)malloc(code_len);
+    if (!code_copy)
+        return -1;
+    memcpy(code_copy, code, code_len);
+    blob->code = code_copy;
+    blob->code_len = code_len;
+
+    /* Convert obj relocs (index-based) to cached relocs (name-based).
+       At this point reloc offsets are function-relative (not yet adjusted
+       to absolute), so they can be stored directly in the blob. */
+    if (num_relocs > 0) {
+        lr_cached_reloc_t *cached = (lr_cached_reloc_t *)calloc(
+            num_relocs, sizeof(*cached));
+        if (!cached) {
+            free(code_copy);
+            return -1;
+        }
+        for (uint32_t i = 0; i < num_relocs; i++) {
+            const lr_obj_reloc_t *rel = &oc->relocs[s->direct_reloc_base + i];
+            if (rel->symbol_idx >= oc->num_symbols) {
+                free(cached);
+                free(code_copy);
+                return -1;
+            }
+            cached[i].offset = rel->offset;
+            cached[i].type = rel->type;
+            cached[i].symbol_name = oc->symbols[rel->symbol_idx].name;
+        }
+        blob->relocs = cached;
+        blob->num_relocs = num_relocs;
+    }
+
+    s->blob_count++;
     return 0;
 }
 
@@ -333,6 +455,7 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     }
     if (!s->jit->update_active) {
         err_set(err, S_ERR_BACKEND, "jit update transition failed");
+        s->module->obj_ctx = NULL;
         return -1;
     }
     should_close_update = s->compile_opened_update;
@@ -343,6 +466,7 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     s->compile_opened_update = false;
     if (rc != 0) {
         err_set(err, S_ERR_BACKEND, "backend compile end failed");
+        s->module->obj_ctx = NULL;
         if (should_close_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         return -1;
@@ -350,18 +474,46 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
 
     if (s->compile_start + code_len > s->jit->code_cap) {
         err_set(err, S_ERR_BACKEND, "jit code buffer overflow");
+        s->module->obj_ctx = NULL;
         if (should_close_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         return -1;
     }
 
+    /* Capture blob (pre-relocation code + relocs) for later exe/obj emission.
+       Must happen before adjusting reloc offsets to absolute. */
+    if (capture_blob(s, s->jit->code_buf + s->compile_start, code_len) != 0) {
+        err_set(err, S_ERR_BACKEND, "blob capture failed");
+        s->module->obj_ctx = NULL;
+        if (should_close_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return -1;
+    }
+
+    /* Adjust reloc offsets from function-relative to absolute within the
+       JIT code buffer, matching the pattern in jit.c:compile_one_function. */
+    for (uint32_t ri = s->direct_reloc_base; ri < s->direct_obj_ctx.num_relocs; ri++)
+        s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
+
+    /* Apply JIT relocations on the live code copy for immediate execution */
     s->jit->code_size = s->compile_start + code_len;
     if (s->jit->update_active && code_len > 0)
         s->jit->update_dirty = true;
+    lr_jit_patch_relocs(s->jit, &s->direct_obj_ctx);
 
     lr_jit_add_symbol(s->jit, s->cur_func->name,
                       s->jit->code_buf + s->compile_start);
     s->cur_func->is_decl = true;
+
+    /* Update symbol cache so subsequent functions know this one is defined */
+    if (s->direct_obj_ctx_active) {
+        uint32_t sym_id = lr_module_intern_symbol(s->module, s->cur_func->name);
+        if (sym_id < s->direct_obj_ctx.module_sym_count)
+            s->direct_obj_ctx.module_sym_defined[sym_id] = 1;
+    }
+
+    s->module->obj_ctx = NULL;
+
     if (out_addr)
         *out_addr = s->jit->code_buf + s->compile_start;
 
@@ -464,6 +616,8 @@ static void finish_function_state(struct lr_session *s) {
         return;
     if (s->compile_opened_update && s->jit && s->jit->update_active)
         lr_jit_end_update(s->jit);
+    if (s->module)
+        s->module->obj_ctx = NULL;
     reset_block_tracking(s);
     reset_phi_copies(s);
     s->cur_func = NULL;
@@ -681,6 +835,13 @@ void lr_session_destroy(struct lr_session *s) {
         free(it);
         it = next;
     }
+    for (uint32_t i = 0; i < s->blob_count; i++) {
+        free((void *)s->blobs[i].code);
+        free((void *)s->blobs[i].relocs);
+    }
+    free(s->blobs);
+    if (s->direct_obj_ctx_active)
+        free_direct_obj_ctx(&s->direct_obj_ctx);
     free(s->phi_copies);
     free(s->block_terminated);
     free(s->block_seen);
@@ -1108,7 +1269,12 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
         normalized.op == LR_OP_CALL &&
         normalized.num_operands > 0 &&
         normalized.operands &&
-        normalized.operands[0].kind == LR_OP_KIND_GLOBAL) {
+        normalized.operands[0].kind == LR_OP_KIND_GLOBAL &&
+        !s->module->obj_ctx) {
+        /* Pre-resolve call targets when NOT in relocatable mode.
+           When obj_ctx is active, the backend emits relocations for
+           GLOBAL operands instead, which get patched by JIT relocs
+           after compile_end and stay name-based in captured blobs. */
         const char *callee_name = lr_module_symbol_name(
             s->module, normalized.operands[0].global_id
         );
@@ -1138,6 +1304,7 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             s->compile_active = false;
             s->compile_opened_update = false;
             s->compile_ctx = NULL;
+            s->module->obj_ctx = NULL;
         } else {
             err_set(err, S_ERR_BACKEND,
                     "direct call target unresolved after streaming began");
@@ -1365,6 +1532,12 @@ int lr_session_compile_auto(struct lr_session *s, const uint8_t *data, size_t le
 
 /* ---- Output ------------------------------------------------------------ */
 
+static const lr_target_t *session_resolve_target(struct lr_session *s) {
+    if (s->cfg.target && s->cfg.target[0])
+        return lr_target_by_name(s->cfg.target);
+    return lr_target_host();
+}
+
 int lr_session_emit_object(struct lr_session *s, const char *path,
                             session_error_t *err) {
     char backend_err[256] = {0};
@@ -1374,6 +1547,28 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
         err_set(err, S_ERR_ARGUMENT, "invalid emit_object arguments");
         return -1;
     }
+
+    if (s->blob_count > 0) {
+        const lr_target_t *target = session_resolve_target(s);
+        if (!target) {
+            err_set(err, S_ERR_BACKEND, "target not found");
+            return -1;
+        }
+        FILE *out = fopen(path, "wb");
+        if (!out) {
+            err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
+            return -1;
+        }
+        int rc = lr_emit_object_from_blobs(s->blobs, s->blob_count,
+                                           s->module, target, out);
+        (void)fclose(out);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "blob object emission failed");
+            return -1;
+        }
+        return 0;
+    }
+
     if (lr_emit_module_object_path(s->module, s->cfg.target, path,
                                    backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
@@ -1392,6 +1587,29 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
+
+    if (s->blob_count > 0) {
+        const lr_target_t *target = session_resolve_target(s);
+        if (!target) {
+            err_set(err, S_ERR_BACKEND, "target not found");
+            return -1;
+        }
+        FILE *out = fopen(path, "wb");
+        if (!out) {
+            err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
+            return -1;
+        }
+        int rc = lr_emit_executable_from_blobs(s->blobs, s->blob_count,
+                                               s->module, target, out,
+                                               "_start");
+        (void)fclose(out);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "blob executable emission failed");
+            return -1;
+        }
+        return 0;
+    }
+
     if (lr_emit_module_executable_path(s->module, s->cfg.target, path,
                                        "_start", NULL, 0,
                                        backend_err, sizeof(backend_err)) != 0) {

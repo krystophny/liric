@@ -256,6 +256,10 @@ int test_session_ir_exe_ret_42(void);
 int test_session_ir_exe_branch(void);
 int test_session_ir_exe_call(void);
 int test_session_ir_exe_loop(void);
+int test_session_direct_exe_ret_42(void);
+int test_session_direct_exe_branch(void);
+int test_session_direct_exe_call(void);
+int test_session_direct_jit_and_exe(void);
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -504,6 +508,12 @@ int main(void) {
     RUN_TEST(test_session_ir_exe_branch);
     RUN_TEST(test_session_ir_exe_call);
     RUN_TEST(test_session_ir_exe_loop);
+
+    fprintf(stderr, "\nSession DIRECT exe tests:\n");
+    RUN_TEST(test_session_direct_exe_ret_42);
+    RUN_TEST(test_session_direct_exe_branch);
+    RUN_TEST(test_session_direct_exe_call);
+    RUN_TEST(test_session_direct_jit_and_exe);
 #endif
 
     fprintf(stderr, "\nModule merge tests:\n");

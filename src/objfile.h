@@ -57,6 +57,22 @@ typedef struct lr_objfile_ctx {
     bool preserve_symbol_names;
 } lr_objfile_ctx_t;
 
+/* Name-based relocation (used for blob capture and materialization cache) */
+typedef struct lr_cached_reloc {
+    uint32_t offset;
+    uint8_t type;
+    const char *symbol_name;
+} lr_cached_reloc_t;
+
+/* Pre-compiled function blob for exe/obj emission from DIRECT mode */
+typedef struct lr_func_blob {
+    const char *name;
+    const uint8_t *code;
+    size_t code_len;
+    const lr_cached_reloc_t *relocs;
+    uint32_t num_relocs;
+} lr_func_blob_t;
+
 /* Mapped relocation info returned by format-specific reloc mappers */
 typedef struct {
     uint32_t native_type;
@@ -83,6 +99,21 @@ void lr_obj_add_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
 
 void lr_obj_add_data_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
                             uint32_t symbol_idx, uint8_t type);
+
+int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m);
+
+int lr_emit_executable_from_blobs(const lr_func_blob_t *blobs,
+                                  uint32_t num_blobs,
+                                  lr_module_t *m,
+                                  const lr_target_t *target,
+                                  FILE *out,
+                                  const char *entry_symbol);
+
+int lr_emit_object_from_blobs(const lr_func_blob_t *blobs,
+                              uint32_t num_blobs,
+                              lr_module_t *m,
+                              const lr_target_t *target,
+                              FILE *out);
 
 /* Byte-level write helpers shared by Mach-O and ELF format writers */
 

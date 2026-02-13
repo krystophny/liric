@@ -3,25 +3,27 @@
 JIT compiler and native code emitter for LLVM IR and WebAssembly. C11, zero dependencies.
 
 ```
-         .ll text    .bc bitcode    .wasm binary       Session / Compat API
-             |            |              |                      |
-             v            v              v                      |
-          ll_lexer    bc_decode     wasm_decode                 |
-          ll_parser                 wasm_to_ir                  |
-             |            |              |                      |
-             +------------+--------------+----------------------+
-                                         |
-                                    lr_module_t
-                                    (SSA IR, 45 ops)
-                                         |
-                     +-------------------+-------------------+
-                     |                   |                   |
-                   ISel           Copy-and-patch          Real LLVM
-                (single-pass)    (template memcpy)      (LLVM C API)
-                     |                   |                   |
-                     +-------------------+-------------------+
-                     |                   |                   |
-                    JIT            Object file (.o)      Executable
+     .ll text    .bc bitcode    .wasm binary
+         |            |              |
+         v            v              v               Session / Compat API
+      ll_lexer    bc_decode     wasm_decode                    |
+      ll_parser                 wasm_to_ir              +------+------+
+         |            |              |                  |             |
+         +------------+--------------+             IR mode      DIRECT mode
+                      |                           (deferred)    (streaming)
+                 lr_module_t                           |             |
+                 (SSA IR, 45 ops)                      |       compile_begin
+                      |                                |       compile_emit
+                      +--------------------------------+       compile_end
+                      |                                             |
+  +-------------------+-------------------+                  blob capture
+  |                   |                   |              (code + relocations)
+ISel           Copy-and-patch          Real LLVM              |
+(single-pass)  (template memcpy)      (LLVM C API)           |
+  |                   |                   |                   |
+  +-------------------+-------------------+-------------------+
+  |                   |                   |
+ JIT            Object file (.o)      Executable
 ```
 
 ## Build
@@ -78,12 +80,14 @@ ISel uses stack-based register allocation (every vreg gets a stack slot, computa
 
 ## Output Modes
 
-| Mode | Flag | Formats |
-|------|------|---------|
-| Executable | default / `-o` (when `@main` exists) | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) |
-| JIT | `--jit` | mmap'd code, W^X, dlsym symbol resolution |
-| Object file | `-o` (when `@main` is absent) | ELF64, Mach-O |
-| IR dump | `--dump-ir` | LLVM IR text |
+| Mode | Flag | Formats | Source |
+|------|------|---------|--------|
+| Executable | default / `-o` (when `@main` exists) | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) | IR or DIRECT blobs |
+| JIT | `--jit` | mmap'd code, W^X, dlsym symbol resolution | IR or DIRECT streaming |
+| Object file | `-o` (when `@main` is absent) | ELF64, Mach-O | IR or DIRECT blobs |
+| IR dump | `--dump-ir` | LLVM IR text | IR mode only |
+
+DIRECT mode captures relocatable machine code blobs during streaming compilation. These blobs are used directly for exe/obj emission without constructing IR.
 
 ## Programmatic APIs
 
@@ -100,6 +104,8 @@ C core                ir.h, jit.h      (lr_module_t, lr_jit_t, arena allocator)
 ```
 
 The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
+
+**DIRECT mode** streams instructions directly to the backend (compile_begin/emit/end) without constructing persistent IR. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
 
 ## Platform Support
 
@@ -152,7 +158,7 @@ All C source is in `src/`. Public headers in `include/liric/`. C++ compat header
 | aarch64 ISel | `target_aarch64.c` |
 | riscv64 ISel | `target_riscv64.c` |
 | JIT engine | `jit.c` |
-| Object/exe emission | `objfile.c`, `objfile_elf.c`, `objfile_macho.c` |
+| Object/exe emission | `objfile.c`, `objfile_elf.c`, `objfile_macho.c`, `module_emit.c` |
 | Intrinsic stubs | `platform/*.S` |
 | Session API | `session.c` |
 | Compat API | `liric_compat.c` |

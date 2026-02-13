@@ -47,7 +47,7 @@ static int obj_symbol_index_rebuild(lr_objfile_ctx_t *oc, uint32_t min_symbols) 
     return 0;
 }
 
-static int obj_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
+int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
     if (!oc || !m)
         return -1;
 
@@ -409,7 +409,7 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
 
     out->ctx.preserve_symbol_names = preserve_symbol_names;
     m->obj_ctx = &out->ctx;
-    if (obj_build_module_symbol_cache(&out->ctx, m) != 0) {
+    if (lr_obj_build_symbol_cache(&out->ctx, m) != 0) {
         m->obj_ctx = NULL;
         lr_arena_destroy(arena);
         obj_build_result_destroy(out);
@@ -534,6 +534,249 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
     m->obj_ctx = NULL;
     lr_arena_destroy(arena);
     return 0;
+}
+
+static int obj_build_from_blobs(const lr_func_blob_t *blobs,
+                               uint32_t num_blobs,
+                               lr_module_t *m,
+                               const lr_target_t *target,
+                               bool preserve_symbol_names,
+                               lr_obj_build_result_t *out) {
+    if (!blobs || num_blobs == 0 || !m || !target || !out)
+        return -1;
+
+    memset(out, 0, sizeof(*out));
+    out->code_buf = (uint8_t *)calloc(1, OBJ_CODE_BUF_SIZE);
+    out->data_buf = (uint8_t *)calloc(1, OBJ_DATA_BUF_SIZE);
+    if (!out->code_buf || !out->data_buf) {
+        obj_build_result_destroy(out);
+        return -1;
+    }
+
+    out->ctx.preserve_symbol_names = preserve_symbol_names;
+
+    for (uint32_t bi = 0; bi < num_blobs; bi++) {
+        const lr_func_blob_t *blob = &blobs[bi];
+        if (!blob->name || !blob->code || blob->code_len == 0)
+            continue;
+
+        out->code_pos = obj_align_up(out->code_pos, 16);
+        if (out->code_pos + blob->code_len > OBJ_CODE_BUF_SIZE) {
+            obj_build_result_destroy(out);
+            return -1;
+        }
+
+        uint32_t sym_idx = lr_obj_ensure_symbol(&out->ctx, blob->name,
+                                                true, 1,
+                                                (uint32_t)out->code_pos);
+        if (sym_idx == UINT32_MAX) {
+            obj_build_result_destroy(out);
+            return -1;
+        }
+
+        memcpy(out->code_buf + out->code_pos, blob->code, blob->code_len);
+
+        for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
+            const lr_cached_reloc_t *rel = &blob->relocs[ri];
+            if (!rel->symbol_name || !rel->symbol_name[0])
+                continue;
+            uint32_t reloc_sym = lr_obj_ensure_symbol(&out->ctx,
+                                                      rel->symbol_name,
+                                                      false, 0, 0);
+            if (reloc_sym == UINT32_MAX) {
+                obj_build_result_destroy(out);
+                return -1;
+            }
+            lr_obj_add_reloc(&out->ctx,
+                             (uint32_t)out->code_pos + rel->offset,
+                             reloc_sym, rel->type);
+        }
+
+        out->code_pos += blob->code_len;
+    }
+
+    /* Declare external functions that aren't in the blob list */
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0])
+            continue;
+        if (f->is_decl || !f->first_block) {
+            if (lr_obj_ensure_symbol(&out->ctx, f->name, false, 0, 0) ==
+                UINT32_MAX) {
+                obj_build_result_destroy(out);
+                return -1;
+            }
+        }
+    }
+
+    if (preserve_symbol_names) {
+        if (obj_define_intrinsic_stubs(out, target) != 0) {
+            obj_build_result_destroy(out);
+            return -1;
+        }
+    }
+
+    /* Globals (same as obj_build_module) */
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->is_external) {
+            if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) ==
+                UINT32_MAX) {
+                obj_build_result_destroy(out);
+                return -1;
+            }
+            continue;
+        }
+
+        size_t gsize = lr_type_size(g->type);
+        if (gsize == 0)
+            gsize = 8;
+        size_t galign = lr_type_align(g->type);
+        if (galign == 0)
+            galign = 8;
+        out->data_pos = obj_align_up(out->data_pos, galign);
+        if (out->data_pos + gsize > OBJ_DATA_BUF_SIZE) {
+            obj_build_result_destroy(out);
+            return -1;
+        }
+
+        if (g->init_data && g->init_size > 0) {
+            size_t copy_n = g->init_size < gsize ? g->init_size : gsize;
+            memcpy(out->data_buf + out->data_pos, g->init_data, copy_n);
+        }
+
+        if (lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
+                                 (uint32_t)out->data_pos) == UINT32_MAX) {
+            obj_build_result_destroy(out);
+            return -1;
+        }
+
+        for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
+            uint32_t rel_sym = lr_obj_ensure_symbol(
+                &out->ctx, rel->symbol_name, false, 0, 0);
+            if (rel_sym == UINT32_MAX) {
+                obj_build_result_destroy(out);
+                return -1;
+            }
+            uint8_t abs64_reloc = LR_RELOC_X86_64_64;
+            if (strcmp(target->name, "aarch64") == 0)
+                abs64_reloc = LR_RELOC_ARM64_ABS64;
+            lr_obj_add_data_reloc(&out->ctx,
+                                  (uint32_t)(out->data_pos + rel->offset),
+                                  rel_sym, abs64_reloc);
+        }
+
+        out->data_pos += gsize;
+        out->has_data = true;
+    }
+
+    return 0;
+}
+
+int lr_emit_object_from_blobs(const lr_func_blob_t *blobs,
+                              uint32_t num_blobs,
+                              lr_module_t *m,
+                              const lr_target_t *target,
+                              FILE *out) {
+    if (!blobs || !m || !target || !out)
+        return -1;
+
+    lr_obj_build_result_t build;
+    if (obj_build_from_blobs(blobs, num_blobs, m, target, false, &build) != 0)
+        return -1;
+
+    int result = write_object_payload(out, target, &build);
+    obj_build_result_destroy(&build);
+    return result;
+}
+
+int lr_emit_executable_from_blobs(const lr_func_blob_t *blobs,
+                                  uint32_t num_blobs,
+                                  lr_module_t *m,
+                                  const lr_target_t *target,
+                                  FILE *out,
+                                  const char *entry_symbol) {
+    if (!blobs || !m || !target || !out)
+        return -1;
+    if (!entry_symbol || !entry_symbol[0])
+        entry_symbol = "main";
+
+    lr_obj_build_result_t build;
+    if (obj_build_from_blobs(blobs, num_blobs, m, target, true, &build) != 0)
+        return -1;
+
+    for (uint32_t i = 0; i < build.ctx.num_symbols; i++) {
+        if (build.ctx.symbols[i].is_defined)
+            continue;
+        const char *orig = build.ctx.symbols[i].name;
+        const char *mapped = remap_intrinsic(orig);
+        if (mapped != orig)
+            build.ctx.symbols[i].name = mapped;
+    }
+
+    int result = -1;
+#if defined(__linux__)
+    if (strcmp(target->name, "x86_64") == 0) {
+        bool has_undef = false;
+        for (uint32_t i = 0; i < build.ctx.num_symbols; i++) {
+            if (!build.ctx.symbols[i].is_defined) {
+                has_undef = true;
+                break;
+            }
+        }
+        if (has_undef) {
+            result = write_elf_dynamic_executable_x86_64(
+                out, build.code_buf, build.code_pos,
+                build.has_data ? build.data_buf : NULL,
+                build.has_data ? build.data_pos : 0,
+                &build.ctx, entry_symbol);
+        } else {
+            result = write_elf_executable_x86_64(
+                out, build.code_buf, build.code_pos,
+                build.has_data ? build.data_buf : NULL,
+                build.has_data ? build.data_pos : 0,
+                &build.ctx, entry_symbol);
+        }
+    } else if (strcmp(target->name, "aarch64") == 0) {
+        result = write_elf_executable_aarch64(
+            out, build.code_buf, build.code_pos,
+            build.has_data ? build.data_buf : NULL,
+            build.has_data ? build.data_pos : 0,
+            &build.ctx, entry_symbol);
+    } else if (strncmp(target->name, "riscv64", 7) == 0) {
+        result = write_elf_executable_riscv64(
+            out, build.code_buf, build.code_pos,
+            build.has_data ? build.data_buf : NULL,
+            build.has_data ? build.data_pos : 0,
+            &build.ctx, entry_symbol);
+    }
+#else
+    if (strcmp(target->name, "aarch64") == 0) {
+        char exe_tpl[] = "/tmp/liric_exe_XXXXXX";
+        int exe_fd = mkstemp(exe_tpl);
+        FILE *exe_out = NULL;
+        if (exe_fd < 0) goto blob_done;
+        exe_out = fdopen(exe_fd, "wb");
+        if (!exe_out) { close(exe_fd); goto blob_done; }
+        exe_fd = -1;
+        result = write_macho_executable_arm64(
+            exe_out, build.code_buf, build.code_pos,
+            build.has_data ? build.data_buf : NULL,
+            build.has_data ? build.data_pos : 0,
+            &build.ctx, entry_symbol);
+        if (fclose(exe_out) != 0) result = -1;
+        exe_out = NULL;
+        if (result != 0) goto blob_done;
+        if (run_codesign_adhoc(exe_tpl) != 0) { result = -1; goto blob_done; }
+        if (copy_file_to_stream(exe_tpl, out) != 0) { result = -1; goto blob_done; }
+        result = 0;
+blob_done:
+        if (exe_out) fclose(exe_out);
+        if (exe_fd >= 0) close(exe_fd);
+        unlink(exe_tpl);
+    }
+#endif
+
+    obj_build_result_destroy(&build);
+    return result;
 }
 
 int lr_emit_object(lr_module_t *m, const lr_target_t *target, FILE *out) {
