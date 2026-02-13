@@ -651,80 +651,48 @@ static int rv_compile_func_rv64gc(lr_func_t *func, lr_module_t *mod,
     return rv_compile_func_with_features(func, mod, buf, buflen, out_len, arena, &feat);
 }
 
-static int rv_compile_func_cp_rv64im(lr_func_t *func, lr_module_t *mod,
-                                     uint8_t *buf, size_t buflen, size_t *out_len,
-                                     lr_arena_t *arena) {
-    return rv_compile_func_rv64im(func, mod, buf, buflen, out_len, arena);
-}
+/* ---- Streaming direct-emission ISel ------------------------------------ */
 
-static int rv_compile_func_cp_rv64gc(lr_func_t *func, lr_module_t *mod,
-                                     uint8_t *buf, size_t buflen, size_t *out_len,
-                                     lr_arena_t *arena) {
-    return rv_compile_func_rv64gc(func, mod, buf, buflen, out_len, arena);
-}
-
-typedef int (*rv_compile_entry_t)(lr_func_t *func, lr_module_t *mod,
-                                  uint8_t *buf, size_t buflen, size_t *out_len,
-                                  lr_arena_t *arena);
-
-typedef struct rv_stream_block_builder {
-    lr_block_t block;
-    lr_inst_t **inst_array;
-    uint32_t inst_cap;
-} rv_stream_block_builder_t;
-
-typedef struct rv_stream_bridge_ctx {
-    lr_func_t *func;
-    lr_func_t stream_func;
-    uint32_t *owned_param_vregs;
-    rv_stream_block_builder_t **blocks;
-    uint32_t block_cap;
-    uint32_t max_block_id_plus1;
-    uint32_t current_block_id;
-    bool has_current_block;
-    bool saw_stream_input;
+typedef struct rv_direct_ctx {
+    rv_emit_ctx_t ec;
+    rv_vreg_map_t *vmap;
+    uint32_t vmap_n;
+    size_t gpr_next;
+    size_t fpr_next;
     lr_module_t *mod;
-    uint8_t *buf;
-    size_t buflen;
     lr_arena_t *arena;
     lr_compile_mode_t mode;
-    rv_compile_entry_t isel_entry;
-    rv_compile_entry_t cp_entry;
-} rv_stream_bridge_ctx_t;
+    const rv_features_t *feat;
+    uint32_t current_block_id;
+    bool has_current_block;
+    uint32_t next_vreg;
+} rv_direct_ctx_t;
 
-static lr_operand_t rv_stream_operand_from_desc(const lr_operand_desc_t *desc) {
+static lr_operand_t rv_operand_from_desc(const lr_operand_desc_t *desc) {
     lr_operand_t out;
     memset(&out, 0, sizeof(out));
-    if (!desc)
+    if (!desc) {
+        out.kind = LR_VAL_UNDEF;
         return out;
+    }
+    out.kind = (lr_operand_kind_t)desc->kind;
     out.type = desc->type;
     out.global_offset = desc->global_offset;
     switch (desc->kind) {
     case LR_OP_KIND_VREG:
-        out.kind = LR_VAL_VREG;
         out.vreg = desc->vreg;
         break;
     case LR_OP_KIND_IMM_I64:
-        out.kind = LR_VAL_IMM_I64;
         out.imm_i64 = desc->imm_i64;
         break;
     case LR_OP_KIND_IMM_F64:
-        out.kind = LR_VAL_IMM_F64;
         out.imm_f64 = desc->imm_f64;
         break;
     case LR_OP_KIND_BLOCK:
-        out.kind = LR_VAL_BLOCK;
         out.block_id = desc->block_id;
         break;
     case LR_OP_KIND_GLOBAL:
-        out.kind = LR_VAL_GLOBAL;
         out.global_id = desc->global_id;
-        break;
-    case LR_OP_KIND_NULL:
-        out.kind = LR_VAL_NULL;
-        break;
-    case LR_OP_KIND_UNDEF:
-        out.kind = LR_VAL_UNDEF;
         break;
     default:
         break;
@@ -732,250 +700,357 @@ static lr_operand_t rv_stream_operand_from_desc(const lr_operand_desc_t *desc) {
     return out;
 }
 
-static int rv_stream_ensure_block_capacity(rv_stream_bridge_ctx_t *ctx,
-                                           uint32_t need) {
-    rv_stream_block_builder_t **new_blocks = NULL;
-    uint32_t new_cap;
-    if (!ctx)
-        return -1;
-    if (need <= ctx->block_cap)
+static void rv_direct_note_vregs(rv_direct_ctx_t *ctx,
+                                 const lr_compile_inst_desc_t *desc) {
+    if (desc->dest != 0 && desc->dest >= ctx->next_vreg)
+        ctx->next_vreg = desc->dest + 1u;
+    for (uint32_t i = 0; i < desc->num_operands; i++) {
+        if (desc->operands[i].kind == LR_OP_KIND_VREG &&
+            desc->operands[i].vreg >= ctx->next_vreg)
+            ctx->next_vreg = desc->operands[i].vreg + 1u;
+    }
+}
+
+static int rv_direct_ensure_vmap(rv_direct_ctx_t *ctx, uint32_t vreg) {
+    if (vreg < ctx->vmap_n)
         return 0;
-    new_cap = ctx->block_cap == 0 ? 8u : ctx->block_cap;
-    while (new_cap < need)
-        new_cap *= 2u;
-    new_blocks = lr_arena_array(ctx->arena, rv_stream_block_builder_t *, new_cap);
-    if (!new_blocks)
+    uint32_t new_n = ctx->vmap_n == 0 ? 64u : ctx->vmap_n;
+    while (new_n <= vreg)
+        new_n *= 2u;
+    rv_vreg_map_t *nv = lr_arena_array(ctx->arena, rv_vreg_map_t, new_n);
+    if (!nv)
         return -1;
-    if (ctx->block_cap > 0)
-        memcpy(new_blocks, ctx->blocks, sizeof(*new_blocks) * ctx->block_cap);
-    ctx->blocks = new_blocks;
-    ctx->block_cap = new_cap;
+    if (ctx->vmap_n > 0)
+        memcpy(nv, ctx->vmap, sizeof(rv_vreg_map_t) * ctx->vmap_n);
+    ctx->vmap = nv;
+    ctx->vmap_n = new_n;
     return 0;
 }
 
-static rv_stream_block_builder_t *rv_stream_get_or_create_block(
-        rv_stream_bridge_ctx_t *ctx, uint32_t block_id) {
-    rv_stream_block_builder_t *b = NULL;
-    char name_buf[32];
-    if (!ctx)
-        return NULL;
-    if (rv_stream_ensure_block_capacity(ctx, block_id + 1u) != 0)
-        return NULL;
-    b = ctx->blocks[block_id];
-    if (b)
-        return b;
-    b = lr_arena_new(ctx->arena, rv_stream_block_builder_t);
-    if (!b)
-        return NULL;
-    (void)snprintf(name_buf, sizeof(name_buf), "b%u", block_id);
-    b->block.id = block_id;
-    b->block.name = lr_arena_strdup(ctx->arena, name_buf, strlen(name_buf));
-    b->block.func = &ctx->stream_func;
-    if (!b->block.name)
-        return NULL;
-    ctx->blocks[block_id] = b;
-    if (ctx->max_block_id_plus1 < block_id + 1u)
-        ctx->max_block_id_plus1 = block_id + 1u;
-    return b;
-}
-
-static int rv_stream_push_inst_ref(rv_stream_bridge_ctx_t *ctx,
-                                   rv_stream_block_builder_t *block,
-                                   lr_inst_t *inst) {
-    lr_inst_t **new_refs = NULL;
-    uint32_t new_cap;
-    if (!ctx || !block || !inst)
-        return -1;
-    if (block->block.num_insts == block->inst_cap) {
-        new_cap = block->inst_cap == 0 ? 16u : block->inst_cap * 2u;
-        new_refs = lr_arena_array(ctx->arena, lr_inst_t *, new_cap);
-        if (!new_refs)
-            return -1;
-        if (block->inst_cap > 0)
-            memcpy(new_refs, block->inst_array, sizeof(*new_refs) * block->inst_cap);
-        block->inst_array = new_refs;
-        block->inst_cap = new_cap;
-    }
-    block->inst_array[block->block.num_insts++] = inst;
-    return 0;
-}
-
-static void rv_stream_note_vregs(rv_stream_bridge_ctx_t *ctx,
-                                 const lr_compile_inst_desc_t *inst_desc) {
-    if (!ctx || !inst_desc)
-        return;
-    if (inst_desc->dest >= ctx->stream_func.next_vreg &&
-        inst_desc->dest != 0) {
-        ctx->stream_func.next_vreg = inst_desc->dest + 1u;
-    }
-    for (uint32_t i = 0; i < inst_desc->num_operands; i++) {
-        const lr_operand_desc_t *op = &inst_desc->operands[i];
-        if (op->kind != LR_OP_KIND_VREG)
-            continue;
-        if (op->vreg >= ctx->stream_func.next_vreg)
-            ctx->stream_func.next_vreg = op->vreg + 1u;
-    }
-}
-
-static int rv_stream_finalize_function(rv_stream_bridge_ctx_t *ctx) {
-    lr_block_t **block_array = NULL;
-    if (!ctx || !ctx->saw_stream_input || ctx->max_block_id_plus1 == 0)
-        return -1;
-
-    block_array = lr_arena_array(ctx->arena, lr_block_t *, ctx->max_block_id_plus1);
-    if (!block_array)
-        return -1;
-
-    for (uint32_t i = 0; i < ctx->max_block_id_plus1; i++) {
-        rv_stream_block_builder_t *b = ctx->blocks ? ctx->blocks[i] : NULL;
-        if (!b)
-            return -1;
-        b->block.inst_array = b->inst_array;
-        b->block.func = &ctx->stream_func;
-        if (i + 1u < ctx->max_block_id_plus1) {
-            rv_stream_block_builder_t *next_b = ctx->blocks[i + 1u];
-            if (!next_b)
-                return -1;
-            b->block.next = &next_b->block;
-        } else {
-            b->block.next = NULL;
-        }
-        block_array[i] = &b->block;
-    }
-
-    ctx->stream_func.is_decl = false;
-    ctx->stream_func.num_blocks = ctx->max_block_id_plus1;
-    ctx->stream_func.first_block = &ctx->blocks[0]->block;
-    ctx->stream_func.last_block = &ctx->blocks[ctx->max_block_id_plus1 - 1u]->block;
-    ctx->stream_func.block_array = block_array;
-
-    return lr_func_finalize(&ctx->stream_func, ctx->arena);
-}
+static const uint8_t rv_gpr_tmp_pool[] = {
+    RV_T3, RV_T4, RV_T5, RV_T6,
+    RV_S2, RV_S3, RV_S4, RV_S5, RV_S6, RV_S7, RV_S8, RV_S9, RV_S10, RV_S11,
+};
+static const uint8_t rv_fpr_tmp_pool[] = {
+    RV_FT0, RV_FT1, RV_FT2, RV_FT3, RV_FT4, RV_FT5, RV_FT6, RV_FT7,
+    RV_FT8, RV_FT9, RV_FT10, RV_FT11, RV_FS2, RV_FS3, RV_FS4, RV_FS5,
+};
 
 static int rv_compile_begin_common(void **compile_ctx,
                                    const lr_compile_func_meta_t *func_meta,
                                    lr_module_t *mod,
                                    uint8_t *buf, size_t buflen,
                                    lr_arena_t *arena,
-                                   rv_compile_entry_t isel_entry,
-                                   rv_compile_entry_t cp_entry) {
-    rv_stream_bridge_ctx_t *ctx = NULL;
-    if (!compile_ctx || !func_meta || !mod || !arena ||
-        !isel_entry || !cp_entry)
+                                   const rv_features_t *feat) {
+    rv_direct_ctx_t *ctx = NULL;
+    if (!compile_ctx || !func_meta || !mod || !arena || !feat)
         return -1;
-    ctx = lr_arena_new(arena, rv_stream_bridge_ctx_t);
+
+    ctx = lr_arena_new(arena, rv_direct_ctx_t);
     if (!ctx)
         return -1;
-    ctx->func = func_meta->func;
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->ec.buf = buf;
+    ctx->ec.buflen = buflen;
+    ctx->ec.pos = 0;
     ctx->mod = mod;
-    ctx->buf = buf;
-    ctx->buflen = buflen;
     ctx->arena = arena;
     ctx->mode = func_meta->mode;
-    ctx->isel_entry = isel_entry;
-    ctx->cp_entry = cp_entry;
-    if (func_meta->func && func_meta->func->name) {
-        ctx->stream_func.name = func_meta->func->name;
-    } else {
-        ctx->stream_func.name = lr_arena_strdup(ctx->arena, "__liric_stream_fn",
-                                                strlen("__liric_stream_fn"));
-        if (!ctx->stream_func.name)
-            return -1;
-    }
-    ctx->stream_func.ret_type = func_meta->ret_type ? func_meta->ret_type
-                                                    : mod->type_void;
-    ctx->stream_func.param_types = func_meta->param_types;
-    ctx->stream_func.num_params = func_meta->num_params;
-    ctx->stream_func.vararg = func_meta->vararg;
-    ctx->stream_func.next_vreg = func_meta->next_vreg;
+    ctx->feat = feat;
+    ctx->next_vreg = func_meta->next_vreg;
+
+    uint32_t initial_vmap = ctx->next_vreg > 64 ? ctx->next_vreg : 64;
+    ctx->vmap = lr_arena_array(arena, rv_vreg_map_t, initial_vmap);
+    if (!ctx->vmap)
+        return -1;
+    ctx->vmap_n = initial_vmap;
+
+    uint32_t *param_vregs = NULL;
+    uint32_t num_params = func_meta->num_params;
+
     if (func_meta->func && func_meta->func->param_vregs) {
-        ctx->stream_func.param_vregs = func_meta->func->param_vregs;
-    } else if (func_meta->num_params > 0) {
-        ctx->owned_param_vregs = lr_arena_array(ctx->arena, uint32_t,
-                                                func_meta->num_params);
-        if (!ctx->owned_param_vregs)
-            return -1;
-        for (uint32_t i = 0; i < func_meta->num_params; i++) {
-            ctx->owned_param_vregs[i] = i + 1u;
-            if (ctx->stream_func.next_vreg <= i + 1u)
-                ctx->stream_func.next_vreg = i + 2u;
+        param_vregs = func_meta->func->param_vregs;
+    } else if (num_params > 0) {
+        param_vregs = lr_arena_array(arena, uint32_t, num_params);
+        if (!param_vregs) return -1;
+        for (uint32_t i = 0; i < num_params; i++) {
+            param_vregs[i] = i + 1u;
+            if (ctx->next_vreg <= i + 1u)
+                ctx->next_vreg = i + 2u;
         }
-        ctx->stream_func.param_vregs = ctx->owned_param_vregs;
     }
+
+    uint8_t next_iarg = RV_A0;
+    uint8_t next_farg = RV_FA0;
+    for (uint32_t i = 0; i < num_params; i++) {
+        uint32_t v = param_vregs[i];
+        lr_type_t *pt = func_meta->param_types ? func_meta->param_types[i] : NULL;
+        if (rv_direct_ensure_vmap(ctx, v) != 0)
+            return -1;
+        if (rv_type_is_fp(pt)) {
+            if ((pt->kind == LR_TYPE_DOUBLE && !feat->ext_d) ||
+                (pt->kind == LR_TYPE_FLOAT && !feat->ext_f) ||
+                next_farg > RV_FA7)
+                return -1;
+            ctx->vmap[v].in_use = 1;
+            ctx->vmap[v].cls = RV_REGCLS_FPR;
+            ctx->vmap[v].reg = next_farg++;
+        } else {
+            if (!rv_type_is_intlike(pt) || next_iarg > RV_A7)
+                return -1;
+            ctx->vmap[v].in_use = 1;
+            ctx->vmap[v].cls = RV_REGCLS_GPR;
+            ctx->vmap[v].reg = next_iarg++;
+        }
+    }
+
     *compile_ctx = ctx;
     return 0;
 }
 
 static int rv_compile_emit(void *compile_ctx,
-                           const lr_compile_inst_desc_t *inst_desc) {
-    rv_stream_bridge_ctx_t *ctx = (rv_stream_bridge_ctx_t *)compile_ctx;
-    rv_stream_block_builder_t *block = NULL;
-    lr_inst_t *inst = NULL;
+                           const lr_compile_inst_desc_t *desc) {
+    rv_direct_ctx_t *ctx = (rv_direct_ctx_t *)compile_ctx;
+    lr_operand_t ops[16];
 
-    if (!ctx || !inst_desc || !ctx->has_current_block)
+    if (!ctx || !desc || !ctx->has_current_block)
         return -1;
-    if (inst_desc->num_operands > 0 && !inst_desc->operands)
-        return -1;
-    if (inst_desc->num_indices > 0 && !inst_desc->indices)
+    if (desc->num_operands > 0 && !desc->operands)
         return -1;
 
-    block = rv_stream_get_or_create_block(ctx, ctx->current_block_id);
-    if (!block)
+    rv_direct_note_vregs(ctx, desc);
+
+    uint32_t nops = desc->num_operands;
+    for (uint32_t i = 0; i < nops && i < 16; i++)
+        ops[i] = rv_operand_from_desc(&desc->operands[i]);
+
+    rv_emit_ctx_t *ec = &ctx->ec;
+    const rv_features_t *feat = ctx->feat;
+
+    if (rv_direct_ensure_vmap(ctx, desc->dest) != 0)
         return -1;
 
-    inst = lr_arena_new(ctx->arena, lr_inst_t);
-    if (!inst)
-        return -1;
-    inst->op = inst_desc->op;
-    inst->type = inst_desc->type;
-    inst->dest = inst_desc->dest;
-    inst->num_operands = inst_desc->num_operands;
-    inst->num_indices = inst_desc->num_indices;
-    if (inst_desc->op == LR_OP_ICMP) {
-        inst->icmp_pred = (lr_icmp_pred_t)inst_desc->icmp_pred;
-    } else if (inst_desc->op == LR_OP_FCMP) {
-        inst->fcmp_pred = (lr_fcmp_pred_t)inst_desc->fcmp_pred;
-    }
-    inst->call_external_abi = inst_desc->call_external_abi;
-    inst->call_vararg = inst_desc->call_vararg;
-    inst->call_fixed_args = inst_desc->call_fixed_args;
-
-    if (inst_desc->num_operands > 0) {
-        inst->operands = lr_arena_array(ctx->arena, lr_operand_t,
-                                        inst_desc->num_operands);
-        if (!inst->operands)
+    switch (desc->op) {
+    case LR_OP_ADD: case LR_OP_SUB: case LR_OP_MUL:
+    case LR_OP_SDIV: case LR_OP_SREM:
+    case LR_OP_AND: case LR_OP_OR: case LR_OP_XOR:
+    case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
+        if (!rv_type_is_intlike(desc->type) || nops != 2)
             return -1;
-        for (uint32_t i = 0; i < inst_desc->num_operands; i++)
-            inst->operands[i] = rv_stream_operand_from_desc(&inst_desc->operands[i]);
-    }
-    if (inst_desc->num_indices > 0) {
-        inst->indices = lr_arena_array(ctx->arena, uint32_t,
-                                       inst_desc->num_indices);
-        if (!inst->indices)
+        if ((desc->op == LR_OP_MUL || desc->op == LR_OP_SDIV ||
+             desc->op == LR_OP_SREM) && !feat->ext_m)
             return -1;
-        memcpy(inst->indices, inst_desc->indices,
-               sizeof(*inst->indices) * inst_desc->num_indices);
-    }
+        if (ctx->gpr_next >= sizeof(rv_gpr_tmp_pool))
+            return -1;
 
-    if (!block->block.first) {
-        block->block.first = inst;
-        block->block.last = inst;
-    } else {
-        block->block.last->next = inst;
-        block->block.last = inst;
+        uint8_t rd = rv_gpr_tmp_pool[ctx->gpr_next++];
+        uint8_t rs1 = 0, rs2 = 0;
+        if (rv_operand_gpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                           RV_T1, RV_T0, &rs1) != 0 ||
+            rv_operand_gpr(ec, &ops[1], ctx->vmap, ctx->vmap_n,
+                           RV_T2, RV_T0, &rs2) != 0)
+            return -1;
+
+        uint32_t enc = 0;
+        switch (desc->op) {
+        case LR_OP_ADD: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_ADD_SUB, rd, RV_OPCODE_OP); break;
+        case LR_OP_SUB: enc = rv_enc_r(RV_FUNCT7_SUB, rs2, rs1, RV_FUNCT3_ADD_SUB, rd, RV_OPCODE_OP); break;
+        case LR_OP_MUL: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_ADD_SUB, rd, RV_OPCODE_OP); break;
+        case LR_OP_SDIV: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_DIV, rd, RV_OPCODE_OP); break;
+        case LR_OP_SREM: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_REM, rd, RV_OPCODE_OP); break;
+        case LR_OP_AND: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_AND, rd, RV_OPCODE_OP); break;
+        case LR_OP_OR: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_OR, rd, RV_OPCODE_OP); break;
+        case LR_OP_XOR: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_XOR, rd, RV_OPCODE_OP); break;
+        case LR_OP_SHL: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_SLL, rd, RV_OPCODE_OP); break;
+        case LR_OP_LSHR: enc = rv_enc_r(RV_FUNCT7_SRL, rs2, rs1, RV_FUNCT3_SRL_SRA, rd, RV_OPCODE_OP); break;
+        case LR_OP_ASHR: enc = rv_enc_r(RV_FUNCT7_SRA, rs2, rs1, RV_FUNCT3_SRL_SRA, rd, RV_OPCODE_OP); break;
+        default: return -1;
+        }
+        if (rv_emit32(ec, enc) != 0)
+            return -1;
+        ctx->vmap[desc->dest].in_use = 1;
+        ctx->vmap[desc->dest].cls = RV_REGCLS_GPR;
+        ctx->vmap[desc->dest].reg = rd;
+        break;
     }
-    if (rv_stream_push_inst_ref(ctx, block, inst) != 0)
+    case LR_OP_FADD: case LR_OP_FSUB:
+    case LR_OP_FMUL: case LR_OP_FDIV:
+    case LR_OP_FNEG: {
+        bool is_double = desc->type && desc->type->kind == LR_TYPE_DOUBLE;
+        bool is_float = desc->type && desc->type->kind == LR_TYPE_FLOAT;
+        if ((!is_float && !is_double) ||
+            (is_double && !feat->ext_d) || (is_float && !feat->ext_f))
+            return -1;
+        if (ctx->fpr_next >= sizeof(rv_fpr_tmp_pool))
+            return -1;
+
+        uint8_t rd = rv_fpr_tmp_pool[ctx->fpr_next++];
+        uint8_t rs1 = 0, rs2 = 0;
+        uint8_t funct7 = 0, rm = 0;
+
+        if (desc->op == LR_OP_FNEG) {
+            if (nops != 1 ||
+                rv_operand_fpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                               RV_T1, RV_T2, RV_FT0, feat, &rs1) != 0)
+                return -1;
+            funct7 = is_double ? 0x11u : 0x10u;
+            rm = 0x1u;
+            rs2 = rs1;
+        } else {
+            if (nops != 2 ||
+                rv_operand_fpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                               RV_T1, RV_T2, RV_FT0, feat, &rs1) != 0 ||
+                rv_operand_fpr(ec, &ops[1], ctx->vmap, ctx->vmap_n,
+                               RV_T1, RV_T2, RV_FT1, feat, &rs2) != 0)
+                return -1;
+            uint8_t funct7_base = 0;
+            switch (desc->op) {
+            case LR_OP_FADD: funct7_base = 0x00u; break;
+            case LR_OP_FSUB: funct7_base = 0x04u; break;
+            case LR_OP_FMUL: funct7_base = 0x08u; break;
+            case LR_OP_FDIV: funct7_base = 0x0Cu; break;
+            default: return -1;
+            }
+            funct7 = funct7_base + (is_double ? 1u : 0u);
+            rm = 0u;
+        }
+
+        if (rv_emit32(ec, rv_enc_r(funct7, rs2, rs1, rm, rd, RV_OPCODE_OPFP)) != 0)
+            return -1;
+        ctx->vmap[desc->dest].in_use = 1;
+        ctx->vmap[desc->dest].cls = RV_REGCLS_FPR;
+        ctx->vmap[desc->dest].reg = rd;
+        break;
+    }
+    case LR_OP_SITOFP: {
+        bool is_double = desc->type && desc->type->kind == LR_TYPE_DOUBLE;
+        bool is_float = desc->type && desc->type->kind == LR_TYPE_FLOAT;
+        if ((!is_float && !is_double) || nops != 1 ||
+            (is_double && !feat->ext_d) || (is_float && !feat->ext_f) ||
+            ctx->fpr_next >= sizeof(rv_fpr_tmp_pool))
+            return -1;
+        uint8_t rs1 = 0;
+        if (rv_operand_gpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                           RV_T1, RV_T2, &rs1) != 0)
+            return -1;
+        uint8_t rd = rv_fpr_tmp_pool[ctx->fpr_next++];
+        uint8_t f7 = is_double ? 0x69u : 0x68u;
+        if (rv_emit32(ec, rv_enc_r(f7, 0x2u, rs1, 0x0u, rd, RV_OPCODE_OPFP)) != 0)
+            return -1;
+        ctx->vmap[desc->dest].in_use = 1;
+        ctx->vmap[desc->dest].cls = RV_REGCLS_FPR;
+        ctx->vmap[desc->dest].reg = rd;
+        break;
+    }
+    case LR_OP_FPTOSI: {
+        if (!rv_type_is_intlike(desc->type) || nops != 1 ||
+            ctx->gpr_next >= sizeof(rv_gpr_tmp_pool))
+            return -1;
+        bool src_double = ops[0].type && ops[0].type->kind == LR_TYPE_DOUBLE;
+        bool src_float = ops[0].type && ops[0].type->kind == LR_TYPE_FLOAT;
+        if ((!src_float && !src_double) ||
+            (src_double && !feat->ext_d) || (src_float && !feat->ext_f))
+            return -1;
+        uint8_t frs = 0;
+        if (rv_operand_fpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                           RV_T1, RV_T2, RV_FT0, feat, &frs) != 0)
+            return -1;
+        uint8_t rd = rv_gpr_tmp_pool[ctx->gpr_next++];
+        uint8_t f7 = src_double ? 0x61u : 0x60u;
+        if (rv_emit32(ec, rv_enc_r(f7, 0x2u, frs, 0x1u, rd, RV_OPCODE_OPFP)) != 0)
+            return -1;
+        ctx->vmap[desc->dest].in_use = 1;
+        ctx->vmap[desc->dest].cls = RV_REGCLS_GPR;
+        ctx->vmap[desc->dest].reg = rd;
+        break;
+    }
+    case LR_OP_FPEXT:
+    case LR_OP_FPTRUNC: {
+        bool to_double = desc->op == LR_OP_FPEXT;
+        if (nops != 1 || ctx->fpr_next >= sizeof(rv_fpr_tmp_pool) || !feat->ext_d)
+            return -1;
+        if (!ops[0].type || !desc->type)
+            return -1;
+        if (to_double && !(ops[0].type->kind == LR_TYPE_FLOAT &&
+                           desc->type->kind == LR_TYPE_DOUBLE))
+            return -1;
+        if (!to_double && !(ops[0].type->kind == LR_TYPE_DOUBLE &&
+                            desc->type->kind == LR_TYPE_FLOAT))
+            return -1;
+        uint8_t frs = 0;
+        if (rv_operand_fpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                           RV_T1, RV_T2, RV_FT0, feat, &frs) != 0)
+            return -1;
+        uint8_t rd = rv_fpr_tmp_pool[ctx->fpr_next++];
+        uint8_t f7 = to_double ? 0x21u : 0x20u;
+        uint8_t rs2_val = to_double ? 0u : 1u;
+        if (rv_emit32(ec, rv_enc_r(f7, rs2_val, frs, 0x0u, rd, RV_OPCODE_OPFP)) != 0)
+            return -1;
+        ctx->vmap[desc->dest].in_use = 1;
+        ctx->vmap[desc->dest].cls = RV_REGCLS_FPR;
+        ctx->vmap[desc->dest].reg = rd;
+        break;
+    }
+    case LR_OP_TRUNC: case LR_OP_ZEXT:
+    case LR_OP_SEXT: case LR_OP_BITCAST: {
+        if (nops != 1)
+            return -1;
+        if (rv_type_is_intlike(desc->type) && rv_type_is_intlike(ops[0].type)) {
+            uint8_t rs = 0;
+            if (rv_operand_gpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                               RV_T1, RV_T2, &rs) != 0)
+                return -1;
+            if (ctx->gpr_next >= sizeof(rv_gpr_tmp_pool))
+                return -1;
+            uint8_t rd = rv_gpr_tmp_pool[ctx->gpr_next++];
+            if (rv_emit_mv(ec, rd, rs) != 0)
+                return -1;
+            ctx->vmap[desc->dest].in_use = 1;
+            ctx->vmap[desc->dest].cls = RV_REGCLS_GPR;
+            ctx->vmap[desc->dest].reg = rd;
+            break;
+        }
         return -1;
-    rv_stream_note_vregs(ctx, inst_desc);
-    ctx->saw_stream_input = true;
+    }
+    case LR_OP_RET: {
+        if (nops != 1)
+            return -1;
+        if (rv_type_is_fp(ops[0].type)) {
+            uint8_t src = 0;
+            if (rv_operand_fpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                               RV_T1, RV_T2, RV_FT0, feat, &src) != 0)
+                return -1;
+            bool is_double = ops[0].type->kind == LR_TYPE_DOUBLE;
+            if (src != RV_FA0 &&
+                rv_emit_fp_move(ec, RV_FA0, src, is_double) != 0)
+                return -1;
+        } else {
+            uint8_t src = 0;
+            if (rv_operand_gpr(ec, &ops[0], ctx->vmap, ctx->vmap_n,
+                               RV_T1, RV_T2, &src) != 0)
+                return -1;
+            if (src != RV_A0 && rv_emit_mv(ec, RV_A0, src) != 0)
+                return -1;
+        }
+        if (rv_emit32(ec, rv_enc_i(0, RV_RA, 0, RV_X0, RV_OPCODE_JALR)) != 0)
+            return -1;
+        break;
+    }
+    case LR_OP_RET_VOID:
+        if (rv_emit32(ec, rv_enc_i(0, RV_RA, 0, RV_X0, RV_OPCODE_JALR)) != 0)
+            return -1;
+        break;
+    case LR_OP_PHI:
+        break;
+    default:
+        return -1;
+    }
     return 0;
 }
 
 static int rv_compile_set_block(void *compile_ctx, uint32_t block_id) {
-    rv_stream_bridge_ctx_t *ctx = (rv_stream_bridge_ctx_t *)compile_ctx;
+    rv_direct_ctx_t *ctx = (rv_direct_ctx_t *)compile_ctx;
     if (!ctx)
-        return -1;
-    if (!rv_stream_get_or_create_block(ctx, block_id))
         return -1;
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
@@ -983,27 +1058,38 @@ static int rv_compile_set_block(void *compile_ctx, uint32_t block_id) {
 }
 
 static int rv_compile_end(void *compile_ctx, size_t *out_len) {
-    rv_stream_bridge_ctx_t *ctx = (rv_stream_bridge_ctx_t *)compile_ctx;
-    lr_func_t *func_to_compile = NULL;
+    rv_direct_ctx_t *ctx = (rv_direct_ctx_t *)compile_ctx;
     if (!ctx || !out_len)
         return -1;
-    if (ctx->saw_stream_input) {
-        if (rv_stream_finalize_function(ctx) != 0)
-            return -1;
-        func_to_compile = &ctx->stream_func;
-    } else {
-        func_to_compile = ctx->func;
-    }
-    if (!func_to_compile)
+    *out_len = ctx->ec.pos;
+    if (ctx->ec.pos > ctx->ec.buflen)
         return -1;
-    if (ctx->mode == LR_COMPILE_COPY_PATCH)
-        return ctx->cp_entry(func_to_compile, ctx->mod, ctx->buf, ctx->buflen,
-                             out_len, ctx->arena);
-    if (ctx->mode == LR_COMPILE_ISEL)
-        return ctx->isel_entry(func_to_compile, ctx->mod, ctx->buf, ctx->buflen,
-                               out_len, ctx->arena);
+    return 0;
+}
+
+static int rv_compile_add_phi_copy(void *compile_ctx,
+                                   uint32_t pred_block_id,
+                                   uint32_t dest_vreg,
+                                   const lr_operand_desc_t *src_op) {
+    (void)compile_ctx;
+    (void)pred_block_id;
+    (void)dest_vreg;
+    (void)src_op;
     return -1;
 }
+
+static const rv_features_t rv_feat_gc = {
+    .name = "rv64gc",
+    .ext_m = true,
+    .ext_f = true,
+    .ext_d = true,
+};
+static const rv_features_t rv_feat_im = {
+    .name = "rv64im",
+    .ext_m = true,
+    .ext_f = false,
+    .ext_d = false,
+};
 
 static int rv_compile_begin_rv64gc(void **compile_ctx,
                                    const lr_compile_func_meta_t *func_meta,
@@ -1011,8 +1097,7 @@ static int rv_compile_begin_rv64gc(void **compile_ctx,
                                    uint8_t *buf, size_t buflen,
                                    lr_arena_t *arena) {
     return rv_compile_begin_common(compile_ctx, func_meta, mod, buf, buflen,
-                                   arena, rv_compile_func_rv64gc,
-                                   rv_compile_func_cp_rv64gc);
+                                   arena, &rv_feat_gc);
 }
 
 static int rv_compile_begin_rv64im(void **compile_ctx,
@@ -1021,8 +1106,7 @@ static int rv_compile_begin_rv64im(void **compile_ctx,
                                    uint8_t *buf, size_t buflen,
                                    lr_arena_t *arena) {
     return rv_compile_begin_common(compile_ctx, func_meta, mod, buf, buflen,
-                                   arena, rv_compile_func_rv64im,
-                                   rv_compile_func_cp_rv64im);
+                                   arena, &rv_feat_im);
 }
 
 static const lr_target_t target_riscv64gc = {
@@ -1032,8 +1116,8 @@ static const lr_target_t target_riscv64gc = {
     .compile_emit = rv_compile_emit,
     .compile_set_block = rv_compile_set_block,
     .compile_end = rv_compile_end,
-    .compile_add_phi_copy = NULL,
-    .compile_func = NULL,
+    .compile_add_phi_copy = rv_compile_add_phi_copy,
+    .compile_func = rv_compile_func_rv64gc,
 };
 
 static const lr_target_t target_riscv64im = {
@@ -1043,8 +1127,8 @@ static const lr_target_t target_riscv64im = {
     .compile_emit = rv_compile_emit,
     .compile_set_block = rv_compile_set_block,
     .compile_end = rv_compile_end,
-    .compile_add_phi_copy = NULL,
-    .compile_func = NULL,
+    .compile_add_phi_copy = rv_compile_add_phi_copy,
+    .compile_func = rv_compile_func_rv64im,
 };
 
 const lr_target_t *lr_target_riscv64(void) {
