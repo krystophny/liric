@@ -4,7 +4,14 @@
 #include "ir.h"
 #include "ll_lexer.h"
 
+typedef int (*lr_parse_ll_func_cb_t)(lr_func_t *func, lr_module_t *mod,
+                                     void *ctx);
+
 lr_module_t *lr_parse_ll_text(const char *src, size_t len,
                                lr_arena_t *arena, char *err, size_t errlen);
+lr_module_t *lr_parse_ll_text_streaming(const char *src, size_t len,
+                                        lr_arena_t *arena,
+                                        lr_parse_ll_func_cb_t on_func,
+                                        void *ctx, char *err, size_t errlen);
 
 #endif

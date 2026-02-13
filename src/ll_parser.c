@@ -95,6 +95,9 @@ typedef struct lr_parser {
     uint32_t type_map_count;
     uint32_t type_map_cap;
 
+    lr_parse_ll_func_cb_t on_func;
+    void *on_func_ctx;
+
     lr_func_t *cur_func;
 } lr_parser_t;
 
@@ -2239,6 +2242,11 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
 
     if (!is_decl)
         parse_function_body(p, func, param_names);
+
+    if (!is_decl && !p->had_error && p->on_func) {
+        if (p->on_func(func, p->module, p->on_func_ctx) != 0)
+            error(p, "function callback failed for '%s'", func->name);
+    }
 }
 
 /* Skip lines we don't understand (metadata, target triple, attributes, etc.) */
@@ -2610,14 +2618,18 @@ static void parse_global(lr_parser_t *p) {
     skip_line(p);
 }
 
-lr_module_t *lr_parse_ll_text(const char *src, size_t len,
-                               lr_arena_t *arena, char *err, size_t errlen) {
+lr_module_t *lr_parse_ll_text_streaming(const char *src, size_t len,
+                                        lr_arena_t *arena,
+                                        lr_parse_ll_func_cb_t on_func,
+                                        void *ctx, char *err, size_t errlen) {
     lr_parser_t p = {0};
     lr_module_t *out = NULL;
     lr_lexer_init(&p.lex, src, len);
     p.arena = arena;
     p.err = err;
     p.errlen = errlen;
+    p.on_func = on_func;
+    p.on_func_ctx = ctx;
     if (err && errlen > 0) err[0] = '\0';
 
     if (!parser_init_work_buffers(&p)) {
@@ -2660,4 +2672,9 @@ lr_module_t *lr_parse_ll_text(const char *src, size_t len,
         out = p.module;
     parser_free_work_buffers(&p);
     return out;
+}
+
+lr_module_t *lr_parse_ll_text(const char *src, size_t len,
+                               lr_arena_t *arena, char *err, size_t errlen) {
+    return lr_parse_ll_text_streaming(src, len, arena, NULL, NULL, err, errlen);
 }
