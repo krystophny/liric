@@ -268,18 +268,6 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            lr_target_can_compile(s->jit->target, s->jit->mode);
 }
 
-static void free_direct_obj_ctx(lr_objfile_ctx_t *ctx) {
-    if (!ctx)
-        return;
-    free(ctx->relocs);
-    free(ctx->data_relocs);
-    free(ctx->symbols);
-    free(ctx->symbol_index);
-    free(ctx->module_sym_defined);
-    free(ctx->module_sym_funcs);
-    memset(ctx, 0, sizeof(*ctx));
-}
-
 static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
     if (need <= s->blob_cap)
         return 0;
@@ -400,7 +388,7 @@ static int capture_blob(struct lr_session *s, const uint8_t *code,
     blob->name = s->cur_func->name;
 
     /* Copy pre-relocation code bytes */
-    uint8_t *code_copy = (uint8_t *)malloc(code_len);
+    uint8_t *code_copy = (uint8_t *)malloc(code_len > 0 ? code_len : 1u);
     if (!code_copy)
         return -1;
     memcpy(code_copy, code, code_len);
@@ -841,7 +829,7 @@ void lr_session_destroy(struct lr_session *s) {
     }
     free(s->blobs);
     if (s->direct_obj_ctx_active)
-        free_direct_obj_ctx(&s->direct_obj_ctx);
+        lr_objfile_ctx_destroy(&s->direct_obj_ctx);
     free(s->phi_copies);
     free(s->block_terminated);
     free(s->block_seen);

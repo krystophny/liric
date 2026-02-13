@@ -2,29 +2,22 @@
 
 JIT compiler and native code emitter for LLVM IR and WebAssembly. C11, zero dependencies.
 
+There are two compilation paths. Both produce JIT, object files, or executables.
+
+**IR path** -- parse .ll/.bc/.wasm into SSA IR, then batch-compile:
+
 ```
-     .ll text    .bc bitcode    .wasm binary
-         |            |              |
-         v            v              v               Session / Compat API
-      ll_lexer    bc_decode     wasm_decode                    |
-      ll_parser                 wasm_to_ir              +------+------+
-         |            |              |                  |             |
-         +------------+--------------+             IR mode      DIRECT mode
-                      |                           (deferred)    (streaming)
-                 lr_module_t                           |             |
-                 (SSA IR, 45 ops)                      |       compile_begin
-                      |                                |       compile_emit
-                      +--------------------------------+       compile_end
-                      |                                             |
-  +-------------------+-------------------+                  blob capture
-  |                   |                   |              (code + relocations)
-ISel           Copy-and-patch          Real LLVM              |
-(single-pass)  (template memcpy)      (LLVM C API)           |
-  |                   |                   |                   |
-  +-------------------+-------------------+-------------------+
-  |                   |                   |
- JIT            Object file (.o)      Executable
+  .ll / .bc / .wasm  -->  lr_module_t (SSA IR)  -->  ISel / C&P / LLVM  -->  JIT, .o, exe
 ```
+
+**DIRECT path** -- stream instructions from the programmatic API, no IR:
+
+```
+  Session API  -->  ISel / C&P (streaming)  -->  JIT + blob capture  -->  JIT, .o, exe
+```
+
+The IR path is used by the CLI and `lr_session_compile_*()`. The DIRECT path is
+used by the C++/C compat API (lfortran integration) for lowest-latency compilation.
 
 ## Build
 

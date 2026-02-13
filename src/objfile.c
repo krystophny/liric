@@ -297,7 +297,7 @@ static int obj_define_intrinsic_stubs(lr_obj_build_result_t *out,
     return 0;
 }
 
-static void obj_ctx_destroy(lr_objfile_ctx_t *ctx) {
+void lr_objfile_ctx_destroy(lr_objfile_ctx_t *ctx) {
     if (!ctx)
         return;
     free(ctx->relocs);
@@ -312,7 +312,7 @@ static void obj_ctx_destroy(lr_objfile_ctx_t *ctx) {
 static void obj_build_result_destroy(lr_obj_build_result_t *build) {
     if (!build)
         return;
-    obj_ctx_destroy(&build->ctx);
+    lr_objfile_ctx_destroy(&build->ctx);
     free(build->code_buf);
     free(build->data_buf);
     memset(build, 0, sizeof(*build));

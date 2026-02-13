@@ -101,6 +101,7 @@ void lr_obj_add_data_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
                             uint32_t symbol_idx, uint8_t type);
 
 int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m);
+void lr_objfile_ctx_destroy(lr_objfile_ctx_t *ctx);
 
 int lr_emit_executable_from_blobs(const lr_func_blob_t *blobs,
                                   uint32_t num_blobs,
