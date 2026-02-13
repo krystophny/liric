@@ -14,10 +14,8 @@
 
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Core.h>
-#include <llvm-c/Error.h>
 #include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/IRReader.h>
-#include <llvm-c/Orc.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 
@@ -30,6 +28,22 @@
 #endif
 #else
 #define LIRIC_HAVE_LLVM_C_LLJIT 0
+#endif
+
+#if LIRIC_HAVE_LLVM_C_LLJIT
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    (LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 21)
+#define LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT 1
+#else
+#define LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT 0
+#endif
+
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    (LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 13)
+typedef LLVMOrcExecutorAddress lr_llvm_orc_addr_t;
+#else
+typedef LLVMOrcJITTargetAddress lr_llvm_orc_addr_t;
+#endif
 #endif
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -369,7 +383,8 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     const lr_target_t *host = lr_target_host();
     LLVMOrcLLJITRef lljit = NULL;
     LLVMOrcJITDylibRef dylib;
-    LLVMContextRef ctx = NULL;
+    LLVMContextRef parse_ctx = NULL;
+    int parse_ctx_owned = 0;
     LLVMMemoryBufferRef mem = NULL;
     LLVMModuleRef mod = NULL;
     LLVMOrcThreadSafeContextRef ts_ctx = NULL;
@@ -411,11 +426,25 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
         goto done;
     }
 
-    ctx = LLVMContextCreate();
-    if (!ctx) {
+#if LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT
+    parse_ctx = LLVMContextCreate();
+    parse_ctx_owned = 1;
+    if (!parse_ctx) {
         set_err(err, err_cap, "LLVMContextCreate failed");
         goto done;
     }
+#else
+    ts_ctx = LLVMOrcCreateNewThreadSafeContext();
+    if (!ts_ctx) {
+        set_err(err, err_cap, "LLVMOrcCreateNewThreadSafeContext failed");
+        goto done;
+    }
+    parse_ctx = LLVMOrcThreadSafeContextGetContext(ts_ctx);
+    if (!parse_ctx) {
+        set_err(err, err_cap, "LLVMOrcThreadSafeContextGetContext failed");
+        goto done;
+    }
+#endif
 
     mem = LLVMCreateMemoryBufferWithMemoryRangeCopy(ll, ll_len, "liric_module");
     if (!mem) {
@@ -423,19 +452,22 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
         goto done;
     }
 
-    if (LLVMParseIRInContext(ctx, mem, &mod, &parse_msg) != 0 || !mod) {
+    if (LLVMParseIRInContext(parse_ctx, mem, &mod, &parse_msg) != 0 || !mod) {
         set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
                 parse_msg ? parse_msg : "unknown parse error");
         goto done;
     }
     mem = NULL;
 
-    ts_ctx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(ctx);
+#if LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT
+    ts_ctx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(parse_ctx);
     if (!ts_ctx) {
         set_err(err, err_cap, "LLVMOrcCreateNewThreadSafeContextFromLLVMContext failed");
         goto done;
     }
-    ctx = NULL;
+    parse_ctx = NULL;
+    parse_ctx_owned = 0;
+#endif
 
     ts_mod = LLVMOrcCreateNewThreadSafeModule(mod, ts_ctx);
     if (!ts_mod) {
@@ -458,7 +490,7 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (f->is_decl || !f->name || !f->name[0] || !f->first_block)
             continue;
-        LLVMOrcExecutorAddress addr = 0;
+        lr_llvm_orc_addr_t addr = 0;
         LLVMErrorRef lookup_err = LLVMOrcLLJITLookup(lljit, &addr, f->name);
         if (set_err_from_llvm_error(err, err_cap, "LLVMOrcLLJITLookup failed",
                                     lookup_err) != 0) {
@@ -481,8 +513,8 @@ done:
         LLVMDisposeModule(mod);
     if (mem)
         LLVMDisposeMemoryBuffer(mem);
-    if (ctx)
-        LLVMContextDispose(ctx);
+    if (parse_ctx_owned && parse_ctx)
+        LLVMContextDispose(parse_ctx);
     return rc;
 #endif
 }
