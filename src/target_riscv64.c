@@ -5,6 +5,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -666,8 +667,22 @@ typedef int (*rv_compile_entry_t)(lr_func_t *func, lr_module_t *mod,
                                   uint8_t *buf, size_t buflen, size_t *out_len,
                                   lr_arena_t *arena);
 
+typedef struct rv_stream_block_builder {
+    lr_block_t block;
+    lr_inst_t **inst_array;
+    uint32_t inst_cap;
+} rv_stream_block_builder_t;
+
 typedef struct rv_stream_bridge_ctx {
     lr_func_t *func;
+    lr_func_t stream_func;
+    uint32_t *owned_param_vregs;
+    rv_stream_block_builder_t **blocks;
+    uint32_t block_cap;
+    uint32_t max_block_id_plus1;
+    uint32_t current_block_id;
+    bool has_current_block;
+    bool saw_stream_input;
     lr_module_t *mod;
     uint8_t *buf;
     size_t buflen;
@@ -677,6 +692,166 @@ typedef struct rv_stream_bridge_ctx {
     rv_compile_entry_t cp_entry;
 } rv_stream_bridge_ctx_t;
 
+static lr_operand_t rv_stream_operand_from_desc(const lr_operand_desc_t *desc) {
+    lr_operand_t out;
+    memset(&out, 0, sizeof(out));
+    if (!desc)
+        return out;
+    out.type = desc->type;
+    out.global_offset = desc->global_offset;
+    switch (desc->kind) {
+    case LR_OP_KIND_VREG:
+        out.kind = LR_VAL_VREG;
+        out.vreg = desc->vreg;
+        break;
+    case LR_OP_KIND_IMM_I64:
+        out.kind = LR_VAL_IMM_I64;
+        out.imm_i64 = desc->imm_i64;
+        break;
+    case LR_OP_KIND_IMM_F64:
+        out.kind = LR_VAL_IMM_F64;
+        out.imm_f64 = desc->imm_f64;
+        break;
+    case LR_OP_KIND_BLOCK:
+        out.kind = LR_VAL_BLOCK;
+        out.block_id = desc->block_id;
+        break;
+    case LR_OP_KIND_GLOBAL:
+        out.kind = LR_VAL_GLOBAL;
+        out.global_id = desc->global_id;
+        break;
+    case LR_OP_KIND_NULL:
+        out.kind = LR_VAL_NULL;
+        break;
+    case LR_OP_KIND_UNDEF:
+        out.kind = LR_VAL_UNDEF;
+        break;
+    default:
+        break;
+    }
+    return out;
+}
+
+static int rv_stream_ensure_block_capacity(rv_stream_bridge_ctx_t *ctx,
+                                           uint32_t need) {
+    rv_stream_block_builder_t **new_blocks = NULL;
+    uint32_t new_cap;
+    if (!ctx)
+        return -1;
+    if (need <= ctx->block_cap)
+        return 0;
+    new_cap = ctx->block_cap == 0 ? 8u : ctx->block_cap;
+    while (new_cap < need)
+        new_cap *= 2u;
+    new_blocks = lr_arena_array(ctx->arena, rv_stream_block_builder_t *, new_cap);
+    if (!new_blocks)
+        return -1;
+    if (ctx->block_cap > 0)
+        memcpy(new_blocks, ctx->blocks, sizeof(*new_blocks) * ctx->block_cap);
+    ctx->blocks = new_blocks;
+    ctx->block_cap = new_cap;
+    return 0;
+}
+
+static rv_stream_block_builder_t *rv_stream_get_or_create_block(
+        rv_stream_bridge_ctx_t *ctx, uint32_t block_id) {
+    rv_stream_block_builder_t *b = NULL;
+    char name_buf[32];
+    if (!ctx)
+        return NULL;
+    if (rv_stream_ensure_block_capacity(ctx, block_id + 1u) != 0)
+        return NULL;
+    b = ctx->blocks[block_id];
+    if (b)
+        return b;
+    b = lr_arena_new(ctx->arena, rv_stream_block_builder_t);
+    if (!b)
+        return NULL;
+    (void)snprintf(name_buf, sizeof(name_buf), "b%u", block_id);
+    b->block.id = block_id;
+    b->block.name = lr_arena_strdup(ctx->arena, name_buf, strlen(name_buf));
+    b->block.func = &ctx->stream_func;
+    if (!b->block.name)
+        return NULL;
+    ctx->blocks[block_id] = b;
+    if (ctx->max_block_id_plus1 < block_id + 1u)
+        ctx->max_block_id_plus1 = block_id + 1u;
+    return b;
+}
+
+static int rv_stream_push_inst_ref(rv_stream_bridge_ctx_t *ctx,
+                                   rv_stream_block_builder_t *block,
+                                   lr_inst_t *inst) {
+    lr_inst_t **new_refs = NULL;
+    uint32_t new_cap;
+    if (!ctx || !block || !inst)
+        return -1;
+    if (block->block.num_insts == block->inst_cap) {
+        new_cap = block->inst_cap == 0 ? 16u : block->inst_cap * 2u;
+        new_refs = lr_arena_array(ctx->arena, lr_inst_t *, new_cap);
+        if (!new_refs)
+            return -1;
+        if (block->inst_cap > 0)
+            memcpy(new_refs, block->inst_array, sizeof(*new_refs) * block->inst_cap);
+        block->inst_array = new_refs;
+        block->inst_cap = new_cap;
+    }
+    block->inst_array[block->block.num_insts++] = inst;
+    return 0;
+}
+
+static void rv_stream_note_vregs(rv_stream_bridge_ctx_t *ctx,
+                                 const lr_compile_inst_desc_t *inst_desc) {
+    if (!ctx || !inst_desc)
+        return;
+    if (inst_desc->dest >= ctx->stream_func.next_vreg &&
+        inst_desc->dest != 0) {
+        ctx->stream_func.next_vreg = inst_desc->dest + 1u;
+    }
+    for (uint32_t i = 0; i < inst_desc->num_operands; i++) {
+        const lr_operand_desc_t *op = &inst_desc->operands[i];
+        if (op->kind != LR_OP_KIND_VREG)
+            continue;
+        if (op->vreg >= ctx->stream_func.next_vreg)
+            ctx->stream_func.next_vreg = op->vreg + 1u;
+    }
+}
+
+static int rv_stream_finalize_function(rv_stream_bridge_ctx_t *ctx) {
+    lr_block_t **block_array = NULL;
+    if (!ctx || !ctx->saw_stream_input || ctx->max_block_id_plus1 == 0)
+        return -1;
+
+    block_array = lr_arena_array(ctx->arena, lr_block_t *, ctx->max_block_id_plus1);
+    if (!block_array)
+        return -1;
+
+    for (uint32_t i = 0; i < ctx->max_block_id_plus1; i++) {
+        rv_stream_block_builder_t *b = ctx->blocks ? ctx->blocks[i] : NULL;
+        if (!b)
+            return -1;
+        b->block.inst_array = b->inst_array;
+        b->block.func = &ctx->stream_func;
+        if (i + 1u < ctx->max_block_id_plus1) {
+            rv_stream_block_builder_t *next_b = ctx->blocks[i + 1u];
+            if (!next_b)
+                return -1;
+            b->block.next = &next_b->block;
+        } else {
+            b->block.next = NULL;
+        }
+        block_array[i] = &b->block;
+    }
+
+    ctx->stream_func.is_decl = false;
+    ctx->stream_func.num_blocks = ctx->max_block_id_plus1;
+    ctx->stream_func.first_block = &ctx->blocks[0]->block;
+    ctx->stream_func.last_block = &ctx->blocks[ctx->max_block_id_plus1 - 1u]->block;
+    ctx->stream_func.block_array = block_array;
+
+    return lr_func_finalize(&ctx->stream_func, ctx->arena);
+}
+
 static int rv_compile_begin_common(void **compile_ctx,
                                    const lr_compile_func_meta_t *func_meta,
                                    lr_module_t *mod,
@@ -685,7 +860,7 @@ static int rv_compile_begin_common(void **compile_ctx,
                                    rv_compile_entry_t isel_entry,
                                    rv_compile_entry_t cp_entry) {
     rv_stream_bridge_ctx_t *ctx = NULL;
-    if (!compile_ctx || !func_meta || !func_meta->func || !mod || !arena ||
+    if (!compile_ctx || !func_meta || !mod || !arena ||
         !isel_entry || !cp_entry)
         return -1;
     ctx = lr_arena_new(arena, rv_stream_bridge_ctx_t);
@@ -699,32 +874,130 @@ static int rv_compile_begin_common(void **compile_ctx,
     ctx->mode = func_meta->mode;
     ctx->isel_entry = isel_entry;
     ctx->cp_entry = cp_entry;
+    if (func_meta->func && func_meta->func->name) {
+        ctx->stream_func.name = func_meta->func->name;
+    } else {
+        ctx->stream_func.name = lr_arena_strdup(ctx->arena, "__liric_stream_fn",
+                                                strlen("__liric_stream_fn"));
+        if (!ctx->stream_func.name)
+            return -1;
+    }
+    ctx->stream_func.ret_type = func_meta->ret_type ? func_meta->ret_type
+                                                    : mod->type_void;
+    ctx->stream_func.param_types = func_meta->param_types;
+    ctx->stream_func.num_params = func_meta->num_params;
+    ctx->stream_func.vararg = func_meta->vararg;
+    ctx->stream_func.next_vreg = func_meta->next_vreg;
+    if (func_meta->func && func_meta->func->param_vregs) {
+        ctx->stream_func.param_vregs = func_meta->func->param_vregs;
+    } else if (func_meta->num_params > 0) {
+        ctx->owned_param_vregs = lr_arena_array(ctx->arena, uint32_t,
+                                                func_meta->num_params);
+        if (!ctx->owned_param_vregs)
+            return -1;
+        for (uint32_t i = 0; i < func_meta->num_params; i++) {
+            ctx->owned_param_vregs[i] = i + 1u;
+            if (ctx->stream_func.next_vreg <= i + 1u)
+                ctx->stream_func.next_vreg = i + 2u;
+        }
+        ctx->stream_func.param_vregs = ctx->owned_param_vregs;
+    }
     *compile_ctx = ctx;
     return 0;
 }
 
 static int rv_compile_emit(void *compile_ctx,
                            const lr_compile_inst_desc_t *inst_desc) {
-    (void)compile_ctx;
-    (void)inst_desc;
+    rv_stream_bridge_ctx_t *ctx = (rv_stream_bridge_ctx_t *)compile_ctx;
+    rv_stream_block_builder_t *block = NULL;
+    lr_inst_t *inst = NULL;
+
+    if (!ctx || !inst_desc || !ctx->has_current_block)
+        return -1;
+    if (inst_desc->num_operands > 0 && !inst_desc->operands)
+        return -1;
+    if (inst_desc->num_indices > 0 && !inst_desc->indices)
+        return -1;
+
+    block = rv_stream_get_or_create_block(ctx, ctx->current_block_id);
+    if (!block)
+        return -1;
+
+    inst = lr_arena_new(ctx->arena, lr_inst_t);
+    if (!inst)
+        return -1;
+    inst->op = inst_desc->op;
+    inst->type = inst_desc->type;
+    inst->dest = inst_desc->dest;
+    inst->num_operands = inst_desc->num_operands;
+    inst->num_indices = inst_desc->num_indices;
+    inst->icmp_pred = (lr_icmp_pred_t)inst_desc->icmp_pred;
+    inst->fcmp_pred = (lr_fcmp_pred_t)inst_desc->fcmp_pred;
+    inst->call_external_abi = inst_desc->call_external_abi;
+    inst->call_vararg = inst_desc->call_vararg;
+    inst->call_fixed_args = inst_desc->call_fixed_args;
+
+    if (inst_desc->num_operands > 0) {
+        inst->operands = lr_arena_array(ctx->arena, lr_operand_t,
+                                        inst_desc->num_operands);
+        if (!inst->operands)
+            return -1;
+        for (uint32_t i = 0; i < inst_desc->num_operands; i++)
+            inst->operands[i] = rv_stream_operand_from_desc(&inst_desc->operands[i]);
+    }
+    if (inst_desc->num_indices > 0) {
+        inst->indices = lr_arena_array(ctx->arena, uint32_t,
+                                       inst_desc->num_indices);
+        if (!inst->indices)
+            return -1;
+        memcpy(inst->indices, inst_desc->indices,
+               sizeof(*inst->indices) * inst_desc->num_indices);
+    }
+
+    if (!block->block.first) {
+        block->block.first = inst;
+        block->block.last = inst;
+    } else {
+        block->block.last->next = inst;
+        block->block.last = inst;
+    }
+    if (rv_stream_push_inst_ref(ctx, block, inst) != 0)
+        return -1;
+    rv_stream_note_vregs(ctx, inst_desc);
+    ctx->saw_stream_input = true;
     return 0;
 }
 
 static int rv_compile_set_block(void *compile_ctx, uint32_t block_id) {
-    (void)compile_ctx;
-    (void)block_id;
+    rv_stream_bridge_ctx_t *ctx = (rv_stream_bridge_ctx_t *)compile_ctx;
+    if (!ctx)
+        return -1;
+    if (!rv_stream_get_or_create_block(ctx, block_id))
+        return -1;
+    ctx->current_block_id = block_id;
+    ctx->has_current_block = true;
     return 0;
 }
 
 static int rv_compile_end(void *compile_ctx, size_t *out_len) {
     rv_stream_bridge_ctx_t *ctx = (rv_stream_bridge_ctx_t *)compile_ctx;
+    lr_func_t *func_to_compile = NULL;
     if (!ctx || !out_len)
         return -1;
+    if (ctx->saw_stream_input) {
+        if (rv_stream_finalize_function(ctx) != 0)
+            return -1;
+        func_to_compile = &ctx->stream_func;
+    } else {
+        func_to_compile = ctx->func;
+    }
+    if (!func_to_compile)
+        return -1;
     if (ctx->mode == LR_COMPILE_COPY_PATCH)
-        return ctx->cp_entry(ctx->func, ctx->mod, ctx->buf, ctx->buflen,
+        return ctx->cp_entry(func_to_compile, ctx->mod, ctx->buf, ctx->buflen,
                              out_len, ctx->arena);
     if (ctx->mode == LR_COMPILE_ISEL)
-        return ctx->isel_entry(ctx->func, ctx->mod, ctx->buf, ctx->buflen,
+        return ctx->isel_entry(func_to_compile, ctx->mod, ctx->buf, ctx->buflen,
                                out_len, ctx->arena);
     return -1;
 }
