@@ -14,6 +14,15 @@
     } \
 } while (0)
 
+#define TEST_ASSERT_EQ(a, b, msg) do { \
+    long long _a = (long long)(a), _b = (long long)(b); \
+    if (_a != _b) { \
+        fprintf(stderr, "  FAIL: %s: got %lld, expected %lld (line %d)\n", \
+                msg, _a, _b, __LINE__); \
+        return 1; \
+    } \
+} while (0)
+
 int test_host_target_name(void) {
     const char *name = lr_jit_host_target_name();
     TEST_ASSERT(name != NULL, "host target name exists");
@@ -154,6 +163,223 @@ int test_target_copy_patch_fallback_matches_isel_for_non_x86(void) {
     }
 
     lr_module_free(m);
+    return 0;
+}
+
+int test_target_x86_streaming_hooks_isel_smoke(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = NULL;
+    const lr_target_t *t = lr_target_by_name("x86_64");
+    lr_type_t *params[2];
+    lr_compile_func_meta_t meta;
+    lr_operand_desc_t add_ops[2];
+    lr_operand_desc_t ret_ops[1];
+    lr_compile_inst_desc_t add_desc;
+    lr_compile_inst_desc_t ret_desc;
+    void *compile_ctx = NULL;
+    uint8_t code[4096];
+    size_t code_len = 0;
+    int rc;
+
+    TEST_ASSERT(arena != NULL, "arena create");
+    TEST_ASSERT(t != NULL, "x86_64 target exists");
+
+    m = lr_module_create(arena);
+    TEST_ASSERT(m != NULL, "module create");
+
+    params[0] = m->type_i32;
+    params[1] = m->type_i32;
+    memset(&meta, 0, sizeof(meta));
+    meta.ret_type = m->type_i32;
+    meta.param_types = params;
+    meta.num_params = 2;
+    meta.next_vreg = 4;
+    meta.mode = LR_COMPILE_ISEL;
+
+    rc = t->compile_begin(&compile_ctx, &meta, m, code, sizeof(code), arena);
+    TEST_ASSERT_EQ(rc, 0, "compile_begin succeeds");
+    TEST_ASSERT(compile_ctx != NULL, "compile ctx exists");
+    TEST_ASSERT_EQ(t->compile_set_block(compile_ctx, 0), 0, "set block 0");
+
+    memset(add_ops, 0, sizeof(add_ops));
+    add_ops[0].kind = LR_OP_KIND_VREG;
+    add_ops[0].type = m->type_i32;
+    add_ops[0].vreg = 1;
+    add_ops[1].kind = LR_OP_KIND_VREG;
+    add_ops[1].type = m->type_i32;
+    add_ops[1].vreg = 2;
+    memset(&add_desc, 0, sizeof(add_desc));
+    add_desc.op = LR_OP_ADD;
+    add_desc.type = m->type_i32;
+    add_desc.dest = 3;
+    add_desc.operands = add_ops;
+    add_desc.num_operands = 2;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &add_desc), 0, "emit add");
+
+    memset(ret_ops, 0, sizeof(ret_ops));
+    ret_ops[0].kind = LR_OP_KIND_VREG;
+    ret_ops[0].type = m->type_i32;
+    ret_ops[0].vreg = 3;
+    memset(&ret_desc, 0, sizeof(ret_desc));
+    ret_desc.op = LR_OP_RET;
+    ret_desc.type = m->type_i32;
+    ret_desc.operands = ret_ops;
+    ret_desc.num_operands = 1;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &ret_desc), 0, "emit ret");
+
+    TEST_ASSERT_EQ(t->compile_end(compile_ctx, &code_len), 0, "compile_end succeeds");
+    TEST_ASSERT(code_len > 0, "generated code");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_target_x86_streaming_hooks_copy_patch_smoke(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = NULL;
+    const lr_target_t *t = lr_target_by_name("x86_64");
+    lr_type_t *params[2];
+    lr_compile_func_meta_t meta;
+    lr_operand_desc_t add_ops[2];
+    lr_operand_desc_t ret_ops[1];
+    lr_compile_inst_desc_t add_desc;
+    lr_compile_inst_desc_t ret_desc;
+    void *compile_ctx = NULL;
+    uint8_t code[4096];
+    size_t code_len = 0;
+    int rc;
+
+    TEST_ASSERT(arena != NULL, "arena create");
+    TEST_ASSERT(t != NULL, "x86_64 target exists");
+
+    m = lr_module_create(arena);
+    TEST_ASSERT(m != NULL, "module create");
+
+    params[0] = m->type_i32;
+    params[1] = m->type_i32;
+    memset(&meta, 0, sizeof(meta));
+    meta.ret_type = m->type_i32;
+    meta.param_types = params;
+    meta.num_params = 2;
+    meta.next_vreg = 4;
+    meta.mode = LR_COMPILE_COPY_PATCH;
+
+    rc = t->compile_begin(&compile_ctx, &meta, m, code, sizeof(code), arena);
+    TEST_ASSERT_EQ(rc, 0, "compile_begin succeeds");
+    TEST_ASSERT(compile_ctx != NULL, "compile ctx exists");
+    TEST_ASSERT_EQ(t->compile_set_block(compile_ctx, 0), 0, "set block 0");
+
+    memset(add_ops, 0, sizeof(add_ops));
+    add_ops[0].kind = LR_OP_KIND_VREG;
+    add_ops[0].type = m->type_i32;
+    add_ops[0].vreg = 1;
+    add_ops[1].kind = LR_OP_KIND_VREG;
+    add_ops[1].type = m->type_i32;
+    add_ops[1].vreg = 2;
+    memset(&add_desc, 0, sizeof(add_desc));
+    add_desc.op = LR_OP_ADD;
+    add_desc.type = m->type_i32;
+    add_desc.dest = 3;
+    add_desc.operands = add_ops;
+    add_desc.num_operands = 2;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &add_desc), 0, "emit add");
+
+    memset(ret_ops, 0, sizeof(ret_ops));
+    ret_ops[0].kind = LR_OP_KIND_VREG;
+    ret_ops[0].type = m->type_i32;
+    ret_ops[0].vreg = 3;
+    memset(&ret_desc, 0, sizeof(ret_desc));
+    ret_desc.op = LR_OP_RET;
+    ret_desc.type = m->type_i32;
+    ret_desc.operands = ret_ops;
+    ret_desc.num_operands = 1;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &ret_desc), 0, "emit ret");
+
+#if defined(__x86_64__) || defined(_M_X64)
+    TEST_ASSERT_EQ(t->compile_end(compile_ctx, &code_len), 0, "compile_end succeeds");
+    TEST_ASSERT(code_len > 0, "generated code");
+#else
+    TEST_ASSERT_EQ(t->compile_end(compile_ctx, &code_len), -1,
+                   "compile_end reports unsupported x86 copy-patch backend");
+#endif
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_target_x86_streaming_hooks_phi_smoke(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = NULL;
+    const lr_target_t *t = lr_target_by_name("x86_64");
+    lr_compile_func_meta_t meta;
+    lr_operand_desc_t br_ops[1];
+    lr_operand_desc_t phi_ops[2];
+    lr_operand_desc_t ret_ops[1];
+    lr_compile_inst_desc_t br_desc;
+    lr_compile_inst_desc_t phi_desc;
+    lr_compile_inst_desc_t ret_desc;
+    void *compile_ctx = NULL;
+    uint8_t code[4096];
+    size_t code_len = 0;
+    int rc;
+
+    TEST_ASSERT(arena != NULL, "arena create");
+    TEST_ASSERT(t != NULL, "x86_64 target exists");
+
+    m = lr_module_create(arena);
+    TEST_ASSERT(m != NULL, "module create");
+
+    memset(&meta, 0, sizeof(meta));
+    meta.ret_type = m->type_i32;
+    meta.next_vreg = 2;
+    meta.mode = LR_COMPILE_ISEL;
+
+    rc = t->compile_begin(&compile_ctx, &meta, m, code, sizeof(code), arena);
+    TEST_ASSERT_EQ(rc, 0, "compile_begin succeeds");
+    TEST_ASSERT(compile_ctx != NULL, "compile ctx exists");
+    TEST_ASSERT_EQ(t->compile_set_block(compile_ctx, 0), 0, "set block 0");
+
+    memset(br_ops, 0, sizeof(br_ops));
+    br_ops[0].kind = LR_OP_KIND_BLOCK;
+    br_ops[0].block_id = 1;
+    memset(&br_desc, 0, sizeof(br_desc));
+    br_desc.op = LR_OP_BR;
+    br_desc.type = m->type_void;
+    br_desc.operands = br_ops;
+    br_desc.num_operands = 1;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &br_desc), 0, "emit br");
+
+    TEST_ASSERT_EQ(t->compile_set_block(compile_ctx, 1), 0, "set block 1");
+
+    memset(phi_ops, 0, sizeof(phi_ops));
+    phi_ops[0].kind = LR_OP_KIND_IMM_I64;
+    phi_ops[0].type = m->type_i32;
+    phi_ops[0].imm_i64 = 7;
+    phi_ops[1].kind = LR_OP_KIND_BLOCK;
+    phi_ops[1].block_id = 0;
+    memset(&phi_desc, 0, sizeof(phi_desc));
+    phi_desc.op = LR_OP_PHI;
+    phi_desc.type = m->type_i32;
+    phi_desc.dest = 1;
+    phi_desc.operands = phi_ops;
+    phi_desc.num_operands = 2;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &phi_desc), 0, "emit phi");
+
+    memset(ret_ops, 0, sizeof(ret_ops));
+    ret_ops[0].kind = LR_OP_KIND_VREG;
+    ret_ops[0].type = m->type_i32;
+    ret_ops[0].vreg = 1;
+    memset(&ret_desc, 0, sizeof(ret_desc));
+    ret_desc.op = LR_OP_RET;
+    ret_desc.type = m->type_i32;
+    ret_desc.operands = ret_ops;
+    ret_desc.num_operands = 1;
+    TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &ret_desc), 0, "emit ret");
+
+    TEST_ASSERT_EQ(t->compile_end(compile_ctx, &code_len), 0, "compile_end succeeds");
+    TEST_ASSERT(code_len > 0, "generated code");
+
+    lr_arena_destroy(arena);
     return 0;
 }
 
