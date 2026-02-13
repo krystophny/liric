@@ -191,6 +191,8 @@ int test_wasm_jit_loop(void);
 int test_wasm_jit_call(void);
 int test_bc_parse_api_ret_42(void);
 int test_bc_parse_auto_loop_phi(void);
+int test_bc_streaming_callback_collects_opcodes(void);
+int test_bc_streaming_callback_abort_propagates_error(void);
 int test_session_direct_ret_42(void);
 int test_session_add_args(void);
 int test_session_arithmetic_chain(void);
@@ -443,6 +445,8 @@ int main(void) {
     fprintf(stderr, "\nBC Parser tests:\n");
     RUN_TEST(test_bc_parse_api_ret_42);
     RUN_TEST(test_bc_parse_auto_loop_phi);
+    RUN_TEST(test_bc_streaming_callback_collects_opcodes);
+    RUN_TEST(test_bc_streaming_callback_abort_propagates_error);
 
     fprintf(stderr, "\nSession API tests:\n");
     RUN_TEST(test_session_direct_ret_42);

@@ -3,6 +3,7 @@
 #include "../src/bc_decode.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -357,5 +358,93 @@ int test_bc_parse_auto_loop_phi(void) {
         return 0;
     TEST_ASSERT_EQ(run_jit_bc_auto(bc_loop_data, bc_loop_len, "f"), 55,
                    "BC auto parser loop/phi");
+    return 0;
+}
+
+typedef struct {
+    uint32_t total;
+    uint32_t ret_count;
+    uint32_t br_count;
+    uint32_t phi_count;
+} bc_stream_stats_t;
+
+static int bc_stream_collect_cb(lr_func_t *func, lr_block_t *block,
+                                const lr_inst_t *inst, void *ctx) {
+    bc_stream_stats_t *stats = (bc_stream_stats_t *)ctx;
+    (void)func;
+    (void)block;
+    if (!stats || !inst)
+        return -1;
+    stats->total++;
+    if (inst->op == LR_OP_RET)
+        stats->ret_count++;
+    else if (inst->op == LR_OP_BR || inst->op == LR_OP_CONDBR)
+        stats->br_count++;
+    else if (inst->op == LR_OP_PHI)
+        stats->phi_count++;
+    return 0;
+}
+
+typedef struct {
+    uint32_t calls;
+} bc_stream_abort_t;
+
+static int bc_stream_abort_cb(lr_func_t *func, lr_block_t *block,
+                              const lr_inst_t *inst, void *ctx) {
+    bc_stream_abort_t *state = (bc_stream_abort_t *)ctx;
+    (void)func;
+    (void)block;
+    (void)inst;
+    if (!state)
+        return -1;
+    state->calls++;
+    return 1;
+}
+
+int test_bc_streaming_callback_collects_opcodes(void) {
+    lr_arena_t *arena;
+    lr_module_t *m;
+    char err[256] = {0};
+    bc_stream_stats_t stats = {0};
+
+    if (!lr_bc_parser_available())
+        return 0;
+
+    arena = lr_arena_create(0);
+    TEST_ASSERT(arena != NULL, "arena alloc");
+
+    m = lr_parse_bc_data_streaming(bc_loop_data, bc_loop_len, arena,
+                                   bc_stream_collect_cb, &stats,
+                                   err, sizeof(err));
+    TEST_ASSERT(m != NULL, "streaming parse succeeds");
+    TEST_ASSERT(stats.total > 0, "stream callback saw instructions");
+    TEST_ASSERT(stats.ret_count > 0, "stream callback saw return");
+    TEST_ASSERT(stats.br_count > 0, "stream callback saw branches");
+    TEST_ASSERT(stats.phi_count > 0, "stream callback saw phi");
+
+    lr_module_free(m);
+    return 0;
+}
+
+int test_bc_streaming_callback_abort_propagates_error(void) {
+    lr_arena_t *arena;
+    lr_module_t *m;
+    char err[256] = {0};
+    bc_stream_abort_t state = {0};
+
+    if (!lr_bc_parser_available())
+        return 0;
+
+    arena = lr_arena_create(0);
+    TEST_ASSERT(arena != NULL, "arena alloc");
+
+    m = lr_parse_bc_data_streaming(bc_ret42_data, bc_ret42_len, arena,
+                                   bc_stream_abort_cb, &state,
+                                   err, sizeof(err));
+    TEST_ASSERT(m == NULL, "stream callback abort fails parse");
+    TEST_ASSERT(state.calls > 0, "stream callback invoked");
+    TEST_ASSERT(strstr(err, "callback failed") != NULL, "callback error surfaced");
+
+    lr_arena_destroy(arena);
     return 0;
 }

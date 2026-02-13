@@ -535,6 +535,8 @@ typedef struct {
     const uint8_t *strtab_data;
     size_t strtab_len;
     uint32_t bc_version;
+    lr_bc_inst_callback_t on_inst;
+    void *on_inst_ctx;
     char *err;
     size_t errlen;
 } bc_decoder_t;
@@ -1128,6 +1130,21 @@ static bool bc_map_fcmp_pred(uint32_t pred, lr_fcmp_pred_t *out) {
     }
 }
 
+static bool bc_emit_inst(bc_decoder_t *d, lr_func_t *func,
+                         lr_block_t *block, lr_inst_t *inst) {
+    if (!d || !func || !block || !inst) {
+        if (d)
+            bc_dec_error(d, "failed to materialize instruction");
+        return false;
+    }
+    if (d->on_inst && d->on_inst(func, block, inst, d->on_inst_ctx) != 0) {
+        bc_dec_error(d, "bitcode streaming callback failed");
+        return false;
+    }
+    lr_block_append(block, inst);
+    return true;
+}
+
 /* ---- Function block decoder -------------------------------------------- */
 
 static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
@@ -1271,7 +1288,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     op = bc_make_operand_from_value(d, &local_vt, vid, func, func->ret_type);
                     inst = lr_inst_create(d->arena, LR_OP_RET, op.type, 0, &op, 1);
                 }
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 cur_block++;
                 break;
             }
@@ -1281,7 +1301,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     lr_operand_t op = lr_op_block(dest_bb);
                     lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_BR,
                                                      d->module->type_void, 0, &op, 1);
-                    lr_block_append(blocks[cur_block], inst);
+                    if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                        ok = false;
+                        break;
+                    }
                 } else if (r->record_len >= 3) {
                     lr_operand_t ops[3];
                     uint32_t bb_true = (uint32_t)r->record[0];
@@ -1299,7 +1322,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     ops[2] = lr_op_block(bb_false);
                     inst = lr_inst_create(d->arena, LR_OP_CONDBR,
                                           d->module->type_void, 0, ops, 3);
-                    lr_block_append(blocks[cur_block], inst);
+                    if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                        ok = false;
+                        break;
+                    }
                 }
                 cur_block++;
                 break;
@@ -1307,7 +1333,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
             case FUNC_CODE_INST_UNREACHABLE: {
                 lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_UNREACHABLE,
                                                   d->module->type_void, 0, NULL, 0);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 cur_block++;
                 break;
             }
@@ -1340,7 +1369,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
 
                 inst = lr_inst_create(d->arena, bc_map_binop(opc, is_fp),
                                        res_type, dest, ops, 2);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_CAST: {
@@ -1368,7 +1400,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
 
                 inst = lr_inst_create(d->arena, bc_map_cast(cast_opc),
                                        dest_type, dest, &op, 1);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_CMP2: {
@@ -1418,7 +1453,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     if (inst)
                         inst->icmp_pred = ipred;
                 }
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_PHI: {
@@ -1465,7 +1503,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
 
                 inst = lr_inst_create(d->arena, LR_OP_PHI, phi_type, dest, ops, npairs * 2);
                 free(ops);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_ALLOCA: {
@@ -1508,7 +1549,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                                        d->module->type_ptr, dest, &size_op, 1);
                 if (inst)
                     inst->type = elem_ty;
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_LOAD: {
@@ -1534,7 +1578,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 next_value_id++;
 
                 inst = lr_inst_create(d->arena, LR_OP_LOAD, load_ty, dest, &op, 1);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_STORE:
@@ -1570,7 +1617,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     break;
                 inst = lr_inst_create(d->arena, LR_OP_STORE,
                                        d->module->type_void, 0, ops, 2);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_GEP: {
@@ -1622,7 +1672,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 free(ops);
                 if (inst)
                     inst->type = base_ty;
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_CALL: {
@@ -1691,7 +1744,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                                        ret_type, dest, ops, nargs + 1);
                 free(ops);
                 (void)cc_flags;
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_SELECT: {
@@ -1726,7 +1782,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
 
                 inst = lr_inst_create(d->arena, LR_OP_SELECT,
                                        res_type, dest, ops, 3);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_EXTRACTVALUE: {
@@ -1759,7 +1818,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     inst->indices = idx_copy;
                     inst->num_indices = nidx;
                 }
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_INSERTVALUE: {
@@ -1797,7 +1859,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     inst->indices = idx_copy;
                     inst->num_indices = nidx;
                 }
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_UNOP: {
@@ -1823,7 +1888,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 (void)unopc;
                 inst = lr_inst_create(d->arena, LR_OP_FNEG,
                                        op.type, dest, &op, 1);
-                lr_block_append(blocks[cur_block], inst);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
                 break;
             }
             case FUNC_CODE_INST_SWITCH: {
@@ -1844,7 +1912,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     lr_operand_t op = lr_op_block(default_bb);
                     lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_BR,
                                                      d->module->type_void, 0, &op, 1);
-                    lr_block_append(blocks[cur_block], inst);
+                    if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                        ok = false;
+                        break;
+                    }
                 }
                 cur_block++;
                 break;
@@ -2148,8 +2219,10 @@ static void bc_scan_strtab(bc_decoder_t *d, bc_reader_t *r) {
     r->has_error = false;
 }
 
-lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
-                               lr_arena_t *arena, char *err, size_t errlen) {
+lr_module_t *lr_parse_bc_data_streaming(const uint8_t *data, size_t len,
+                                        lr_arena_t *arena,
+                                        lr_bc_inst_callback_t on_inst, void *ctx,
+                                        char *err, size_t errlen) {
     bc_reader_t reader;
     bc_decoder_t decoder;
     const uint8_t *bc_data = data;
@@ -2199,6 +2272,8 @@ lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
     memset(&decoder, 0, sizeof(decoder));
     decoder.reader = &reader;
     decoder.arena = arena;
+    decoder.on_inst = on_inst;
+    decoder.on_inst_ctx = ctx;
     decoder.err = err;
     decoder.errlen = errlen;
 
@@ -2333,4 +2408,9 @@ cleanup_fail:
     if (err && errlen > 0 && err[0] == '\0')
         lr_frontend_set_error(err, errlen, "failed to parse LLVM bitcode");
     return NULL;
+}
+
+lr_module_t *lr_parse_bc_data(const uint8_t *data, size_t len,
+                              lr_arena_t *arena, char *err, size_t errlen) {
+    return lr_parse_bc_data_streaming(data, len, arena, NULL, NULL, err, errlen);
 }
