@@ -250,6 +250,61 @@ int test_wasm_ir_add_args(void) {
     return 0;
 }
 
+int test_wasm_ir_i64_unsigned_div_rem_lower_to_integer_ops(void) {
+    uint8_t div_wasm[] = {
+        0x00, 0x61, 0x73, 0x6D,
+        0x01, 0x00, 0x00, 0x00,
+        /* Type: () -> i64 */
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7E,
+        /* Function: type 0 */
+        0x03, 0x02, 0x01, 0x00,
+        /* Export: "div_u64" -> func 0 */
+        0x07, 0x0B, 0x01, 0x07, 'd', 'i', 'v', '_', 'u', '6', '4', 0x00, 0x00,
+        /* Code: i64.const 60, i64.const 7, i64.div_u, end */
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x42, 0x3C, 0x42, 0x07, 0x80, 0x0B,
+    };
+    uint8_t rem_wasm[] = {
+        0x00, 0x61, 0x73, 0x6D,
+        0x01, 0x00, 0x00, 0x00,
+        /* Type: () -> i64 */
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7E,
+        /* Function: type 0 */
+        0x03, 0x02, 0x01, 0x00,
+        /* Export: "rem_u64" -> func 0 */
+        0x07, 0x0B, 0x01, 0x07, 'r', 'e', 'm', '_', 'u', '6', '4', 0x00, 0x00,
+        /* Code: i64.const 60, i64.const 7, i64.rem_u, end */
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x42, 0x3C, 0x42, 0x07, 0x82, 0x0B,
+    };
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_wasm_module_t *wmod = lr_wasm_decode(div_wasm, sizeof(div_wasm), arena, err, sizeof(err));
+    TEST_ASSERT(wmod != NULL, "decode i64.div_u");
+    lr_module_t *m = lr_wasm_build_module(wmod, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, "build module i64.div_u");
+    lr_func_t *f = m->first_func;
+    bool found_sdiv = false;
+    TEST_ASSERT(f != NULL && f->first_block, "has i64.div_u body");
+    for (lr_inst_t *inst = f->first_block->first; inst; inst = inst->next)
+        if (inst->op == LR_OP_SDIV)
+            found_sdiv = true;
+    TEST_ASSERT(found_sdiv, "i64.div_u lowers to integer div op");
+
+    wmod = lr_wasm_decode(rem_wasm, sizeof(rem_wasm), arena, err, sizeof(err));
+    TEST_ASSERT(wmod != NULL, "decode i64.rem_u");
+    m = lr_wasm_build_module(wmod, arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, "build module i64.rem_u");
+    f = m->first_func;
+    bool found_srem = false;
+    TEST_ASSERT(f != NULL && f->first_block, "has i64.rem_u body");
+    for (lr_inst_t *inst = f->first_block->first; inst; inst = inst->next)
+        if (inst->op == LR_OP_SREM)
+            found_srem = true;
+    TEST_ASSERT(found_srem, "i64.rem_u lowers to integer rem op");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_wasm_to_session_builds_function_ir(void) {
     lr_session_config_t cfg = {0};
     lr_error_t sess_err = {0};
@@ -392,6 +447,72 @@ int test_wasm_jit_add_args(void) {
     TEST_ASSERT_EQ(fn(10, 32), 42, "add(10, 32) == 42");
     TEST_ASSERT_EQ(fn(-5, 5), 0, "add(-5, 5) == 0");
     TEST_ASSERT_EQ(fn(0, 0), 0, "add(0, 0) == 0");
+
+    lr_jit_destroy(jit);
+    lr_module_free(m);
+    return 0;
+}
+
+int test_wasm_jit_div_u_opcodes_lower(void) {
+    uint8_t wasm_i32[] = {
+        0x00, 0x61, 0x73, 0x6D,
+        0x01, 0x00, 0x00, 0x00,
+        /* Type: () -> i32 */
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F,
+        /* Function: type 0 */
+        0x03, 0x02, 0x01, 0x00,
+        /* Export: "div_u32" -> func 0 */
+        0x07, 0x0B, 0x01, 0x07, 'd', 'i', 'v', '_', 'u', '3', '2', 0x00, 0x00,
+        /* Code: i32.const 42, i32.const 5, i32.div_u, end */
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x41, 0x2A, 0x41, 0x05, 0x6E, 0x0B,
+    };
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_wasm(wasm_i32, sizeof(wasm_i32), err, sizeof(err));
+    TEST_ASSERT(m != NULL, "parse wasm i32.div_u");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create i32.div_u");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module i32.div_u");
+
+    typedef int (*fn32_t)(void);
+    fn32_t fn32;
+    LR_JIT_GET_FN(fn32, jit, "div_u32");
+    TEST_ASSERT(fn32 != NULL, "function lookup i32.div_u");
+    TEST_ASSERT_EQ(fn32(), 8, "i32.div_u opcode lowers to integer division");
+
+    lr_jit_destroy(jit);
+    lr_module_free(m);
+    return 0;
+}
+
+int test_wasm_jit_rem_u_opcodes_lower(void) {
+    uint8_t wasm_i32[] = {
+        0x00, 0x61, 0x73, 0x6D,
+        0x01, 0x00, 0x00, 0x00,
+        /* Type: () -> i32 */
+        0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7F,
+        /* Function: type 0 */
+        0x03, 0x02, 0x01, 0x00,
+        /* Export: "rem_u32" -> func 0 */
+        0x07, 0x0B, 0x01, 0x07, 'r', 'e', 'm', '_', 'u', '3', '2', 0x00, 0x00,
+        /* Code: i32.const 42, i32.const 5, i32.rem_u, end */
+        0x0A, 0x09, 0x01, 0x07, 0x00, 0x41, 0x2A, 0x41, 0x05, 0x70, 0x0B,
+    };
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_wasm(wasm_i32, sizeof(wasm_i32), err, sizeof(err));
+    TEST_ASSERT(m != NULL, "parse wasm i32.rem_u");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create i32.rem_u");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module i32.rem_u");
+
+    typedef int (*fn32_t)(void);
+    fn32_t fn32;
+    LR_JIT_GET_FN(fn32, jit, "rem_u32");
+    TEST_ASSERT(fn32 != NULL, "function lookup i32.rem_u");
+    TEST_ASSERT_EQ(fn32(), 2, "i32.rem_u opcode lowers to integer remainder");
 
     lr_jit_destroy(jit);
     lr_module_free(m);
