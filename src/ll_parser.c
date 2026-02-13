@@ -1,5 +1,6 @@
 #include "ll_parser.h"
 #include "frontend_common.h"
+#include <liric/liric_session.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -99,6 +100,7 @@ typedef struct lr_parser {
     void *on_func_ctx;
 
     lr_func_t *cur_func;
+    lr_session_t *session;
 } lr_parser_t;
 
 static void error(lr_parser_t *p, const char *fmt, ...) {
@@ -1297,6 +1299,123 @@ static bool is_integer_type(const lr_type_t *ty) {
            ty->kind == LR_TYPE_I64;
 }
 
+static void operand_to_desc(const lr_operand_t *op, lr_operand_desc_t *out) {
+    out->kind = (int)op->kind;
+    out->type = op->type;
+    out->global_offset = op->global_offset;
+    switch (op->kind) {
+    case LR_VAL_VREG:    out->vreg = op->vreg; break;
+    case LR_VAL_IMM_I64: out->imm_i64 = op->imm_i64; break;
+    case LR_VAL_IMM_F64: out->imm_f64 = op->imm_f64; break;
+    case LR_VAL_BLOCK:   out->block_id = op->block_id; break;
+    case LR_VAL_GLOBAL:  out->global_id = op->global_id; break;
+    default: break;
+    }
+}
+
+static uint32_t stream_emit(lr_parser_t *p, lr_opcode_t op, lr_type_t *type,
+                             uint32_t dest, const lr_operand_t *ops,
+                             uint32_t nops, const uint32_t *indices,
+                             uint32_t num_indices, int icmp_pred,
+                             int fcmp_pred, bool call_external_abi,
+                             bool call_vararg, uint32_t call_fixed_args) {
+    lr_operand_desc_t desc_ops[66];
+    uint32_t n = nops < 66 ? nops : 66;
+    for (uint32_t i = 0; i < n; i++)
+        operand_to_desc(&ops[i], &desc_ops[i]);
+
+    lr_inst_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.op = op;
+    desc.type = type;
+    desc.dest = dest;
+    desc.operands = desc_ops;
+    desc.num_operands = n;
+    desc.indices = indices;
+    desc.num_indices = num_indices;
+    desc.icmp_pred = icmp_pred;
+    desc.fcmp_pred = fcmp_pred;
+    desc.call_external_abi = call_external_abi;
+    desc.call_vararg = call_vararg;
+    desc.call_fixed_args = call_fixed_args;
+
+    return lr_session_emit(p->session, &desc, NULL);
+}
+
+static void emit_inst(lr_parser_t *p, lr_block_t *block, lr_opcode_t op,
+                       lr_type_t *type, uint32_t dest,
+                       lr_operand_t *ops, uint32_t nops) {
+    if (p->session) {
+        stream_emit(p, op, type, dest, ops, nops, NULL, 0, 0, 0,
+                    false, false, 0);
+    } else {
+        lr_inst_t *inst = lr_inst_create(p->arena, op, type, dest, ops, nops);
+        lr_block_append(block, inst);
+    }
+}
+
+static void emit_icmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
+                       uint32_t dest, lr_operand_t *ops, uint32_t nops,
+                       int pred) {
+    if (p->session) {
+        stream_emit(p, LR_OP_ICMP, type, dest, ops, nops, NULL, 0,
+                    pred, 0, false, false, 0);
+    } else {
+        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_ICMP, type,
+                                         dest, ops, nops);
+        inst->icmp_pred = pred;
+        lr_block_append(block, inst);
+    }
+}
+
+static void emit_fcmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
+                       uint32_t dest, lr_operand_t *ops, uint32_t nops,
+                       int pred) {
+    if (p->session) {
+        stream_emit(p, LR_OP_FCMP, type, dest, ops, nops, NULL, 0,
+                    0, pred, false, false, 0);
+    } else {
+        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_FCMP, type,
+                                         dest, ops, nops);
+        inst->fcmp_pred = pred;
+        lr_block_append(block, inst);
+    }
+}
+
+static void emit_call(lr_parser_t *p, lr_block_t *block, lr_type_t *ret_ty,
+                       uint32_t dest, lr_operand_t *ops, uint32_t nops,
+                       bool vararg, uint32_t fixed_args,
+                       bool external_abi) {
+    if (p->session) {
+        stream_emit(p, LR_OP_CALL, ret_ty, dest, ops, nops, NULL, 0,
+                    0, 0, external_abi, vararg, fixed_args);
+    } else {
+        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL, ret_ty,
+                                         dest, ops, nops);
+        inst->call_vararg = vararg;
+        inst->call_fixed_args = fixed_args;
+        inst->call_external_abi = external_abi;
+        lr_block_append(block, inst);
+    }
+}
+
+static void emit_with_indices(lr_parser_t *p, lr_block_t *block,
+                               lr_opcode_t op, lr_type_t *type,
+                               uint32_t dest, lr_operand_t *ops,
+                               uint32_t nops, const uint32_t *indices,
+                               uint32_t num_indices) {
+    if (p->session) {
+        stream_emit(p, op, type, dest, ops, nops, indices, num_indices,
+                    0, 0, false, false, 0);
+    } else {
+        lr_inst_t *inst = lr_inst_create(p->arena, op, type, dest, ops, nops);
+        inst->indices = lr_arena_array(p->arena, uint32_t, num_indices);
+        memcpy(inst->indices, indices, sizeof(uint32_t) * num_indices);
+        inst->num_indices = num_indices;
+        lr_block_append(block, inst);
+    }
+}
+
 static lr_operand_t canonicalize_gep_index_operand(lr_parser_t *p,
                                                     lr_func_t *func,
                                                     lr_block_t *block,
@@ -1313,10 +1432,15 @@ static lr_operand_t canonicalize_gep_index_operand(lr_parser_t *p,
     if (op->kind == LR_VAL_VREG && op->type->kind != LR_TYPE_I64) {
         uint32_t tmp_vreg = lr_vreg_new(func);
         lr_operand_t cast_ops[1] = {*op};
-        lr_inst_t *cast = lr_inst_create(p->arena, LR_OP_SEXT,
-                                         p->module->type_i64,
-                                         tmp_vreg, cast_ops, 1);
-        lr_block_append(block, cast);
+        if (p->session) {
+            stream_emit(p, LR_OP_SEXT, p->module->type_i64, tmp_vreg,
+                        cast_ops, 1, NULL, 0, 0, 0, false, false, 0);
+        } else {
+            lr_inst_t *cast = lr_inst_create(p->arena, LR_OP_SEXT,
+                                             p->module->type_i64,
+                                             tmp_vreg, cast_ops, 1);
+            lr_block_append(block, cast);
+        }
         return lr_op_vreg(tmp_vreg, p->module->type_i64);
     }
 
@@ -1376,8 +1500,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 }
 
                 lr_operand_t ops[2] = {lhs, rhs};
-                lr_inst_t *inst = lr_inst_create(p->arena, irop, ty, dest, ops, 2);
-                lr_block_append(block, inst);
+                emit_inst(p, block, irop, ty, dest, ops, 2);
                 break;
             }
 
@@ -1404,10 +1527,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 expect(p, LR_TOK_COMMA);
                 lr_operand_t rhs = parse_operand(p, ty);
                 lr_operand_t ops[2] = {lhs, rhs};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_ICMP,
-                    p->module->type_i1, dest, ops, 2);
-                inst->icmp_pred = pred;
-                lr_block_append(block, inst);
+                emit_icmp(p, block, p->module->type_i1, dest, ops, 2, pred);
                 break;
             }
 
@@ -1431,17 +1551,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                         }
                     }
                 }
-                lr_inst_t *inst;
                 if (has_count) {
                     lr_operand_t ops[1] = {count_op};
-                    inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
-                        p->module->type_ptr, dest, ops, 1);
+                    emit_inst(p, block, LR_OP_ALLOCA, ty, dest, ops, 1);
                 } else {
-                    inst = lr_inst_create(p->arena, LR_OP_ALLOCA,
-                        p->module->type_ptr, dest, NULL, 0);
+                    emit_inst(p, block, LR_OP_ALLOCA, ty, dest, NULL, 0);
                 }
-                inst->type = ty;
-                lr_block_append(block, inst);
                 break;
             }
 
@@ -1455,9 +1570,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
                 }
                 lr_operand_t ops[1] = {src};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_LOAD,
-                    ty, dest, ops, 1);
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_LOAD, ty, dest, ops, 1);
                 break;
             }
 
@@ -1491,13 +1604,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 all_ops[0] = callee;
                 for (uint32_t i = 0; i < nargs; i++)
                     all_ops[i + 1] = args[i];
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
-                    ret_ty, dest, all_ops, nargs + 1);
-                inst->call_vararg = call_sig_vararg;
-                inst->call_fixed_args = call_sig_fixed;
-                if (callee.kind != LR_VAL_GLOBAL)
-                    inst->call_external_abi = true;
-                lr_block_append(block, inst);
+                emit_call(p, block, ret_ty, dest, all_ops, nargs + 1,
+                          call_sig_vararg, call_sig_fixed,
+                          callee.kind != LR_VAL_GLOBAL);
                 /* skip trailing attribute groups */
                 skip_attrs(p);
                 break;
@@ -1528,18 +1637,14 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 default: irop = LR_OP_BITCAST; break;
                 }
                 lr_operand_t ops[1] = {src};
-                lr_inst_t *inst = lr_inst_create(p->arena, irop,
-                    dst_ty, dest, ops, 1);
-                lr_block_append(block, inst);
+                emit_inst(p, block, irop, dst_ty, dest, ops, 1);
                 break;
             }
 
             case LR_TOK_FNEG: {
                 lr_operand_t src = parse_typed_operand(p);
                 lr_operand_t ops[1] = {src};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_FNEG,
-                    src.type, dest, ops, 1);
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_FNEG, src.type, dest, ops, 1);
                 break;
             }
 
@@ -1550,9 +1655,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 expect(p, LR_TOK_COMMA);
                 lr_operand_t fv = parse_typed_operand(p);
                 lr_operand_t ops[3] = {cond, tv, fv};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_SELECT,
-                    tv.type, dest, ops, 3);
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_SELECT, tv.type, dest, ops, 3);
                 break;
             }
 
@@ -1568,11 +1671,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     idx = canonicalize_gep_index_operand(p, func, block, &idx);
                     ops[nops++] = idx;
                 }
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_GEP,
-                    p->module->type_ptr, dest, ops, nops);
-                /* store base type in inst->type for GEP offset computation */
-                inst->type = base_ty;
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_GEP, base_ty, dest, ops, nops);
                 break;
             }
 
@@ -1606,9 +1705,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     }
                     expect(p, LR_TOK_RBRACKET);
                 } while (match(p, LR_TOK_COMMA));
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_PHI,
-                    ty, dest, ops, nops);
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_PHI, ty, dest, ops, nops);
                 free(ops);
                 break;
             }
@@ -1630,12 +1727,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     }
                 }
                 lr_operand_t ops[1] = {src};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_EXTRACTVALUE,
-                    result_ty, dest, ops, 1);
-                inst->indices = lr_arena_array(p->arena, uint32_t, nidx);
-                memcpy(inst->indices, indices, sizeof(uint32_t) * nidx);
-                inst->num_indices = nidx;
-                lr_block_append(block, inst);
+                emit_with_indices(p, block, LR_OP_EXTRACTVALUE, result_ty,
+                                  dest, ops, 1, indices, nidx);
                 break;
             }
 
@@ -1659,12 +1752,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 if (src.type && src.type->kind == LR_TYPE_ARRAY)
                     result_ty = src.type->array.elem;
                 lr_operand_t ops[1] = {src};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_EXTRACTVALUE,
-                    result_ty, dest, ops, 1);
-                inst->indices = lr_arena_array(p->arena, uint32_t, 1);
-                inst->indices[0] = idx;
-                inst->num_indices = 1;
-                lr_block_append(block, inst);
+                uint32_t idx_arr[1] = {idx};
+                emit_with_indices(p, block, LR_OP_EXTRACTVALUE, result_ty,
+                                  dest, ops, 1, idx_arr, 1);
                 break;
             }
 
@@ -1679,12 +1769,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     expect(p, LR_TOK_INT_LIT);
                 }
                 lr_operand_t ops[2] = {agg, val};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_INSERTVALUE,
-                    agg.type, dest, ops, 2);
-                inst->indices = lr_arena_array(p->arena, uint32_t, nidx);
-                memcpy(inst->indices, indices, sizeof(uint32_t) * nidx);
-                inst->num_indices = nidx;
-                lr_block_append(block, inst);
+                emit_with_indices(p, block, LR_OP_INSERTVALUE, agg.type,
+                                  dest, ops, 2, indices, nidx);
                 break;
             }
 
@@ -1717,10 +1803,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 expect(p, LR_TOK_COMMA);
                 lr_operand_t rhs = parse_operand(p, ty);
                 lr_operand_t ops[2] = {lhs, rhs};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_FCMP,
-                    p->module->type_i1, dest, ops, 2);
-                inst->fcmp_pred = pred;
-                lr_block_append(block, inst);
+                emit_fcmp(p, block, p->module->type_i1, dest, ops, 2, pred);
                 break;
             }
 
@@ -1753,13 +1836,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 all_ops[0] = callee;
                 for (uint32_t i = 0; i < nargs; i++)
                     all_ops[i + 1] = args[i];
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
-                    ret_ty, dest, all_ops, nargs + 1);
-                inst->call_vararg = call_sig_vararg;
-                inst->call_fixed_args = call_sig_fixed;
-                if (callee.kind != LR_VAL_GLOBAL)
-                    inst->call_external_abi = true;
-                lr_block_append(block, inst);
+                emit_call(p, block, ret_ty, dest, all_ops, nargs + 1,
+                          call_sig_vararg, call_sig_fixed,
+                          callee.kind != LR_VAL_GLOBAL);
                 skip_attrs(p);
                 /* to label %normal unwind label %except */
                 expect(p, LR_TOK_TO);
@@ -1772,9 +1851,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                        !p->had_error)
                     next(p);
                 lr_operand_t br_ops[1] = {lr_op_block(normal_id)};
-                lr_inst_t *br = lr_inst_create(p->arena, LR_OP_BR,
-                    p->module->type_void, 0, br_ops, 1);
-                lr_block_append(block, br);
+                emit_inst(p, block, LR_OP_BR, p->module->type_void, 0,
+                          br_ops, 1);
                 break;
             }
 
@@ -1806,15 +1884,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         next(p);
         if (check(p, LR_TOK_VOID)) {
             next(p);
-            lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_RET_VOID,
-                p->module->type_void, 0, NULL, 0);
-            lr_block_append(block, inst);
+            emit_inst(p, block, LR_OP_RET_VOID, p->module->type_void,
+                      0, NULL, 0);
         } else {
             lr_operand_t val = parse_typed_operand(p);
             lr_operand_t ops[1] = {val};
-            lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_RET,
-                val.type, 0, ops, 1);
-            lr_block_append(block, inst);
+            emit_inst(p, block, LR_OP_RET, val.type, 0, ops, 1);
         }
         return;
     }
@@ -1837,9 +1912,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 next(p);
                 uint32_t fid = resolve_block_n(p, fname.s, fname.len);
                 lr_operand_t ops[3] = {cond, lr_op_block(tid), lr_op_block(fid)};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CONDBR,
-                    p->module->type_void, 0, ops, 3);
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_CONDBR, p->module->type_void,
+                          0, ops, 3);
             }
         } else {
             /* unconditional: br label %dest */
@@ -1849,9 +1923,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 next(p);
                 uint32_t did = resolve_block_n(p, dname.s, dname.len);
                 lr_operand_t ops[1] = {lr_op_block(did)};
-                lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_BR,
-                    p->module->type_void, 0, ops, 1);
-                lr_block_append(block, inst);
+                emit_inst(p, block, LR_OP_BR, p->module->type_void,
+                          0, ops, 1);
             }
         }
         return;
@@ -1884,16 +1957,14 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     lr_op_imm_i64(0, p->module->type_i32),
                     lr_op_imm_i64((int64_t)i, p->module->type_i32)
                 };
-                lr_inst_t *gep = lr_inst_create(p->arena, LR_OP_GEP,
-                    val_ty, gep_dest, gep_ops, 3);
-                lr_block_append(block, gep);
+                emit_inst(p, block, LR_OP_GEP, val_ty, gep_dest,
+                          gep_ops, 3);
                 lr_operand_t st_ops[2] = {
                     fields[i],
                     lr_op_vreg(gep_dest, p->module->type_ptr)
                 };
-                lr_inst_t *st = lr_inst_create(p->arena, LR_OP_STORE,
-                    p->module->type_void, 0, st_ops, 2);
-                lr_block_append(block, st);
+                emit_inst(p, block, LR_OP_STORE, p->module->type_void,
+                          0, st_ops, 2);
             }
             return;
         }
@@ -1905,17 +1976,14 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
         }
         lr_operand_t ops[2] = {val, dst};
-        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_STORE,
-            p->module->type_void, 0, ops, 2);
-        lr_block_append(block, inst);
+        emit_inst(p, block, LR_OP_STORE, p->module->type_void, 0, ops, 2);
         return;
     }
 
     if (op_tok == LR_TOK_UNREACHABLE) {
         next(p);
-        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_UNREACHABLE,
-            p->module->type_void, 0, NULL, 0);
-        lr_block_append(block, inst);
+        emit_inst(p, block, LR_OP_UNREACHABLE, p->module->type_void,
+                  0, NULL, 0);
         return;
     }
 
@@ -1952,19 +2020,15 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
         if (ncases == 0) {
             lr_operand_t ops[1] = {lr_op_block(default_id)};
-            lr_inst_t *br = lr_inst_create(p->arena, LR_OP_BR,
-                p->module->type_void, 0, ops, 1);
-            lr_block_append(block, br);
+            emit_inst(p, block, LR_OP_BR, p->module->type_void, 0, ops, 1);
         } else {
             for (uint32_t ci = 0; ci < ncases; ci++) {
                 uint32_t cmp_dest = lr_vreg_new(func);
                 lr_operand_t cmp_ops[2] = {
                     val, lr_op_imm_i64(cases[ci].case_val, val_ty)
                 };
-                lr_inst_t *cmp = lr_inst_create(p->arena, LR_OP_ICMP,
-                    p->module->type_i1, cmp_dest, cmp_ops, 2);
-                cmp->icmp_pred = LR_ICMP_EQ;
-                lr_block_append(block, cmp);
+                emit_icmp(p, block, p->module->type_i1, cmp_dest,
+                          cmp_ops, 2, LR_ICMP_EQ);
 
                 uint32_t next_id;
                 if (ci + 1 < ncases) {
@@ -1981,9 +2045,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     lr_op_block(cases[ci].block_id),
                     lr_op_block(next_id)
                 };
-                lr_inst_t *br = lr_inst_create(p->arena, LR_OP_CONDBR,
-                    p->module->type_void, 0, br_ops, 3);
-                lr_block_append(block, br);
+                emit_inst(p, block, LR_OP_CONDBR, p->module->type_void,
+                          0, br_ops, 3);
 
                 if (ci + 1 < ncases) {
                     block = func->block_array ? NULL :
@@ -1991,6 +2054,10 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     if (!block) {
                         error(p, "switch lowering lost block");
                         return;
+                    }
+                    if (p->session) {
+                        lr_session_adopt_block(p->session, block->id,
+                                               block, NULL);
                     }
                 }
             }
@@ -2029,18 +2096,14 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         all_ops[0] = callee;
         for (uint32_t i = 0; i < nargs; i++)
             all_ops[i + 1] = args[i];
-        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
-            ret_ty, 0, all_ops, nargs + 1);
-        inst->call_vararg = call_sig_vararg;
-        inst->call_fixed_args = call_sig_fixed;
-        if (callee.kind != LR_VAL_GLOBAL)
-            inst->call_external_abi = true;
-        lr_block_append(block, inst);
+        emit_call(p, block, ret_ty, 0, all_ops, nargs + 1,
+                  call_sig_vararg, call_sig_fixed,
+                  callee.kind != LR_VAL_GLOBAL);
         skip_attrs(p);
         return;
     }
 
-    /* void invoke → lower to call + br to normal label */
+    /* void invoke -> lower to call + br to normal label */
     if (op_tok == LR_TOK_INVOKE) {
         next(p);
         bool call_sig_vararg = false;
@@ -2071,13 +2134,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         all_ops[0] = callee;
         for (uint32_t i = 0; i < nargs; i++)
             all_ops[i + 1] = args[i];
-        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL,
-            ret_ty, 0, all_ops, nargs + 1);
-        inst->call_vararg = call_sig_vararg;
-        inst->call_fixed_args = call_sig_fixed;
-        if (callee.kind != LR_VAL_GLOBAL)
-            inst->call_external_abi = true;
-        lr_block_append(block, inst);
+        emit_call(p, block, ret_ty, 0, all_ops, nargs + 1,
+                  call_sig_vararg, call_sig_fixed,
+                  callee.kind != LR_VAL_GLOBAL);
         skip_attrs(p);
         expect(p, LR_TOK_TO);
         expect(p, LR_TOK_LABEL);
@@ -2089,9 +2148,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                !p->had_error)
             next(p);
         lr_operand_t br_ops[1] = {lr_op_block(normal_id)};
-        lr_inst_t *br = lr_inst_create(p->arena, LR_OP_BR,
-            p->module->type_void, 0, br_ops, 1);
-        lr_block_append(block, br);
+        emit_inst(p, block, LR_OP_BR, p->module->type_void, 0, br_ops, 1);
         return;
     }
 
@@ -2144,6 +2201,10 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
                 next(p);
                 name_view_t bname = tok_name_view(&saved_tok);
                 cur_block = resolve_block_ptr_n(p, bname.s, bname.len);
+                if (p->session) {
+                    lr_session_adopt_block(p->session, cur_block->id,
+                                           cur_block, NULL);
+                }
                 continue;
             }
             /* not a label, restore and parse as instruction */
@@ -2151,12 +2212,12 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             p->lex.pos = saved_pos;
         }
 
-        /* Check for bare keyword label (e.g. "entry:" without %) */
-        /* In LLVM IR, block labels can be bare identifiers */
-        /* We handle this by checking known patterns */
-
         if (!cur_block) {
             cur_block = resolve_block_ptr(p, "entry");
+            if (p->session) {
+                lr_session_adopt_block(p->session, cur_block->id,
+                                       cur_block, NULL);
+            }
         }
 
         parse_instruction(p, func, cur_block);
@@ -2245,20 +2306,55 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
             next(p);
     }
 
-    uint32_t sym_id = UINT32_MAX;
-    lr_func_t *func = lr_frontend_create_function(p->module, name, ret_type,
-                                                  params, nparams, vararg,
-                                                  is_decl, &sym_id);
-    if (resolve_global(p, name) == UINT32_MAX)
-        register_global(p, name, sym_id);
-    register_func(p, name, func);
+    if (p->session) {
+        lr_error_t serr;
+        if (is_decl) {
+            lr_session_declare(p->session, name, ret_type, params, nparams,
+                               vararg, &serr);
+            uint32_t sym_id = lr_session_intern(p->session, name);
+            if (resolve_global(p, name) == UINT32_MAX)
+                register_global(p, name, sym_id);
+        } else {
+            if (lr_session_func_begin(p->session, name, ret_type, params,
+                                       nparams, vararg, &serr) != 0) {
+                error(p, "session func_begin failed for '%s': %s",
+                      name, serr.msg);
+                return;
+            }
+            lr_func_t *func = lr_session_module(p->session)->last_func;
+            p->cur_func = func;
+            if (func->next_vreg == 0)
+                func->next_vreg = 1;
+            uint32_t sym_id = lr_frontend_intern_symbol(p->module, name);
+            if (resolve_global(p, name) == UINT32_MAX)
+                register_global(p, name, sym_id);
+            register_func(p, name, func);
+            parse_function_body(p, func, param_names);
+            if (!p->had_error) {
+                void *addr = NULL;
+                if (lr_session_func_end(p->session, &addr, &serr) != 0) {
+                    error(p, "session func_end failed for '%s': %s",
+                          name, serr.msg);
+                }
+            }
+        }
+    } else {
+        uint32_t sym_id = UINT32_MAX;
+        lr_func_t *func = lr_frontend_create_function(p->module, name,
+                                                      ret_type, params,
+                                                      nparams, vararg,
+                                                      is_decl, &sym_id);
+        if (resolve_global(p, name) == UINT32_MAX)
+            register_global(p, name, sym_id);
+        register_func(p, name, func);
 
-    if (!is_decl)
-        parse_function_body(p, func, param_names);
+        if (!is_decl)
+            parse_function_body(p, func, param_names);
 
-    if (!p->had_error && p->on_func) {
-        if (p->on_func(func, p->module, p->on_func_ctx) != 0)
-            error(p, "function callback failed for '%s'", func->name);
+        if (!p->had_error && p->on_func) {
+            if (p->on_func(func, p->module, p->on_func_ctx) != 0)
+                error(p, "function callback failed for '%s'", func->name);
+        }
     }
 }
 
@@ -2690,4 +2786,69 @@ lr_module_t *lr_parse_ll_text_streaming(const char *src, size_t len,
 lr_module_t *lr_parse_ll_text(const char *src, size_t len,
                                lr_arena_t *arena, char *err, size_t errlen) {
     return lr_parse_ll_text_streaming(src, len, arena, NULL, NULL, err, errlen);
+}
+
+int lr_parse_ll_to_session(const char *src, size_t len, lr_session_t *session,
+                            char *err, size_t errlen) {
+    lr_parser_t p = {0};
+    lr_module_t *module = NULL;
+    lr_arena_t *arena = NULL;
+
+    if (!src || !session) {
+        if (err && errlen > 0)
+            snprintf(err, errlen, "null source or session");
+        return -1;
+    }
+    if (err && errlen > 0) err[0] = '\0';
+
+    module = lr_session_module(session);
+    if (!module) {
+        if (err && errlen > 0)
+            snprintf(err, errlen, "session has no module");
+        return -1;
+    }
+    arena = module->arena;
+
+    lr_lexer_init(&p.lex, src, len);
+    p.arena = arena;
+    p.err = err;
+    p.errlen = errlen;
+    p.session = session;
+    p.module = module;
+
+    if (!parser_init_work_buffers(&p)) {
+        parser_free_work_buffers(&p);
+        return -1;
+    }
+
+    next(&p);
+
+    while (!check(&p, LR_TOK_EOF) && !p.had_error) {
+        if (check(&p, LR_TOK_DEFINE)) {
+            next(&p);
+            parse_function_def(&p, false);
+        } else if (check(&p, LR_TOK_DECLARE)) {
+            next(&p);
+            parse_function_def(&p, true);
+        } else if (check(&p, LR_TOK_GLOBAL_ID)) {
+            parse_global(&p);
+        } else if (check(&p, LR_TOK_LOCAL_ID)) {
+            char *tname = tok_name(&p, &p.cur);
+            next(&p);
+            if (match(&p, LR_TOK_EQUALS) && match(&p, LR_TOK_TYPE)) {
+                if (check(&p, LR_TOK_OPAQUE)) {
+                    next(&p);
+                } else {
+                    lr_type_t *alias = parse_type(&p);
+                    register_type(&p, tname, alias);
+                }
+            }
+            skip_line(&p);
+        } else {
+            skip_line(&p);
+        }
+    }
+
+    parser_free_work_buffers(&p);
+    return p.had_error ? -1 : 0;
 }

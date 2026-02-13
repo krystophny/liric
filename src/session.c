@@ -960,6 +960,32 @@ int lr_session_set_block(struct lr_session *s, uint32_t block_id,
     return 0;
 }
 
+int lr_session_adopt_block(struct lr_session *s, uint32_t block_id,
+                           lr_block_t *block, session_error_t *err) {
+    err_clear(err);
+    if (!s || !s->cur_func || !block) {
+        err_set(err, S_ERR_ARGUMENT, "invalid adopt_block arguments");
+        return -1;
+    }
+    if (ensure_block_capacity(s, block_id + 1u) != 0) {
+        err_set(err, S_ERR_BACKEND, "block table allocation failed");
+        return -1;
+    }
+    if (s->block_count <= block_id)
+        s->block_count = block_id + 1u;
+    s->blocks[block_id] = block;
+    s->cur_block = block;
+    if (s->compile_active) {
+        if (!s->compile_ctx || !s->jit->target ||
+            !s->jit->target->compile_set_block ||
+            s->jit->target->compile_set_block(s->compile_ctx, block_id) != 0) {
+            err_set(err, S_ERR_BACKEND, "backend set-block failed");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 int lr_session_bind_ir(struct lr_session *s, lr_module_t *module,
                        lr_func_t *func, lr_block_t *block,
                        session_error_t *err) {
