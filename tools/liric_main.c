@@ -55,6 +55,14 @@ static bool module_has_main_definition(const lr_module_t *m) {
     return false;
 }
 
+static bool output_path_forces_object(const char *path) {
+    size_t len = 0;
+    if (!path)
+        return false;
+    len = strlen(path);
+    return len >= 2 && path[len - 2] == '.' && path[len - 1] == 'o';
+}
+
 static bool is_wasm_binary(const uint8_t *data, size_t len) {
     return data && len >= 4 &&
            data[0] == 0x00 &&
@@ -172,7 +180,7 @@ static int dump_ir_bc_streaming(const uint8_t *data, size_t len,
 int main(int argc, char **argv) {
     bool jit_mode = false;
     bool dump_ir = false;
-    const char *emit_exe_path = NULL;
+    const char *output_path_opt = NULL;
     const char *target_name = NULL;
     const char *input_file = NULL;
     const char *func_name = "main";
@@ -184,7 +192,7 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--jit") == 0) jit_mode = true;
         else if (strcmp(argv[i], "--dump-ir") == 0) dump_ir = true;
         else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) target_name = argv[++i];
-        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) emit_exe_path = argv[++i];
+        else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) output_path_opt = argv[++i];
         else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) func_name = argv[++i];
         else if (strcmp(argv[i], "--runtime") == 0 && i + 1 < argc) runtime_path = argv[++i];
         else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
@@ -201,7 +209,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (emit_exe_path && (jit_mode || dump_ir)) {
+    if (output_path_opt && (jit_mode || dump_ir)) {
         fprintf(stderr, "-o is only valid for file output mode\n");
         return 1;
     }
@@ -334,8 +342,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const char *out_path = emit_exe_path ? emit_exe_path : "a.out";
-    bool emit_object = !module_has_main_definition(m);
+    const char *out_path = output_path_opt ? output_path_opt : "a.out";
+    bool emit_object = output_path_forces_object(out_path) ||
+                       !module_has_main_definition(m);
     FILE *out = fopen(out_path, "wb");
     if (!out) {
         fprintf(stderr, "failed to open output: %s\n", out_path);
