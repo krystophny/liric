@@ -3340,6 +3340,11 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
     if (!ctx || !out_len)
         return -1;
 
+#if !defined(__x86_64__) && !defined(_M_X64)
+    if (ctx->mode == LR_COMPILE_COPY_PATCH)
+        return -1;
+#endif
+
     if (ctx->block_offset_pending) {
         ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
         ctx->block_offset_pending = false;
