@@ -931,8 +931,11 @@ static int rv_compile_emit(void *compile_ctx,
     inst->dest = inst_desc->dest;
     inst->num_operands = inst_desc->num_operands;
     inst->num_indices = inst_desc->num_indices;
-    inst->icmp_pred = (lr_icmp_pred_t)inst_desc->icmp_pred;
-    inst->fcmp_pred = (lr_fcmp_pred_t)inst_desc->fcmp_pred;
+    if (inst_desc->op == LR_OP_ICMP) {
+        inst->icmp_pred = (lr_icmp_pred_t)inst_desc->icmp_pred;
+    } else if (inst_desc->op == LR_OP_FCMP) {
+        inst->fcmp_pred = (lr_fcmp_pred_t)inst_desc->fcmp_pred;
+    }
     inst->call_external_abi = inst_desc->call_external_abi;
     inst->call_vararg = inst_desc->call_vararg;
     inst->call_fixed_args = inst_desc->call_fixed_args;

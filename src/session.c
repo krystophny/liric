@@ -944,6 +944,7 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
                           session_error_t *err) {
     const session_inst_desc_t *inst = (const session_inst_desc_t *)inst_ptr;
     lr_compile_inst_desc_t compile_desc;
+    lr_operand_desc_t *resolved_call_ops = NULL;
     lr_type_t *itype = NULL;
     uint32_t dest = 0;
     session_inst_desc_t normalized;
@@ -990,9 +991,48 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
     normalized.type = itype;
     normalized.dest = dest;
 
+    if (s->compile_active &&
+        normalized.op == LR_OP_CALL &&
+        normalized.num_operands > 0 &&
+        normalized.operands &&
+        normalized.operands[0].kind == LR_OP_KIND_GLOBAL) {
+        const char *callee_name = lr_module_symbol_name(
+            s->module, normalized.operands[0].global_id
+        );
+        void *callee_addr = NULL;
+        if (callee_name && s->jit)
+            callee_addr = lr_jit_get_function(s->jit, callee_name);
+
+        if (callee_addr) {
+            resolved_call_ops = (lr_operand_desc_t *)calloc(
+                normalized.num_operands, sizeof(*resolved_call_ops)
+            );
+            if (!resolved_call_ops) {
+                err_set(err, S_ERR_BACKEND, "call operand allocation failed");
+                return 0;
+            }
+            memcpy(resolved_call_ops, normalized.operands,
+                   sizeof(*resolved_call_ops) * normalized.num_operands);
+            resolved_call_ops[0].kind = LR_OP_KIND_IMM_I64;
+            resolved_call_ops[0].imm_i64 = (int64_t)(intptr_t)callee_addr;
+            resolved_call_ops[0].type = s->module->type_ptr;
+            resolved_call_ops[0].global_offset = 0;
+            normalized.operands = resolved_call_ops;
+        } else if (s->emitted_count == 0) {
+            /* Fall back before streaming emits so unresolved calls can use normal IR/JIT lowering. */
+            s->compile_active = false;
+            s->compile_ctx = NULL;
+        } else {
+            err_set(err, S_ERR_BACKEND,
+                    "direct call target unresolved after streaming began");
+            return 0;
+        }
+    }
+
     if (s->compile_active) {
         if (!s->compile_ctx || !s->jit->target || !s->jit->target->compile_emit) {
             err_set(err, S_ERR_STATE, "no active direct compile context");
+            free(resolved_call_ops);
             return 0;
         }
         memset(&compile_desc, 0, sizeof(compile_desc));
@@ -1010,12 +1050,16 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
         compile_desc.call_fixed_args = normalized.call_fixed_args;
         if (s->jit->target->compile_emit(s->compile_ctx, &compile_desc) != 0) {
             err_set(err, S_ERR_BACKEND, "backend emit failed");
+            free(resolved_call_ops);
             return 0;
         }
     } else {
-        if (emit_ir_instruction(s, &normalized, err, NULL) != 0)
+        if (emit_ir_instruction(s, &normalized, err, NULL) != 0) {
+            free(resolved_call_ops);
             return 0;
+        }
     }
+    free(resolved_call_ops);
 
     s->block_seen[s->cur_block->id] = true;
     s->block_terminated[s->cur_block->id] = is_terminator(normalized.op);
