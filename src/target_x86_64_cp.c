@@ -5,6 +5,7 @@
 #if defined(__x86_64__) || defined(_M_X64)
 
 #include "cp_template.h"
+#include "stencil_runtime.h"
 #include <string.h>
 #include <stdbool.h>
 
@@ -217,6 +218,16 @@ static int32_t cp_resolve_operand(cp_ctx_t *ctx, const lr_operand_t *op) {
     return off;
 }
 
+static void cp_emit_mov_rdi_rbp(cp_ctx_t *ctx) {
+    static const uint8_t k_mov_rdi_rbp[3] = {0x48, 0x89, 0xEF};
+    if (ctx->pos + sizeof(k_mov_rdi_rbp) > ctx->buflen) {
+        ctx->pos += sizeof(k_mov_rdi_rbp);
+        return;
+    }
+    memcpy(ctx->buf + ctx->pos, k_mov_rdi_rbp, sizeof(k_mov_rdi_rbp));
+    ctx->pos += sizeof(k_mov_rdi_rbp);
+}
+
 /* Map (opcode, is_i32) -> template id, or -1 if unsupported. */
 static int cp_template_for_alu(lr_opcode_t op, bool is_i32) {
     switch (op) {
@@ -328,12 +339,35 @@ int x86_64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
         case LR_OP_SDIV: case LR_OP_SREM:
         case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
             bool is_i32 = inst->type && inst->type->kind == LR_TYPE_I32;
-            int tid = cp_template_for_alu(inst->op, is_i32);
             int32_t src0 = cp_resolve_operand(&ctx, &inst->operands[0]);
             int32_t src1 = cp_resolve_operand(&ctx, &inst->operands[1]);
             int32_t dest = cp_alloc_slot(&ctx, inst->dest);
-            cp_emit(&ctx, &g_templates[tid], src0, src1, dest, 0);
-            break;
+            const lr_stencil_t *st = lr_stencil_lookup_for_ir(inst->op,
+                                                               inst->type ? inst->type->kind
+                                                                          : LR_TYPE_VOID);
+            if (st) {
+                lr_stencil_emit_args_t args = {
+                    .src0_off = src0,
+                    .src1_off = src1,
+                    .dst_off = dest,
+                };
+                uint8_t *code_ptr = ctx.buf + ctx.pos;
+                uint8_t *code_end = ctx.buf + ctx.buflen;
+                cp_emit_mov_rdi_rbp(&ctx);
+                code_ptr = ctx.buf + ctx.pos;
+                if (lr_stencil_emit(&code_ptr, code_end, st, &args, true) == 0) {
+                    ctx.pos = (size_t)(code_ptr - ctx.buf);
+                    break;
+                }
+            }
+
+            {
+                int tid = cp_template_for_alu(inst->op, is_i32);
+                if (tid < 0)
+                    return -1;
+                cp_emit(&ctx, &g_templates[tid], src0, src1, dest, 0);
+                break;
+            }
         }
         default:
             return -1;

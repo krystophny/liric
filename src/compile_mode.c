@@ -15,6 +15,10 @@ int lr_compile_mode_parse(const char *text, lr_compile_mode_t *out_mode) {
         *out_mode = LR_COMPILE_COPY_PATCH;
         return 0;
     }
+    if (strcmp(text, "stencil") == 0) {
+        *out_mode = LR_COMPILE_COPY_PATCH;
+        return 0;
+    }
     if (strcmp(text, "llvm") == 0) {
         *out_mode = LR_COMPILE_LLVM;
         return 0;

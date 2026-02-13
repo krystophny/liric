@@ -253,6 +253,11 @@ int test_stencil_generated_lookup_core_entries(void);
 int test_stencil_generated_lookup_unknown_returns_null(void);
 int test_stencil_gen_deterministic_output(void);
 int test_stencil_gen_missing_input_fails(void);
+int test_stencil_runtime_lookup_known_entries(void);
+int test_stencil_runtime_lookup_unknown_entry_returns_null(void);
+int test_stencil_runtime_emit_patches_all_holes(void);
+int test_stencil_runtime_emit_strip_trailing_ret(void);
+int test_stencil_runtime_emit_rejects_small_buffer(void);
 #endif
 
 int main(void) {
@@ -509,6 +514,13 @@ int main(void) {
     RUN_TEST(test_stencil_generated_lookup_unknown_returns_null);
     RUN_TEST(test_stencil_gen_deterministic_output);
     RUN_TEST(test_stencil_gen_missing_input_fails);
+
+    fprintf(stderr, "\nStencil runtime tests:\n");
+    RUN_TEST(test_stencil_runtime_lookup_known_entries);
+    RUN_TEST(test_stencil_runtime_lookup_unknown_entry_returns_null);
+    RUN_TEST(test_stencil_runtime_emit_patches_all_holes);
+    RUN_TEST(test_stencil_runtime_emit_strip_trailing_ret);
+    RUN_TEST(test_stencil_runtime_emit_rejects_small_buffer);
 #endif
 
     fprintf(stderr, "\n================\n");
