@@ -12,7 +12,7 @@ JIT compiler and native code emitter for LLVM IR and WebAssembly. C11, zero depe
              +------------+--------------+----------------------+
                                          |
                                     lr_module_t
-                                    (SSA IR, 44 ops)
+                                    (SSA IR, 45 ops)
                                          |
                      +-------------------+-------------------+
                      |                   |                   |
