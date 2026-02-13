@@ -81,7 +81,9 @@
 #define OP_I64_SUB      0x7D
 #define OP_I64_MUL      0x7E
 #define OP_I64_DIV_S    0x7F
+#define OP_I64_DIV_U    0x80
 #define OP_I64_REM_S    0x81
+#define OP_I64_REM_U    0x82
 #define OP_I64_AND      0x83
 #define OP_I64_OR       0x84
 #define OP_I64_XOR      0x85
@@ -653,15 +655,20 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
         case OP_I32_ADD: case OP_I64_ADD: emit_binop(ctx, LR_OP_ADD); break;
         case OP_I32_SUB: case OP_I64_SUB: emit_binop(ctx, LR_OP_SUB); break;
         case OP_I32_MUL: case OP_I64_MUL: emit_binop(ctx, LR_OP_MUL); break;
-        case OP_I32_DIV_S: case OP_I64_DIV_S: emit_binop(ctx, LR_OP_SDIV); break;
-        case OP_I32_REM_S: case OP_I64_REM_S: emit_binop(ctx, LR_OP_SREM); break;
+        case OP_I32_DIV_S: case OP_I64_DIV_S:
+        case OP_I32_DIV_U: case OP_I64_DIV_U:
+            emit_binop(ctx, LR_OP_SDIV);
+            break;
+        case OP_I32_REM_S: case OP_I64_REM_S:
+        case OP_I32_REM_U: case OP_I64_REM_U:
+            emit_binop(ctx, LR_OP_SREM);
+            break;
         case OP_I32_AND: case OP_I64_AND: emit_binop(ctx, LR_OP_AND); break;
         case OP_I32_OR:  case OP_I64_OR:  emit_binop(ctx, LR_OP_OR); break;
         case OP_I32_XOR: case OP_I64_XOR: emit_binop(ctx, LR_OP_XOR); break;
         case OP_I32_SHL: case OP_I64_SHL: emit_binop(ctx, LR_OP_SHL); break;
         case OP_I32_SHR_S: case OP_I64_SHR_S: emit_binop(ctx, LR_OP_ASHR); break;
         case OP_I32_SHR_U: case OP_I64_SHR_U: emit_binop(ctx, LR_OP_LSHR); break;
-        case OP_I32_DIV_U: emit_binop(ctx, LR_OP_SDIV); break; /* TODO: UDIV */
 
         case OP_I32_EQ:  case OP_I64_EQ:  emit_cmp(ctx, LR_ICMP_EQ); break;
         case OP_I32_NE:  case OP_I64_NE:  emit_cmp(ctx, LR_ICMP_NE); break;
