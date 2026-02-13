@@ -12,6 +12,7 @@
     } \
 } while (0)
 
+#if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))
 static int has_hole(const lr_stencil_t *st, lr_stencil_hole_t hole) {
     uint8_t i;
     if (!st) {
@@ -24,7 +25,11 @@ static int has_hole(const lr_stencil_t *st, lr_stencil_hole_t hole) {
     }
     return 0;
 }
+#endif
 
+#if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64)) && \
+    defined(LIRIC_STENCIL_GEN_EXE) && defined(LIRIC_STENCIL_SOURCE_DIR) && \
+    defined(LIRIC_STENCIL_CC)
 static int compare_files_equal(const char *a_path, const char *b_path) {
     FILE *a = fopen(a_path, "rb");
     FILE *b = fopen(b_path, "rb");
@@ -47,6 +52,7 @@ static int compare_files_equal(const char *a_path, const char *b_path) {
     fclose(b);
     return eq;
 }
+#endif
 
 int test_stencil_generated_lookup_core_entries(void) {
 #if defined(__linux__) && (defined(__x86_64__) || defined(_M_X64))
