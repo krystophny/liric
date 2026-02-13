@@ -30,6 +30,8 @@ DECL_TEMPLATE(ret_i32);
 DECL_TEMPLATE(ret_void);
 DECL_TEMPLATE(add_i64);
 DECL_TEMPLATE(add_i32);
+DECL_TEMPLATE(add_ret_i64);
+DECL_TEMPLATE(add_ret_i32);
 DECL_TEMPLATE(sub_i64);
 DECL_TEMPLATE(sub_i32);
 DECL_TEMPLATE(and_i64);
@@ -68,6 +70,7 @@ typedef enum {
     CP_PROLOGUE,
     CP_RET_I64, CP_RET_I32, CP_RET_VOID,
     CP_ADD_I64, CP_ADD_I32,
+    CP_ADD_RET_I64, CP_ADD_RET_I32,
     CP_SUB_I64, CP_SUB_I32,
     CP_AND_I64, CP_AND_I32,
     CP_OR_I64,  CP_OR_I32,
@@ -102,6 +105,8 @@ static void ensure_templates(void) {
     INIT_T(CP_RET_VOID,  ret_void);
     INIT_T(CP_ADD_I64,   add_i64);
     INIT_T(CP_ADD_I32,   add_i32);
+    INIT_T(CP_ADD_RET_I64, add_ret_i64);
+    INIT_T(CP_ADD_RET_I32, add_ret_i32);
     INIT_T(CP_SUB_I64,   sub_i64);
     INIT_T(CP_SUB_I32,   sub_i32);
     INIT_T(CP_AND_I64,   and_i64);
@@ -246,6 +251,24 @@ static int cp_template_for_alu(lr_opcode_t op, bool is_i32) {
     }
 }
 
+static int cp_template_for_alu_ret_supernode(const lr_inst_t *inst, const lr_inst_t *next) {
+    lr_type_kind_t k;
+    if (!inst || !next)
+        return -1;
+    if (inst->op != LR_OP_ADD || !inst->type)
+        return -1;
+    if (next->op != LR_OP_RET || next->num_operands < 1 || !next->operands || !next->type)
+        return -1;
+    if (next->operands[0].kind != LR_VAL_VREG || next->operands[0].vreg != inst->dest)
+        return -1;
+    k = inst->type->kind;
+    if (k != LR_TYPE_I32 && k != LR_TYPE_I64)
+        return -1;
+    if (next->type->kind != k)
+        return -1;
+    return (k == LR_TYPE_I32) ? CP_ADD_RET_I32 : CP_ADD_RET_I64;
+}
+
 /* Check if all instructions in a function have C&P templates. */
 static bool cp_function_supported(lr_func_t *func) {
     if (!func || func->num_blocks == 0) return false;
@@ -338,10 +361,20 @@ int x86_64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
         case LR_OP_OR:  case LR_OP_XOR: case LR_OP_MUL:
         case LR_OP_SDIV: case LR_OP_SREM:
         case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
+            int super_tid = -1;
+            lr_inst_t *next_inst = NULL;
             bool is_i32 = inst->type && inst->type->kind == LR_TYPE_I32;
             int32_t src0 = cp_resolve_operand(&ctx, &inst->operands[0]);
             int32_t src1 = cp_resolve_operand(&ctx, &inst->operands[1]);
             int32_t dest = cp_alloc_slot(&ctx, inst->dest);
+            if (ii + 1 < b->num_insts)
+                next_inst = b->inst_array[ii + 1];
+            super_tid = cp_template_for_alu_ret_supernode(inst, next_inst);
+            if (super_tid >= 0) {
+                cp_emit(&ctx, &g_templates[super_tid], src0, src1, 0, 0);
+                ii++;
+                break;
+            }
             const lr_stencil_t *st = lr_stencil_lookup_for_ir(inst->op,
                                                                inst->type ? inst->type->kind
                                                                           : LR_TYPE_VOID);
