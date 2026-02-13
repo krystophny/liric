@@ -1,5 +1,6 @@
 #include "bc_decode.h"
 #include "frontend_common.h"
+#include <liric/liric_session.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -2488,4 +2489,393 @@ cleanup_fail:
 lr_module_t *lr_parse_bc_with_arena(const uint8_t *data, size_t len,
                                     lr_arena_t *arena, char *err, size_t errlen) {
     return lr_parse_bc_streaming(data, len, arena, NULL, NULL, err, errlen);
+}
+
+/* ---- Session streaming: parse BC then replay through session API ------- */
+
+static lr_type_t *bc_map_type_to_session(lr_session_t *session,
+                                          const lr_type_t *src_type) {
+    if (!session || !src_type)
+        return NULL;
+    switch (src_type->kind) {
+    case LR_TYPE_VOID:   return lr_type_void_s(session);
+    case LR_TYPE_I1:     return lr_type_i1_s(session);
+    case LR_TYPE_I8:     return lr_type_i8_s(session);
+    case LR_TYPE_I16:    return lr_type_i16_s(session);
+    case LR_TYPE_I32:    return lr_type_i32_s(session);
+    case LR_TYPE_I64:    return lr_type_i64_s(session);
+    case LR_TYPE_FLOAT:  return lr_type_f32_s(session);
+    case LR_TYPE_DOUBLE: return lr_type_f64_s(session);
+    case LR_TYPE_PTR:    return lr_type_ptr_s(session);
+    case LR_TYPE_ARRAY:
+        return lr_type_array_s(session,
+                               bc_map_type_to_session(session, src_type->array.elem),
+                               src_type->array.count);
+    case LR_TYPE_STRUCT: {
+        lr_type_t **fields = NULL;
+        uint32_t i;
+        if (src_type->struc.num_fields > 0) {
+            fields = (lr_type_t **)calloc(src_type->struc.num_fields,
+                                           sizeof(*fields));
+            if (!fields)
+                return NULL;
+            for (i = 0; i < src_type->struc.num_fields; i++) {
+                fields[i] = bc_map_type_to_session(session,
+                                                    src_type->struc.fields[i]);
+                if (!fields[i]) {
+                    free(fields);
+                    return NULL;
+                }
+            }
+        }
+        {
+            lr_type_t *result = lr_type_struct_s(session, fields,
+                                                  src_type->struc.num_fields,
+                                                  src_type->struc.packed);
+            free(fields);
+            return result;
+        }
+    }
+    case LR_TYPE_FUNC: {
+        lr_type_t *ret = bc_map_type_to_session(session, src_type->func.ret);
+        lr_type_t **params = NULL;
+        uint32_t i;
+        if (!ret)
+            return NULL;
+        if (src_type->func.num_params > 0) {
+            params = (lr_type_t **)calloc(src_type->func.num_params,
+                                           sizeof(*params));
+            if (!params)
+                return NULL;
+            for (i = 0; i < src_type->func.num_params; i++) {
+                params[i] = bc_map_type_to_session(session,
+                                                    src_type->func.params[i]);
+                if (!params[i]) {
+                    free(params);
+                    return NULL;
+                }
+            }
+        }
+        {
+            lr_type_t *result = lr_type_function_s(session, ret, params,
+                                                    src_type->func.num_params,
+                                                    src_type->func.vararg);
+            free(params);
+            return result;
+        }
+    }
+    default:
+        return NULL;
+    }
+}
+
+static lr_operand_desc_t bc_map_operand_to_session(const lr_operand_t *src_op,
+                                                    lr_session_t *session,
+                                                    const lr_module_t *src_mod) {
+    lr_operand_desc_t out;
+    memset(&out, 0, sizeof(out));
+    if (!src_op || !session)
+        return out;
+    out.type = bc_map_type_to_session(session, src_op->type);
+    out.global_offset = src_op->global_offset;
+    switch (src_op->kind) {
+    case LR_VAL_VREG:
+        out.kind = LR_OP_KIND_VREG;
+        out.vreg = src_op->vreg;
+        break;
+    case LR_VAL_IMM_I64:
+        out.kind = LR_OP_KIND_IMM_I64;
+        out.imm_i64 = src_op->imm_i64;
+        break;
+    case LR_VAL_IMM_F64:
+        out.kind = LR_OP_KIND_IMM_F64;
+        out.imm_f64 = src_op->imm_f64;
+        break;
+    case LR_VAL_BLOCK:
+        out.kind = LR_OP_KIND_BLOCK;
+        out.block_id = src_op->block_id;
+        break;
+    case LR_VAL_GLOBAL: {
+        const char *sym_name = lr_module_symbol_name(src_mod, src_op->global_id);
+        out.kind = LR_OP_KIND_GLOBAL;
+        if (sym_name) {
+            uint32_t sid = lr_session_intern(session, sym_name);
+            out.global_id = (sid != UINT32_MAX) ? sid : src_op->global_id;
+        } else {
+            out.global_id = src_op->global_id;
+        }
+        break;
+    }
+    case LR_VAL_NULL:
+        out.kind = LR_OP_KIND_NULL;
+        break;
+    case LR_VAL_UNDEF:
+    default:
+        out.kind = LR_OP_KIND_UNDEF;
+        break;
+    }
+    return out;
+}
+
+static bool bc_opcode_has_dest(lr_opcode_t op, lr_type_t *type) {
+    switch (op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_UNREACHABLE:
+    case LR_OP_STORE:
+        return false;
+    case LR_OP_CALL:
+        return type && type->kind != LR_TYPE_VOID;
+    default:
+        return true;
+    }
+}
+
+static int bc_replay_func_to_session(const lr_module_t *src_mod,
+                                      const lr_func_t *src_func,
+                                      lr_session_t *session,
+                                      char *err, size_t errlen) {
+    lr_type_t **params = NULL;
+    lr_type_t *ret_type = NULL;
+    uint32_t i;
+    const lr_block_t *block;
+    lr_error_t serr = {0};
+    int rc;
+
+    ret_type = bc_map_type_to_session(session, src_func->ret_type);
+    if (!ret_type) {
+        lr_frontend_set_error(err, errlen, "unsupported bc return type");
+        return -1;
+    }
+    if (src_func->num_params > 0) {
+        params = (lr_type_t **)calloc(src_func->num_params, sizeof(*params));
+        if (!params) {
+            lr_frontend_set_error(err, errlen, "param allocation failed");
+            return -1;
+        }
+        for (i = 0; i < src_func->num_params; i++) {
+            params[i] = bc_map_type_to_session(session, src_func->param_types[i]);
+            if (!params[i]) {
+                free(params);
+                lr_frontend_set_error(err, errlen, "unsupported bc param type");
+                return -1;
+            }
+        }
+    }
+
+    rc = lr_session_func_begin(session, src_func->name, ret_type, params,
+                               src_func->num_params, src_func->vararg, &serr);
+    free(params);
+    if (rc != 0) {
+        lr_frontend_set_error(err, errlen, "%s", serr.msg);
+        return -1;
+    }
+
+    for (i = 0; i < src_func->num_blocks; i++) {
+        uint32_t block_id = lr_session_block(session);
+        if (block_id != i) {
+            lr_frontend_set_error(err, errlen,
+                                  "session block allocation mismatch");
+            return -1;
+        }
+    }
+
+    for (block = src_func->first_block; block; block = block->next) {
+        const lr_inst_t *inst;
+        rc = lr_session_set_block(session, block->id, &serr);
+        if (rc != 0) {
+            lr_frontend_set_error(err, errlen, "%s", serr.msg);
+            return -1;
+        }
+
+        for (inst = block->first; inst; inst = inst->next) {
+            lr_inst_desc_t desc;
+            lr_operand_desc_t *ops = NULL;
+            lr_error_t emit_err = {0};
+            uint32_t emit_dest;
+
+            memset(&desc, 0, sizeof(desc));
+            desc.op = inst->op;
+            desc.type = bc_map_type_to_session(session, inst->type);
+            desc.dest = inst->dest;
+            desc.num_operands = inst->num_operands;
+            desc.num_indices = inst->num_indices;
+            desc.indices = inst->indices;
+            desc.icmp_pred = inst->icmp_pred;
+            desc.fcmp_pred = inst->fcmp_pred;
+            desc.call_external_abi = inst->call_external_abi;
+            desc.call_vararg = inst->call_vararg;
+            desc.call_fixed_args = inst->call_fixed_args;
+
+            if (desc.num_operands > 0) {
+                uint32_t j;
+                ops = (lr_operand_desc_t *)calloc(desc.num_operands,
+                                                   sizeof(*ops));
+                if (!ops) {
+                    lr_frontend_set_error(err, errlen,
+                                          "operand allocation failed");
+                    return -1;
+                }
+                for (j = 0; j < desc.num_operands; j++) {
+                    ops[j] = bc_map_operand_to_session(&inst->operands[j],
+                                                        session, src_mod);
+                }
+                desc.operands = ops;
+            }
+
+            emit_dest = lr_session_emit(session, &desc, &emit_err);
+            free(ops);
+            if (emit_err.code != LR_OK) {
+                lr_frontend_set_error(err, errlen, "%s", emit_err.msg);
+                return -1;
+            }
+            if (bc_opcode_has_dest(desc.op, desc.type) &&
+                desc.dest != 0 && emit_dest != desc.dest) {
+                lr_frontend_set_error(err, errlen, "vreg replay mismatch");
+                return -1;
+            }
+        }
+    }
+
+    rc = lr_session_func_end(session, NULL, &serr);
+    if (rc != 0) {
+        lr_frontend_set_error(err, errlen, "%s", serr.msg);
+        return -1;
+    }
+    return 0;
+}
+
+int lr_parse_bc_to_session(const uint8_t *data, size_t len,
+                           lr_session_t *session,
+                           char *err, size_t errlen) {
+    lr_arena_t *tmp_arena = NULL;
+    lr_module_t *tmp_mod = NULL;
+    lr_func_t *func;
+    char parse_err[256] = {0};
+    lr_error_t serr = {0};
+
+    if (!data || len == 0 || !session) {
+        lr_frontend_set_error(err, errlen,
+                              "invalid bc session streaming arguments");
+        return -1;
+    }
+    if (err && errlen > 0)
+        err[0] = '\0';
+
+    tmp_arena = lr_arena_create(0);
+    if (!tmp_arena) {
+        lr_frontend_set_error(err, errlen, "arena allocation failed");
+        return -1;
+    }
+
+    tmp_mod = lr_parse_bc_streaming(data, len, tmp_arena, NULL, NULL,
+                                    parse_err, sizeof(parse_err));
+    if (!tmp_mod) {
+        lr_arena_destroy(tmp_arena);
+        lr_frontend_set_error(err, errlen, "%s",
+                              parse_err[0] ? parse_err
+                                           : "bc parse failed");
+        return -1;
+    }
+
+    /* Intern all symbols from the source module into the session. */
+    for (func = tmp_mod->first_func; func; func = func->next) {
+        if (func->name)
+            lr_session_intern(session, func->name);
+    }
+
+    /* Replay globals into the session module. */
+    {
+        lr_module_t *smod = lr_session_module(session);
+        lr_global_t *g;
+        for (g = tmp_mod->first_global; g; g = g->next) {
+            if (g->is_external) {
+                lr_session_global_extern(session, g->name,
+                                          bc_map_type_to_session(session, g->type));
+            } else {
+                uint32_t gid = lr_session_global(
+                    session, g->name,
+                    bc_map_type_to_session(session, g->type),
+                    g->is_const, g->init_data, g->init_size);
+                if (g->relocs) {
+                    lr_reloc_t *r;
+                    for (r = g->relocs; r; r = r->next) {
+                        lr_session_global_reloc(session, gid, r->offset,
+                                                r->symbol_name);
+                    }
+                }
+            }
+        }
+        (void)smod;
+    }
+
+    /* Replay functions: declarations first, then definitions. */
+    for (func = tmp_mod->first_func; func; func = func->next) {
+        if (!func->is_decl)
+            continue;
+        {
+            lr_type_t **params = NULL;
+            lr_type_t *ret_type = bc_map_type_to_session(session,
+                                                          func->ret_type);
+            uint32_t i;
+            int rc;
+
+            if (!ret_type) {
+                lr_arena_destroy(tmp_arena);
+                lr_frontend_set_error(err, errlen,
+                                      "unsupported bc return type in decl");
+                return -1;
+            }
+            if (func->num_params > 0) {
+                params = (lr_type_t **)calloc(func->num_params,
+                                               sizeof(*params));
+                if (!params) {
+                    lr_arena_destroy(tmp_arena);
+                    lr_frontend_set_error(err, errlen,
+                                          "param allocation failed");
+                    return -1;
+                }
+                for (i = 0; i < func->num_params; i++) {
+                    params[i] = bc_map_type_to_session(session,
+                                                        func->param_types[i]);
+                    if (!params[i]) {
+                        free(params);
+                        lr_arena_destroy(tmp_arena);
+                        lr_frontend_set_error(err, errlen,
+                                              "unsupported bc param type");
+                        return -1;
+                    }
+                }
+            }
+            rc = lr_session_declare(session, func->name, ret_type, params,
+                                    func->num_params, func->vararg, &serr);
+            free(params);
+            if (rc != 0) {
+                lr_arena_destroy(tmp_arena);
+                lr_frontend_set_error(err, errlen, "%s", serr.msg);
+                return -1;
+            }
+        }
+    }
+
+    for (func = tmp_mod->first_func; func; func = func->next) {
+        if (func->is_decl)
+            continue;
+        if (lr_func_finalize(func, tmp_arena) != 0) {
+            lr_arena_destroy(tmp_arena);
+            lr_frontend_set_error(err, errlen,
+                                  "bc function finalization failed");
+            return -1;
+        }
+        if (bc_replay_func_to_session(tmp_mod, func, session,
+                                       err, errlen) != 0) {
+            lr_arena_destroy(tmp_arena);
+            return -1;
+        }
+    }
+
+    lr_arena_destroy(tmp_arena);
+    return 0;
 }
