@@ -315,18 +315,20 @@ int test_objfile_elf_call_relocation(void) {
 #if defined(__aarch64__)
         (void)r_type;
 #else
-        if (r_type == 4) { /* R_X86_64_PLT32 */
+        /* Streaming ISel emits indirect calls via R10 with a
+           GOTPCRELX relocation (type 41) for external symbols. */
+        if (r_type == 41) { /* R_X86_64_GOTPCRELX */
             found_expected_reloc = true;
             int64_t r_addend = 0;
             memcpy(&r_addend, rela + 16, 8);
-            TEST_ASSERT_EQ(r_addend, -4, "PLT32 addend = -4");
+            TEST_ASSERT_EQ(r_addend, -4, "GOTPCRELX addend = -4");
         }
 #endif
     }
 #if defined(__aarch64__)
     (void)found_expected_reloc;
 #else
-    TEST_ASSERT(found_expected_reloc, "found R_X86_64_PLT32 relocation");
+    TEST_ASSERT(found_expected_reloc, "found R_X86_64_GOTPCRELX relocation");
 #endif
     TEST_ASSERT(found_external_func_reloc, "relocation targets external_func");
 

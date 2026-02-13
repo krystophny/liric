@@ -49,11 +49,6 @@ typedef struct {
     uint32_t sym_count;
     uint32_t x9_holds_vreg;
     uint32_t x10_holds_vreg;
-    uint32_t *vreg_use_counts;
-    uint32_t num_vreg_use_counts;
-    lr_block_t *current_block;
-    lr_inst_t *current_inst;
-    uint32_t current_inst_index;
 } a64_compile_ctx_t;
 
 static void invalidate_cached_reg_a64(a64_compile_ctx_t *ctx, uint8_t reg) {
@@ -79,79 +74,6 @@ static void set_cached_reg_vreg_a64(a64_compile_ctx_t *ctx, uint8_t reg, uint32_
     if (!ctx) return;
     if (reg == A64_X9) ctx->x9_holds_vreg = vreg;
     if (reg == A64_X10) ctx->x10_holds_vreg = vreg;
-}
-
-static bool inst_produces_elidable_x9_value(const lr_inst_t *inst) {
-    if (!inst)
-        return false;
-    switch (inst->op) {
-    case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
-    case LR_OP_OR: case LR_OP_XOR:
-    case LR_OP_MUL:
-    case LR_OP_SDIV:
-    case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR:
-    case LR_OP_ICMP:
-    case LR_OP_SELECT:
-    case LR_OP_ALLOCA:
-    case LR_OP_LOAD:
-    case LR_OP_GEP:
-    case LR_OP_SEXT:
-    case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
-    case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
-    case LR_OP_FCMP:
-    case LR_OP_FPTOSI:
-    case LR_OP_EXTRACTVALUE:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool inst_consumes_operand0_in_x9(const lr_inst_t *inst) {
-    if (!inst || inst->num_operands == 0)
-        return false;
-    switch (inst->op) {
-    case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
-    case LR_OP_OR: case LR_OP_XOR:
-    case LR_OP_MUL:
-    case LR_OP_SDIV: case LR_OP_SREM:
-    case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR:
-    case LR_OP_ICMP:
-    case LR_OP_SELECT:
-    case LR_OP_ALLOCA:
-    case LR_OP_LOAD:
-    case LR_OP_GEP:
-    case LR_OP_SEXT:
-    case LR_OP_ZEXT: case LR_OP_TRUNC: case LR_OP_BITCAST:
-    case LR_OP_PTRTOINT: case LR_OP_INTTOPTR:
-    case LR_OP_SITOFP:
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool should_elide_store_slot(const a64_compile_ctx_t *ctx,
-                                    uint32_t vreg, uint8_t reg) {
-    if (!ctx || reg != A64_X9 || !ctx->current_block || !ctx->current_inst)
-        return false;
-    if (!inst_produces_elidable_x9_value(ctx->current_inst))
-        return false;
-    if (ctx->current_inst->dest != vreg)
-        return false;
-    if (!ctx->vreg_use_counts || vreg >= ctx->num_vreg_use_counts)
-        return false;
-    if (ctx->vreg_use_counts[vreg] != 1)
-        return false;
-    if (ctx->current_inst_index + 1 >= ctx->current_block->num_insts)
-        return false;
-
-    lr_inst_t *next = ctx->current_block->inst_array[ctx->current_inst_index + 1];
-    if (!inst_consumes_operand0_in_x9(next))
-        return false;
-    if (next->operands[0].kind != LR_VAL_VREG || next->operands[0].vreg != vreg)
-        return false;
-    return true;
 }
 
 static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, size_t size) {
@@ -506,10 +428,6 @@ static void emit_load_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
 }
 
 static void emit_store_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
-    if (should_elide_store_slot(ctx, vreg, reg)) {
-        set_cached_reg_vreg_a64(ctx, reg, vreg);
-        return;
-    }
     int32_t off = alloc_slot(ctx, vreg, 8);
     emit_store(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, off, 8);
     set_cached_reg_vreg_a64(ctx, reg, vreg);
@@ -525,56 +443,6 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
             return true;
     }
     return false;
-}
-
-#if defined(__APPLE__)
-static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
-    if (!mod || !name)
-        return NULL;
-    for (lr_func_t *f = mod->first_func; f; f = f->next) {
-        if (f->name && strcmp(f->name, name) == 0)
-            return f;
-    }
-    return NULL;
-}
-
-static uint32_t call_fixed_arg_count(const a64_compile_ctx_t *ctx,
-                                     const lr_inst_t *inst,
-                                     uint32_t nargs) {
-    uint32_t fixed = 0;
-
-    if (!inst)
-        return 0;
-    fixed = inst->call_fixed_args;
-    if (fixed > nargs)
-        fixed = nargs;
-    if (fixed != 0)
-        return fixed;
-
-    if (!ctx || !ctx->mod || !inst->call_vararg || inst->num_operands == 0)
-        return fixed;
-    if (inst->operands[0].kind != LR_VAL_GLOBAL)
-        return fixed;
-
-    {
-        const char *sym_name = lr_module_symbol_name(ctx->mod,
-                                                     inst->operands[0].global_id);
-        lr_func_t *callee = find_module_function(ctx->mod, sym_name);
-        if (callee && callee->vararg)
-            fixed = callee->num_params;
-    }
-
-    if (fixed > nargs)
-        fixed = nargs;
-    return fixed;
-}
-#endif
-
-static void attach_obj_symbol_defined_cache(a64_compile_ctx_t *ctx) {
-    if (!ctx || !ctx->obj_ctx)
-        return;
-    ctx->sym_defined = ctx->obj_ctx->module_sym_defined;
-    ctx->sym_count = ctx->obj_ctx->module_sym_count;
 }
 
 static uint8_t int_type_width_bits(const lr_type_t *type) {
@@ -772,13 +640,6 @@ static void emit_jcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint32_t target_blo
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x54000000u);
 }
 
-static void emit_phi_copies(a64_compile_ctx_t *ctx, const lr_block_phi_copies_t *copies) {
-    for (uint32_t i = 0; i < copies->count; i++) {
-        emit_load_operand(ctx, &copies->copies[i].src_op, A64_X9);
-        emit_store_slot(ctx, copies->copies[i].dest_vreg, A64_X9);
-    }
-}
-
 static void emit_mem_copy_base_to_base(a64_compile_ctx_t *ctx,
                                        uint8_t dst_base, int32_t dst_disp,
                                        uint8_t src_base, int32_t src_disp,
@@ -840,16 +701,6 @@ static void emit_mem_zero_base(a64_compile_ctx_t *ctx, uint8_t dst_base,
     }
 }
 
-static bool aggregate_path_from_inst(const lr_inst_t *inst, const lr_type_t *agg_ty,
-                                     size_t *field_off_out,
-                                     const lr_type_t **field_ty_out) {
-    if (!inst || !agg_ty) {
-        return false;
-    }
-    return lr_aggregate_index_path(agg_ty, inst->indices, inst->num_indices,
-                                   field_off_out, field_ty_out);
-}
-
 static void emit_load_vreg_mem_sized(a64_compile_ctx_t *ctx, uint32_t src_vreg,
                                      int32_t add_off, uint8_t reg, uint8_t size) {
     int32_t src_off = alloc_slot(ctx, src_vreg, 8) + add_off;
@@ -866,33 +717,6 @@ static void emit_signext_index_reg(a64_compile_ctx_t *ctx, uint8_t reg,
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, insn);
 }
 
-static int32_t ensure_static_alloca_offset(a64_compile_ctx_t *ctx, const lr_inst_t *inst) {
-    int32_t off = lr_target_lookup_static_alloca_offset(ctx->static_alloca_offsets,
-                                                        ctx->num_static_alloca_offsets,
-                                                        inst->dest);
-    if (off != 0)
-        return off;
-
-    ctx->stack_size += (uint32_t)lr_target_alloca_elem_size(inst, 8);
-    ctx->stack_size = (ctx->stack_size + 7u) & ~7u;
-    {
-        int32_t new_off = -(int32_t)ctx->stack_size;
-        lr_target_set_static_alloca_offset(ctx->arena,
-                                           &ctx->static_alloca_offsets,
-                                           &ctx->num_static_alloca_offsets,
-                                           inst->dest,
-                                           new_off);
-        return new_off;
-    }
-}
-
-static int32_t ensure_static_alloca_offset_cb(void *ctx, const lr_inst_t *inst) {
-    return ensure_static_alloca_offset((a64_compile_ctx_t *)ctx, inst);
-}
-
-static void reserve_phi_dest_slot_cb(void *ctx, uint32_t dest_vreg) {
-    (void)alloc_slot((a64_compile_ctx_t *)ctx, dest_vreg, 8);
-}
 
 static size_t emit_prologue_a64(a64_compile_ctx_t *ctx) {
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0xA9BF7BFDu); /* stp x29, x30, [sp, #-16]! */
@@ -914,796 +738,6 @@ static void patch_prologue_stack_adjust(a64_compile_ctx_t *ctx, size_t imm_pos,
               enc_movz(true, A64_X15, (uint16_t)(frame_stack_size & 0xFFFFu), 0));
     patch_u32(ctx->buf, ctx->buflen, imm_pos + 4,
               enc_movk(true, A64_X15, (uint16_t)((frame_stack_size >> 16) & 0xFFFFu), 1));
-}
-
-/*
- * aarch64_compile_func: single-pass ISel + encoding.
- * Replaces the old two-phase isel_func + encode_func approach.
- */
-static int aarch64_compile_func(lr_func_t *func, lr_module_t *mod,
-                                uint8_t *buf, size_t buflen, size_t *out_len,
-                                lr_arena_t *arena) {
-    lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
-    lr_target_func_analysis_t analysis;
-
-    uint32_t nb = func->num_blocks > 0 ? func->num_blocks : 1;
-    uint32_t fc = nb * 2;
-    a64_compile_ctx_t ctx = {
-        .buf = buf,
-        .buflen = buflen,
-        .pos = 0,
-        .stack_size = 0,
-        .stack_slots = NULL,
-        .stack_slot_sizes = NULL,
-        .num_stack_slots = 0,
-        .static_alloca_offsets = NULL,
-        .num_static_alloca_offsets = 0,
-        .block_offsets = lr_arena_array_uninit(arena, size_t, nb),
-        .num_block_offsets = nb,
-        .fixups = lr_arena_array_uninit(arena, a64_fixup_t, fc),
-        .num_fixups = 0,
-        .fixup_cap = fc,
-        .arena = arena,
-        .obj_ctx = mod ? (lr_objfile_ctx_t *)mod->obj_ctx : NULL,
-        .mod = mod,
-        .sym_defined = NULL,
-        .sym_count = 0,
-        .x9_holds_vreg = UINT32_MAX,
-        .x10_holds_vreg = UINT32_MAX,
-        .vreg_use_counts = NULL,
-        .num_vreg_use_counts = 0,
-        .current_block = NULL,
-        .current_inst = NULL,
-        .current_inst_index = 0,
-    };
-
-    attach_obj_symbol_defined_cache(&ctx);
-
-    lr_block_phi_copies_t *phi_copies = lr_build_phi_copies(ctx.arena, func);
-    if (!phi_copies)
-        return -1;
-    if (lr_target_analyze_function(func, layout_arena, phi_copies,
-                                   &ctx, ensure_static_alloca_offset_cb,
-                                   &ctx, reserve_phi_dest_slot_cb,
-                                   &analysis) != 0)
-        return -1;
-    ctx.vreg_use_counts = analysis.vreg_use_counts;
-    ctx.num_vreg_use_counts = analysis.num_vregs;
-
-    size_t prologue_stack_patch_pos = emit_prologue_a64(&ctx);
-
-    /* Store parameters: first 8 from registers, rest from caller frame */
-    static const uint8_t param_regs[] = {
-        A64_X0, A64_X1, A64_X2, A64_X3, A64_X4, A64_X5, A64_X6, A64_X7
-    };
-    for (uint32_t i = 0; i < func->num_params && i < 8; i++)
-        emit_store_slot(&ctx, func->param_vregs[i], param_regs[i]);
-    for (uint32_t i = 8; i < func->num_params; i++) {
-        int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
-        emit_load(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP, caller_off, 8);
-        emit_store_slot(&ctx, func->param_vregs[i], A64_X9);
-    }
-
-    /* Walk IR blocks and instructions, emitting code directly */
-    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-        lr_block_t *b = func->block_array[bi];
-        ctx.block_offsets[bi] = ctx.pos;
-        invalidate_cached_gprs_a64(&ctx);
-
-        for (uint32_t ii = 0; ii < b->num_insts; ii++) {
-            lr_inst_t *inst = b->inst_array[ii];
-            ctx.current_block = b;
-            ctx.current_inst = inst;
-            ctx.current_inst_index = ii;
-            switch (inst->op) {
-            case LR_OP_RET: {
-                emit_phi_copies(&ctx, &phi_copies[bi]);
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_mov_reg(ctx.buf, &ctx.pos, ctx.buflen, A64_X0, A64_X9, true);
-                emit_epilogue_a64(&ctx);
-                break;
-            }
-            case LR_OP_RET_VOID: {
-                emit_phi_copies(&ctx, &phi_copies[bi]);
-                emit_epilogue_a64(&ctx);
-                break;
-            }
-            case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
-            case LR_OP_OR: case LR_OP_XOR: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                bool is64 = lr_type_size(inst->type) > 4;
-                switch (inst->op) {
-                case LR_OP_ADD:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_add_reg(is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                case LR_OP_SUB:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_sub_reg(is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                case LR_OP_AND:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_logic_reg(0x8A000000u, is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                case LR_OP_OR:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_logic_reg(0xAA000000u, is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                case LR_OP_XOR:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_logic_reg(0xCA000000u, is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                default: break;
-                }
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_MUL: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                bool is64 = lr_type_size(inst->type) > 4;
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_mul(is64, A64_X9, A64_X9, A64_X10));
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_FADD: case LR_OP_FSUB:
-            case LR_OP_FMUL: case LR_OP_FDIV: {
-                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
-                emit_load_fp_operand(&ctx, &inst->operands[1], FP_SCRATCH1, fsize);
-                switch (inst->op) {
-                case LR_OP_FADD:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_fadd(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
-                    break;
-                case LR_OP_FSUB:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_fsub(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
-                    break;
-                case LR_OP_FMUL:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_fmul(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
-                    break;
-                case LR_OP_FDIV:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_fdiv(fsize, FP_SCRATCH0, FP_SCRATCH0, FP_SCRATCH1));
-                    break;
-                default: break;
-                }
-                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
-                break;
-            }
-            case LR_OP_FNEG: {
-                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_fneg(fsize, FP_SCRATCH0, FP_SCRATCH0));
-                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
-                break;
-            }
-            case LR_OP_SDIV: case LR_OP_SREM: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                bool is64 = lr_type_size(inst->type) > 4;
-                emit_mov_reg(ctx.buf, &ctx.pos, ctx.buflen, A64_X11, A64_X9, is64);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_sdiv(is64, A64_X9, A64_X9, A64_X10));
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_msub(is64, A64_X11, A64_X9, A64_X10, A64_X11));
-                invalidate_cached_reg_a64(&ctx, A64_X9);
-                if (inst->op == LR_OP_SREM)
-                    emit_store_slot(&ctx, inst->dest, A64_X11);
-                else
-                    emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                bool is64 = lr_type_size(inst->type) > 4;
-                switch (inst->op) {
-                case LR_OP_SHL:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lslv(is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                case LR_OP_LSHR:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lsrv(is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                case LR_OP_ASHR:
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_asrv(is64, A64_X9, A64_X9, A64_X10));
-                    break;
-                default: break;
-                }
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_ICMP: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                bool is64 = lr_type_size(inst->operands[0].type) > 4;
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_subs_reg(is64, A64_X9, A64_X10));
-
-                uint8_t cc = lr_target_cc_from_icmp(inst->icmp_pred);
-
-                emit_setcc_a64(&ctx, cc, A64_X9);
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SELECT: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_ands_reg(false, A64_X9, A64_X9));
-                emit_load_operand(&ctx, &inst->operands[2], A64_X9);  /* false value */
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10); /* true value */
-                uint8_t cond = lr_cc_to_a64(LR_CC_NE);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_csel(true, A64_X9, A64_X10, A64_X9, cond));
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_BR: {
-                emit_phi_copies(&ctx, &phi_copies[bi]);
-                emit_jmp_a64(&ctx, inst->operands[0].block_id);
-                break;
-            }
-            case LR_OP_CONDBR: {
-                emit_phi_copies(&ctx, &phi_copies[bi]);
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_ands_reg(false, A64_X9, A64_X9));
-                emit_jcc_a64(&ctx, LR_CC_NE, inst->operands[1].block_id);
-                emit_jmp_a64(&ctx, inst->operands[2].block_id);
-                break;
-            }
-            case LR_OP_ALLOCA: {
-                size_t elem_sz = lr_target_alloca_elem_size(inst, 8);
-
-                bool use_static = lr_target_alloca_uses_static_storage(inst);
-
-                if (use_static) {
-                    int32_t off = ensure_static_alloca_offset(&ctx, inst);
-                    emit_addr(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP, off);
-                    emit_store_slot(&ctx, inst->dest, A64_X9);
-                } else {
-                    emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                    if (elem_sz != 1) {
-                        emit_move_imm_ctx(&ctx, A64_X10, (int64_t)elem_sz, true);
-                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                 enc_mul(true, A64_X9, A64_X9, A64_X10));
-                    }
-                    /* Align to 16: X9 = (X9 + 15) & ~15 */
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_add_imm(true, A64_X9, A64_X9, 15));
-                    emit_move_imm_ctx(&ctx, A64_X10, ~15LL, true);
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_logic_reg(0x8A000000u, true, A64_X9, A64_X9, A64_X10));
-                    /* sub sp, sp, X9 */
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_add_imm(true, A64_X14, A64_SP, 0));
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_sub_reg(true, A64_X14, A64_X14, A64_X9));
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_add_imm(true, A64_SP, A64_X14, 0));
-                    /* x9 now holds alloca result pointer */
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_add_imm(true, A64_X9, A64_SP, 0));
-                    emit_store_slot(&ctx, inst->dest, A64_X9);
-                }
-                break;
-            }
-            case LR_OP_LOAD: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                size_t load_sz = lr_type_size(inst->type);
-                if (load_sz == 0)
-                    load_sz = 8;
-                if (load_sz > 8) {
-                    int32_t dst_off = alloc_slot(&ctx, inst->dest, load_sz);
-                    emit_mem_copy_base_to_base(&ctx, A64_FP, dst_off, A64_X9, 0, load_sz);
-                } else {
-                    emit_load(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X9, 0, (uint8_t)load_sz);
-                    emit_store_slot(&ctx, inst->dest, A64_X9);
-                }
-                break;
-            }
-            case LR_OP_STORE: {
-                emit_load_operand(&ctx, &inst->operands[1], A64_X10);
-                size_t store_sz = lr_type_size(inst->operands[0].type);
-                if (store_sz == 0)
-                    store_sz = 8;
-                if (store_sz > 8) {
-                    if (inst->operands[0].kind == LR_VAL_IMM_I64 &&
-                        inst->operands[0].imm_i64 == 0) {
-                        emit_mem_zero_base(&ctx, A64_X10, 0, store_sz);
-                        break;
-                    }
-                    if (inst->operands[0].kind == LR_VAL_VREG &&
-                        inst->operands[0].vreg < ctx.num_stack_slots &&
-                        ctx.stack_slot_sizes[inst->operands[0].vreg] > 0) {
-                        uint32_t vreg = inst->operands[0].vreg;
-                        int32_t src_off = alloc_slot(&ctx, vreg, 8);
-                        size_t src_sz = ctx.stack_slot_sizes[vreg];
-                        if (src_sz > store_sz)
-                            src_sz = store_sz;
-                        if (src_sz > 0) {
-                            emit_mem_copy_base_to_base(&ctx, A64_X10, 0, A64_FP, src_off, src_sz);
-                        }
-                        if (src_sz < store_sz) {
-                            emit_mem_zero_base(&ctx, A64_X10, (int32_t)src_sz, store_sz - src_sz);
-                        }
-                        break;
-                    }
-                    emit_mem_zero_base(&ctx, A64_X10, 0, store_sz);
-                    break;
-                }
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_X10, 0, (uint8_t)store_sz);
-                break;
-            }
-            case LR_OP_GEP: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                const lr_type_t *cur_ty = inst->type;
-                for (uint32_t idx = 1; idx < inst->num_operands; idx++) {
-                    const lr_operand_t *idx_op = &inst->operands[idx];
-                    lr_gep_step_t step;
-                    if (!lr_gep_analyze_step(cur_ty, idx == 1, idx_op, &step)) {
-                        continue;
-                    }
-                    cur_ty = step.next_type;
-                    if (step.is_const) {
-                        if (step.const_byte_offset == 0)
-                            continue;
-                        emit_move_imm_ctx(&ctx, A64_X10, step.const_byte_offset, true);
-                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                 enc_add_reg(true, A64_X9, A64_X9, A64_X10));
-                        continue;
-                    }
-
-                    emit_load_operand(&ctx, idx_op, A64_X10);
-                    emit_signext_index_reg(&ctx, A64_X10, step.runtime_signext_bytes);
-                    if (step.runtime_elem_size != 1) {
-                        emit_move_imm_ctx(&ctx, A64_X11, (int64_t)step.runtime_elem_size, true);
-                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                                 enc_mul(true, A64_X10, A64_X10, A64_X11));
-                    }
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_add_reg(true, A64_X9, A64_X9, A64_X10));
-                }
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SEXT: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                uint8_t src_bits = int_type_width_bits(inst->operands[0].type);
-                if (src_bits > 0 && src_bits < 64) {
-                    uint8_t shift = (uint8_t)(64 - src_bits);
-                    emit_move_imm_ctx(&ctx, A64_X10, (int64_t)shift, true);
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lslv(true, A64_X9, A64_X9, A64_X10));
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_asrv(true, A64_X9, A64_X9, A64_X10));
-                }
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_ZEXT: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                uint8_t src_bits = int_type_width_bits(inst->operands[0].type);
-                if (src_bits > 0 && src_bits < 64) {
-                    uint8_t shift = (uint8_t)(64 - src_bits);
-                    emit_move_imm_ctx(&ctx, A64_X10, (int64_t)shift, true);
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lslv(true, A64_X9, A64_X9, A64_X10));
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lsrv(true, A64_X9, A64_X9, A64_X10));
-                }
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_TRUNC: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                uint8_t dst_bits = int_type_width_bits(inst->type);
-                if (dst_bits > 0 && dst_bits < 64) {
-                    uint8_t shift = (uint8_t)(64 - dst_bits);
-                    emit_move_imm_ctx(&ctx, A64_X10, (int64_t)shift, true);
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lslv(true, A64_X9, A64_X9, A64_X10));
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             enc_lsrv(true, A64_X9, A64_X9, A64_X10));
-                }
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_BITCAST:
-            case LR_OP_PTRTOINT:
-            case LR_OP_INTTOPTR: {
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_FCMP: {
-                uint8_t fsize = (inst->operands[0].type &&
-                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
-                emit_load_fp_operand(&ctx, &inst->operands[1], FP_SCRATCH1, fsize);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_fcmp(fsize, FP_SCRATCH0, FP_SCRATCH1));
-
-                uint8_t cc = lr_target_cc_from_fcmp(inst->fcmp_pred);
-
-                emit_setcc_a64(&ctx, cc, A64_X9);
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_SITOFP: {
-                uint8_t fsize = (inst->type && inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                size_t src_sz = lr_type_size(inst->operands[0].type);
-                if (src_sz <= 4) {
-                    /* sxtw x9, w9 — sign-extend 32-bit to 64-bit */
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             0x93407C00u | ((uint32_t)A64_X9 << 5) | A64_X9);
-                }
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_scvtf(fsize, FP_SCRATCH0, A64_X9));
-                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, fsize);
-                break;
-            }
-            case LR_OP_FPTOSI: {
-                uint8_t fsize = (inst->operands[0].type &&
-                                 inst->operands[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, fsize);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_fcvtzs(fsize, A64_X9, FP_SCRATCH0));
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_FPEXT: {
-                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, 4);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_fcvt_f32_to_f64(FP_SCRATCH0, FP_SCRATCH0));
-                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, 8);
-                break;
-            }
-            case LR_OP_FPTRUNC: {
-                emit_load_fp_operand(&ctx, &inst->operands[0], FP_SCRATCH0, 8);
-                emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                         enc_fcvt_f64_to_f32(FP_SCRATCH0, FP_SCRATCH0));
-                emit_store_fp_slot(&ctx, inst->dest, FP_SCRATCH0, 4);
-                break;
-            }
-            case LR_OP_EXTRACTVALUE: {
-                size_t field_off = 0;
-                const lr_type_t *field_ty = NULL;
-                size_t field_sz = 8;
-                bool have_path = false;
-
-                if (inst->num_operands > 0 && inst->operands[0].type) {
-                    have_path = aggregate_path_from_inst(inst, inst->operands[0].type,
-                                                         &field_off, &field_ty);
-                }
-                if (field_ty) {
-                    field_sz = lr_type_size(field_ty);
-                }
-                if (field_sz == 0) {
-                    field_sz = 8;
-                }
-
-                if (have_path && inst->num_operands > 0 &&
-                    inst->operands[0].kind == LR_VAL_VREG) {
-                    if (field_sz > 8) {
-                        int32_t dst_off = alloc_slot(&ctx, inst->dest, field_sz);
-                        int32_t src_off = alloc_slot(&ctx, inst->operands[0].vreg, 8) +
-                                          (int32_t)field_off;
-                        emit_mem_copy_base_to_base(&ctx, A64_FP, dst_off, A64_FP,
-                                                   src_off, field_sz);
-                    } else {
-                        emit_load_vreg_mem_sized(&ctx, inst->operands[0].vreg,
-                                                 (int32_t)field_off, A64_X9,
-                                                 (uint8_t)field_sz);
-                        emit_store_slot(&ctx, inst->dest, A64_X9);
-                    }
-                    break;
-                }
-
-                if (inst->num_operands > 0 &&
-                    (inst->operands[0].kind == LR_VAL_UNDEF ||
-                     inst->operands[0].kind == LR_VAL_NULL)) {
-                    if (field_sz > 8) {
-                        int32_t dst_off = alloc_slot(&ctx, inst->dest, field_sz);
-                        emit_mem_zero_base(&ctx, A64_FP, dst_off, field_sz);
-                    } else {
-                        emit_move_imm_ctx(&ctx, A64_X9, 0, true);
-                        emit_store_slot(&ctx, inst->dest, A64_X9);
-                    }
-                    break;
-                }
-
-                emit_load_operand(&ctx, &inst->operands[0], A64_X9);
-                emit_store_slot(&ctx, inst->dest, A64_X9);
-                break;
-            }
-            case LR_OP_INSERTVALUE: {
-                size_t agg_sz = inst->type ? lr_type_size(inst->type) : 8;
-                size_t field_off = 0;
-                const lr_type_t *field_ty = NULL;
-                int32_t dst_off;
-
-                if (agg_sz < 8) {
-                    agg_sz = 8;
-                }
-                dst_off = alloc_slot(&ctx, inst->dest, agg_sz);
-
-                if (inst->num_operands > 0) {
-                    const lr_operand_t *agg = &inst->operands[0];
-                    if (agg->kind == LR_VAL_VREG) {
-                        size_t src_sz = 0;
-                        int32_t src_off = alloc_slot(&ctx, agg->vreg, 8);
-                        if (agg->vreg < ctx.num_stack_slots) {
-                            src_sz = ctx.stack_slot_sizes[agg->vreg];
-                        }
-                        if (src_sz > agg_sz) {
-                            src_sz = agg_sz;
-                        }
-                        if (src_sz > 0) {
-                            emit_mem_copy_base_to_base(&ctx, A64_FP, dst_off, A64_FP,
-                                                       src_off, src_sz);
-                        }
-                        if (src_sz < agg_sz) {
-                            emit_mem_zero_base(&ctx, A64_FP,
-                                               dst_off + (int32_t)src_sz,
-                                               agg_sz - src_sz);
-                        }
-                    } else if (agg->kind == LR_VAL_UNDEF || agg->kind == LR_VAL_NULL) {
-                        emit_mem_zero_base(&ctx, A64_FP, dst_off, agg_sz);
-                    } else if (agg_sz <= 8) {
-                        emit_load_operand(&ctx, agg, A64_X9);
-                        emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9,
-                                   A64_FP, dst_off, (uint8_t)agg_sz);
-                    } else {
-                        emit_mem_zero_base(&ctx, A64_FP, dst_off, agg_sz);
-                    }
-                }
-
-                if (inst->num_operands < 2 ||
-                    !aggregate_path_from_inst(inst, inst->type, &field_off, &field_ty) ||
-                    !field_ty) {
-                    break;
-                }
-
-                {
-                    size_t field_sz = lr_type_size(field_ty);
-                    const lr_operand_t *val = &inst->operands[1];
-                    if (field_sz == 0) {
-                        break;
-                    }
-                    if (field_sz > 8) {
-                        if (val->kind == LR_VAL_VREG) {
-                            size_t src_sz = 0;
-                            int32_t src_off = alloc_slot(&ctx, val->vreg, 8);
-                            if (val->vreg < ctx.num_stack_slots) {
-                                src_sz = ctx.stack_slot_sizes[val->vreg];
-                            }
-                            if (src_sz > field_sz) {
-                                src_sz = field_sz;
-                            }
-                            if (src_sz > 0) {
-                                emit_mem_copy_base_to_base(&ctx, A64_FP,
-                                                           dst_off + (int32_t)field_off,
-                                                           A64_FP, src_off, src_sz);
-                            }
-                            if (src_sz < field_sz) {
-                                emit_mem_zero_base(&ctx, A64_FP,
-                                                   dst_off + (int32_t)field_off +
-                                                   (int32_t)src_sz,
-                                                   field_sz - src_sz);
-                            }
-                        } else {
-                            emit_mem_zero_base(&ctx, A64_FP,
-                                               dst_off + (int32_t)field_off,
-                                               field_sz);
-                        }
-                    } else {
-                        if (val->kind == LR_VAL_UNDEF || val->kind == LR_VAL_NULL) {
-                            emit_move_imm_ctx(&ctx, A64_X9, 0, true);
-                        } else {
-                            emit_load_operand(&ctx, val, A64_X9);
-                        }
-                        emit_store(ctx.buf, &ctx.pos, ctx.buflen, A64_X9, A64_FP,
-                                   dst_off + (int32_t)field_off, (uint8_t)field_sz);
-                    }
-                }
-                break;
-            }
-            case LR_OP_CALL: {
-                static const uint8_t call_regs[] = {
-                    A64_X0, A64_X1, A64_X2, A64_X3,
-                    A64_X4, A64_X5, A64_X6, A64_X7
-                };
-                static const uint8_t call_fp_regs[] = {
-                    A64_D0, A64_D1, A64_D2, A64_D3,
-                    A64_D4, A64_D5, A64_D6, A64_D7
-                };
-                uint32_t nargs = inst->num_operands - 1;
-                uint32_t gp_used = 0, fp_used = 0, stack_args = 0;
-                bool darwin_stack_varargs = false;
-                uint32_t fixed_args = 0;
-
-                bool use_fp_abi = inst->call_external_abi;
-                if (inst->operands[0].kind == LR_VAL_GLOBAL)
-                    use_fp_abi = true;
-
-#if defined(__APPLE__)
-                if (use_fp_abi && inst->call_vararg) {
-                    darwin_stack_varargs = true;
-                    fixed_args = call_fixed_arg_count(&ctx, inst, nargs);
-                }
-#endif
-
-                if (use_fp_abi) {
-                    for (uint32_t i = 0; i < nargs; i++) {
-                        const lr_type_t *at = inst->operands[i + 1].type;
-                        bool is_variadic_stack_arg = darwin_stack_varargs &&
-                                                     i >= fixed_args;
-                        bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
-                                            at->kind == LR_TYPE_DOUBLE);
-                        if (is_variadic_stack_arg) {
-                            stack_args++;
-                            continue;
-                        }
-                        if (is_fp) {
-                            if (fp_used < 8) fp_used++; else stack_args++;
-                        } else {
-                            if (gp_used < 8) gp_used++; else stack_args++;
-                        }
-                    }
-                } else {
-                    stack_args = nargs > 8 ? nargs - 8 : 0;
-                }
-
-                uint32_t stack_bytes = ((stack_args * 8 + 15) & ~15u);
-                if (stack_bytes > 0)
-                    emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, stack_bytes, true);
-
-                if (use_fp_abi) {
-                    uint32_t si = 0;
-                    gp_used = 0; fp_used = 0;
-                    for (uint32_t i = 0; i < nargs; i++) {
-                        const lr_operand_t *arg = &inst->operands[i + 1];
-                        bool is_variadic_stack_arg = darwin_stack_varargs &&
-                                                     i >= fixed_args;
-                        bool is_fp = arg->type &&
-                                     (arg->type->kind == LR_TYPE_FLOAT ||
-                                      arg->type->kind == LR_TYPE_DOUBLE);
-                        uint8_t fsz = (arg->type && arg->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                        if (is_variadic_stack_arg) {
-                            emit_load_operand(&ctx, arg, A64_X9);
-                            emit_store(ctx.buf, &ctx.pos, ctx.buflen,
-                                       A64_X9, A64_SP, (int32_t)(si * 8), 8);
-                            si++;
-                        } else if (is_fp && fp_used < 8) {
-                            emit_load_fp_operand(&ctx, arg, call_fp_regs[fp_used], fsz);
-                            fp_used++;
-                        } else if (!is_fp && gp_used < 8) {
-                            emit_load_operand(&ctx, arg, call_regs[gp_used]);
-                            gp_used++;
-                        } else {
-                            emit_load_operand(&ctx, arg, A64_X9);
-                            emit_store(ctx.buf, &ctx.pos, ctx.buflen,
-                                       A64_X9, A64_SP, (int32_t)(si * 8), 8);
-                            si++;
-                        }
-                    }
-                } else {
-                    uint32_t nstack = nargs > 8 ? nargs - 8 : 0;
-                    for (uint32_t i = 0; i < nstack; i++) {
-                        emit_load_operand(&ctx, &inst->operands[8 + i + 1], A64_X9);
-                        emit_store(ctx.buf, &ctx.pos, ctx.buflen,
-                                   A64_X9, A64_SP, (int32_t)(i * 8), 8);
-                    }
-                    for (uint32_t i = 0; i < nargs && i < 8; i++)
-                        emit_load_operand(&ctx, &inst->operands[i + 1], call_regs[i]);
-                }
-
-                bool emit_reloc_call = ctx.obj_ctx &&
-                                       inst->operands[0].kind == LR_VAL_GLOBAL;
-                if (emit_reloc_call && ctx.obj_ctx->preserve_symbol_names) {
-                    const lr_operand_t *callee = &inst->operands[0];
-                    const char *sym_name = lr_module_symbol_name(ctx.mod, callee->global_id);
-                    bool defined = false;
-                    if (sym_name) {
-                        if (callee->global_id < ctx.sym_count)
-                            defined = ctx.sym_defined[callee->global_id] != 0;
-                        else
-                            defined = is_symbol_defined_in_module(ctx.mod, sym_name);
-                    }
-                    emit_reloc_call = defined;
-                }
-
-                if (emit_reloc_call) {
-                    const char *sym_name = lr_module_symbol_name(
-                        ctx.mod, inst->operands[0].global_id);
-                    if (sym_name) {
-                        uint32_t sym_idx = lr_obj_ensure_symbol(
-                            ctx.obj_ctx, sym_name, false, 0, 0);
-                        size_t bl_off = ctx.pos;
-                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0x94000000u);
-                        lr_obj_add_reloc(ctx.obj_ctx, (uint32_t)bl_off,
-                                          sym_idx, LR_RELOC_ARM64_BRANCH26);
-                    } else {
-                        emit_u32(ctx.buf, &ctx.pos, ctx.buflen, 0xD503201Fu);
-                    }
-                } else {
-                    emit_load_operand(&ctx, &inst->operands[0], A64_X16);
-                    emit_u32(ctx.buf, &ctx.pos, ctx.buflen,
-                             0xD63F0000u | ((uint32_t)A64_X16 << 5));
-                }
-
-                if (stack_bytes > 0)
-                    emit_sp_adjust(ctx.buf, &ctx.pos, ctx.buflen, stack_bytes, false);
-
-                invalidate_cached_gprs_a64(&ctx);
-                if (inst->type && inst->type->kind != LR_TYPE_VOID) {
-                    bool ret_fp = use_fp_abi && inst->type &&
-                                  (inst->type->kind == LR_TYPE_FLOAT ||
-                                   inst->type->kind == LR_TYPE_DOUBLE);
-                    if (ret_fp) {
-                        uint8_t rsz = (inst->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                        emit_store_fp_slot(&ctx, inst->dest, A64_D0, rsz);
-                    } else {
-                        emit_store_slot(&ctx, inst->dest, A64_X0);
-                    }
-                }
-                break;
-            }
-            case LR_OP_PHI:
-                break;
-            case LR_OP_UNREACHABLE:
-                break;
-            default:
-                break;
-            }
-        }
-    }
-
-    /* Empty function body: emit implicit return */
-    if (!func->first_block)
-        emit_epilogue_a64(&ctx);
-
-    /* Fix up branch targets */
-    for (uint32_t i = 0; i < ctx.num_fixups; i++) {
-        if (ctx.fixups[i].target >= func->num_blocks) continue;
-
-        int64_t target_pos = (int64_t)ctx.block_offsets[ctx.fixups[i].target];
-        int64_t here = (int64_t)ctx.fixups[i].insn_pos;
-        int64_t imm = (target_pos - here) / 4;
-
-        if (ctx.fixups[i].kind == 0) {
-            if (imm >= -(1LL << 25) && imm < (1LL << 25)) {
-                uint32_t insn = 0x14000000u | ((uint32_t)imm & 0x03FFFFFFu);
-                patch_u32(buf, buflen, ctx.fixups[i].insn_pos, insn);
-            }
-        } else {
-            if (imm >= -(1LL << 18) && imm < (1LL << 18)) {
-                uint32_t insn = 0x54000000u
-                              | (((uint32_t)imm & 0x7FFFFu) << 5)
-                              | (ctx.fixups[i].cond & 0xF);
-                patch_u32(buf, buflen, ctx.fixups[i].insn_pos, insn);
-            }
-        }
-    }
-
-    patch_prologue_stack_adjust(&ctx, prologue_stack_patch_pos,
-                                (ctx.stack_size + 15u) & ~15u);
-
-    *out_len = ctx.pos;
-    if (ctx.pos > buflen)
-        return -1;
-    return 0;
 }
 
 /* ---- Streaming direct-emission ISel ------------------------------------ */
@@ -1949,18 +983,12 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->num_fixups = 0;
     cc->fixup_cap = 16;
     cc->arena = arena;
-    cc->obj_ctx = NULL;
+    cc->obj_ctx = mod ? mod->obj_ctx : NULL;
     cc->mod = mod;
     cc->sym_defined = NULL;
     cc->sym_count = 0;
     cc->x9_holds_vreg = UINT32_MAX;
     cc->x10_holds_vreg = UINT32_MAX;
-    cc->vreg_use_counts = NULL;
-    cc->num_vreg_use_counts = 0;
-    cc->current_block = NULL;
-    cc->current_inst = NULL;
-    cc->current_inst_index = 0;
-
     ctx->prologue_patch_pos = emit_prologue_a64(cc);
 
     for (uint32_t i = 0; i < num_params && i < 8; i++)
@@ -2049,9 +1077,6 @@ static int aarch64_compile_emit(void *compile_ctx,
         inst_header.op = desc->op;
     }
 
-    cc->current_inst = &inst_header;
-    cc->current_block = NULL;
-
     switch (desc->op) {
     case LR_OP_RET: {
         ctx->deferred.pending = true;
@@ -2059,7 +1084,6 @@ static int aarch64_compile_emit(void *compile_ctx,
         ctx->deferred.ops[0] = ops[0];
         ctx->deferred.num_ops = 1;
         ctx->deferred.block_id = ctx->current_block_id;
-        cc->current_inst = NULL;
         return 0;
     }
     case LR_OP_RET_VOID:
@@ -2067,7 +1091,6 @@ static int aarch64_compile_emit(void *compile_ctx,
         ctx->deferred.op = LR_OP_RET_VOID;
         ctx->deferred.num_ops = 0;
         ctx->deferred.block_id = ctx->current_block_id;
-        cc->current_inst = NULL;
         return 0;
     case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
     case LR_OP_OR: case LR_OP_XOR: {
@@ -2214,7 +1237,6 @@ static int aarch64_compile_emit(void *compile_ctx,
         ctx->deferred.ops[0] = ops[0];
         ctx->deferred.num_ops = 1;
         ctx->deferred.block_id = ctx->current_block_id;
-        cc->current_inst = NULL;
         return 0;
     }
     case LR_OP_CONDBR: {
@@ -2225,7 +1247,6 @@ static int aarch64_compile_emit(void *compile_ctx,
         ctx->deferred.ops[2] = ops[2];
         ctx->deferred.num_ops = 3;
         ctx->deferred.block_id = ctx->current_block_id;
-        cc->current_inst = NULL;
         return 0;
     }
     case LR_OP_ALLOCA: {
@@ -2585,15 +1606,32 @@ static int aarch64_compile_emit(void *compile_ctx,
         uint32_t stack_bytes;
 
         bool use_fp_abi = desc->call_external_abi;
+        bool darwin_stack_varargs = false;
+        uint32_t fixed_args = 0;
         if (ops[0].kind == LR_VAL_GLOBAL)
             use_fp_abi = true;
+
+#if defined(__APPLE__)
+        if (use_fp_abi && desc->call_vararg) {
+            darwin_stack_varargs = true;
+            fixed_args = desc->call_fixed_args;
+            if (fixed_args > nargs)
+                fixed_args = nargs;
+        }
+#endif
 
         if (use_fp_abi) {
             uint32_t fp_used_count = 0;
             for (uint32_t i = 0; i < nargs; i++) {
                 const lr_type_t *at = ops[i + 1].type;
+                bool is_variadic_stack_arg = darwin_stack_varargs &&
+                                             i >= fixed_args;
                 bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
                                     at->kind == LR_TYPE_DOUBLE);
+                if (is_variadic_stack_arg) {
+                    stack_args++;
+                    continue;
+                }
                 if (is_fp) {
                     if (fp_used_count < 8) fp_used_count++;
                     else stack_args++;
@@ -2619,12 +1657,25 @@ static int aarch64_compile_emit(void *compile_ctx,
             gp_used = 0;
             uint32_t fp_used_emit = 0;
             for (uint32_t i = 0; i < nargs; i++) {
+                bool is_variadic_stack_arg = darwin_stack_varargs &&
+                                             i >= fixed_args;
                 bool is_fp = ops[i + 1].type &&
                              (ops[i + 1].type->kind == LR_TYPE_FLOAT ||
                               ops[i + 1].type->kind == LR_TYPE_DOUBLE);
                 uint8_t fsz = (ops[i + 1].type &&
                                ops[i + 1].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                if (is_fp && fp_used_emit < 8) {
+                if (is_variadic_stack_arg) {
+                    if (is_fp) {
+                        emit_load_fp_operand(cc, &ops[i + 1], A64_D0, fsz);
+                        emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                                      A64_D0, A64_SP, (int32_t)(si * 8), fsz);
+                    } else {
+                        emit_load_operand(cc, &ops[i + 1], A64_X9);
+                        emit_store(cc->buf, &cc->pos, cc->buflen,
+                                   A64_X9, A64_SP, (int32_t)(si * 8), 8);
+                    }
+                    si++;
+                } else if (is_fp && fp_used_emit < 8) {
                     emit_load_fp_operand(cc, &ops[i + 1],
                                          call_fp_regs[fp_used_emit], fsz);
                     fp_used_emit++;
@@ -2679,7 +1730,6 @@ static int aarch64_compile_emit(void *compile_ctx,
         break;
     }
 
-    cc->current_inst = NULL;
     return 0;
 }
 
@@ -2809,7 +1859,6 @@ static const lr_target_t aarch64_target = {
     .compile_set_block = aarch64_compile_set_block,
     .compile_end = aarch64_compile_end,
     .compile_add_phi_copy = aarch64_compile_add_phi_copy,
-    .compile_func = aarch64_compile_func,
 };
 
 const lr_target_t *lr_target_aarch64(void) {
