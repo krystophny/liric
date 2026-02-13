@@ -68,6 +68,7 @@ typedef struct session_phi_copy_entry {
 struct lr_session {
     session_config_t cfg;
     lr_jit_t *jit;
+    lr_module_t *owned_module;
     lr_module_t *module;
     lr_func_t *cur_func;
     lr_block_t *cur_block;
@@ -618,7 +619,8 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
         return NULL;
     }
 
-    s->module = lr_module_create(arena);
+    s->owned_module = lr_module_create(arena);
+    s->module = s->owned_module;
     if (!s->module) {
         lr_arena_destroy(arena);
         free(s);
@@ -631,7 +633,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     else
         s->jit = lr_jit_create();
     if (!s->jit) {
-        lr_module_free(s->module);
+        lr_module_free(s->owned_module);
         free(s);
         err_set(err, S_ERR_BACKEND, "jit creation failed");
         return NULL;
@@ -646,8 +648,8 @@ void lr_session_destroy(struct lr_session *s) {
         return;
     if (s->jit)
         lr_jit_destroy(s->jit);
-    if (s->module)
-        lr_module_free(s->module);
+    if (s->owned_module)
+        lr_module_free(s->owned_module);
     it = s->owned_modules;
     while (it) {
         lr_owned_module_t *next = it->next;
@@ -928,6 +930,29 @@ int lr_session_set_block(struct lr_session *s, uint32_t block_id,
             return -1;
         }
     }
+    return 0;
+}
+
+int lr_session_bind_ir(struct lr_session *s, lr_module_t *module,
+                       lr_func_t *func, lr_block_t *block,
+                       session_error_t *err) {
+    err_clear(err);
+    if (!s || !module || !func || !block || block->func != func) {
+        err_set(err, S_ERR_ARGUMENT, "invalid bind arguments");
+        return -1;
+    }
+    s->module = module;
+    if (ensure_block_capacity(s, block->id + 1u) != 0) {
+        err_set(err, S_ERR_BACKEND, "block table allocation failed");
+        return -1;
+    }
+    if (s->block_count <= block->id)
+        s->block_count = block->id + 1u;
+    s->blocks[block->id] = block;
+    s->cur_func = func;
+    s->cur_block = block;
+    s->compile_active = false;
+    s->compile_ctx = NULL;
     return 0;
 }
 

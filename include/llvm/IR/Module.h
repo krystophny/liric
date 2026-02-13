@@ -522,8 +522,6 @@ inline bool legacy::PassManager::run(Module &M) {
     if (!compat)
         return false;
 
-    lc_module_finalize_phis(compat);
-
     FILE *f = detail::obj_emit_state.out->getFileOrNull();
     if (!f)
         return false;
