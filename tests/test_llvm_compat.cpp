@@ -6,6 +6,7 @@
 #include <liric/liric_compat.h>
 
 #include <llvm/Config/llvm-config.h>
+#include <llvm/AsmParser/Parser.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/IRBuilder.h>
@@ -265,6 +266,74 @@ static int test_constant_data_array_addnull() {
     TEST_ASSERT_EQ(p[0], 'A', "byte 0");
     TEST_ASSERT_EQ(p[1], 'B', "byte 1");
     TEST_ASSERT_EQ(p[2], 0, "byte 2 null");
+    return 0;
+}
+
+static int test_constant_struct_and_array_bytes() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("const_aggregate_bytes", ctx);
+
+    llvm::Type *i16 = llvm::Type::getInt16Ty(ctx);
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *fields[] = {i32, i32};
+    llvm::StructType *sty = llvm::StructType::get(ctx, fields);
+    llvm::Constant *sv[] = {
+        llvm::ConstantInt::get(i32, 1),
+        llvm::ConstantInt::get(i32, 2),
+    };
+    llvm::Constant *sc = llvm::ConstantStruct::get(sty, sv);
+    TEST_ASSERT(sc != nullptr, "constant struct created");
+    TEST_ASSERT(sc->impl()->kind == LC_VAL_CONST_AGGREGATE, "struct aggregate kind");
+    TEST_ASSERT_EQ(sc->impl()->aggregate.size, 8, "struct aggregate size");
+    const uint8_t *sb = static_cast<const uint8_t *>(sc->impl()->aggregate.data);
+    TEST_ASSERT(sb != nullptr, "struct aggregate data");
+    TEST_ASSERT_EQ(sb[0], 1, "struct field0 byte0");
+    TEST_ASSERT_EQ(sb[4], 2, "struct field1 byte0");
+
+    llvm::ArrayType *aty = llvm::ArrayType::get(i16, 3);
+    llvm::Constant *av[] = {
+        llvm::ConstantInt::get(i16, 7),
+        llvm::ConstantInt::get(i16, 8),
+        llvm::ConstantInt::get(i16, 9),
+    };
+    llvm::Constant *ac = llvm::ConstantArray::get(aty, av);
+    TEST_ASSERT(ac != nullptr, "constant array created");
+    TEST_ASSERT(ac->impl()->kind == LC_VAL_CONST_AGGREGATE, "array aggregate kind");
+    TEST_ASSERT_EQ(ac->impl()->aggregate.size, 6, "array aggregate size");
+    const uint8_t *ab = static_cast<const uint8_t *>(ac->impl()->aggregate.data);
+    TEST_ASSERT(ab != nullptr, "array aggregate data");
+    TEST_ASSERT_EQ(ab[0], 7, "array element0 byte0");
+    TEST_ASSERT_EQ(ab[2], 8, "array element1 byte0");
+    TEST_ASSERT_EQ(ab[4], 9, "array element2 byte0");
+    return 0;
+}
+
+static int test_parse_assembly_wrapper_fast_path() {
+    llvm::LLVMContext ctx;
+    llvm::SMDiagnostic err;
+    const char *wrapper_ir =
+        "declare i32 @main(i32, i8**)\n"
+        "define i32 @__lfortran_jit_entry(i32 %argc, i8** %argv) {\n"
+        "entry:\n"
+        "  %ret = call i32 @main(i32 %argc, i8** %argv)\n"
+        "  ret i32 %ret\n"
+        "}\n";
+    std::unique_ptr<llvm::Module> mod = llvm::parseAssemblyString(
+        llvm::StringRef(wrapper_ir), err, ctx);
+    TEST_ASSERT(mod != nullptr, "parseAssemblyString wrapper path");
+
+    lr_module_t *ir = lc_module_get_ir(mod->getCompat());
+    TEST_ASSERT(ir != nullptr, "parsed module available");
+    bool found_main_decl = false;
+    bool found_entry = false;
+    for (lr_func_t *f = ir->first_func; f; f = f->next) {
+        if (f->name && std::strcmp(f->name, "main") == 0)
+            found_main_decl = f->is_decl;
+        if (f->name && std::strcmp(f->name, "__lfortran_jit_entry") == 0)
+            found_entry = !f->is_decl && f->first_block != nullptr;
+    }
+    TEST_ASSERT(found_main_decl, "wrapper main declaration");
+    TEST_ASSERT(found_entry, "wrapper entry definition");
     return 0;
 }
 
@@ -795,6 +864,19 @@ static int test_stringref_twine() {
     return 0;
 }
 
+static int test_intrinsic_name_lookup_helper() {
+    const char *sin_name = lc_intrinsic_name((unsigned)llvm::Intrinsic::sin);
+    const char *trap_name = lc_intrinsic_name((unsigned)llvm::Intrinsic::trap);
+    const char *dbg_name = lc_intrinsic_name((unsigned)llvm::Intrinsic::dbg_value);
+
+    TEST_ASSERT(sin_name != nullptr && std::strcmp(sin_name, "sin") == 0,
+                "intrinsic sin mapping");
+    TEST_ASSERT(trap_name != nullptr && std::strcmp(trap_name, "abort") == 0,
+                "intrinsic trap mapping");
+    TEST_ASSERT(dbg_name == nullptr, "unsupported intrinsic returns null");
+    return 0;
+}
+
 static int test_stringref_nullptr_zero_len_safety() {
     llvm::StringRef empty_from_null(nullptr, 0);
     TEST_ASSERT(empty_from_null.empty(), "nullptr+0 StringRef is empty");
@@ -822,6 +904,18 @@ static int test_raw_ostream_null_cstr_safety() {
 
     os.write(nullptr, 4);
     TEST_ASSERT(out.empty(), "raw_string_ostream ignores null write pointer");
+    return 0;
+}
+
+static int test_raw_ostream_numeric_formatting() {
+    std::string out;
+    llvm::raw_string_ostream os(out);
+    os << -12 << " " << 34u << " " << 5.5;
+    os << " " << static_cast<const void *>(&os);
+    TEST_ASSERT(out.find("-12") != std::string::npos, "signed integer formatting");
+    TEST_ASSERT(out.find("34") != std::string::npos, "unsigned integer formatting");
+    TEST_ASSERT(out.find("5.500000") != std::string::npos, "double formatting");
+    TEST_ASSERT(out.find("0x") != std::string::npos, "pointer formatting");
     return 0;
 }
 
@@ -1301,8 +1395,10 @@ int main() {
     fprintf(stderr, "Infrastructure tests:\n");
     RUN_TEST(test_llvm_version);
     RUN_TEST(test_stringref_twine);
+    RUN_TEST(test_intrinsic_name_lookup_helper);
     RUN_TEST(test_stringref_nullptr_zero_len_safety);
     RUN_TEST(test_raw_ostream_null_cstr_safety);
+    RUN_TEST(test_raw_ostream_numeric_formatting);
     RUN_TEST(test_twine_abi_layout_and_concat);
     RUN_TEST(test_arrayref);
     RUN_TEST(test_apint_apfloat);
@@ -1321,7 +1417,9 @@ int main() {
     fprintf(stderr, "\nConstant tests:\n");
     RUN_TEST(test_constants);
     RUN_TEST(test_constant_data_array_addnull);
+    RUN_TEST(test_constant_struct_and_array_bytes);
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
+    RUN_TEST(test_parse_assembly_wrapper_fast_path);
 
     fprintf(stderr, "\nFunction tests:\n");
     RUN_TEST(test_function_creation);

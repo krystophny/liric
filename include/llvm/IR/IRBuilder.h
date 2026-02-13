@@ -882,7 +882,8 @@ public:
     Value *CreateIntrinsic(Intrinsic::ID ID, ArrayRef<Type *> Types,
                            ArrayRef<Value *> Args,
                            const Twine &Name = "") {
-        const char *intrinsic_name = intrinsic_id_to_name(ID);
+        const char *intrinsic_name = lc_intrinsic_name(
+            static_cast<unsigned>(ID));
         if (!intrinsic_name) return nullptr;
 
         lc_module_compat_t *mod = M();
@@ -924,43 +925,6 @@ public:
                                 const Twine &Name = "") {
         Type *ty = V->getType();
         return CreateIntrinsic(ID, {ty}, {V}, Name);
-    }
-
-private:
-    static const char *intrinsic_id_to_name(Intrinsic::ID ID) {
-        switch (ID) {
-        case Intrinsic::abs:       return "abs";
-        case Intrinsic::copysign:  return "copysign";
-        case Intrinsic::cos:       return "cos";
-        case Intrinsic::ctlz:      return "ctlz";
-        case Intrinsic::ctpop:     return "ctpop";
-        case Intrinsic::cttz:      return "cttz";
-        case Intrinsic::exp:       return "exp";
-        case Intrinsic::exp2:      return "exp2";
-        case Intrinsic::fabs:      return "fabs";
-        case Intrinsic::floor:     return "floor";
-        case Intrinsic::ceil:      return "ceil";
-        case Intrinsic::round:     return "round";
-        case Intrinsic::trunc:     return "trunc";
-        case Intrinsic::fma:       return "fma";
-        case Intrinsic::fmuladd:   return "fma";
-        case Intrinsic::log:       return "log";
-        case Intrinsic::log2:      return "log2";
-        case Intrinsic::log10:     return "log10";
-        case Intrinsic::maximum:   return "fmax";
-        case Intrinsic::maxnum:    return "fmax";
-        case Intrinsic::minimum:   return "fmin";
-        case Intrinsic::minnum:    return "fmin";
-        case Intrinsic::memcpy:    return "memcpy";
-        case Intrinsic::memmove:   return "memmove";
-        case Intrinsic::memset:    return "memset";
-        case Intrinsic::pow:       return "pow";
-        case Intrinsic::powi:      return "powi";
-        case Intrinsic::sin:       return "sin";
-        case Intrinsic::sqrt:      return "sqrt";
-        case Intrinsic::trap:      return "abort";
-        default: return nullptr;
-        }
     }
 };
 

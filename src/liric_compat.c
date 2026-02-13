@@ -2,11 +2,13 @@
 #include "arena.h"
 #include "compile_mode.h"
 #include "jit.h"
+#include "liric.h"
 #include "llvm_backend.h"
 #include "objfile.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
 #if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
 #endif
@@ -846,6 +848,285 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
         cache_global_by_symbol(mod, sym_id, g);
     }
     return lc_value_global(mod, sym_id, m->type_ptr, g->name);
+}
+
+/* ---- Compat utility helpers ---- */
+
+const char *lc_intrinsic_name(unsigned intrinsic_id) {
+    switch (intrinsic_id) {
+    case 1:  return "abs";
+    case 2:  return "copysign";
+    case 3:  return "cos";
+    case 4:  return "ctlz";
+    case 5:  return "ctpop";
+    case 6:  return "cttz";
+    case 7:  return "exp";
+    case 8:  return "exp2";
+    case 9:  return "fabs";
+    case 10: return "floor";
+    case 11: return "ceil";
+    case 12: return "round";
+    case 13: return "trunc";
+    case 14: return "fma";
+    case 15: return "fma";
+    case 16: return "log";
+    case 17: return "log2";
+    case 18: return "log10";
+    case 19: return "fmax";
+    case 20: return "fmax";
+    case 21: return "fmin";
+    case 22: return "fmin";
+    case 23: return "memcpy";
+    case 24: return "memmove";
+    case 25: return "memset";
+    case 26: return "pow";
+    case 27: return "powi";
+    case 28: return "sin";
+    case 29: return "sqrt";
+    case 35: return "abort";
+    default:
+        return NULL;
+    }
+}
+
+static bool text_contains(const char *haystack, size_t hay_len,
+                          const char *needle) {
+    size_t needle_len = 0;
+    if (!haystack || !needle)
+        return false;
+    needle_len = strlen(needle);
+    if (needle_len == 0 || hay_len < needle_len)
+        return false;
+    for (size_t i = 0; i + needle_len <= hay_len; i++) {
+        if (memcmp(haystack + i, needle, needle_len) == 0)
+            return true;
+    }
+    return false;
+}
+
+bool lc_is_lfortran_jit_wrapper_ir(const char *asm_text, size_t len) {
+    if (!asm_text || len == 0)
+        return false;
+    return text_contains(asm_text, len, "declare i32 @main(i32, i8**)\n") &&
+           text_contains(asm_text, len,
+                         "define i32 @__lfortran_jit_entry(i32 %argc, i8** %argv)") &&
+           text_contains(asm_text, len,
+                         "call i32 @main(i32 %argc, i8** %argv)") &&
+           text_contains(asm_text, len, "ret i32 %ret");
+}
+
+lr_module_t *lc_build_lfortran_jit_wrapper_module(char *err, size_t errlen) {
+    static const char wrapper_ir[] =
+        "declare i32 @main(i32, i8**)\n"
+        "define i32 @__lfortran_jit_entry(i32 %argc, i8** %argv) {\n"
+        "entry:\n"
+        "  %ret = call i32 @main(i32 %argc, i8** %argv)\n"
+        "  ret i32 %ret\n"
+        "}\n";
+    return lr_parse_ll(wrapper_ir, strlen(wrapper_ir), err, errlen);
+}
+
+static size_t format_snprintf(char *buf, size_t buf_size,
+                              const char *fmt, ...) {
+    va_list ap;
+    int n = 0;
+    if (!buf || buf_size == 0 || !fmt)
+        return 0;
+    va_start(ap, fmt);
+    n = vsnprintf(buf, buf_size, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return 0;
+    if ((size_t)n >= buf_size)
+        return buf_size - 1;
+    return (size_t)n;
+}
+
+size_t lc_format_i64(char *buf, size_t buf_size, int64_t value) {
+    return format_snprintf(buf, buf_size, "%lld", (long long)value);
+}
+
+size_t lc_format_u64(char *buf, size_t buf_size, uint64_t value) {
+    return format_snprintf(buf, buf_size, "%llu",
+                           (unsigned long long)value);
+}
+
+size_t lc_format_f64(char *buf, size_t buf_size, double value) {
+    return format_snprintf(buf, buf_size, "%.6f", value);
+}
+
+size_t lc_format_ptr(char *buf, size_t buf_size, const void *ptr) {
+    return format_snprintf(buf, buf_size, "%p", ptr);
+}
+
+static bool pack_constant_bytes_raw(const lc_value_t *value, const lr_type_t *ty,
+                                    uint8_t *out, size_t out_size) {
+    size_t need = 0;
+    if (!ty || !out)
+        return false;
+    need = lr_type_size(ty);
+    if (out_size < need)
+        return false;
+    if (need > 0)
+        memset(out, 0, need);
+    if (!value)
+        return false;
+
+    switch (value->kind) {
+    case LC_VAL_CONST_NULL:
+    case LC_VAL_CONST_UNDEF:
+        return true;
+    case LC_VAL_CONST_INT: {
+        if (need == 0)
+            return true;
+        if (ty->kind == LR_TYPE_I1) {
+            out[0] = value->const_int.val ? 1u : 0u;
+            return true;
+        }
+        uint64_t raw = (uint64_t)value->const_int.val;
+        size_t n = need < sizeof(raw) ? need : sizeof(raw);
+        for (size_t i = 0; i < n; i++)
+            out[i] = (uint8_t)((raw >> (8u * i)) & 0xffu);
+        return true;
+    }
+    case LC_VAL_CONST_FP:
+        if (ty->kind == LR_TYPE_FLOAT) {
+            float f = (float)value->const_fp.val;
+            size_t n = need < sizeof(f) ? need : sizeof(f);
+            memcpy(out, &f, n);
+        } else {
+            double d = value->const_fp.val;
+            size_t n = need < sizeof(d) ? need : sizeof(d);
+            memcpy(out, &d, n);
+        }
+        return true;
+    case LC_VAL_CONST_AGGREGATE:
+        if (value->aggregate.data && value->aggregate.size > 0) {
+            size_t n = need < value->aggregate.size ? need
+                                                    : value->aggregate.size;
+            memcpy(out, value->aggregate.data, n);
+        }
+        return true;
+    case LC_VAL_GLOBAL:
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool lc_pack_constant_bytes(lc_value_t *value, lr_type_t *ty,
+                             uint8_t *out, size_t out_size) {
+    return pack_constant_bytes_raw(value, ty, out, out_size);
+}
+
+lc_value_t *lc_const_struct_from_values(lc_module_compat_t *mod,
+                                         lr_type_t *struct_ty,
+                                         lc_value_t **values,
+                                         uint32_t num_values) {
+    lc_value_t *agg = NULL;
+    uint8_t *bytes = NULL;
+    size_t total = 0;
+    uint32_t n = 0;
+    if (!mod || !struct_ty || struct_ty->kind != LR_TYPE_STRUCT)
+        return NULL;
+
+    total = lr_type_size(struct_ty);
+    if (total > 0) {
+        bytes = (uint8_t *)calloc(1, total);
+        if (!bytes)
+            return NULL;
+    }
+
+    n = struct_ty->struc.num_fields;
+    if (num_values < n)
+        n = num_values;
+
+    for (uint32_t i = 0; i < n; i++) {
+        lr_type_t *field_ty = struct_ty->struc.fields[i];
+        size_t off = lr_struct_field_offset(struct_ty, i);
+        size_t field_sz = lr_type_size(field_ty);
+        if (!field_ty || !bytes || field_sz == 0)
+            continue;
+        if (off > total || field_sz > total - off)
+            continue;
+        (void)pack_constant_bytes_raw(values ? values[i] : NULL,
+                                      field_ty, bytes + off, field_sz);
+    }
+
+    agg = lc_value_const_aggregate(mod, struct_ty, bytes, total);
+    free(bytes);
+    if (!agg)
+        return NULL;
+
+    for (uint32_t i = 0; i < n; i++) {
+        lr_type_t *field_ty = struct_ty->struc.fields[i];
+        lc_value_t *elem = values ? values[i] : NULL;
+        if (!elem || !field_ty || field_ty->kind != LR_TYPE_PTR)
+            continue;
+        if (elem->kind == LC_VAL_GLOBAL && elem->global.name) {
+            size_t off = lr_struct_field_offset(struct_ty, i);
+            if (lc_value_const_aggregate_add_reloc(mod, agg, off,
+                                                   elem->global.name, 0) != 0)
+                return NULL;
+        }
+    }
+    return agg;
+}
+
+lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
+                                        lr_type_t *array_ty,
+                                        lc_value_t **values,
+                                        uint32_t num_values) {
+    lc_value_t *agg = NULL;
+    lr_type_t *elem_ty = NULL;
+    uint8_t *bytes = NULL;
+    size_t total = 0;
+    size_t elem_sz = 0;
+    uint64_t n = 0;
+    if (!mod || !array_ty || array_ty->kind != LR_TYPE_ARRAY)
+        return NULL;
+
+    elem_ty = array_ty->array.elem;
+    total = lr_type_size(array_ty);
+    elem_sz = lr_type_size(elem_ty);
+    if (total > 0) {
+        bytes = (uint8_t *)calloc(1, total);
+        if (!bytes)
+            return NULL;
+    }
+
+    n = array_ty->array.count;
+    if ((uint64_t)num_values < n)
+        n = num_values;
+
+    for (uint64_t i = 0; i < n; i++) {
+        size_t off = (size_t)i * elem_sz;
+        if (!elem_ty || !bytes || elem_sz == 0)
+            continue;
+        if (off > total || elem_sz > total - off)
+            continue;
+        (void)pack_constant_bytes_raw(values ? values[i] : NULL,
+                                      elem_ty, bytes + off, elem_sz);
+    }
+
+    agg = lc_value_const_aggregate(mod, array_ty, bytes, total);
+    free(bytes);
+    if (!agg)
+        return NULL;
+
+    if (elem_ty && elem_ty->kind == LR_TYPE_PTR) {
+        for (uint64_t i = 0; i < n; i++) {
+            lc_value_t *elem = values ? values[i] : NULL;
+            if (!elem || elem->kind != LC_VAL_GLOBAL || !elem->global.name)
+                continue;
+            size_t off = (size_t)i * elem_sz;
+            if (lc_value_const_aggregate_add_reloc(mod, agg, off,
+                                                   elem->global.name, 0) != 0)
+                return NULL;
+        }
+    }
+
+    return agg;
 }
 
 /* ---- Function ---- */

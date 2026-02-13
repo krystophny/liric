@@ -3,7 +3,9 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallVector.h"
+#include <liric/liric_compat.h>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -38,37 +40,44 @@ public:
         return write(s.data(), s.size());
     }
     raw_ostream &operator<<(int v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[32];
+        size_t n = lc_format_i64(buf, sizeof(buf), static_cast<int64_t>(v));
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(unsigned v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[32];
+        size_t n = lc_format_u64(buf, sizeof(buf), static_cast<uint64_t>(v));
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(long v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[32];
+        size_t n = lc_format_i64(buf, sizeof(buf), static_cast<int64_t>(v));
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(unsigned long v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[32];
+        size_t n = lc_format_u64(buf, sizeof(buf), static_cast<uint64_t>(v));
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(long long v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[32];
+        size_t n = lc_format_i64(buf, sizeof(buf), static_cast<int64_t>(v));
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(unsigned long long v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[32];
+        size_t n = lc_format_u64(buf, sizeof(buf), static_cast<uint64_t>(v));
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(double v) {
-        std::string s = std::to_string(v);
-        return write(s.data(), s.size());
+        char buf[64];
+        size_t n = lc_format_f64(buf, sizeof(buf), v);
+        return n ? write(buf, n) : *this;
     }
     raw_ostream &operator<<(const void *p) {
         char buf[32];
-        snprintf(buf, sizeof(buf), "%p", p);
-        return write(buf, std::strlen(buf));
+        size_t n = lc_format_ptr(buf, sizeof(buf), p);
+        return n ? write(buf, n) : *this;
     }
 
     virtual void flush() {}
