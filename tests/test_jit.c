@@ -1893,6 +1893,40 @@ int test_jit_varargs_printf_double_call(void) {
     return 0;
 }
 
+int test_jit_varargs_declared_signature_call(void) {
+    const char *src =
+        "declare i32 @check_vararg_double_no_decl(ptr, ...)\n"
+        "define i32 @call_vararg_declared() {\n"
+        "entry:\n"
+        "  %r = call i32 (ptr, ...) @check_vararg_double_no_decl(ptr null, double 1.5)\n"
+        "  ret i32 %r\n"
+        "}\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int (*check_fn)(const char *, ...) = check_vararg_double_no_decl;
+    void *check_addr = NULL;
+    memcpy(&check_addr, &check_fn, sizeof(check_addr));
+    lr_jit_add_symbol(jit, "check_vararg_double_no_decl", check_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_vararg_declared");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 1234, "declared vararg call receives correct double");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_varargs_undeclared_signature_call(void) {
     const char *src =
         "define i32 @call_vararg_undeclared() {\n"

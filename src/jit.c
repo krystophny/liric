@@ -334,6 +334,8 @@ static int sig_serialize_inst(lr_sig_buf_t *sb, const lr_inst_t *inst,
         return -1;
     if (sig_buf_u8(sb, inst->call_vararg ? 1u : 0u) != 0)
         return -1;
+    if (sig_buf_u32(sb, inst->call_fixed_args) != 0)
+        return -1;
     if (sig_buf_u32(sb, (uint32_t)inst->icmp_pred) != 0)
         return -1;
     if (sig_buf_u32(sb, (uint32_t)inst->fcmp_pred) != 0)

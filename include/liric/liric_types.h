@@ -44,6 +44,9 @@ struct lr_inst {
         uint32_t *indices;
     };
     uint32_t num_indices;
+    bool call_external_abi;
+    bool call_vararg;
+    uint32_t call_fixed_args;
     struct lr_inst *next;
 };
 

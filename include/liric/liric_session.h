@@ -63,6 +63,7 @@ typedef struct lr_inst_desc {
     int fcmp_pred;
     bool call_external_abi;
     bool call_vararg;
+    uint32_t call_fixed_args;
 } lr_inst_desc_t;
 
 /* ---- Lifecycle --------------------------------------------------------- */
