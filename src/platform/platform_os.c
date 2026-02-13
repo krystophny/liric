@@ -22,6 +22,8 @@
 #endif
 
 void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {
+    void *map = MAP_FAILED;
+
     if (out_map_jit_enabled)
         *out_map_jit_enabled = false;
 
@@ -30,7 +32,7 @@ void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     prot |= PROT_EXEC;
     flags |= MAP_JIT;
-    void *map = mmap(NULL, len, prot, flags, -1, 0);
+    map = mmap(NULL, len, prot, flags, -1, 0);
     if (map != MAP_FAILED) {
         pthread_jit_write_protect_np(0);
         if (out_map_jit_enabled)
@@ -39,7 +41,7 @@ void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {
     }
 #endif
 
-    void *map = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    map = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (map == MAP_FAILED)
         return NULL;
     return map;
