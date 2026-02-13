@@ -2045,6 +2045,8 @@ static const lr_target_t aarch64_target = {
     .compile_emit = aarch64_compile_emit,
     .compile_set_block = aarch64_compile_set_block,
     .compile_end = aarch64_compile_end,
+    .compile_add_phi_copy = NULL,
+    .compile_func = NULL,
 };
 
 const lr_target_t *lr_target_aarch64(void) {

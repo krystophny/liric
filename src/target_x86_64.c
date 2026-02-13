@@ -1147,9 +1147,9 @@ static void reserve_phi_dest_slot_cb(void *ctx, uint32_t dest_vreg) {
 
 /*
  * x86_64_compile_func: single-pass ISel + encoding.
- * Replaces the old two-phase isel_func + encode_func approach.
+ * Non-streaming path used by object-file emission and copy-and-patch fallback.
  */
-static int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
+int x86_64_compile_func(lr_func_t *func, lr_module_t *mod,
                                 uint8_t *buf, size_t buflen, size_t *out_len,
                                 lr_arena_t *arena) {
     lr_arena_t *layout_arena = (mod && mod->arena) ? mod->arena : arena;
@@ -2097,30 +2097,49 @@ extern int x86_64_compile_func_cp(lr_func_t *func, lr_module_t *mod,
                                    uint8_t *buf, size_t buflen, size_t *out_len,
                                    lr_arena_t *arena);
 
-typedef struct x86_stream_bridge_ctx {
-    lr_func_t *func;
-    lr_module_t *mod;
-    uint8_t *buf;
-    size_t buflen;
-    lr_arena_t *arena;
+/* ---- Streaming direct-emission ISel ------------------------------------ */
+
+/*
+ * True streaming backend: converts lr_compile_inst_desc_t operands to
+ * stack-local lr_operand_t arrays and runs the same ISel switch as
+ * x86_64_compile_func, emitting machine code immediately without
+ * materializing persistent IR.
+ */
+
+typedef struct x86_stream_phi_copy {
+    uint32_t pred_block_id;
+    uint32_t dest_vreg;
+    lr_operand_t src_op;
+} x86_stream_phi_copy_t;
+
+/* Saved terminator for deferred emission (allows phi copies registered
+   after the terminator to be included when the next block starts). */
+typedef struct x86_deferred_term {
+    bool pending;
+    lr_opcode_t op;
+    lr_type_t *type;
+    uint32_t dest;
+    lr_operand_t ops[4];
+    uint32_t num_ops;
+    uint32_t block_id;
+} x86_deferred_term_t;
+
+typedef struct x86_direct_ctx {
+    x86_compile_ctx_t cc;
+    size_t prologue_patch_pos;
     lr_compile_mode_t mode;
-    lr_func_t stream_func;
-    uint32_t *owned_param_vregs;
-    struct x86_stream_block_builder **blocks;
-    uint32_t block_cap;
-    uint32_t max_block_id_plus1;
     uint32_t current_block_id;
     bool has_current_block;
-    bool saw_stream_input;
-} x86_stream_bridge_ctx_t;
+    bool block_offset_pending;
+    uint32_t next_vreg;
+    lr_type_t *ret_type;
+    x86_stream_phi_copy_t *phi_copies;
+    uint32_t phi_copy_count;
+    uint32_t phi_copy_cap;
+    x86_deferred_term_t deferred;
+} x86_direct_ctx_t;
 
-typedef struct x86_stream_block_builder {
-    lr_block_t block;
-    lr_inst_t **inst_array;
-    uint32_t inst_cap;
-} x86_stream_block_builder_t;
-
-static lr_operand_t x86_stream_operand_from_desc(const lr_operand_desc_t *desc) {
+static lr_operand_t operand_from_desc(const lr_operand_desc_t *desc) {
     lr_operand_t out;
     memset(&out, 0, sizeof(out));
     if (!desc) {
@@ -2152,124 +2171,200 @@ static lr_operand_t x86_stream_operand_from_desc(const lr_operand_desc_t *desc) 
     return out;
 }
 
-static int x86_stream_ensure_block_capacity(x86_stream_bridge_ctx_t *ctx,
-                                            uint32_t need) {
-    x86_stream_block_builder_t **new_blocks = NULL;
-    uint32_t new_cap;
-    if (!ctx)
-        return -1;
-    if (need <= ctx->block_cap)
+static void direct_note_vregs(x86_direct_ctx_t *ctx,
+                              const lr_compile_inst_desc_t *desc) {
+    if (desc->dest != 0 && desc->dest >= ctx->next_vreg)
+        ctx->next_vreg = desc->dest + 1u;
+    for (uint32_t i = 0; i < desc->num_operands; i++) {
+        if (desc->operands[i].kind == LR_OP_KIND_VREG &&
+            desc->operands[i].vreg >= ctx->next_vreg)
+            ctx->next_vreg = desc->operands[i].vreg + 1u;
+    }
+}
+
+static int direct_ensure_fixup_cap(x86_direct_ctx_t *ctx) {
+    x86_compile_ctx_t *cc = &ctx->cc;
+    if (cc->num_fixups < cc->fixup_cap)
         return 0;
-    new_cap = ctx->block_cap == 0 ? 8u : ctx->block_cap;
-    while (new_cap < need)
+    uint32_t new_cap = cc->fixup_cap == 0 ? 16u : cc->fixup_cap * 2u;
+    x86_fixup_t *nf = lr_arena_array_uninit(cc->arena, x86_fixup_t, new_cap);
+    if (!nf)
+        return -1;
+    if (cc->fixup_cap > 0)
+        memcpy(nf, cc->fixups, sizeof(x86_fixup_t) * cc->fixup_cap);
+    cc->fixups = nf;
+    cc->fixup_cap = new_cap;
+    return 0;
+}
+
+static int direct_ensure_block_offsets(x86_direct_ctx_t *ctx,
+                                       uint32_t block_id) {
+    x86_compile_ctx_t *cc = &ctx->cc;
+    if (block_id < cc->num_block_offsets)
+        return 0;
+    uint32_t new_cap = cc->num_block_offsets == 0 ? 8u : cc->num_block_offsets;
+    while (new_cap <= block_id)
         new_cap *= 2u;
-    new_blocks = lr_arena_array(ctx->arena, x86_stream_block_builder_t *, new_cap);
-    if (!new_blocks)
+    size_t *nb = lr_arena_array_uninit(cc->arena, size_t, new_cap);
+    if (!nb)
         return -1;
-    if (ctx->block_cap > 0)
-        memcpy(new_blocks, ctx->blocks, sizeof(*new_blocks) * ctx->block_cap);
-    ctx->blocks = new_blocks;
-    ctx->block_cap = new_cap;
+    if (cc->num_block_offsets > 0)
+        memcpy(nb, cc->block_offsets,
+               sizeof(size_t) * cc->num_block_offsets);
+    for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
+        nb[i] = 0;
+    cc->block_offsets = nb;
+    cc->num_block_offsets = new_cap;
     return 0;
 }
 
-static x86_stream_block_builder_t *x86_stream_get_or_create_block(
-        x86_stream_bridge_ctx_t *ctx, uint32_t block_id) {
-    x86_stream_block_builder_t *b = NULL;
-    char name_buf[32];
-    if (!ctx)
-        return NULL;
-    if (x86_stream_ensure_block_capacity(ctx, block_id + 1u) != 0)
-        return NULL;
-    b = ctx->blocks[block_id];
-    if (b)
-        return b;
-    b = lr_arena_new(ctx->arena, x86_stream_block_builder_t);
-    if (!b)
-        return NULL;
-    (void)snprintf(name_buf, sizeof(name_buf), "b%u", block_id);
-    b->block.id = block_id;
-    b->block.name = lr_arena_strdup(ctx->arena, name_buf, strlen(name_buf));
-    b->block.func = &ctx->stream_func;
-    if (!b->block.name)
-        return NULL;
-    ctx->blocks[block_id] = b;
-    if (ctx->max_block_id_plus1 < block_id + 1u)
-        ctx->max_block_id_plus1 = block_id + 1u;
-    return b;
-}
-
-static int x86_stream_push_inst_ref(x86_stream_bridge_ctx_t *ctx,
-                                    x86_stream_block_builder_t *block,
-                                    lr_inst_t *inst) {
-    lr_inst_t **new_refs = NULL;
-    uint32_t new_cap;
-    if (!ctx || !block || !inst)
+static int direct_ensure_phi_copy_cap(x86_direct_ctx_t *ctx) {
+    if (ctx->phi_copy_count < ctx->phi_copy_cap)
+        return 0;
+    uint32_t new_cap = ctx->phi_copy_cap == 0 ? 8u : ctx->phi_copy_cap * 2u;
+    x86_stream_phi_copy_t *np = lr_arena_array_uninit(
+        ctx->cc.arena, x86_stream_phi_copy_t, new_cap);
+    if (!np)
         return -1;
-    if (block->block.num_insts == block->inst_cap) {
-        new_cap = block->inst_cap == 0 ? 16u : block->inst_cap * 2u;
-        new_refs = lr_arena_array(ctx->arena, lr_inst_t *, new_cap);
-        if (!new_refs)
-            return -1;
-        if (block->inst_cap > 0)
-            memcpy(new_refs, block->inst_array, sizeof(*new_refs) * block->inst_cap);
-        block->inst_array = new_refs;
-        block->inst_cap = new_cap;
-    }
-    block->inst_array[block->block.num_insts++] = inst;
+    if (ctx->phi_copy_cap > 0)
+        memcpy(np, ctx->phi_copies,
+               sizeof(x86_stream_phi_copy_t) * ctx->phi_copy_cap);
+    ctx->phi_copies = np;
+    ctx->phi_copy_cap = new_cap;
     return 0;
 }
 
-static void x86_stream_note_vregs(x86_stream_bridge_ctx_t *ctx,
-                                  const lr_compile_inst_desc_t *inst_desc) {
-    if (!ctx || !inst_desc)
-        return;
-    if (inst_desc->dest >= ctx->stream_func.next_vreg &&
-        inst_desc->dest != 0) {
-        ctx->stream_func.next_vreg = inst_desc->dest + 1u;
-    }
-    for (uint32_t i = 0; i < inst_desc->num_operands; i++) {
-        const lr_operand_desc_t *op = &inst_desc->operands[i];
-        if (op->kind != LR_OP_KIND_VREG)
+static void direct_emit_phi_copies(x86_direct_ctx_t *ctx, uint32_t pred) {
+    x86_compile_ctx_t *cc = &ctx->cc;
+    for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
+        if (ctx->phi_copies[i].pred_block_id != pred)
             continue;
-        if (op->vreg >= ctx->stream_func.next_vreg)
-            ctx->stream_func.next_vreg = op->vreg + 1u;
+        emit_load_operand(cc, &ctx->phi_copies[i].src_op, X86_RAX);
+        emit_store_slot(cc, ctx->phi_copies[i].dest_vreg, X86_RAX);
     }
 }
 
-static int x86_stream_finalize_function(x86_stream_bridge_ctx_t *ctx) {
-    lr_block_t **block_array = NULL;
-    if (!ctx || !ctx->saw_stream_input || ctx->max_block_id_plus1 == 0)
-        return -1;
+/* Flush a deferred terminator (BR, CONDBR, RET, RET_VOID) that was
+   saved during compile_emit. Phi copies are emitted before the branch
+   so that copies registered after the terminator's compile_emit call
+   (e.g., from a PHI in a successor block) are included. */
+static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
+    x86_compile_ctx_t *cc;
+    x86_deferred_term_t *dt;
 
-    block_array = lr_arena_array(ctx->arena, lr_block_t *, ctx->max_block_id_plus1);
-    if (!block_array)
-        return -1;
+    if (!ctx || !ctx->deferred.pending)
+        return 0;
 
-    for (uint32_t i = 0; i < ctx->max_block_id_plus1; i++) {
-        x86_stream_block_builder_t *b = ctx->blocks ? ctx->blocks[i] : NULL;
-        if (!b)
-            return -1;
-        b->block.inst_array = b->inst_array;
-        b->block.func = &ctx->stream_func;
-        if (i + 1u < ctx->max_block_id_plus1) {
-            x86_stream_block_builder_t *next_b = ctx->blocks[i + 1u];
-            if (!next_b)
-                return -1;
-            b->block.next = &next_b->block;
+    cc = &ctx->cc;
+    dt = &ctx->deferred;
+    dt->pending = false;
+
+    direct_emit_phi_copies(ctx, dt->block_id);
+
+    switch (dt->op) {
+    case LR_OP_RET:
+        if (cc->func_uses_internal_sret) {
+            size_t ret_sz = lr_type_size(ctx->ret_type);
+            emit_mem_load_sized(cc, X86_RDI, X86_RBP, cc->sret_ptr_off, 8);
+            if (ret_sz == 0)
+                ret_sz = 8;
+            if (dt->ops[0].kind == LR_VAL_VREG) {
+                uint32_t vreg = dt->ops[0].vreg;
+                size_t src_sz = 0;
+                int32_t src_off = alloc_slot(cc, vreg, 8, 8);
+                if (vreg < cc->num_stack_slots)
+                    src_sz = cc->stack_slot_sizes[vreg];
+                if (src_sz > ret_sz)
+                    src_sz = ret_sz;
+                if (src_sz > 0)
+                    emit_mem_copy_base_to_base(cc, X86_RDI, 0,
+                                               X86_RBP, src_off, src_sz);
+                if (src_sz < ret_sz)
+                    emit_mem_zero_base(cc, X86_RDI, (int32_t)src_sz,
+                                       ret_sz - src_sz);
+            } else if (dt->ops[0].kind == LR_VAL_UNDEF ||
+                       dt->ops[0].kind == LR_VAL_NULL) {
+                emit_mem_zero_base(cc, X86_RDI, 0, ret_sz);
+            } else if (ret_sz <= 8) {
+                emit_load_operand(cc, &dt->ops[0], X86_RAX);
+                emit_mem_store_sized(cc, X86_RAX, X86_RDI, 0,
+                                     (uint8_t)ret_sz);
+            } else {
+                emit_mem_zero_base(cc, X86_RDI, 0, ret_sz);
+            }
+            encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x89,
+                          X86_RAX, X86_RDI, 8);
         } else {
-            b->block.next = NULL;
+            emit_load_operand(cc, &dt->ops[0], X86_RAX);
         }
-        block_array[i] = &b->block;
+        emit_epilogue(cc);
+        break;
+    case LR_OP_RET_VOID:
+        emit_epilogue(cc);
+        break;
+    case LR_OP_BR: {
+        if (direct_ensure_fixup_cap(ctx) != 0) return -1;
+        uint32_t target_id = dt->ops[0].block_id;
+        emit_jmp(cc, target_id);
+        break;
+    }
+    case LR_OP_CONDBR: {
+        emit_load_operand(cc, &dt->ops[0], X86_RAX);
+        encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x85,
+                      X86_RAX, X86_RAX, 1);
+        if (direct_ensure_fixup_cap(ctx) != 0) return -1;
+        uint32_t true_id = dt->ops[1].block_id;
+        uint32_t false_id = dt->ops[2].block_id;
+        emit_jcc(cc, LR_CC_NE, true_id);
+        if (direct_ensure_fixup_cap(ctx) != 0) return -1;
+        emit_jmp(cc, false_id);
+        break;
+    }
+    default:
+        break;
+    }
+    return 0;
+}
+
+static bool direct_call_uses_external_sysv_abi(x86_compile_ctx_t *cc,
+                                               const lr_operand_t *callee_op,
+                                               bool call_external_abi,
+                                               bool call_vararg,
+                                               lr_func_t **callee_func_out,
+                                               bool *out_vararg) {
+    lr_func_t *callee_func = NULL;
+    if (callee_func_out) *callee_func_out = NULL;
+    if (out_vararg) *out_vararg = call_vararg;
+
+    if (!cc || !cc->mod || !callee_op)
+        return false;
+
+    if (callee_op->kind == LR_VAL_GLOBAL) {
+        if (callee_op->global_id < cc->sym_count) {
+            callee_func = cc->sym_funcs[callee_op->global_id];
+            if (callee_func_out) *callee_func_out = callee_func;
+            if (callee_func) {
+                if (out_vararg)
+                    *out_vararg = callee_func->vararg || call_vararg;
+                return callee_func->first_block == NULL;
+            }
+            return cc->sym_defined[callee_op->global_id] == 0;
+        }
+        const char *sym_name = lr_module_symbol_name(cc->mod,
+                                                      callee_op->global_id);
+        if (!sym_name) return false;
+        callee_func = find_module_function(cc->mod, sym_name);
+        if (callee_func_out) *callee_func_out = callee_func;
+        if (callee_func) {
+            if (out_vararg)
+                *out_vararg = callee_func->vararg || call_vararg;
+            return callee_func->first_block == NULL;
+        }
+        return !is_symbol_defined_in_module(cc->mod, sym_name);
     }
 
-    ctx->stream_func.is_decl = false;
-    ctx->stream_func.num_blocks = ctx->max_block_id_plus1;
-    ctx->stream_func.first_block = &ctx->blocks[0]->block;
-    ctx->stream_func.last_block = &ctx->blocks[ctx->max_block_id_plus1 - 1u]->block;
-    ctx->stream_func.block_array = block_array;
-
-    return lr_func_finalize(&ctx->stream_func, ctx->arena);
+    if (out_vararg) *out_vararg = call_vararg;
+    return call_external_abi;
 }
 
 static int x86_64_compile_begin(void **compile_ctx,
@@ -2277,152 +2372,1025 @@ static int x86_64_compile_begin(void **compile_ctx,
                                 lr_module_t *mod,
                                 uint8_t *buf, size_t buflen,
                                 lr_arena_t *arena) {
-    x86_stream_bridge_ctx_t *ctx = NULL;
+    static const uint8_t param_regs[] = {
+        X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9
+    };
+    x86_direct_ctx_t *ctx = NULL;
+    uint32_t initial_slots;
+    uint32_t *param_vregs = NULL;
+    uint32_t num_params;
+    bool vararg;
+    lr_type_t *ret_type;
+
     if (!compile_ctx || !func_meta || !mod || !arena)
         return -1;
-    ctx = lr_arena_new(arena, x86_stream_bridge_ctx_t);
+
+    ctx = lr_arena_new(arena, x86_direct_ctx_t);
     if (!ctx)
         return -1;
-    ctx->func = func_meta->func;
-    ctx->mod = mod;
-    ctx->buf = buf;
-    ctx->buflen = buflen;
-    ctx->arena = arena;
+    memset(ctx, 0, sizeof(*ctx));
     ctx->mode = func_meta->mode;
-    if (func_meta->func && func_meta->func->name) {
-        ctx->stream_func.name = func_meta->func->name;
-    } else {
-        ctx->stream_func.name = lr_arena_strdup(ctx->arena, "__liric_stream_fn",
-                                                strlen("__liric_stream_fn"));
-        if (!ctx->stream_func.name)
-            return -1;
-    }
-    ctx->stream_func.ret_type = func_meta->ret_type ? func_meta->ret_type
-                                                    : mod->type_void;
-    ctx->stream_func.param_types = func_meta->param_types;
-    ctx->stream_func.num_params = func_meta->num_params;
-    ctx->stream_func.vararg = func_meta->vararg;
-    ctx->stream_func.next_vreg = func_meta->next_vreg;
+    ctx->next_vreg = func_meta->next_vreg;
+    ret_type = func_meta->ret_type ? func_meta->ret_type : mod->type_void;
+    ctx->ret_type = ret_type;
+    num_params = func_meta->num_params;
+    vararg = func_meta->vararg;
+
     if (func_meta->func && func_meta->func->param_vregs) {
-        ctx->stream_func.param_vregs = func_meta->func->param_vregs;
-    } else if (func_meta->num_params > 0) {
-        ctx->owned_param_vregs = lr_arena_array(ctx->arena, uint32_t,
-                                                func_meta->num_params);
-        if (!ctx->owned_param_vregs)
-            return -1;
-        for (uint32_t i = 0; i < func_meta->num_params; i++) {
-            ctx->owned_param_vregs[i] = i + 1u;
-            if (ctx->stream_func.next_vreg <= i + 1u)
-                ctx->stream_func.next_vreg = i + 2u;
+        param_vregs = func_meta->func->param_vregs;
+    } else if (num_params > 0) {
+        param_vregs = lr_arena_array(arena, uint32_t, num_params);
+        if (!param_vregs) return -1;
+        for (uint32_t i = 0; i < num_params; i++) {
+            param_vregs[i] = i + 1u;
+            if (ctx->next_vreg <= i + 1u)
+                ctx->next_vreg = i + 2u;
         }
-        ctx->stream_func.param_vregs = ctx->owned_param_vregs;
     }
+
+    initial_slots = ctx->next_vreg > 64 ? ctx->next_vreg : 64;
+    x86_compile_ctx_t *cc = &ctx->cc;
+    cc->buf = buf;
+    cc->buflen = buflen;
+    cc->pos = 0;
+    cc->stack_size = 0;
+    cc->stack_slots = lr_arena_array(arena, int32_t, initial_slots);
+    cc->stack_slot_sizes = lr_arena_array(arena, uint32_t, initial_slots);
+    cc->num_stack_slots = initial_slots;
+    cc->static_alloca_offsets = NULL;
+    cc->num_static_alloca_offsets = 0;
+    cc->block_offsets = lr_arena_array_uninit(arena, size_t, 8);
+    cc->num_block_offsets = 8;
+    for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = 0;
+    cc->fixups = lr_arena_array_uninit(arena, x86_fixup_t, 16);
+    cc->num_fixups = 0;
+    cc->fixup_cap = 16;
+    cc->arena = arena;
+    cc->obj_ctx = NULL;
+    cc->mod = mod;
+    cc->sym_defined = NULL;
+    cc->sym_funcs = NULL;
+    cc->sym_count = 0;
+    cc->rax_holds_vreg = UINT32_MAX;
+    cc->rcx_holds_vreg = UINT32_MAX;
+    cc->vreg_use_counts = NULL;
+    cc->num_vreg_use_counts = 0;
+    cc->current_block = NULL;
+    cc->current_inst = NULL;
+    cc->current_inst_index = 0;
+    cc->func_uses_internal_sret = false;
+    cc->sret_ptr_off = 0;
+    cc->func_is_vararg = false;
+    cc->vararg_rsa_off = 0;
+    cc->vararg_named_gp = 0;
+
+    attach_obj_symbol_meta_cache(cc);
+
+    ctx->prologue_patch_pos = emit_prologue(cc);
+
+    cc->func_uses_internal_sret = uses_internal_sret_abi(ret_type);
+    if (cc->func_uses_internal_sret) {
+        cc->sret_ptr_off = alloc_temp_slot(cc, 8, 8);
+        emit_mem_store_sized(cc, X86_RDI, X86_RBP, cc->sret_ptr_off, 8);
+    }
+
+    {
+        uint32_t gp_start = cc->func_uses_internal_sret ? 1u : 0u;
+        uint32_t gp_cap = 6u - gp_start;
+        for (uint32_t i = 0; i < num_params && i < gp_cap; i++)
+            emit_store_slot(cc, param_vregs[i], param_regs[gp_start + i]);
+        for (uint32_t i = gp_cap; i < num_params; i++) {
+            int32_t caller_off = 16 + (int32_t)(i - gp_cap) * 8;
+            encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8B,
+                       X86_RAX, X86_RBP, caller_off, 8);
+            emit_store_slot(cc, param_vregs[i], X86_RAX);
+        }
+    }
+
+    cc->func_is_vararg = vararg;
+    if (vararg) {
+        uint32_t named_gp = num_params;
+        if (named_gp > 6) named_gp = 6;
+        cc->vararg_named_gp = named_gp;
+        cc->vararg_rsa_off = alloc_temp_slot(cc, 48, 8);
+        for (uint32_t i = 0; i < 6; i++)
+            emit_mem_store_sized(cc, param_regs[i], X86_RBP,
+                                 cc->vararg_rsa_off + (int32_t)(i * 8), 8);
+    }
+
     *compile_ctx = ctx;
     return 0;
 }
 
-static int x86_64_compile_emit(void *compile_ctx,
-                               const lr_compile_inst_desc_t *inst_desc) {
-    x86_stream_bridge_ctx_t *ctx = (x86_stream_bridge_ctx_t *)compile_ctx;
-    x86_stream_block_builder_t *block = NULL;
-    lr_inst_t *inst = NULL;
-
-    if (!ctx || !inst_desc || !ctx->has_current_block)
+static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
+    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
+    if (!ctx)
         return -1;
-    if (inst_desc->num_operands > 0 && !inst_desc->operands)
+    if (direct_ensure_block_offsets(ctx, block_id) != 0)
         return -1;
-    if (inst_desc->num_indices > 0 && !inst_desc->indices)
-        return -1;
-
-    block = x86_stream_get_or_create_block(ctx, ctx->current_block_id);
-    if (!block)
-        return -1;
-
-    inst = lr_arena_new(ctx->arena, lr_inst_t);
-    if (!inst)
-        return -1;
-    inst->op = inst_desc->op;
-    inst->type = inst_desc->type;
-    inst->dest = inst_desc->dest;
-    inst->num_operands = inst_desc->num_operands;
-    inst->num_indices = inst_desc->num_indices;
-    if (inst_desc->op == LR_OP_ICMP) {
-        inst->icmp_pred = (lr_icmp_pred_t)inst_desc->icmp_pred;
-    } else if (inst_desc->op == LR_OP_FCMP) {
-        inst->fcmp_pred = (lr_fcmp_pred_t)inst_desc->fcmp_pred;
-    }
-    inst->call_external_abi = inst_desc->call_external_abi;
-    inst->call_vararg = inst_desc->call_vararg;
-    inst->call_fixed_args = inst_desc->call_fixed_args;
-
-    if (inst_desc->num_operands > 0) {
-        inst->operands = lr_arena_array(ctx->arena, lr_operand_t,
-                                        inst_desc->num_operands);
-        if (!inst->operands)
-            return -1;
-        for (uint32_t i = 0; i < inst_desc->num_operands; i++) {
-            inst->operands[i] = x86_stream_operand_from_desc(
-                &inst_desc->operands[i]
-            );
-        }
-    }
-    if (inst_desc->num_indices > 0) {
-        inst->indices = lr_arena_array(ctx->arena, uint32_t,
-                                       inst_desc->num_indices);
-        if (!inst->indices)
-            return -1;
-        memcpy(inst->indices, inst_desc->indices,
-               sizeof(*inst->indices) * inst_desc->num_indices);
-    }
-
-    if (!block->block.first) {
-        block->block.first = inst;
-        block->block.last = inst;
-    } else {
-        block->block.last->next = inst;
-        block->block.last = inst;
-    }
-    if (x86_stream_push_inst_ref(ctx, block, inst) != 0)
-        return -1;
-    x86_stream_note_vregs(ctx, inst_desc);
-    ctx->saw_stream_input = true;
+    /* Defer both the previous block's terminator and this block's offset
+       recording. PHI instructions in the new block will register phi copies
+       for predecessor blocks; the deferred terminator and block offset are
+       materialized when the first non-PHI instruction is emitted. */
+    ctx->current_block_id = block_id;
+    ctx->has_current_block = true;
+    ctx->block_offset_pending = true;
     return 0;
 }
 
-static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
-    x86_stream_bridge_ctx_t *ctx = (x86_stream_bridge_ctx_t *)compile_ctx;
-    if (!ctx)
+static int x86_64_compile_emit(void *compile_ctx,
+                               const lr_compile_inst_desc_t *desc) {
+    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
+    x86_compile_ctx_t *cc;
+    lr_operand_t ops[16];
+    lr_inst_t inst_header;
+
+    if (!ctx || !desc || !ctx->has_current_block)
         return -1;
-    if (!x86_stream_get_or_create_block(ctx, block_id))
+    if (desc->num_operands > 0 && !desc->operands)
         return -1;
-    ctx->current_block_id = block_id;
-    ctx->has_current_block = true;
+    if (desc->num_indices > 0 && !desc->indices)
+        return -1;
+
+    /* PHI instructions only register phi copies and allocate slots; they
+       do not emit code and must not flush the deferred terminator. For
+       all other instructions: flush the deferred terminator from the
+       previous block (now that PHI copies are registered), then record
+       this block's offset so branch fixups target the right position. */
+    if (desc->op != LR_OP_PHI) {
+        if (ctx->deferred.pending) {
+            if (flush_deferred_terminator(ctx) != 0)
+                return -1;
+        }
+        if (ctx->block_offset_pending) {
+            ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
+            invalidate_cached_gprs(&ctx->cc);
+            ctx->block_offset_pending = false;
+        }
+    }
+
+    cc = &ctx->cc;
+    direct_note_vregs(ctx, desc);
+
+    if (direct_ensure_fixup_cap(ctx) != 0)
+        return -1;
+
+    uint32_t nops = desc->num_operands;
+    if (nops > 16) {
+        lr_operand_t *heap_ops = lr_arena_array_uninit(
+            cc->arena, lr_operand_t, nops);
+        if (!heap_ops)
+            return -1;
+        for (uint32_t i = 0; i < nops; i++)
+            heap_ops[i] = operand_from_desc(&desc->operands[i]);
+        memset(&inst_header, 0, sizeof(inst_header));
+        inst_header.op = desc->op;
+        inst_header.operands = heap_ops;
+        inst_header.num_operands = nops;
+        inst_header.type = desc->type;
+        inst_header.dest = desc->dest;
+        inst_header.icmp_pred = (lr_icmp_pred_t)desc->icmp_pred;
+        inst_header.fcmp_pred = (lr_fcmp_pred_t)desc->fcmp_pred;
+        inst_header.call_external_abi = desc->call_external_abi;
+        inst_header.call_vararg = desc->call_vararg;
+        inst_header.call_fixed_args = desc->call_fixed_args;
+        inst_header.indices = (uint32_t *)desc->indices;
+        inst_header.num_indices = desc->num_indices;
+        /* Copy the first 16 into the local array so the switch can
+           reference ops[] uniformly for most operands. */
+        memcpy(ops, heap_ops, 16 * sizeof(lr_operand_t));
+    } else {
+        for (uint32_t i = 0; i < nops; i++)
+            ops[i] = operand_from_desc(&desc->operands[i]);
+        memset(&inst_header, 0, sizeof(inst_header));
+        inst_header.op = desc->op;
+    }
+
+    cc->current_inst = &inst_header;
+    cc->current_block = NULL;
+
+    switch (desc->op) {
+    case LR_OP_RET: {
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_RET;
+        ctx->deferred.ops[0] = ops[0];
+        ctx->deferred.num_ops = 1;
+        ctx->deferred.block_id = ctx->current_block_id;
+        cc->current_inst = NULL;
+        return 0;
+    }
+    case LR_OP_RET_VOID:
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_RET_VOID;
+        ctx->deferred.num_ops = 0;
+        ctx->deferred.block_id = ctx->current_block_id;
+        cc->current_inst = NULL;
+        return 0;
+    case LR_OP_ADD: case LR_OP_SUB: case LR_OP_AND:
+    case LR_OP_OR: case LR_OP_XOR: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        uint8_t opcode;
+        switch (desc->op) {
+        case LR_OP_ADD: opcode = 0x01; break;
+        case LR_OP_SUB: opcode = 0x29; break;
+        case LR_OP_AND: opcode = 0x21; break;
+        case LR_OP_OR:  opcode = 0x09; break;
+        case LR_OP_XOR: opcode = 0x31; break;
+        default: opcode = 0x01; break;
+        }
+        encode_alu_rr(cc->buf, &cc->pos, cc->buflen, opcode,
+                      X86_RAX, X86_RCX,
+                      (uint8_t)lr_type_size(desc->type));
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_MUL: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        emit_imul_rr(cc, X86_RAX, X86_RCX,
+                     (uint8_t)lr_type_size(desc->type));
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_FADD: case LR_OP_FSUB:
+    case LR_OP_FMUL: case LR_OP_FDIV: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
+        emit_load_fp_operand(cc, &ops[1], FP_SCRATCH1, fsize);
+        uint8_t op1;
+        switch (desc->op) {
+        case LR_OP_FADD: op1 = 0x58; break;
+        case LR_OP_FSUB: op1 = 0x5C; break;
+        case LR_OP_FMUL: op1 = 0x59; break;
+        case LR_OP_FDIV: op1 = 0x5E; break;
+        default: op1 = 0x58; break;
+        }
+        emit_sse_arith(cc, op1, FP_SCRATCH0, FP_SCRATCH1, fsize);
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
+        break;
+    }
+    case LR_OP_FNEG: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH1, fsize);
+        encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0x66, 0x57, 0,
+                      FP_SCRATCH0, FP_SCRATCH0);
+        uint8_t prefix = (fsize == 8) ? 0xF2 : 0xF3;
+        encode_sse_rr(cc->buf, &cc->pos, cc->buflen, prefix, 0x5C, 0,
+                      FP_SCRATCH0, FP_SCRATCH1);
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
+        break;
+    }
+    case LR_OP_SDIV: case LR_OP_SREM: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        {
+            uint8_t bits = int_type_width_bits(desc->type);
+            emit_sign_extend_value(cc, X86_RAX, bits);
+            emit_sign_extend_value(cc, X86_RCX, bits);
+            emit_byte(cc->buf, &cc->pos, cc->buflen,
+                      rex(true, false, false, false));
+            emit_byte(cc->buf, &cc->pos, cc->buflen, 0x99);
+            emit_idiv_r(cc, X86_RCX, 8);
+            if (bits < 64) {
+                uint8_t narrow_res = (desc->op == LR_OP_SREM) ?
+                                     X86_RDX : X86_RAX;
+                emit_sign_extend_value(cc, narrow_res, bits);
+            }
+        }
+        {
+            uint8_t res_reg = (desc->op == LR_OP_SREM) ?
+                              X86_RDX : X86_RAX;
+            emit_store_slot(cc, desc->dest, res_reg);
+        }
+        break;
+    }
+    case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        uint8_t ext;
+        switch (desc->op) {
+        case LR_OP_SHL:  ext = 4; break;
+        case LR_OP_LSHR: ext = 5; break;
+        case LR_OP_ASHR: ext = 7; break;
+        default: ext = 4; break;
+        }
+        emit_shift(cc, ext, X86_RAX,
+                   (uint8_t)lr_type_size(desc->type));
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_ICMP: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x39,
+                      X86_RAX, X86_RCX,
+                      (uint8_t)lr_type_size(ops[0].type));
+        uint8_t icc = lr_target_cc_from_icmp(
+            (lr_icmp_pred_t)desc->icmp_pred);
+        emit_setcc(cc, icc, X86_RAX);
+        emit_movzx_rr(cc, X86_RAX, X86_RAX, 1);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_SELECT: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x85,
+                      X86_RAX, X86_RAX, 1);
+        emit_load_operand(cc, &ops[2], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        emit_cmovcc(cc, LR_CC_NE, X86_RAX, X86_RCX, 8);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_BR: {
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_BR;
+        ctx->deferred.ops[0] = ops[0];
+        ctx->deferred.num_ops = 1;
+        ctx->deferred.block_id = ctx->current_block_id;
+        cc->current_inst = NULL;
+        return 0;
+    }
+    case LR_OP_CONDBR: {
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_CONDBR;
+        ctx->deferred.ops[0] = ops[0];
+        ctx->deferred.ops[1] = ops[1];
+        ctx->deferred.ops[2] = ops[2];
+        ctx->deferred.num_ops = 3;
+        ctx->deferred.block_id = ctx->current_block_id;
+        cc->current_inst = NULL;
+        return 0;
+    }
+    case LR_OP_ALLOCA: {
+        size_t elem_sz = lr_type_size(desc->type);
+        if (elem_sz < 1) elem_sz = 1;
+        bool use_static = (nops == 0) ||
+            (ops[0].kind == LR_VAL_IMM_I64 && ops[0].imm_i64 == 1);
+        if (use_static) {
+            int32_t off = lr_target_lookup_static_alloca_offset(
+                cc->static_alloca_offsets, cc->num_static_alloca_offsets,
+                desc->dest);
+            if (off == 0) {
+                size_t elem_align = lr_type_align(desc->type);
+                if (elem_align == 0) elem_align = 1;
+                cc->stack_size = (uint32_t)align_up(cc->stack_size,
+                                                     elem_align);
+                cc->stack_size += (uint32_t)elem_sz;
+                off = -(int32_t)cc->stack_size;
+                lr_target_set_static_alloca_offset(
+                    cc->arena, &cc->static_alloca_offsets,
+                    &cc->num_static_alloca_offsets, desc->dest, off);
+            }
+            encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8D,
+                       X86_RAX, X86_RBP, off, 8);
+            emit_store_slot(cc, desc->dest, X86_RAX);
+        } else {
+            emit_load_operand(cc, &ops[0], X86_RAX);
+            if (elem_sz != 1) {
+                emit_mov_imm(cc, X86_RCX, (int64_t)elem_sz, false);
+                emit_imul_rr(cc, X86_RAX, X86_RCX, 8);
+            }
+            emit_mov_imm(cc, X86_RCX, 15, false);
+            encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x01,
+                          X86_RAX, X86_RCX, 8);
+            emit_mov_imm(cc, X86_RCX, ~15LL, false);
+            encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x21,
+                          X86_RAX, X86_RCX, 8);
+            encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x29,
+                          X86_RSP, X86_RAX, 8);
+            encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x89,
+                          X86_RAX, X86_RSP, 8);
+            emit_store_slot(cc, desc->dest, X86_RAX);
+        }
+        break;
+    }
+    case LR_OP_LOAD: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        size_t load_sz = lr_type_size(desc->type);
+        if (load_sz == 0) load_sz = 8;
+        if (load_sz > 8) {
+            size_t load_align = lr_type_align(desc->type);
+            int32_t dst_off = alloc_slot(cc, desc->dest, load_sz,
+                                         load_align);
+            emit_mem_copy_base_to_base(cc, X86_RBP, dst_off,
+                                       X86_RAX, 0, load_sz);
+        } else {
+            uint8_t sz = (uint8_t)load_sz;
+            if (sz < 4)
+                emit_movzx_mem(cc, X86_RAX, X86_RAX, 0, sz);
+            else
+                encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8B,
+                           X86_RAX, X86_RAX, 0, sz);
+            emit_store_slot(cc, desc->dest, X86_RAX);
+        }
+        break;
+    }
+    case LR_OP_STORE: {
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        size_t store_sz = lr_type_size(ops[0].type);
+        if (store_sz == 0) store_sz = 8;
+        if (store_sz > 8) {
+            if (ops[0].kind == LR_VAL_IMM_I64 && ops[0].imm_i64 == 0) {
+                emit_mem_zero_base(cc, X86_RCX, 0, store_sz);
+                break;
+            }
+            if (ops[0].kind == LR_VAL_VREG) {
+                uint32_t vreg = ops[0].vreg;
+                size_t src_sz = 0;
+                int32_t src_off = alloc_slot(cc, vreg, 8, 8);
+                if (vreg < cc->num_stack_slots)
+                    src_sz = cc->stack_slot_sizes[vreg];
+                if (src_sz > store_sz) src_sz = store_sz;
+                if (src_sz > 0)
+                    emit_mem_copy_base_to_base(cc, X86_RCX, 0,
+                                               X86_RBP, src_off, src_sz);
+                if (src_sz < store_sz)
+                    emit_mem_zero_base(cc, X86_RCX, (int32_t)src_sz,
+                                       store_sz - src_sz);
+                break;
+            }
+            emit_mem_zero_base(cc, X86_RCX, 0, store_sz);
+            break;
+        }
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_mem_store_sized(cc, X86_RAX, X86_RCX, 0,
+                             (uint8_t)store_sz);
+        break;
+    }
+    case LR_OP_GEP: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        const lr_type_t *cur_ty = desc->type;
+        for (uint32_t idx = 1; idx < nops; idx++) {
+            lr_gep_step_t step;
+            if (!lr_gep_analyze_step(cur_ty, idx == 1, &ops[idx], &step))
+                continue;
+            cur_ty = step.next_type;
+            if (step.is_const) {
+                if (step.const_byte_offset == 0) continue;
+                emit_mov_imm(cc, X86_RCX, step.const_byte_offset,
+                             false);
+                encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x01,
+                              X86_RAX, X86_RCX, 8);
+                continue;
+            }
+            emit_load_operand(cc, &ops[idx], X86_RCX);
+            if (step.runtime_signext_bytes == 1 ||
+                step.runtime_signext_bytes == 2)
+                emit_movsx_rr(cc, X86_RCX, X86_RCX,
+                              step.runtime_signext_bytes);
+            else if (step.runtime_signext_bytes == 4)
+                emit_movsxd(cc, X86_RCX, X86_RCX);
+            if (step.runtime_elem_size != 1) {
+                emit_mov_imm(cc, X86_R10,
+                             (int64_t)step.runtime_elem_size, false);
+                emit_imul_rr(cc, X86_RCX, X86_R10, 8);
+            }
+            encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x01,
+                          X86_RAX, X86_RCX, 8);
+        }
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_SEXT: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        uint8_t src_bits = int_type_width_bits(ops[0].type);
+        if (src_bits > 0 && src_bits < 64) {
+            uint8_t shift = (uint8_t)(64 - src_bits);
+            emit_mov_imm(cc, X86_RCX, (int64_t)shift, false);
+            emit_shift(cc, 4, X86_RAX, 8);
+            emit_shift(cc, 7, X86_RAX, 8);
+        }
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_ZEXT: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        uint8_t src_bits = int_type_width_bits(ops[0].type);
+        if (src_bits > 0 && src_bits < 64) {
+            uint8_t shift = (uint8_t)(64 - src_bits);
+            emit_mov_imm(cc, X86_RCX, (int64_t)shift, false);
+            emit_shift(cc, 4, X86_RAX, 8);
+            emit_shift(cc, 5, X86_RAX, 8);
+        }
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_TRUNC: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        uint8_t dst_bits = int_type_width_bits(desc->type);
+        if (dst_bits > 0 && dst_bits < 64) {
+            uint8_t shift = (uint8_t)(64 - dst_bits);
+            emit_mov_imm(cc, X86_RCX, (int64_t)shift, false);
+            emit_shift(cc, 4, X86_RAX, 8);
+            emit_shift(cc, 5, X86_RAX, 8);
+        }
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_BITCAST:
+    case LR_OP_PTRTOINT:
+    case LR_OP_INTTOPTR:
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    case LR_OP_FCMP: {
+        uint8_t fsize = (ops[0].type &&
+                         ops[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
+        emit_load_fp_operand(cc, &ops[1], FP_SCRATCH1, fsize);
+        emit_fcmp(cc, FP_SCRATCH0, FP_SCRATCH1, fsize);
+        uint8_t fcc = lr_target_cc_from_fcmp(
+            (lr_fcmp_pred_t)desc->fcmp_pred);
+        emit_setcc(cc, fcc, X86_RAX);
+        emit_movzx_rr(cc, X86_RAX, X86_RAX, 1);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_SITOFP: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        {
+            size_t src_sz = lr_type_size(ops[0].type);
+            if (src_sz == 1 || src_sz == 2)
+                emit_movsx_rr(cc, X86_RAX, X86_RAX, (uint8_t)src_sz);
+            else if (src_sz == 4)
+                emit_movsxd(cc, X86_RAX, X86_RAX);
+        }
+        emit_cvtsi2fp(cc, FP_SCRATCH0, X86_RAX, fsize);
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
+        break;
+    }
+    case LR_OP_UITOFP: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        {
+            size_t src_sz = lr_type_size(ops[0].type);
+            if (src_sz <= 4) {
+                cc->buf[cc->pos++] = 0x89;
+                cc->buf[cc->pos++] = 0xC0;
+            }
+        }
+        emit_cvtsi2fp(cc, FP_SCRATCH0, X86_RAX, fsize);
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
+        break;
+    }
+    case LR_OP_FPTOSI: {
+        uint8_t fsize = (ops[0].type &&
+                         ops[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
+        emit_cvtfp2si(cc, X86_RAX, FP_SCRATCH0, fsize);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_FPTOUI: {
+        uint8_t fsize = (ops[0].type &&
+                         ops[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
+        emit_cvtfp2si(cc, X86_RAX, FP_SCRATCH0, fsize);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_FPEXT: {
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, 4);
+        encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0xF3, 0x5A, 0,
+                      FP_SCRATCH0, FP_SCRATCH0);
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, 8);
+        break;
+    }
+    case LR_OP_FPTRUNC: {
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, 8);
+        encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0xF2, 0x5A, 0,
+                      FP_SCRATCH0, FP_SCRATCH0);
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, 4);
+        break;
+    }
+    case LR_OP_EXTRACTVALUE: {
+        size_t field_off = 0;
+        const lr_type_t *field_ty = NULL;
+        size_t field_sz = 8;
+        bool have_path = false;
+
+        if (nops > 0 && ops[0].type)
+            have_path = lr_aggregate_index_path(
+                ops[0].type, desc->indices, desc->num_indices,
+                &field_off, &field_ty);
+        if (field_ty)
+            field_sz = lr_type_size(field_ty);
+        if (field_sz == 0)
+            field_sz = 8;
+
+        if (have_path && nops > 0 && ops[0].kind == LR_VAL_VREG) {
+            if (field_sz > 8) {
+                size_t dst_align = desc->type ? lr_type_align(desc->type) : 8;
+                if (dst_align < 8) dst_align = 8;
+                int32_t dst_off = alloc_slot(cc, desc->dest, field_sz,
+                                             dst_align);
+                int32_t src_off = alloc_slot(cc, ops[0].vreg, 8, 8) +
+                                  (int32_t)field_off;
+                emit_mem_copy_base_to_base(cc, X86_RBP, dst_off,
+                                           X86_RBP, src_off, field_sz);
+            } else {
+                emit_load_vreg_mem_sized(cc, ops[0].vreg,
+                                         (int32_t)field_off, X86_RAX,
+                                         (uint8_t)field_sz);
+                emit_store_slot(cc, desc->dest, X86_RAX);
+            }
+            break;
+        }
+        if (nops > 0 && (ops[0].kind == LR_VAL_UNDEF ||
+                          ops[0].kind == LR_VAL_NULL)) {
+            if (field_sz > 8) {
+                size_t dst_align = desc->type ? lr_type_align(desc->type) : 8;
+                if (dst_align < 8) dst_align = 8;
+                int32_t dst_off = alloc_slot(cc, desc->dest, field_sz,
+                                             dst_align);
+                emit_mem_zero_base(cc, X86_RBP, dst_off, field_sz);
+            } else {
+                emit_mov_imm(cc, X86_RAX, 0, false);
+                emit_store_slot(cc, desc->dest, X86_RAX);
+            }
+            break;
+        }
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_store_slot(cc, desc->dest, X86_RAX);
+        break;
+    }
+    case LR_OP_INSERTVALUE: {
+        size_t agg_sz = desc->type ? lr_type_size(desc->type) : 8;
+        size_t agg_align = desc->type ? lr_type_align(desc->type) : 8;
+        size_t field_off = 0;
+        const lr_type_t *field_ty = NULL;
+        int32_t dst_off;
+        if (agg_sz < 8) agg_sz = 8;
+        if (agg_align < 8) agg_align = 8;
+        dst_off = alloc_slot(cc, desc->dest, agg_sz, agg_align);
+
+        if (nops > 0) {
+            if (ops[0].kind == LR_VAL_VREG) {
+                size_t src_sz = 0;
+                int32_t src_off = alloc_slot(cc, ops[0].vreg, 8, 8);
+                if (ops[0].vreg < cc->num_stack_slots)
+                    src_sz = cc->stack_slot_sizes[ops[0].vreg];
+                if (src_sz > agg_sz) src_sz = agg_sz;
+                if (src_sz > 0)
+                    emit_mem_copy_base_to_base(cc, X86_RBP, dst_off,
+                                               X86_RBP, src_off, src_sz);
+                if (src_sz < agg_sz)
+                    emit_mem_zero_base(cc, X86_RBP,
+                                       dst_off + (int32_t)src_sz,
+                                       agg_sz - src_sz);
+            } else if (ops[0].kind == LR_VAL_UNDEF ||
+                       ops[0].kind == LR_VAL_NULL) {
+                emit_mem_zero_base(cc, X86_RBP, dst_off, agg_sz);
+            } else if (agg_sz <= 8) {
+                emit_load_operand(cc, &ops[0], X86_RAX);
+                emit_mem_store_sized(cc, X86_RAX, X86_RBP, dst_off,
+                                     (uint8_t)agg_sz);
+            } else {
+                emit_mem_zero_base(cc, X86_RBP, dst_off, agg_sz);
+            }
+        }
+
+        if (nops < 2 ||
+            !lr_aggregate_index_path(desc->type, desc->indices,
+                                     desc->num_indices, &field_off,
+                                     &field_ty) ||
+            !field_ty)
+            break;
+
+        {
+            size_t field_sz = lr_type_size(field_ty);
+            if (field_sz == 0) break;
+            if (field_sz > 8) {
+                if (ops[1].kind == LR_VAL_VREG) {
+                    size_t src_sz = 0;
+                    int32_t src_off = alloc_slot(cc, ops[1].vreg, 8, 8);
+                    if (ops[1].vreg < cc->num_stack_slots)
+                        src_sz = cc->stack_slot_sizes[ops[1].vreg];
+                    if (src_sz > field_sz) src_sz = field_sz;
+                    if (src_sz > 0)
+                        emit_mem_copy_base_to_base(
+                            cc, X86_RBP,
+                            dst_off + (int32_t)field_off,
+                            X86_RBP, src_off, src_sz);
+                    if (src_sz < field_sz)
+                        emit_mem_zero_base(
+                            cc, X86_RBP,
+                            dst_off + (int32_t)field_off + (int32_t)src_sz,
+                            field_sz - src_sz);
+                } else {
+                    emit_mem_zero_base(cc, X86_RBP,
+                                       dst_off + (int32_t)field_off,
+                                       field_sz);
+                }
+            } else {
+                if (ops[1].kind == LR_VAL_UNDEF ||
+                    ops[1].kind == LR_VAL_NULL)
+                    emit_mov_imm(cc, X86_RAX, 0, false);
+                else
+                    emit_load_operand(cc, &ops[1], X86_RAX);
+                emit_mem_store_sized(cc, X86_RAX, X86_RBP,
+                                     dst_off + (int32_t)field_off,
+                                     (uint8_t)field_sz);
+            }
+        }
+        break;
+    }
+    case LR_OP_CALL: {
+        if (ops[0].kind == LR_VAL_GLOBAL && cc->mod) {
+            const char *cname = lr_module_symbol_name(
+                cc->mod, ops[0].global_id);
+            if (cname && strcmp(cname, "llvm.va_start.p0") == 0) {
+                if (cc->func_is_vararg && nops >= 2) {
+                    emit_load_operand(cc, &ops[1], X86_RAX);
+                    uint32_t gp_off = cc->vararg_named_gp * 8;
+                    emit_mov_imm(cc, X86_RCX, (int64_t)gp_off, false);
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                               X86_RCX, X86_RAX, 0, 4);
+                    emit_mov_imm(cc, X86_RCX, 48, false);
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                               X86_RCX, X86_RAX, 4, 4);
+                    int32_t overflow_off = 16 + (int32_t)(
+                        cc->vararg_named_gp > 6 ?
+                        cc->vararg_named_gp - 6 : 0) * 8;
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8D,
+                               X86_RCX, X86_RBP, overflow_off, 8);
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                               X86_RCX, X86_RAX, 8, 8);
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8D,
+                               X86_RCX, X86_RBP, cc->vararg_rsa_off, 8);
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                               X86_RCX, X86_RAX, 16, 8);
+                    invalidate_cached_gprs(cc);
+                }
+                break;
+            }
+            if (cname && strcmp(cname, "llvm.va_end.p0") == 0)
+                break;
+            if (cname && strcmp(cname, "llvm.va_copy.p0") == 0) {
+                if (nops >= 3) {
+                    emit_load_operand(cc, &ops[1], X86_RAX);
+                    emit_load_operand(cc, &ops[2], X86_RCX);
+                    for (int32_t off = 0; off < 24; off += 8) {
+                        encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8B,
+                                   X86_R11, X86_RCX, off, 8);
+                        encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                                   X86_R11, X86_RAX, off, 8);
+                    }
+                    invalidate_cached_gprs(cc);
+                }
+                break;
+            }
+        }
+        static const uint8_t call_regs[] = {
+            X86_RDI, X86_RSI, X86_RDX, X86_RCX, X86_R8, X86_R9
+        };
+        static const uint8_t call_fp_regs[] = {
+            X86_XMM0, X86_XMM1, X86_XMM2, X86_XMM3,
+            X86_XMM4, X86_XMM5, X86_XMM6, X86_XMM7
+        };
+        uint32_t nargs = nops - 1;
+        uint32_t gp_used = 0;
+        uint32_t fp_used = 0;
+        uint32_t stack_args = 0;
+        uint32_t stack_bytes = 0;
+        uint32_t fp_used_for_call = 0;
+        lr_func_t *callee_func = NULL;
+        bool use_external_sysv_fp = false;
+        bool callee_vararg = false;
+        bool internal_sret = false;
+        uint32_t internal_gp_start = 0;
+        uint32_t internal_gp_cap = 6;
+
+        use_external_sysv_fp = direct_call_uses_external_sysv_abi(
+            cc, &ops[0], desc->call_external_abi, desc->call_vararg,
+            &callee_func, &callee_vararg);
+
+        internal_sret = !use_external_sysv_fp &&
+                        uses_internal_sret_abi(desc->type);
+        if (internal_sret) {
+            internal_gp_start = 1;
+            internal_gp_cap = 5;
+        }
+
+        if (use_external_sysv_fp) {
+            for (uint32_t i = 0; i < nargs; i++) {
+                const lr_type_t *arg_type = ops[i + 1].type;
+                uint8_t agg_lane_size = 0;
+                uint8_t agg_lane_count = 0;
+                if (is_fp_abi_type(arg_type)) {
+                    if (fp_used < 8) fp_used++;
+                    else stack_args++;
+                } else if (fp_abi_two_lane_aggregate(arg_type,
+                                                      &agg_lane_size,
+                                                      &agg_lane_count)) {
+                    if (fp_used + agg_lane_count <= 8)
+                        fp_used += agg_lane_count;
+                    else stack_args++;
+                } else {
+                    if (gp_used < 6) gp_used++;
+                    else stack_args++;
+                }
+            }
+        } else {
+            stack_args = nargs > internal_gp_cap ?
+                nargs - internal_gp_cap : 0;
+        }
+
+        stack_bytes = ((stack_args * 8 + 15) & ~15u);
+        if (stack_bytes > 0)
+            emit_frame_alloc(cc, stack_bytes);
+
+        if (use_external_sysv_fp) {
+            uint32_t stack_idx = 0;
+            gp_used = 0;
+            fp_used = 0;
+            for (uint32_t i = 0; i < nargs; i++) {
+                uint8_t agg_lane_size = 0;
+                uint8_t agg_lane_count = 0;
+                if (is_fp_abi_type(ops[i + 1].type) && fp_used < 8) {
+                    emit_load_fp_operand(cc, &ops[i + 1],
+                                         call_fp_regs[fp_used],
+                                         fp_abi_size(ops[i + 1].type));
+                    fp_used++;
+                    continue;
+                }
+                if (fp_abi_two_lane_aggregate(ops[i + 1].type,
+                                              &agg_lane_size,
+                                              &agg_lane_count) &&
+                    ops[i + 1].kind == LR_VAL_VREG &&
+                    fp_used + agg_lane_count <= 8) {
+                    int32_t src_off = alloc_slot(cc, ops[i + 1].vreg,
+                                                 8, 8);
+                    emit_load_fp_mem_base(cc, X86_RBP, src_off,
+                                          call_fp_regs[fp_used],
+                                          agg_lane_size);
+                    if (agg_lane_count > 1)
+                        emit_load_fp_mem_base(
+                            cc, X86_RBP,
+                            src_off + (int32_t)agg_lane_size,
+                            call_fp_regs[fp_used + 1],
+                            agg_lane_size);
+                    fp_used += agg_lane_count;
+                    continue;
+                }
+                if (!is_fp_abi_type(ops[i + 1].type) && gp_used < 6) {
+                    emit_load_operand(cc, &ops[i + 1],
+                                      call_regs[gp_used]);
+                    gp_used++;
+                    continue;
+                }
+                emit_load_operand(cc, &ops[i + 1], X86_RAX);
+                encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                           X86_RAX, X86_RSP,
+                           (int32_t)(stack_idx * 8), 8);
+                stack_idx++;
+            }
+            fp_used_for_call = fp_used;
+        } else {
+            uint32_t nstack = nargs > internal_gp_cap ?
+                nargs - internal_gp_cap : 0;
+            if (internal_sret) {
+                size_t dst_sz = lr_type_size(desc->type);
+                size_t dst_align = lr_type_align(desc->type);
+                int32_t doff;
+                if (dst_align < 8) dst_align = 8;
+                if (dst_sz < 8) dst_sz = 8;
+                doff = alloc_slot(cc, desc->dest, dst_sz, dst_align);
+                encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8D,
+                           X86_RDI, X86_RBP, doff, 8);
+            }
+            for (uint32_t i = 0; i < nstack; i++) {
+                uint32_t arg_idx = internal_gp_cap + i;
+                emit_load_operand(cc, &ops[arg_idx + 1], X86_RAX);
+                encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                           X86_RAX, X86_RSP, (int32_t)(i * 8), 8);
+            }
+            for (uint32_t i = 0; i < nargs && i < internal_gp_cap; i++)
+                emit_load_operand(cc, &ops[i + 1],
+                                  call_regs[internal_gp_start + i]);
+        }
+
+        if (callee_vararg)
+            emit_mov_imm(cc, X86_RAX, (int64_t)fp_used_for_call,
+                         false);
+
+        emit_load_operand(cc, &ops[0], X86_R10);
+        emit_call_r10(cc);
+
+        if (stack_bytes > 0)
+            emit_frame_free(cc, stack_bytes);
+
+        invalidate_cached_gprs(cc);
+        if (desc->type && desc->type->kind != LR_TYPE_VOID) {
+            uint8_t ret_lane_size = 0;
+            uint8_t ret_lane_count = 0;
+            bool ret_fp_agg = use_external_sysv_fp &&
+                fp_abi_two_lane_aggregate(desc->type, &ret_lane_size,
+                                          &ret_lane_count);
+            if (internal_sret) {
+                /* Already materialized through hidden sret pointer. */
+            } else if (ret_fp_agg) {
+                size_t dst_sz = lr_type_size(desc->type);
+                size_t dst_align = lr_type_align(desc->type);
+                int32_t doff;
+                if (dst_align < 8) dst_align = 8;
+                if (dst_sz < 8) dst_sz = 8;
+                doff = alloc_slot(cc, desc->dest, dst_sz, dst_align);
+                emit_store_fp_mem_base(cc, X86_RBP, doff, X86_XMM0,
+                                       ret_lane_size);
+                if (ret_lane_count > 1 &&
+                    dst_sz >= (size_t)(2 * ret_lane_size))
+                    emit_store_fp_mem_base(
+                        cc, X86_RBP,
+                        doff + (int32_t)ret_lane_size,
+                        X86_XMM1, ret_lane_size);
+            } else if (use_external_sysv_fp &&
+                       is_fp_abi_type(desc->type)) {
+                emit_store_fp_slot(cc, desc->dest, X86_XMM0,
+                                   fp_abi_size(desc->type));
+            } else {
+                emit_store_slot(cc, desc->dest, X86_RAX);
+            }
+        }
+        break;
+    }
+    case LR_OP_PHI:
+        (void)alloc_slot(cc, desc->dest, 8, 8);
+        break;
+    case LR_OP_UNREACHABLE:
+        break;
+    default:
+        break;
+    }
+
+    cc->current_inst = NULL;
     return 0;
 }
 
 static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
-    x86_stream_bridge_ctx_t *ctx = (x86_stream_bridge_ctx_t *)compile_ctx;
-    lr_func_t *func_to_compile = NULL;
+    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
+    x86_compile_ctx_t *cc;
     if (!ctx || !out_len)
         return -1;
-    if (ctx->saw_stream_input) {
-        if (x86_stream_finalize_function(ctx) != 0)
-            return -1;
-        func_to_compile = &ctx->stream_func;
-    } else {
-        func_to_compile = ctx->func;
+
+    if (ctx->block_offset_pending) {
+        ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
+        ctx->block_offset_pending = false;
     }
-    if (!func_to_compile)
+    if (flush_deferred_terminator(ctx) != 0)
         return -1;
-    if (ctx->mode == LR_COMPILE_COPY_PATCH)
-        return x86_64_compile_func_cp(func_to_compile, ctx->mod, ctx->buf,
-                                      ctx->buflen,
-                                      out_len, ctx->arena);
-    if (ctx->mode == LR_COMPILE_ISEL)
-        return x86_64_compile_func(func_to_compile, ctx->mod, ctx->buf,
-                                   ctx->buflen,
-                                   out_len, ctx->arena);
-    return -1;
+
+    cc = &ctx->cc;
+
+    for (uint32_t i = 0; i < cc->num_fixups; i++) {
+        size_t fix_pos = cc->fixups[i].pos;
+        uint32_t target = cc->fixups[i].target;
+        if (target < cc->num_block_offsets && fix_pos + 4 <= cc->buflen) {
+            int32_t rel = (int32_t)((int64_t)cc->block_offsets[target] -
+                                    (int64_t)(fix_pos + 4));
+            cc->buf[fix_pos + 0] = (uint8_t)(rel);
+            cc->buf[fix_pos + 1] = (uint8_t)(rel >> 8);
+            cc->buf[fix_pos + 2] = (uint8_t)(rel >> 16);
+            cc->buf[fix_pos + 3] = (uint8_t)(rel >> 24);
+        }
+    }
+
+    {
+        uint32_t frame_stack_size = (cc->stack_size + 15u) & ~15u;
+        patch_u32(cc->buf, cc->buflen, ctx->prologue_patch_pos,
+                  frame_stack_size);
+    }
+
+    *out_len = cc->pos;
+    if (cc->pos > cc->buflen)
+        return -1;
+    return 0;
+}
+
+static int x86_64_compile_add_phi_copy(void *compile_ctx,
+                                       uint32_t pred_block_id,
+                                       uint32_t dest_vreg,
+                                       const lr_operand_desc_t *src_op) {
+    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
+    if (!ctx || !src_op)
+        return -1;
+    if (direct_ensure_phi_copy_cap(ctx) != 0)
+        return -1;
+
+    (void)alloc_slot(&ctx->cc, dest_vreg, 8, 8);
+
+    x86_stream_phi_copy_t *entry = &ctx->phi_copies[ctx->phi_copy_count++];
+    entry->pred_block_id = pred_block_id;
+    entry->dest_vreg = dest_vreg;
+    entry->src_op = operand_from_desc(src_op);
+    return 0;
 }
 
 static const lr_target_t x86_64_target = {
@@ -2432,6 +3400,8 @@ static const lr_target_t x86_64_target = {
     .compile_emit = x86_64_compile_emit,
     .compile_set_block = x86_64_compile_set_block,
     .compile_end = x86_64_compile_end,
+    .compile_add_phi_copy = x86_64_compile_add_phi_copy,
+    .compile_func = x86_64_compile_func,
 };
 
 const lr_target_t *lr_target_x86_64(void) {
