@@ -132,6 +132,7 @@ add_library(liric STATIC
     src/liric.c
     src/liric_compat.c
     src/stencil_data.c
+    src/stencil_runtime.c
     src/session.c
     src/module_emit.c
     src/llvm_backend.c
@@ -311,6 +312,7 @@ add_executable(test_liric
     tests/test_objfile.c
     tests/test_cp.c
     tests/test_stencil_gen.c
+    tests/test_stencil_runtime.c
     tests/test_platform_os.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
