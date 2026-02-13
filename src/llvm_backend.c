@@ -288,12 +288,26 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
     mem = NULL;
 
     LLVMSetTarget(mod, triple);
+#if defined(LIRIC_BACKEND_LLVM_VERSION_NUM) && \
+    (LIRIC_BACKEND_LLVM_VERSION_NUM < 309)
+    /* LLVMCreateTargetDataLayout added in LLVM 3.9; 3.8 has only
+       LLVMGetTargetMachineData (TM-owned, removed in 3.9). */
+    {
+        LLVMTargetDataRef tm_td = LLVMGetTargetMachineData(tm);
+        if (!tm_td) {
+            set_err(err, err_cap, "LLVMGetTargetMachineData failed");
+            goto done;
+        }
+        dl = LLVMCopyStringRepOfTargetData(tm_td);
+    }
+#else
     td = LLVMCreateTargetDataLayout(tm);
     if (!td) {
         set_err(err, err_cap, "LLVMCreateTargetDataLayout failed");
         goto done;
     }
     dl = LLVMCopyStringRepOfTargetData(td);
+#endif
     if (!dl) {
         set_err(err, err_cap, "LLVMCopyStringRepOfTargetData failed");
         goto done;

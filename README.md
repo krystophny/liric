@@ -35,7 +35,7 @@ Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=
 
 ### LLVM Backend
 
-When building with `-DWITH_REAL_LLVM_BACKEND=ON`, one LLVM major version is selected at configure time via `llvm-config`. Object/exe emission works with LLVM 5+. JIT requires LLVM 10+ (ORC v2 LLJIT APIs). C++ compat headers (`-DWITH_LLVM_COMPAT=ON`) require LLVM 11+. CI tests every major version from 5 through 21.
+When building with `-DWITH_REAL_LLVM_BACKEND=ON`, one LLVM major version is selected at configure time via `llvm-config`. Object/exe emission works with LLVM 3.8+. JIT requires LLVM 10+ (ORC v2 LLJIT APIs). C++ compat headers (`-DWITH_LLVM_COMPAT=ON`) require LLVM 11+. CI tests LLVM 3.8, 3.9, 4.0 (apt on ubuntu:16.04 containers) and every major from 5 through 21 (conda-forge).
 
 `tools/llvm_backend_matrix.sh` runs a conda-forge compatibility sweep across all available LLVM versions (5-22).
 
