@@ -17,7 +17,7 @@ Options:
 EOF
 }
 
-LIRIC_MIN_LLVM_MAJOR=3
+LIRIC_MIN_LLVM_MAJOR=5
 LIRIC_MAX_LLVM_MAJOR=22
 LIRIC_COMPAT_MIN_MAJOR=11
 
@@ -189,7 +189,10 @@ for ver in "${runnable_versions[@]}"; do
 
   micromamba run -p "${env_prefix}" bash -lc "
     set -euo pipefail
-    llvm_config=\$(command -v llvm-config)
+    llvm_config=\$(command -v llvm-config || true)
+    if [[ -z \"\${llvm_config}\" ]]; then
+      llvm_config=\$(command -v llvm-config-${ver} || true)
+    fi
     if [[ -z \"\${llvm_config}\" ]]; then
       echo 'llvm-config not found in environment' >&2
       exit 1
