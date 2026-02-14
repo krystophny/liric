@@ -116,19 +116,22 @@ Intrinsic blobs are hand-written assembly for LLVM intrinsics (sqrt, exp, memcpy
 
 ## Performance
 
-Liric vs LLVM ORC JIT (LLJIT). Repo `tests/ll/` corpus, 8 `@main` tests, 2.42 KiB IR total.
-AMD Ryzen 9 5950X, Linux 6.18, GCC 15.2, LLVM 21.1.
+Published README numbers are generated artifacts (date + commit + host + toolchain), not free-form text.
 
-Liric: `liric_probe_runner --timing` (parse_us + compile_us).
-LLVM ORC: `bench_lli_phases --json` (parse_ms + compile_ms, where compile = add_module + lookup since LLJIT compiles lazily on first symbol lookup).
+Last published snapshot files:
+- `docs/benchmarks/readme_perf_snapshot.json`
+- `docs/benchmarks/readme_perf_table.md`
 
-| Phase | liric (ms) | LLVM ORC (ms) | Speedup |
-|-------|------------|---------------|---------|
-| Parse | 0.575 | 0.666 | 1.2x |
-| Compile | 0.165 | 15.85 | **96x** |
-| Total (parse+compile) | 0.740 | 16.52 | **22x** |
+Regenerate end-to-end:
 
-Liric compile averages 21 us/function. LLVM ORC averages 1.98 ms/function.
+```bash
+./tools/bench_readme_perf_snapshot.sh \
+  --build-dir ./build \
+  --bench-dir /tmp/liric_bench \
+  --out-dir docs/benchmarks \
+  --iters 3 \
+  --compat-timeout 15
+```
 
 ### Benchmarks
 
