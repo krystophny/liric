@@ -742,6 +742,8 @@ static void write_json_row(FILE *f,
                            int lli_ok,
                            int liric_match,
                            int lli_match,
+                           int liric_rc_match,
+                           int lli_rc_match,
                            int llvm_rc,
                            int liric_rc,
                            int lli_rc,
@@ -755,6 +757,7 @@ static void write_json_row(FILE *f,
         "{\"name\":\"%s\",\"source\":\"%s\",\"options\":\"%s\","
         "\"llvm_ok\":%s,\"liric_ok\":%s,\"lli_ok\":%s,"
         "\"liric_match\":%s,\"lli_match\":%s,"
+        "\"liric_rc_match\":%s,\"lli_rc_match\":%s,"
         "\"llvm_rc\":%d,\"liric_rc\":%d,\"lli_rc\":%d,\"error\":\"%s\"}\n",
         e_name, e_source, e_options,
         llvm_ok ? "true" : "false",
@@ -762,6 +765,8 @@ static void write_json_row(FILE *f,
         lli_ok ? "true" : "false",
         liric_match ? "true" : "false",
         lli_match ? "true" : "false",
+        liric_rc_match ? "true" : "false",
+        lli_rc_match ? "true" : "false",
         llvm_rc, liric_rc, lli_rc, e_error);
 
     free(e_name);
@@ -1046,6 +1051,7 @@ int main(int argc, char **argv) {
         cmd_result_t emit_r, compile_r, run_r, jit_r, lli_r;
         int llvm_ok = 0, liric_ok = 0, lli_ok = 0;
         int liric_match = 0, lli_match = 0;
+        int liric_rc_match = 0, lli_rc_match = 0;
         int llvm_rc = -1, liric_rc = -1, lli_rc = -1;
         char *error = xstrdup("");
         char *n_llvm_out = NULL, *n_liric_out = NULL, *n_lli_out = NULL;
@@ -1070,6 +1076,7 @@ int main(int argc, char **argv) {
                 error = xstrdup("work dir template too long");
                 write_json_row(jsonl, t->name, t->source, t->options_joined,
                                llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                               liric_rc_match, lli_rc_match,
                                llvm_rc, liric_rc, lli_rc, error);
                 UPDATE_STATS_AND_PROGRESS();
                 free(error);
@@ -1081,6 +1088,7 @@ int main(int argc, char **argv) {
             error = xstrdup("failed to create temp work dir");
             write_json_row(jsonl, t->name, t->source, t->options_joined,
                            llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                           liric_rc_match, lli_rc_match,
                            llvm_rc, liric_rc, lli_rc, error);
             UPDATE_STATS_AND_PROGRESS();
             free(error);
@@ -1111,6 +1119,7 @@ int main(int argc, char **argv) {
             error = xstrdup("emit failed");
             write_json_row(jsonl, t->name, t->source, t->options_joined,
                            llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                           liric_rc_match, lli_rc_match,
                            llvm_rc, liric_rc, lli_rc, error);
             UPDATE_STATS_AND_PROGRESS();
             free_cmd_result(&emit_r);
@@ -1139,6 +1148,7 @@ int main(int argc, char **argv) {
             error = xstrdup("native compile failed");
             write_json_row(jsonl, t->name, t->source, t->options_joined,
                            llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                           liric_rc_match, lli_rc_match,
                            llvm_rc, liric_rc, lli_rc, error);
             UPDATE_STATS_AND_PROGRESS();
             free_cmd_result(&compile_r);
@@ -1181,7 +1191,8 @@ int main(int argc, char **argv) {
         if (jit_r.rc >= 0 && llvm_ok) {
             liric_ok = 1;
             n_liric_out = normalize_output(jit_r.stdout_text);
-            liric_match = (strcmp(n_liric_out, n_llvm_out) == 0 && jit_r.rc == llvm_rc);
+            liric_match = (strcmp(n_liric_out, n_llvm_out) == 0);
+            liric_rc_match = (jit_r.rc == llvm_rc);
         }
 
         {
@@ -1199,11 +1210,13 @@ int main(int argc, char **argv) {
         if (lli_r.rc >= 0 && llvm_ok) {
             lli_ok = 1;
             n_lli_out = normalize_output(lli_r.stdout_text);
-            lli_match = (strcmp(n_lli_out, n_llvm_out) == 0 && lli_r.rc == llvm_rc);
+            lli_match = (strcmp(n_lli_out, n_llvm_out) == 0);
+            lli_rc_match = (lli_r.rc == llvm_rc);
         }
 
         write_json_row(jsonl, t->name, t->source, t->options_joined,
                        llvm_ok, liric_ok, lli_ok, liric_match, lli_match,
+                       liric_rc_match, lli_rc_match,
                        llvm_rc, liric_rc, lli_rc, error);
         UPDATE_STATS_AND_PROGRESS();
 

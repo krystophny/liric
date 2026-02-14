@@ -479,6 +479,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_compat_check_rc_policy
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_COMPAT_CHECK=$<TARGET_FILE:bench_compat_check>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_compat_check_rc_policy.cmake
+)
+
+add_test(
     NAME bench_ll_empty_dataset_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_LL=$<TARGET_FILE:bench_ll>
