@@ -86,6 +86,7 @@ int test_target_alias_arm64_resolves(void);
 int test_target_riscv64_split_resolves(void);
 int test_target_copy_patch_entrypoints_available(void);
 int test_target_copy_patch_fallback_matches_isel_for_non_x86(void);
+int test_target_copy_patch_matches_isel_for_x86_streaming(void);
 int test_target_x86_streaming_hooks_isel_smoke(void);
 int test_target_x86_streaming_hooks_copy_patch_smoke(void);
 int test_target_x86_streaming_hooks_phi_smoke(void);
@@ -353,6 +354,7 @@ int main(void) {
     RUN_TEST(test_target_riscv64_split_resolves);
     RUN_TEST(test_target_copy_patch_entrypoints_available);
     RUN_TEST(test_target_copy_patch_fallback_matches_isel_for_non_x86);
+    RUN_TEST(test_target_copy_patch_matches_isel_for_x86_streaming);
     RUN_TEST(test_target_x86_streaming_hooks_isel_smoke);
     RUN_TEST(test_target_x86_streaming_hooks_copy_patch_smoke);
     RUN_TEST(test_target_x86_streaming_hooks_phi_smoke);
