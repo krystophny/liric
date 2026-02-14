@@ -2880,6 +2880,53 @@ int test_jit_call_many_stack_args(void) {
     return 0;
 }
 
+static int64_t sum17(int64_t a, int64_t b, int64_t c, int64_t d,
+                     int64_t e, int64_t f, int64_t g, int64_t h,
+                     int64_t i, int64_t j, int64_t k, int64_t l,
+                     int64_t m, int64_t n, int64_t o, int64_t p,
+                     int64_t q) {
+    return a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q;
+}
+
+int test_jit_call_gt16_args(void) {
+    const char *src =
+        "declare i64 @sum17(i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,"
+        " i64, i64, i64, i64, i64, i64, i64)\n"
+        "define i64 @call_sum17() {\n"
+        "entry:\n"
+        "  %r = call i64 @sum17(i64 1, i64 2, i64 3, i64 4, i64 5, i64 6, i64 7,"
+        " i64 8, i64 9, i64 10, i64 11, i64 12, i64 13, i64 14, i64 15, i64 16,"
+        " i64 17)\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int64_t (*sum17_fn)(int64_t, int64_t, int64_t, int64_t, int64_t,
+                        int64_t, int64_t, int64_t, int64_t, int64_t,
+                        int64_t, int64_t, int64_t, int64_t, int64_t,
+                        int64_t, int64_t) = sum17;
+    void *sum17_addr = NULL;
+    memcpy(&sum17_addr, &sum17_fn, sizeof(sum17_addr));
+    lr_jit_add_symbol(jit, "sum17", sum17_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_sum17");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 153, "sum17(1..17) = 153");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_fsub_double(void) {
     const char *src =
         "define double @fsub64(double %a, double %b) {\n"

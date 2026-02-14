@@ -1021,6 +1021,7 @@ static int aarch64_compile_emit(void *compile_ctx,
     a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
     a64_compile_ctx_t *cc;
     lr_operand_t ops[16];
+    lr_operand_t *ops_ptr = ops;
     lr_inst_t inst_header;
 
     if (!ctx || !desc || !ctx->has_current_block)
@@ -1050,15 +1051,14 @@ static int aarch64_compile_emit(void *compile_ctx,
 
     uint32_t nops = desc->num_operands;
     if (nops > 16) {
-        lr_operand_t *heap_ops = lr_arena_array_uninit(
-            cc->arena, lr_operand_t, nops);
-        if (!heap_ops)
+        ops_ptr = lr_arena_array_uninit(cc->arena, lr_operand_t, nops);
+        if (!ops_ptr)
             return -1;
         for (uint32_t i = 0; i < nops; i++)
-            heap_ops[i] = a64_operand_from_desc(&desc->operands[i]);
+            ops_ptr[i] = a64_operand_from_desc(&desc->operands[i]);
         memset(&inst_header, 0, sizeof(inst_header));
         inst_header.op = desc->op;
-        inst_header.operands = heap_ops;
+        inst_header.operands = ops_ptr;
         inst_header.num_operands = nops;
         inst_header.type = desc->type;
         inst_header.dest = desc->dest;
@@ -1069,10 +1069,9 @@ static int aarch64_compile_emit(void *compile_ctx,
         inst_header.call_fixed_args = desc->call_fixed_args;
         inst_header.indices = (uint32_t *)desc->indices;
         inst_header.num_indices = desc->num_indices;
-        memcpy(ops, heap_ops, 16 * sizeof(lr_operand_t));
     } else {
         for (uint32_t i = 0; i < nops; i++)
-            ops[i] = a64_operand_from_desc(&desc->operands[i]);
+            ops_ptr[i] = a64_operand_from_desc(&desc->operands[i]);
         memset(&inst_header, 0, sizeof(inst_header));
         inst_header.op = desc->op;
     }
@@ -1608,7 +1607,7 @@ static int aarch64_compile_emit(void *compile_ctx,
         bool use_fp_abi = desc->call_external_abi;
         bool darwin_stack_varargs = false;
         uint32_t fixed_args = 0;
-        if (ops[0].kind == LR_VAL_GLOBAL)
+        if (ops_ptr[0].kind == LR_VAL_GLOBAL)
             use_fp_abi = true;
 
 #if defined(__APPLE__)
@@ -1623,7 +1622,7 @@ static int aarch64_compile_emit(void *compile_ctx,
         if (use_fp_abi) {
             uint32_t fp_used_count = 0;
             for (uint32_t i = 0; i < nargs; i++) {
-                const lr_type_t *at = ops[i + 1].type;
+                const lr_type_t *at = ops_ptr[i + 1].type;
                 bool is_variadic_stack_arg = darwin_stack_varargs &&
                                              i >= fixed_args;
                 bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
@@ -1659,31 +1658,31 @@ static int aarch64_compile_emit(void *compile_ctx,
             for (uint32_t i = 0; i < nargs; i++) {
                 bool is_variadic_stack_arg = darwin_stack_varargs &&
                                              i >= fixed_args;
-                bool is_fp = ops[i + 1].type &&
-                             (ops[i + 1].type->kind == LR_TYPE_FLOAT ||
-                              ops[i + 1].type->kind == LR_TYPE_DOUBLE);
-                uint8_t fsz = (ops[i + 1].type &&
-                               ops[i + 1].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                bool is_fp = ops_ptr[i + 1].type &&
+                             (ops_ptr[i + 1].type->kind == LR_TYPE_FLOAT ||
+                              ops_ptr[i + 1].type->kind == LR_TYPE_DOUBLE);
+                uint8_t fsz = (ops_ptr[i + 1].type &&
+                               ops_ptr[i + 1].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
                 if (is_variadic_stack_arg) {
                     if (is_fp) {
-                        emit_load_fp_operand(cc, &ops[i + 1], A64_D0, fsz);
+                        emit_load_fp_operand(cc, &ops_ptr[i + 1], A64_D0, fsz);
                         emit_fp_store(cc->buf, &cc->pos, cc->buflen,
                                       A64_D0, A64_SP, (int32_t)(si * 8), fsz);
                     } else {
-                        emit_load_operand(cc, &ops[i + 1], A64_X9);
+                        emit_load_operand(cc, &ops_ptr[i + 1], A64_X9);
                         emit_store(cc->buf, &cc->pos, cc->buflen,
                                    A64_X9, A64_SP, (int32_t)(si * 8), 8);
                     }
                     si++;
                 } else if (is_fp && fp_used_emit < 8) {
-                    emit_load_fp_operand(cc, &ops[i + 1],
+                    emit_load_fp_operand(cc, &ops_ptr[i + 1],
                                          call_fp_regs[fp_used_emit], fsz);
                     fp_used_emit++;
                 } else if (!is_fp && gp_used < 8) {
-                    emit_load_operand(cc, &ops[i + 1], call_regs[gp_used]);
+                    emit_load_operand(cc, &ops_ptr[i + 1], call_regs[gp_used]);
                     gp_used++;
                 } else {
-                    emit_load_operand(cc, &ops[i + 1], A64_X9);
+                    emit_load_operand(cc, &ops_ptr[i + 1], A64_X9);
                     emit_store(cc->buf, &cc->pos, cc->buflen,
                                A64_X9, A64_SP, (int32_t)(si * 8), 8);
                     si++;
@@ -1692,15 +1691,15 @@ static int aarch64_compile_emit(void *compile_ctx,
         } else {
             uint32_t nstack = nargs > 8 ? nargs - 8 : 0;
             for (uint32_t i = 0; i < nstack; i++) {
-                emit_load_operand(cc, &ops[8 + i + 1], A64_X9);
+                emit_load_operand(cc, &ops_ptr[8 + i + 1], A64_X9);
                 emit_store(cc->buf, &cc->pos, cc->buflen,
                            A64_X9, A64_SP, (int32_t)(i * 8), 8);
             }
             for (uint32_t i = 0; i < nargs && i < 8; i++)
-                emit_load_operand(cc, &ops[i + 1], call_regs[i]);
+                emit_load_operand(cc, &ops_ptr[i + 1], call_regs[i]);
         }
 
-        emit_load_operand(cc, &ops[0], A64_X16);
+        emit_load_operand(cc, &ops_ptr[0], A64_X16);
         emit_u32(cc->buf, &cc->pos, cc->buflen,
                  0xD63F0000u | ((uint32_t)A64_X16 << 5));
 

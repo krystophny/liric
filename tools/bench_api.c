@@ -81,6 +81,7 @@ typedef struct {
     double llvm_codegen_ms;
     double liric_backend_ms;
     double llvm_backend_ms;
+    int time_report_fallback;
 } row_t;
 
 typedef struct {
@@ -431,24 +432,27 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const char *extra_opt,
                                          const char *source_path,
                                          int timeout_ms,
-                                         const char *work_dir) {
+                                         const char *work_dir,
+                                         int with_time_report) {
     size_t j;
     size_t extra_n = (extra_opt && extra_opt[0] != '\0') ? 1 : 0;
-    size_t argc_jit = 5 + opt_toks->n + extra_n + 1;
+    size_t time_report_n = with_time_report ? 1 : 0;
+    size_t argc_jit = 4 + time_report_n + opt_toks->n + extra_n + 1;
     char **argv = (char **)calloc(argc_jit + 1, sizeof(char *));
+    size_t k = 0;
     cmd_result_t r;
     if (!argv) die("out of memory", NULL);
 
-    argv[0] = (char *)lfortran_bin;
-    argv[1] = "--backend=llvm";
-    argv[2] = "--jit";
-    argv[3] = "--time-report";
-    argv[4] = "--no-color";
+    argv[k++] = (char *)lfortran_bin;
+    argv[k++] = "--backend=llvm";
+    argv[k++] = "--jit";
+    if (with_time_report) argv[k++] = "--time-report";
+    argv[k++] = "--no-color";
     for (j = 0; j < opt_toks->n; j++)
-        argv[5 + j] = opt_toks->items[j];
-    if (extra_n) argv[5 + opt_toks->n] = (char *)extra_opt;
-    argv[5 + opt_toks->n + extra_n] = (char *)source_path;
-    argv[6 + opt_toks->n + extra_n] = NULL;
+        argv[k++] = opt_toks->items[j];
+    if (extra_n) argv[k++] = (char *)extra_opt;
+    argv[k++] = (char *)source_path;
+    argv[k] = NULL;
 
     r = run_cmd(argv, timeout_ms, NULL, work_dir);
     free(argv);
@@ -1298,6 +1302,17 @@ static int parse_lfortran_time_report(const char *stdout_text, time_report_t *ou
     return ok;
 }
 
+static void synthesize_time_report_from_elapsed(double elapsed_ms, time_report_t *out) {
+    double clamped_ms;
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    clamped_ms = elapsed_ms;
+    if (clamped_ms < 0.0) clamped_ms = 0.0;
+    out->llvm_to_jit_ms = clamped_ms * 0.5;
+    out->jit_run_ms = clamped_ms - out->llvm_to_jit_ms;
+    out->total_ms = clamped_ms;
+}
+
 static void resolve_default_compat_artifacts(const char *bench_dir, char **compat_path, char **opts_path) {
     *compat_path = path_join2(bench_dir, "compat_ll.txt");
     *opts_path = path_join2(bench_dir, "compat_ll_options.jsonl");
@@ -1318,6 +1333,7 @@ static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done)
 
     fprintf(f,
             "{\"name\":\"%s\",\"status\":\"ok\",\"iters\":%zu,"
+            "\"time_report_fallback\":%s,"
             "\"frontend_median_ms\":%.6f,"
             "\"liric_llvm_ir_median_ms\":%.6f,\"llvm_llvm_ir_median_ms\":%.6f,"
             "\"liric_wall_median_ms\":%.6f,\"llvm_wall_median_ms\":%.6f,"
@@ -1328,6 +1344,7 @@ static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done)
             "\"liric_codegen_median_ms\":%.6f,\"llvm_codegen_median_ms\":%.6f,"
             "\"liric_backend_median_ms\":%.6f,\"llvm_backend_median_ms\":%.6f",
             en, iters_done,
+            row->time_report_fallback ? "true" : "false",
             row->frontend_ms,
             row->liric_llvm_ir_ms, row->llvm_llvm_ir_ms,
             row->liric_wall_ms, row->llvm_wall_ms,
@@ -1842,6 +1859,7 @@ int main(int argc, char **argv) {
             const char *skip_reason = NULL;
             int nonzero_compat = 0;
             int nonzero_compat_rc = 0;
+            int test_time_report_fallback = 0;
             char work_tpl[PATH_MAX];
             const char *work_dir = NULL;
             const char *failure_work_dir = NULL;
@@ -1894,11 +1912,15 @@ int main(int argc, char **argv) {
                 const char *extra_retry_opt = NULL;
                 int retried_test_dir = 0;
                 int retried_fast = 0;
+                int retried_no_time_report = 0;
+                int attempt_with_time_report = 1;
                 int run_success = 0;
+                int run_used_time_report = 1;
 
                 for (;;) {
                     const char *llvm_reason = NULL;
                     int same_nonzero = 0;
+                    int saw_signal_failure = 0;
                     failure_work_dir = attempt_work_dir;
 
                     llvm_r = run_lfortran_jit_cmd(cfg.lfortran,
@@ -1906,7 +1928,8 @@ int main(int argc, char **argv) {
                                                   extra_retry_opt,
                                                   source_path,
                                                   cfg.timeout_ms,
-                                                  attempt_work_dir);
+                                                  attempt_work_dir,
+                                                  attempt_with_time_report);
                     if (llvm_r.timed_out) {
                         skip_reason = "llvm_jit_timeout";
                         skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
@@ -1919,7 +1942,8 @@ int main(int argc, char **argv) {
                                                    extra_retry_opt,
                                                    source_path,
                                                    cfg.timeout_ms,
-                                                   attempt_work_dir);
+                                                   attempt_work_dir,
+                                                   attempt_with_time_report);
                     if (liric_r.timed_out) {
                         skip_reason = "liric_jit_timeout";
                         skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
@@ -1930,7 +1954,21 @@ int main(int argc, char **argv) {
 
                     if (llvm_r.rc == 0 && liric_r.rc == 0) {
                         run_success = 1;
+                        run_used_time_report = attempt_with_time_report;
                         break;
+                    }
+
+                    saw_signal_failure =
+                        llvm_r.rc == -SIGSEGV || llvm_r.rc == -SIGABRT ||
+                        liric_r.rc == -SIGSEGV || liric_r.rc == -SIGABRT;
+                    if (attempt_with_time_report &&
+                        !retried_no_time_report &&
+                        saw_signal_failure) {
+                        retried_no_time_report = 1;
+                        attempt_with_time_report = 0;
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        continue;
                     }
 
                     if (llvm_r.rc != 0)
@@ -1990,20 +2028,26 @@ int main(int argc, char **argv) {
                 if (!run_success) break;
 
                 memset(&llvm_time, 0, sizeof(llvm_time));
-                if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
-                    skip_reason = "llvm_jit_failed";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
-                    free_cmd_result(&llvm_r);
-                    free_cmd_result(&liric_r);
-                    break;
-                }
                 memset(&liric_time, 0, sizeof(liric_time));
-                if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
-                    skip_reason = "liric_jit_failed";
-                    skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
-                    free_cmd_result(&llvm_r);
-                    free_cmd_result(&liric_r);
-                    break;
+                if (run_used_time_report) {
+                    if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
+                        skip_reason = "llvm_jit_failed";
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        break;
+                    }
+                    if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
+                        skip_reason = "liric_jit_failed";
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        break;
+                    }
+                } else {
+                    synthesize_time_report_from_elapsed(llvm_r.elapsed_ms, &llvm_time);
+                    synthesize_time_report_from_elapsed(liric_r.elapsed_ms, &liric_time);
+                    test_time_report_fallback = 1;
                 }
                 free_cmd_result(&llvm_r);
                 free_cmd_result(&liric_r);
@@ -2093,6 +2137,7 @@ int main(int argc, char **argv) {
                 row.llvm_codegen_ms = llvm_codegen_m;
                 row.liric_backend_ms = liric_backend_m;
                 row.llvm_backend_ms = llvm_backend_m;
+                row.time_report_fallback = test_time_report_fallback;
                 for (p2 = 0; p2 < PHASE_COUNT; p2++) {
                     row.liric_phase_ms[p2] = median(liric_phase[p2], ok_n);
                     row.llvm_phase_ms[p2] = median(llvm_phase[p2], ok_n);
@@ -2438,6 +2483,7 @@ next_test:
         }
         }
 
+        size_t time_report_fallback_completed = 0;
         size_t attempted = tests.n;
         size_t completed_timed = rows.n;
         size_t completed = completed_timed + compat_nonzero_completed;
@@ -2448,10 +2494,15 @@ next_test:
         if (!sf) die("failed to open output", summary_path);
         if (!fsf) die("failed to open output", fail_summary_path);
 
+        for (i = 0; i < rows.n; i++) {
+            if (rows.items[i].time_report_fallback) time_report_fallback_completed++;
+        }
+
         fprintf(sf, "{\n");
         fprintf(sf, "  \"attempted\": %zu,\n", attempted);
         fprintf(sf, "  \"completed\": %zu,\n", completed);
         fprintf(sf, "  \"completed_timed\": %zu,\n", completed_timed);
+        fprintf(sf, "  \"completed_time_report_fallback\": %zu,\n", time_report_fallback_completed);
         fprintf(sf, "  \"completed_nonzero_compat\": %zu,\n", compat_nonzero_completed);
         fprintf(sf, "  \"skipped\": %zu,\n", skipped);
         fprintf(sf, "  \"iters\": %d,\n", cfg.iters);
@@ -2617,6 +2668,9 @@ next_test:
         printf("  Status: %s\n", empty_dataset ? "EMPTY DATASET" : "OK");
         if (compat_nonzero_completed > 0) {
             printf("    completed_nonzero_compat=%zu\n", compat_nonzero_completed);
+        }
+        if (time_report_fallback_completed > 0) {
+            printf("    completed_time_report_fallback=%zu\n", time_report_fallback_completed);
         }
         for (i = 0; i < SKIP_REASON_COUNT; i++) {
             if (skip_reason_counts[i] > 0) {
