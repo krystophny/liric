@@ -1350,7 +1350,8 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
         compile_desc.call_vararg = normalized.call_vararg;
         compile_desc.call_fixed_args = normalized.call_fixed_args;
         if (s->jit->target->compile_emit(s->compile_ctx, &compile_desc) != 0) {
-            err_set(err, S_ERR_BACKEND, "backend emit failed");
+            err_set(err, S_ERR_BACKEND, "backend emit failed for op %d",
+                    (int)normalized.op);
             free(resolved_call_ops);
             return 0;
         }

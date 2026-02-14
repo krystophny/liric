@@ -55,6 +55,10 @@ typedef struct rv_features {
     bool ext_d;
 } rv_features_t;
 
+enum {
+    RV_ERR_UNSUPPORTED_OP = -2,
+};
+
 static int rv_emit32(rv_emit_ctx_t *ec, uint32_t insn) {
     if (!ec || ec->pos + 4 > ec->buflen)
         return -1;
@@ -425,6 +429,24 @@ static int rv_compile_emit(void *compile_ctx,
         return -1;
 
     switch (desc->op) {
+    case LR_OP_ALLOCA:
+    case LR_OP_BR:
+    case LR_OP_CALL:
+    case LR_OP_CONDBR:
+    case LR_OP_EXTRACTVALUE:
+    case LR_OP_FCMP:
+    case LR_OP_FPTOUI:
+    case LR_OP_GEP:
+    case LR_OP_ICMP:
+    case LR_OP_INSERTVALUE:
+    case LR_OP_INTTOPTR:
+    case LR_OP_LOAD:
+    case LR_OP_PTRTOINT:
+    case LR_OP_SELECT:
+    case LR_OP_STORE:
+    case LR_OP_UITOFP:
+    case LR_OP_UNREACHABLE:
+        return RV_ERR_UNSUPPORTED_OP;
     case LR_OP_ADD: case LR_OP_SUB: case LR_OP_MUL:
     case LR_OP_SDIV: case LR_OP_SREM:
     case LR_OP_AND: case LR_OP_OR: case LR_OP_XOR:
