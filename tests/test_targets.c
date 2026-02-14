@@ -178,6 +178,59 @@ int test_target_copy_patch_fallback_matches_isel_for_non_x86(void) {
     return 0;
 }
 
+int test_target_copy_patch_matches_isel_for_x86_streaming(void) {
+#if !defined(__x86_64__) && !defined(_M_X64)
+    return 0;
+#else
+    const char *src =
+        "define i64 @mix(i64 %a, i64 %b) {\n"
+        "entry:\n"
+        "  %sum = add i64 %a, %b\n"
+        "  %cmp = icmp sgt i64 %a, %b\n"
+        "  %sel = select i1 %cmp, i64 %sum, i64 %b\n"
+        "  ret i64 %sel\n"
+        "}\n";
+    const lr_target_t *t = lr_target_by_name("x86_64");
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll(src, strlen(src), err, sizeof(err));
+    lr_arena_t *a_isel = NULL;
+    lr_arena_t *a_cp = NULL;
+    uint8_t isel_buf[4096];
+    uint8_t cp_buf[4096];
+    size_t isel_len = 0;
+    size_t cp_len = 0;
+    int rc_isel;
+    int rc_cp;
+
+    TEST_ASSERT(t != NULL, "x86_64 target exists");
+    TEST_ASSERT(m != NULL, "parse module");
+    TEST_ASSERT(m->first_func != NULL, "module has function");
+    TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_ISEL), "x86_64 supports isel");
+    TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_COPY_PATCH), "x86_64 supports copy_patch");
+
+    a_isel = lr_arena_create(0);
+    a_cp = lr_arena_create(0);
+    TEST_ASSERT(a_isel != NULL && a_cp != NULL, "arena create");
+
+    rc_isel = lr_target_compile(t, LR_COMPILE_ISEL, m->first_func, m,
+                                isel_buf, sizeof(isel_buf), &isel_len, a_isel);
+    rc_cp = lr_target_compile(t, LR_COMPILE_COPY_PATCH, m->first_func, m,
+                              cp_buf, sizeof(cp_buf), &cp_len, a_cp);
+
+    lr_arena_destroy(a_isel);
+    lr_arena_destroy(a_cp);
+
+    TEST_ASSERT(rc_isel == 0, "isel compile succeeds");
+    TEST_ASSERT(rc_cp == 0, "copy-patch compile succeeds");
+    TEST_ASSERT(isel_len == cp_len, "copy_patch length matches isel");
+    TEST_ASSERT(memcmp(isel_buf, cp_buf, cp_len) == 0,
+                "copy_patch bytes match isel (streaming parity)");
+
+    lr_module_free(m);
+    return 0;
+#endif
+}
+
 int test_target_x86_streaming_hooks_isel_smoke(void) {
     lr_arena_t *arena = lr_arena_create(0);
     lr_module_t *m = NULL;

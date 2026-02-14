@@ -135,7 +135,6 @@ add_library(liric STATIC
     src/target_common.c
     src/target_shared.c
     src/target_x86_64.c
-    src/target_x86_64_cp.c
     src/target_aarch64.c
     src/target_riscv64.c
     src/jit.c
@@ -156,7 +155,6 @@ add_library(liric STATIC
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     target_sources(liric PRIVATE
         src/platform/platform_intrinsic_stubs_x86_64_linux.S
-        src/platform/cp_templates_x86_64.S
     )
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
