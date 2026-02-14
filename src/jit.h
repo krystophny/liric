@@ -89,6 +89,8 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name);
 void lr_jit_destroy(lr_jit_t *j);
 struct lr_objfile_ctx;
 int lr_jit_patch_relocs(lr_jit_t *j, const struct lr_objfile_ctx *ctx);
+int lr_jit_patch_relocs_from(lr_jit_t *j, const struct lr_objfile_ctx *ctx,
+                             uint32_t reloc_start);
 
 void lr_jit_materialize_cache_invalidate_all(void);
 uint32_t lr_jit_materialize_cache_epoch(void);

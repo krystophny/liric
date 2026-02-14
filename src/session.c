@@ -487,7 +487,14 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     s->jit->code_size = s->compile_start + code_len;
     if (s->jit->update_active && code_len > 0)
         s->jit->update_dirty = true;
-    lr_jit_patch_relocs(s->jit, &s->direct_obj_ctx);
+    if (lr_jit_patch_relocs_from(s->jit, &s->direct_obj_ctx,
+                                 s->direct_reloc_base) != 0) {
+        err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
+        s->module->obj_ctx = NULL;
+        if (should_close_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return -1;
+    }
 
     lr_jit_add_symbol(s->jit, s->cur_func->name,
                       s->jit->code_buf + s->compile_start);
