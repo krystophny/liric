@@ -1,0 +1,40 @@
+{
+  "generated_at_utc": "2026-02-14T17:35:55Z",
+  "benchmark_commit": "3585727865731128abfc078468de7fa8fcdfc20b",
+  "host": {
+    "kernel": "Linux 6.19.0-2-cachyos x86_64 GNU/Linux",
+    "cpu": "AMD Ryzen 9 5950X 16-Core Processor"
+  },
+  "toolchain": {
+    "cc": "cc (GCC) 15.2.1 20260209",
+    "lli": "LLVM version 21.1.6"
+  },
+  "dataset": {
+    "tests": 1,
+    "iters": 1
+  },
+  "published_table": {
+    "parse": {
+      "liric_ms": 0.067500,
+      "llvm_orc_ms": 0.057929,
+      "speedup": 0.858
+    },
+    "compile": {
+      "liric_ms": 7.887500,
+      "llvm_orc_ms": 0.001553,
+      "speedup": 0.000
+    },
+    "total_parse_compile": {
+      "liric_ms": 7.955000,
+      "llvm_orc_ms": 0.059482,
+      "speedup": 0.007
+    }
+  },
+  "artifacts": {
+    "compat_check_jsonl": "/tmp/liric_bench_readme_smoke/compat_check.jsonl",
+    "bench_ll_jsonl": "/tmp/liric_bench_readme_smoke/bench_ll.jsonl",
+    "bench_ll_summary_json": "/tmp/liric_bench_readme_smoke/bench_ll_summary.json",
+    "published_snapshot_json": "/home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_snapshot.json",
+    "published_table_md": "/home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_table.md"
+  }
+}
