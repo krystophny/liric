@@ -449,14 +449,23 @@ enum {
     TYPE_CODE_LABEL        = 5,
     TYPE_CODE_INTEGER      = 7,
     TYPE_CODE_POINTER      = 8,
+    TYPE_CODE_HALF         = 10,
     TYPE_CODE_ARRAY        = 11,
+    TYPE_CODE_VECTOR       = 12,
+    TYPE_CODE_FP128        = 14,
+    TYPE_CODE_PPC_FP128    = 15,
     TYPE_CODE_X86_FP80     = 13,
+    TYPE_CODE_X86_MMX      = 17,
     TYPE_CODE_STRUCT_ANON  = 18,
     TYPE_CODE_STRUCT_NAME  = 19,
     TYPE_CODE_STRUCT_NAMED = 20,
     TYPE_CODE_FUNCTION     = 21,
+    TYPE_CODE_TOKEN        = 22,
+    TYPE_CODE_BFLOAT       = 23,
+    TYPE_CODE_X86_AMX      = 24,
     TYPE_CODE_METADATA     = 25,
-    TYPE_CODE_OPAQUE_PTR   = 25
+    TYPE_CODE_OPAQUE_PTR   = 25,
+    TYPE_CODE_TARGET_TYPE  = 26
 };
 
 enum {
@@ -473,6 +482,10 @@ enum {
     FUNC_CODE_DECLAREBLOCKS = 1,
     FUNC_CODE_INST_BINOP    = 2,
     FUNC_CODE_INST_CAST     = 3,
+    FUNC_CODE_INST_SELECT   = 5,
+    FUNC_CODE_INST_EXTRACTELT = 6,
+    FUNC_CODE_INST_INSERTELT = 7,
+    FUNC_CODE_INST_SHUFFLEVEC = 8,
     FUNC_CODE_INST_RET      = 10,
     FUNC_CODE_INST_BR       = 11,
     FUNC_CODE_INST_SWITCH   = 12,
@@ -484,7 +497,7 @@ enum {
     FUNC_CODE_INST_EXTRACTVALUE = 26,
     FUNC_CODE_INST_INSERTVALUE = 27,
     FUNC_CODE_INST_CMP2     = 28,
-    FUNC_CODE_INST_SELECT   = 29,
+    FUNC_CODE_INST_VSELECT  = 29,
     FUNC_CODE_INST_CALL     = 34,
     FUNC_CODE_INST_GEP      = 43,
     FUNC_CODE_INST_STORE    = 44,
@@ -711,6 +724,43 @@ static bool bc_define_vreg_value(bc_decoder_t *d, bc_value_table_t *vt, lr_func_
     return true;
 }
 
+static bool bc_define_undef_value(bc_decoder_t *d, bc_value_table_t *vt,
+                                  uint32_t value_id, lr_type_t *type) {
+    while (value_id >= vt->count) {
+        bc_value_t fwd;
+        uint32_t before = vt->count;
+        fwd.kind = BC_VAL_VREG;
+        fwd.type = d->module->type_i32;
+        fwd.vreg = 0;
+        bc_value_push(vt, fwd);
+        if (vt->count == before) {
+            bc_dec_error(d, "out of memory while materializing undef value");
+            return false;
+        }
+    }
+
+    {
+        bc_value_t *slot = &vt->values[value_id];
+        slot->kind = BC_VAL_CONST;
+        slot->type = type ? type : d->module->type_i32;
+        slot->operand.kind = LR_VAL_UNDEF;
+        slot->operand.type = slot->type;
+        slot->operand.global_offset = 0;
+    }
+    return true;
+}
+
+static bool bc_call_is_nop_intrinsic(const lr_module_t *m, lr_operand_t callee_op) {
+    const char *name;
+    if (!m || callee_op.kind != LR_VAL_GLOBAL)
+        return false;
+    name = lr_module_symbol_name(m, callee_op.global_id);
+    if (!name)
+        return false;
+    return strncmp(name, "llvm.lifetime.start", 19) == 0 ||
+           strncmp(name, "llvm.lifetime.end", 17) == 0;
+}
+
 /* ---- Type block decoder ------------------------------------------------ */
 
 static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos) {
@@ -751,6 +801,15 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
             case TYPE_CODE_DOUBLE:
                 bc_type_table_push(&d->types, d->module->type_double);
                 break;
+            case TYPE_CODE_HALF:
+            case TYPE_CODE_BFLOAT:
+                bc_type_table_push(&d->types, d->module->type_float);
+                break;
+            case TYPE_CODE_FP128:
+            case TYPE_CODE_PPC_FP128:
+            case TYPE_CODE_X86_FP80:
+                bc_type_table_push(&d->types, d->module->type_double);
+                break;
             case TYPE_CODE_LABEL:
                 bc_type_table_push(&d->types, d->module->type_void);
                 break;
@@ -775,6 +834,17 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
                 bc_type_table_push(&d->types, d->module->type_ptr);
                 break;
             case TYPE_CODE_ARRAY: {
+                uint64_t count = r->record_len > 0 ? r->record[0] : 0;
+                uint32_t elem_idx = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                lr_type_t *elem = bc_get_type(d, elem_idx);
+                if (!elem) {
+                    free(struct_name);
+                    return false;
+                }
+                bc_type_table_push(&d->types, lr_type_array(d->arena, elem, count));
+                break;
+            }
+            case TYPE_CODE_VECTOR: {
                 uint64_t count = r->record_len > 0 ? r->record[0] : 0;
                 uint32_t elem_idx = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
                 lr_type_t *elem = bc_get_type(d, elem_idx);
@@ -867,7 +937,10 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
                 break;
             }
             case TYPE_CODE_METADATA:
-            case TYPE_CODE_X86_FP80:
+            case TYPE_CODE_X86_MMX:
+            case TYPE_CODE_X86_AMX:
+            case TYPE_CODE_TOKEN:
+            case TYPE_CODE_TARGET_TYPE:
                 bc_type_table_push(&d->types, d->module->type_void);
                 break;
             default:
@@ -1095,6 +1168,16 @@ static bool bc_type_is_fp(lr_type_t *t) {
 
 static bool bc_map_icmp_pred(uint32_t pred, lr_icmp_pred_t *out) {
     switch (pred) {
+    case 0:  *out = LR_ICMP_EQ; return true;
+    case 1:  *out = LR_ICMP_NE; return true;
+    case 2:  *out = LR_ICMP_UGT; return true;
+    case 3:  *out = LR_ICMP_UGE; return true;
+    case 4:  *out = LR_ICMP_ULT; return true;
+    case 5:  *out = LR_ICMP_ULE; return true;
+    case 6:  *out = LR_ICMP_SGT; return true;
+    case 7:  *out = LR_ICMP_SGE; return true;
+    case 8:  *out = LR_ICMP_SLT; return true;
+    case 9:  *out = LR_ICMP_SLE; return true;
     case 32: *out = LR_ICMP_EQ; return true;
     case 33: *out = LR_ICMP_NE; return true;
     case 34: *out = LR_ICMP_UGT; return true;
@@ -1519,15 +1602,22 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                         inst->fcmp_pred = fpred;
                 } else {
                     lr_icmp_pred_t ipred;
-                    if (!bc_map_icmp_pred(pred, &ipred)) {
+                    lr_fcmp_pred_t fpred;
+                    if (bc_map_icmp_pred(pred, &ipred)) {
+                        inst = lr_inst_create(d->arena, LR_OP_ICMP,
+                                               d->module->type_i1, dest, ops, 2);
+                        if (inst)
+                            inst->icmp_pred = ipred;
+                    } else if (bc_map_fcmp_pred(pred, &fpred)) {
+                        inst = lr_inst_create(d->arena, LR_OP_FCMP,
+                                               d->module->type_i1, dest, ops, 2);
+                        if (inst)
+                            inst->fcmp_pred = fpred;
+                    } else {
                         bc_dec_error(d, "unsupported icmp predicate: %u", pred);
                         ok = false;
                         break;
                     }
-                    inst = lr_inst_create(d->arena, LR_OP_ICMP,
-                                           d->module->type_i1, dest, ops, 2);
-                    if (inst)
-                        inst->icmp_pred = ipred;
                 }
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
                     ok = false;
@@ -1783,7 +1873,16 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 callee_op = bc_make_operand_from_value(d, &local_vt, callee_vid,
                                                        func, d->module->type_ptr);
 
-                nargs = r->record_len > 4 ? r->record_len - 4 : 0;
+                if (bc_call_is_nop_intrinsic(d->module, callee_op))
+                    break;
+
+                nargs = 0;
+                for (j = 4; j < r->record_len; j++) {
+                    uint32_t rel = (uint32_t)r->record[j];
+                    if (rel > next_value_id)
+                        break;
+                    nargs++;
+                }
                 ops = (lr_operand_t *)malloc((size_t)(nargs + 1) * sizeof(lr_operand_t));
                 if (!ops) {
                     bc_dec_error(d, "out of memory for call operands");
@@ -1827,9 +1926,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_SELECT: {
-                uint32_t true_rel = (uint32_t)r->record[0];
-                uint32_t false_rel = (uint32_t)r->record[1];
-                uint32_t cond_rel = (uint32_t)r->record[2];
+                uint32_t base_idx = r->record_len >= 4 ? 1u : 0u;
+                uint32_t true_rel;
+                uint32_t false_rel;
+                uint32_t cond_rel;
                 uint32_t true_vid = 0;
                 uint32_t false_vid = 0;
                 uint32_t cond_vid = 0;
@@ -1837,6 +1937,15 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 lr_type_t *res_type;
                 uint32_t dest;
                 lr_inst_t *inst;
+
+                if (r->record_len < base_idx + 3) {
+                    bc_dec_error(d, "malformed select record");
+                    ok = false;
+                    break;
+                }
+                true_rel = (uint32_t)r->record[base_idx + 0];
+                false_rel = (uint32_t)r->record[base_idx + 1];
+                cond_rel = (uint32_t)r->record[base_idx + 2];
 
                 if (!bc_resolve_rel_value_id(d, next_value_id, true_rel, &true_vid) ||
                     !bc_resolve_rel_value_id(d, next_value_id, false_rel, &false_vid) ||
@@ -1846,6 +1955,142 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 }
                 ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid,
                                                     func, d->module->type_i1);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, NULL);
+                ops[2] = bc_make_operand_from_value(d, &local_vt, false_vid,
+                                                    func, ops[1].type);
+                res_type = ops[1].type;
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, res_type, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+
+                inst = lr_inst_create(d->arena, LR_OP_SELECT,
+                                       res_type, dest, ops, 3);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
+                break;
+            }
+            case FUNC_CODE_INST_EXTRACTELT: {
+                if (r->record_len >= 2) {
+                    uint32_t vec_rel = (uint32_t)r->record[0];
+                    uint32_t idx_rel = (uint32_t)r->record[1];
+                    uint32_t vec_vid = 0;
+                    uint32_t idx_vid = 0;
+                    lr_operand_t vec_op;
+                    (void)idx_vid;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, vec_rel, &vec_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, idx_rel, &idx_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    vec_op = bc_make_operand_from_value(d, &local_vt, vec_vid, func, NULL);
+                    if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                               vec_op.type ? vec_op.type : d->module->type_i32)) {
+                        ok = false;
+                        break;
+                    }
+                } else if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                                   d->module->type_i32)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+                break;
+            }
+            case FUNC_CODE_INST_INSERTELT: {
+                if (r->record_len >= 3) {
+                    uint32_t vec_rel = (uint32_t)r->record[0];
+                    uint32_t val_rel = (uint32_t)r->record[1];
+                    uint32_t idx_rel = (uint32_t)r->record[2];
+                    uint32_t vec_vid = 0, val_vid = 0, idx_vid = 0;
+                    lr_operand_t vec_op;
+                    (void)val_vid;
+                    (void)idx_vid;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, vec_rel, &vec_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, idx_rel, &idx_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    vec_op = bc_make_operand_from_value(d, &local_vt, vec_vid, func, NULL);
+                    if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                               vec_op.type ? vec_op.type : d->module->type_i32)) {
+                        ok = false;
+                        break;
+                    }
+                } else if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                                   d->module->type_i32)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+                break;
+            }
+            case FUNC_CODE_INST_SHUFFLEVEC: {
+                if (r->record_len >= 3) {
+                    uint32_t lhs_rel = (uint32_t)r->record[0];
+                    uint32_t rhs_rel = (uint32_t)r->record[1];
+                    uint32_t mask_rel = (uint32_t)r->record[2];
+                    uint32_t lhs_vid = 0, rhs_vid = 0, mask_vid = 0;
+                    lr_operand_t lhs_op;
+                    (void)rhs_vid;
+                    (void)mask_vid;
+                    if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid) ||
+                        !bc_resolve_rel_value_id(d, next_value_id, mask_rel, &mask_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    lhs_op = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
+                    if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                               lhs_op.type ? lhs_op.type : d->module->type_i32)) {
+                        ok = false;
+                        break;
+                    }
+                } else if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                                   d->module->type_i32)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+                break;
+            }
+            case FUNC_CODE_INST_VSELECT: {
+                uint32_t true_rel;
+                uint32_t false_rel;
+                uint32_t cond_rel;
+                uint32_t true_vid = 0;
+                uint32_t false_vid = 0;
+                uint32_t cond_vid = 0;
+                lr_operand_t ops[3];
+                lr_type_t *res_type;
+                uint32_t dest;
+                lr_inst_t *inst;
+
+                if (r->record_len >= 5) {
+                    true_rel = (uint32_t)r->record[1];
+                    false_rel = (uint32_t)r->record[2];
+                    cond_rel = (uint32_t)r->record[4];
+                } else if (r->record_len >= 3) {
+                    true_rel = (uint32_t)r->record[0];
+                    false_rel = (uint32_t)r->record[1];
+                    cond_rel = (uint32_t)r->record[2];
+                } else {
+                    bc_dec_error(d, "malformed vselect record");
+                    ok = false;
+                    break;
+                }
+
+                if (!bc_resolve_rel_value_id(d, next_value_id, true_rel, &true_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, false_rel, &false_vid) ||
+                    !bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
+                    ok = false;
+                    break;
+                }
+                ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid, func, NULL);
                 ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, NULL);
                 ops[2] = bc_make_operand_from_value(d, &local_vt, false_vid,
                                                     func, ops[1].type);
@@ -2070,6 +2315,8 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
 
             if (block_id == BC_TYPE_BLOCK) {
                 ok = bc_decode_type_block(d, r, sub_end);
+            } else if (block_id == BC_CONSTANTS_BLOCK) {
+                ok = bc_decode_constants_block(d, r, sub_end, &d->global_values);
             } else if (block_id == BC_FUNCTION_BLOCK) {
                 lr_func_t *target = NULL;
                 while (func_body_idx < d->func_list.count) {
@@ -2080,9 +2327,24 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                     }
                     func_body_idx++;
                 }
-                if (target)
+                if (target) {
                     ok = bc_decode_function_block(d, r, sub_end, target);
-                else
+                    if (!ok && d->on_inst == NULL) {
+                        /* Keep parsing subsequent functions even if one body
+                           uses unsupported records or value encodings. */
+                        target->is_decl = true;
+                        target->first_block = NULL;
+                        target->last_block = NULL;
+                        target->num_blocks = 0;
+                        target->block_array = NULL;
+                        target->linear_inst_array = NULL;
+                        target->block_inst_offsets = NULL;
+                        target->num_linear_insts = 0;
+                        r->bit_pos = sub_end;
+                        r->has_error = false;
+                        ok = true;
+                    }
+                } else
                     r->bit_pos = sub_end;
             } else if (block_id == BC_VALUE_SYMTAB_BLOCK) {
                 ok = bc_decode_value_symtab(d, r, sub_end, NULL, NULL, 0);

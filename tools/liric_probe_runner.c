@@ -241,6 +241,8 @@ int main(int argc, char **argv) {
     if (timing) t_jit_create_end = now_us();
 
     if (have_runtime_bc) {
+        if (!getenv("LIRIC_JIT_LAZY"))
+            setenv("LIRIC_JIT_LAZY", "1", 0);
         lr_jit_set_runtime_bc(jit, (const uint8_t *)runtime_bc.data, runtime_bc.len);
     }
 
