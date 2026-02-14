@@ -543,6 +543,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_api_time_report_segv_recovery
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_API=$<TARGET_FILE:bench_api>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_time_report_segv_recovery.cmake
+)
+
+add_test(
     NAME bench_api_alias_source
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
