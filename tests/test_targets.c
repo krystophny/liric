@@ -23,6 +23,18 @@
     } \
 } while (0)
 
+static int code_contains_u32_le(const uint8_t *buf, size_t len, uint32_t word) {
+    for (size_t i = 0; i + 4 <= len; i += 4) {
+        uint32_t got = (uint32_t)buf[i] |
+                       ((uint32_t)buf[i + 1] << 8) |
+                       ((uint32_t)buf[i + 2] << 16) |
+                       ((uint32_t)buf[i + 3] << 24);
+        if (got == word)
+            return 1;
+    }
+    return 0;
+}
+
 int test_host_target_name(void) {
     const char *name = lr_jit_host_target_name();
     TEST_ASSERT(name != NULL, "host target name exists");
@@ -457,6 +469,108 @@ int test_target_aarch64_streaming_hooks_smoke(void) {
 
         TEST_ASSERT_EQ(t->compile_end(compile_ctx, out_len), 0, "compile_end succeeds");
         TEST_ASSERT(*out_len > 0, "generated code");
+
+        lr_arena_destroy(compile_arena);
+    }
+
+    TEST_ASSERT(isel_len == cp_len, "copy-patch fallback length matches isel");
+    TEST_ASSERT(memcmp(isel_code, cp_code, isel_len) == 0,
+                "copy-patch fallback bytes match isel");
+
+    lr_arena_destroy(module_arena);
+    return 0;
+}
+
+int test_target_aarch64_streaming_fp_convert_ops(void) {
+    lr_arena_t *module_arena = lr_arena_create(0);
+    lr_module_t *m = NULL;
+    const lr_target_t *t = lr_target_by_name("aarch64");
+    lr_type_t *params[1];
+    lr_operand_desc_t uitofp_ops[1];
+    lr_operand_desc_t fptoui_ops[1];
+    lr_operand_desc_t ret_ops[1];
+    lr_compile_inst_desc_t uitofp_desc;
+    lr_compile_inst_desc_t fptoui_desc;
+    lr_compile_inst_desc_t ret_desc;
+    lr_compile_mode_t modes[2] = {LR_COMPILE_ISEL, LR_COMPILE_COPY_PATCH};
+    uint8_t isel_code[4096];
+    uint8_t cp_code[4096];
+    size_t isel_len = 0;
+    size_t cp_len = 0;
+    const uint32_t ucvtf_d0_x9 = 0x9E630120u;
+    const uint32_t fcvtzu_x9_d0 = 0x9E790009u;
+
+    TEST_ASSERT(module_arena != NULL, "arena create");
+    TEST_ASSERT(t != NULL, "aarch64 target exists");
+
+    m = lr_module_create(module_arena);
+    TEST_ASSERT(m != NULL, "module create");
+
+    params[0] = m->type_i32;
+
+    for (size_t i = 0; i < 2; i++) {
+        lr_arena_t *compile_arena = lr_arena_create(0);
+        lr_compile_func_meta_t meta;
+        void *compile_ctx = NULL;
+        uint8_t *out_buf = (i == 0) ? isel_code : cp_code;
+        size_t *out_len = (i == 0) ? &isel_len : &cp_len;
+        int rc;
+
+        TEST_ASSERT(compile_arena != NULL, "compile arena create");
+
+        memset(&meta, 0, sizeof(meta));
+        meta.ret_type = m->type_i32;
+        meta.param_types = params;
+        meta.num_params = 1;
+        meta.next_vreg = 4;
+        meta.mode = modes[i];
+
+        rc = t->compile_begin(&compile_ctx, &meta, m, out_buf, 4096, compile_arena);
+        TEST_ASSERT_EQ(rc, 0, "compile_begin succeeds");
+        TEST_ASSERT(compile_ctx != NULL, "compile ctx exists");
+        TEST_ASSERT_EQ(t->compile_set_block(compile_ctx, 0), 0, "set block 0");
+
+        memset(uitofp_ops, 0, sizeof(uitofp_ops));
+        uitofp_ops[0].kind = LR_OP_KIND_VREG;
+        uitofp_ops[0].type = m->type_i32;
+        uitofp_ops[0].vreg = 1;
+        memset(&uitofp_desc, 0, sizeof(uitofp_desc));
+        uitofp_desc.op = LR_OP_UITOFP;
+        uitofp_desc.type = m->type_double;
+        uitofp_desc.dest = 2;
+        uitofp_desc.operands = uitofp_ops;
+        uitofp_desc.num_operands = 1;
+        TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &uitofp_desc), 0, "emit uitofp");
+
+        memset(fptoui_ops, 0, sizeof(fptoui_ops));
+        fptoui_ops[0].kind = LR_OP_KIND_VREG;
+        fptoui_ops[0].type = m->type_double;
+        fptoui_ops[0].vreg = 2;
+        memset(&fptoui_desc, 0, sizeof(fptoui_desc));
+        fptoui_desc.op = LR_OP_FPTOUI;
+        fptoui_desc.type = m->type_i32;
+        fptoui_desc.dest = 3;
+        fptoui_desc.operands = fptoui_ops;
+        fptoui_desc.num_operands = 1;
+        TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &fptoui_desc), 0, "emit fptoui");
+
+        memset(ret_ops, 0, sizeof(ret_ops));
+        ret_ops[0].kind = LR_OP_KIND_VREG;
+        ret_ops[0].type = m->type_i32;
+        ret_ops[0].vreg = 3;
+        memset(&ret_desc, 0, sizeof(ret_desc));
+        ret_desc.op = LR_OP_RET;
+        ret_desc.type = m->type_i32;
+        ret_desc.operands = ret_ops;
+        ret_desc.num_operands = 1;
+        TEST_ASSERT_EQ(t->compile_emit(compile_ctx, &ret_desc), 0, "emit ret");
+
+        TEST_ASSERT_EQ(t->compile_end(compile_ctx, out_len), 0, "compile_end succeeds");
+        TEST_ASSERT(*out_len > 0, "generated code");
+        TEST_ASSERT(code_contains_u32_le(out_buf, *out_len, ucvtf_d0_x9),
+                    "contains ucvtf d0, x9");
+        TEST_ASSERT(code_contains_u32_le(out_buf, *out_len, fcvtzu_x9_d0),
+                    "contains fcvtzu x9, d0");
 
         lr_arena_destroy(compile_arena);
     }

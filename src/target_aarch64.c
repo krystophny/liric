@@ -365,8 +365,18 @@ static uint32_t enc_scvtf(uint8_t fsize, uint8_t fd, uint8_t xn) {
     return base | ((uint32_t)xn << 5) | fd;
 }
 
+static uint32_t enc_ucvtf(uint8_t fsize, uint8_t fd, uint8_t xn) {
+    uint32_t base = (fsize == 8) ? 0x9E630000u : 0x9E230000u;
+    return base | ((uint32_t)xn << 5) | fd;
+}
+
 static uint32_t enc_fcvtzs(uint8_t fsize, uint8_t xd, uint8_t fn) {
     uint32_t base = (fsize == 8) ? 0x9E780000u : 0x9E380000u;
+    return base | ((uint32_t)fn << 5) | xd;
+}
+
+static uint32_t enc_fcvtzu(uint8_t fsize, uint8_t xd, uint8_t fn) {
+    uint32_t base = (fsize == 8) ? 0x9E790000u : 0x9E390000u;
     return base | ((uint32_t)fn << 5) | xd;
 }
 
@@ -1448,12 +1458,41 @@ static int aarch64_compile_emit(void *compile_ctx,
         emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
         break;
     }
+    case LR_OP_UITOFP: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_operand(cc, &ops[0], A64_X9);
+        {
+            uint8_t src_bits = int_type_width_bits(ops[0].type);
+            if (src_bits > 0 && src_bits < 64) {
+                uint8_t shift = (uint8_t)(64 - src_bits);
+                emit_move_imm_ctx(cc, A64_X10, (int64_t)shift, true);
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_lslv(true, A64_X9, A64_X9, A64_X10));
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_lsrv(true, A64_X9, A64_X9, A64_X10));
+            }
+        }
+        emit_u32(cc->buf, &cc->pos, cc->buflen,
+                 enc_ucvtf(fsize, FP_SCRATCH0, A64_X9));
+        emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
+        break;
+    }
     case LR_OP_FPTOSI: {
         uint8_t fsize = (ops[0].type &&
                          ops[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
         emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
         emit_u32(cc->buf, &cc->pos, cc->buflen,
                  enc_fcvtzs(fsize, A64_X9, FP_SCRATCH0));
+        emit_store_slot(cc, desc->dest, A64_X9);
+        break;
+    }
+    case LR_OP_FPTOUI: {
+        uint8_t fsize = (ops[0].type &&
+                         ops[0].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
+        emit_u32(cc->buf, &cc->pos, cc->buflen,
+                 enc_fcvtzu(fsize, A64_X9, FP_SCRATCH0));
         emit_store_slot(cc, desc->dest, A64_X9);
         break;
     }
