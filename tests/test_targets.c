@@ -35,6 +35,42 @@ static int code_contains_u32_le(const uint8_t *buf, size_t len, uint32_t word) {
     return 0;
 }
 
+static int noop_compile_begin(void **compile_ctx,
+                              const lr_compile_func_meta_t *func_meta,
+                              lr_module_t *mod,
+                              uint8_t *buf, size_t buflen,
+                              lr_arena_t *arena) {
+    (void)func_meta;
+    (void)mod;
+    (void)buf;
+    (void)buflen;
+    (void)arena;
+    if (!compile_ctx)
+        return -1;
+    *compile_ctx = (void *)(uintptr_t)1;
+    return 0;
+}
+
+static int noop_compile_emit(void *compile_ctx,
+                             const lr_compile_inst_desc_t *inst_desc) {
+    (void)compile_ctx;
+    (void)inst_desc;
+    return 0;
+}
+
+static int noop_compile_set_block(void *compile_ctx, uint32_t block_id) {
+    (void)compile_ctx;
+    (void)block_id;
+    return 0;
+}
+
+static int noop_compile_end(void *compile_ctx, size_t *out_len) {
+    if (!compile_ctx || !out_len)
+        return -1;
+    *out_len = 0;
+    return 0;
+}
+
 int test_host_target_name(void) {
     const char *name = lr_jit_host_target_name();
     TEST_ASSERT(name != NULL, "host target name exists");
@@ -125,6 +161,34 @@ int test_target_copy_patch_entrypoints_available(void) {
         TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_ISEL), "target supports isel mode");
         TEST_ASSERT(lr_target_can_compile(t, LR_COMPILE_COPY_PATCH), "target supports copy_patch mode");
     }
+    return 0;
+}
+
+int test_target_requires_full_streaming_hooks(void) {
+    lr_target_t t;
+    memset(&t, 0, sizeof(t));
+    t.name = "stub";
+    t.compile_begin = noop_compile_begin;
+    t.compile_end = noop_compile_end;
+
+    TEST_ASSERT(!lr_target_can_compile(&t, LR_COMPILE_ISEL),
+                "target without emit/set_block hooks is rejected");
+
+    t.compile_emit = noop_compile_emit;
+    TEST_ASSERT(!lr_target_can_compile(&t, LR_COMPILE_ISEL),
+                "target without set_block hook is rejected");
+
+    t.compile_set_block = noop_compile_set_block;
+    TEST_ASSERT(lr_target_can_compile(&t, LR_COMPILE_ISEL),
+                "target with full streaming hooks supports isel");
+    TEST_ASSERT(lr_target_can_compile(&t, LR_COMPILE_COPY_PATCH),
+                "target with full streaming hooks supports copy_patch");
+    TEST_ASSERT(!lr_target_can_compile(&t, LR_COMPILE_LLVM),
+                "target compile contract rejects llvm mode");
+
+    t.compile_emit = NULL;
+    TEST_ASSERT(!lr_target_can_compile(&t, LR_COMPILE_COPY_PATCH),
+                "target without emit hook is rejected");
     return 0;
 }
 
