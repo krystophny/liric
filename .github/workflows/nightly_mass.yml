@@ -116,6 +116,14 @@ jobs:
             --cmake "${LFORTRAN_ROOT}/integration_tests/CMakeLists.txt" \
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
+      - name: Validate README benchmark snapshot contract
+        run: |
+          set -euo pipefail
+          ./tools/bench_readme_perf_gate.sh \
+            --readme "${GITHUB_WORKSPACE}/README.md" \
+            --snapshot "${GITHUB_WORKSPACE}/docs/benchmarks/readme_perf_snapshot.json" \
+            --table "${GITHUB_WORKSPACE}/docs/benchmarks/readme_perf_table.md"
+
       - name: Publish trend summary
         run: |
           set -euo pipefail
