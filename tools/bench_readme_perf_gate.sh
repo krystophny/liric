@@ -10,9 +10,11 @@ usage: bench_readme_perf_gate.sh [options]
   -h, --help         show this help
 
 Gate conditions (must all be true):
-  - README references published benchmark artifacts and regen command.
-  - Snapshot JSON contains date, commit, dataset size, and artifact path fields.
-  - Published table includes generated date, benchmark commit, artifact refs, and metric table.
+  - README references published benchmark artifacts and regeneration command.
+  - Snapshot JSON uses corpus_100 dataset and canonical runtime_equalized_bc track.
+  - Canonical track completion equals expected_tests (full real-corpus publish).
+  - Published table includes canonical-track row and real-corpus metadata.
+  - Obsolete smoke/legacy fields are absent.
 USAGE
 }
 
@@ -31,6 +33,15 @@ require_pattern() {
     local pattern="$2"
     local msg="$3"
     if ! grep -Eq "$pattern" "$path"; then
+        die "$msg (${path})"
+    fi
+}
+
+forbid_pattern() {
+    local path="$1"
+    local pattern="$2"
+    local msg="$3"
+    if grep -Eq "$pattern" "$path"; then
         die "$msg (${path})"
     fi
 }
@@ -90,23 +101,35 @@ require_nonempty_file "$table"
 
 generated_at="$(json_string_field "$snapshot" "generated_at_utc")"
 benchmark_commit="$(json_string_field "$snapshot" "benchmark_commit")"
-tests="$(json_int_field "$snapshot" "tests")"
+status="$(json_string_field "$snapshot" "status")"
+dataset_name="$(json_string_field "$snapshot" "dataset_name")"
+canonical_track="$(json_string_field "$snapshot" "canonical_track")"
+expected_tests="$(json_int_field "$snapshot" "expected_tests")"
+attempted_tests="$(json_int_field "$snapshot" "attempted_tests")"
 iters="$(json_int_field "$snapshot" "iters")"
-compat_check_jsonl="$(json_string_field "$snapshot" "compat_check_jsonl")"
-bench_ll_jsonl="$(json_string_field "$snapshot" "bench_ll_jsonl")"
-bench_ll_summary_json="$(json_string_field "$snapshot" "bench_ll_summary_json")"
+core_completed="$(json_int_field "$snapshot" "core_completed_tests")"
+runtime_completed="$(json_int_field "$snapshot" "runtime_equalized_bc_completed_tests")"
+bench_corpus_compare_summary_json="$(json_string_field "$snapshot" "bench_corpus_compare_summary_json")"
+bench_corpus_compare_core_jsonl="$(json_string_field "$snapshot" "bench_corpus_compare_core_jsonl")"
+bench_corpus_compare_runtime_jsonl="$(json_string_field "$snapshot" "bench_corpus_compare_runtime_equalized_bc_jsonl")"
 published_snapshot_json="$(json_string_field "$snapshot" "published_snapshot_json")"
 published_table_md="$(json_string_field "$snapshot" "published_table_md")"
 
 [[ "$generated_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || die "generated_at_utc is not ISO-8601-like: ${generated_at}"
 [[ "$generated_at" =~ Z$ ]] || die "generated_at_utc must be UTC (Z suffix): ${generated_at}"
 [[ "$benchmark_commit" =~ ^[0-9a-fA-F]{7,40}$ ]] || die "benchmark_commit is not a git hash: ${benchmark_commit}"
-[[ "$tests" -gt 0 ]] || die "dataset tests must be > 0"
-[[ "$iters" -gt 0 ]] || die "dataset iters must be > 0"
+[[ "$dataset_name" == "corpus_100" ]] || die "dataset_name must be corpus_100 (got ${dataset_name})"
+[[ "$canonical_track" == "runtime_equalized_bc" ]] || die "canonical_track must be runtime_equalized_bc (got ${canonical_track})"
+[[ "$expected_tests" -eq 100 ]] || die "expected_tests must be 100 (got ${expected_tests})"
+[[ "$attempted_tests" -gt 0 ]] || die "attempted_tests must be > 0"
+[[ "$iters" -gt 0 ]] || die "iters must be > 0"
+[[ "$core_completed" -ge 0 ]] || die "core_completed_tests must be >= 0"
+[[ "$runtime_completed" -eq "$expected_tests" ]] || die "canonical track must complete all expected tests (${runtime_completed}/${expected_tests})"
+[[ "$status" == "OK" ]] || die "status must be OK for publishable README snapshot (got ${status})"
 
-[[ -n "$compat_check_jsonl" ]] || die "compat_check_jsonl path is empty"
-[[ -n "$bench_ll_jsonl" ]] || die "bench_ll_jsonl path is empty"
-[[ -n "$bench_ll_summary_json" ]] || die "bench_ll_summary_json path is empty"
+[[ -n "$bench_corpus_compare_summary_json" ]] || die "bench_corpus_compare_summary_json path is empty"
+[[ -n "$bench_corpus_compare_core_jsonl" ]] || die "bench_corpus_compare_core_jsonl path is empty"
+[[ -n "$bench_corpus_compare_runtime_jsonl" ]] || die "bench_corpus_compare_runtime_equalized_bc_jsonl path is empty"
 [[ -n "$published_snapshot_json" ]] || die "published_snapshot_json path is empty"
 [[ -n "$published_table_md" ]] || die "published_table_md path is empty"
 
@@ -115,25 +138,32 @@ published_table_md="$(json_string_field "$snapshot" "published_table_md")"
 [[ "$published_table_md" == */readme_perf_table.md ]] ||
     die "published_table_md must end with readme_perf_table.md"
 
-require_pattern "$snapshot" '"published_table"[[:space:]]*:[[:space:]]*\{' "snapshot missing published_table object"
-require_pattern "$snapshot" '"artifacts"[[:space:]]*:[[:space:]]*\{' "snapshot missing artifacts object"
-
 require_pattern "$table" '^Generated:[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}T' "table missing Generated line"
 require_pattern "$table" '^Benchmark commit:[[:space:]]+[0-9a-fA-F]{7,40}' "table missing benchmark commit line"
+require_pattern "$table" '^Dataset:[[:space:]]+corpus_100' "table missing corpus_100 dataset line"
+require_pattern "$table" '^Canonical track:[[:space:]]+runtime_equalized_bc' "table missing canonical track line"
 require_pattern "$table" '^Artifacts:' "table missing Artifacts section"
-require_pattern "$table" '^\| Phase \| liric \(ms\) \| LLVM ORC \(ms\) \| Speedup \|' "table missing metric header"
-require_pattern "$table" 'readme_perf_snapshot\.json' "table missing snapshot artifact reference"
+require_pattern "$table" '^\| Track \| Completed \| liric parse \(ms\) \| liric compile\+lookup \(ms\) \| liric total materialized \(ms\) \| LLVM parse \(ms\) \| LLVM add\+lookup \(ms\) \| LLVM total materialized \(ms\) \| Speedup total \(median\) \| Speedup total \(aggregate\) \|' "table missing metric header"
+require_pattern "$table" '^\| runtime_equalized_bc \(canonical\) \|' "table missing canonical track row"
 
 require_pattern "$readme" 'docs/benchmarks/readme_perf_snapshot\.json' "README missing snapshot artifact path"
 require_pattern "$readme" 'docs/benchmarks/readme_perf_table\.md' "README missing table artifact path"
 require_pattern "$readme" '\./tools/bench_readme_perf_snapshot\.sh' "README missing snapshot regeneration command"
-require_pattern "$readme" '\./build/bench_exe_matrix --iters' "README missing exe matrix benchmark command"
+require_pattern "$readme" '\./build/bench_corpus_compare --iters' "README missing corpus comparator benchmark command"
+
+forbid_pattern "$snapshot" '"published_table"[[:space:]]*:' "snapshot contains obsolete published_table object"
+forbid_pattern "$snapshot" '"bench_ll_summary_json"[[:space:]]*:' "snapshot contains obsolete bench_ll artifact reference"
+forbid_pattern "$snapshot" 'readme_smoke' "snapshot contains smoke artifact path"
+forbid_pattern "$table" 'readme_smoke' "table contains smoke artifact path"
+forbid_pattern "$table" 'Total \(parse\+compile\)' "table contains obsolete legacy metric wording"
 
 echo "bench_readme_perf_gate: PASSED"
 echo "  generated_at_utc=${generated_at}"
 echo "  benchmark_commit=${benchmark_commit}"
-echo "  dataset.tests=${tests}"
-echo "  dataset.iters=${iters}"
+echo "  dataset_name=${dataset_name}"
+echo "  expected_tests=${expected_tests}"
+echo "  attempted_tests=${attempted_tests}"
+echo "  runtime_equalized_bc_completed_tests=${runtime_completed}"
 echo "  snapshot=${snapshot}"
 echo "  table=${table}"
 echo "  readme=${readme}"

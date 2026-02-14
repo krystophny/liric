@@ -130,7 +130,9 @@ Regenerate end-to-end:
   --bench-dir /tmp/liric_bench \
   --out-dir docs/benchmarks \
   --iters 3 \
-  --compat-timeout 15
+  --timeout 30 \
+  --corpus tools/corpus_100.tsv \
+  --cache-dir /tmp/liric_lfortran_mass/cache
 ```
 
 Validate published README benchmark artifacts:
@@ -148,6 +150,7 @@ Validate published README benchmark artifacts:
 # prerequisite for bench_corpus: populate /tmp/liric_lfortran_mass/cache
 ./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass
 ./build/bench_corpus --iters 3            # 100-case focused corpus
+./build/bench_corpus_compare --iters 3    # real corpus compare: core + runtime_equalized_bc (canonical)
 ./build/bench_tcc --iters 10              # liric vs TCC micro-benchmarks
 ./build/bench_exe_matrix --iters 3        # ll->exe matrix: isel/copy_patch/llvm vs clang baseline
 ```

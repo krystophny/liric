@@ -1,6 +1,7 @@
 {
-  "generated_at_utc": "2026-02-14T17:35:55Z",
-  "benchmark_commit": "3585727865731128abfc078468de7fa8fcdfc20b",
+  "schema_version": 2,
+  "generated_at_utc": "2026-02-14T23:43:56Z",
+  "benchmark_commit": "b1f2bf5444341da9ea89c0df12576276c0db0b8e",
   "host": {
     "kernel": "Linux 6.19.0-2-cachyos x86_64 GNU/Linux",
     "cpu": "AMD Ryzen 9 5950X 16-Core Processor"
@@ -9,31 +10,34 @@
     "cc": "cc (GCC) 15.2.1 20260209",
     "lli": "LLVM version 21.1.6"
   },
-  "dataset": {
-    "tests": 1,
-    "iters": 1
-  },
-  "published_table": {
-    "parse": {
-      "liric_ms": 0.067500,
-      "llvm_orc_ms": 0.057929,
-      "speedup": 0.858
-    },
-    "compile": {
-      "liric_ms": 7.887500,
-      "llvm_orc_ms": 0.001553,
-      "speedup": 0.000
-    },
-    "total_parse_compile": {
-      "liric_ms": 7.955000,
-      "llvm_orc_ms": 0.059482,
-      "speedup": 0.007
-    }
-  },
+  "status": "OK",
+  "dataset_name": "corpus_100",
+  "expected_tests": 100,
+  "attempted_tests": 100,
+  "iters": 3,
+  "canonical_track": "runtime_equalized_bc",
+  "core_completed_tests": 100,
+  "runtime_equalized_bc_completed_tests": 100,
+  "core_liric_parse_median_ms": 0.170900,
+  "core_liric_compile_materialized_median_ms": 0.161600,
+  "core_liric_total_materialized_median_ms": 0.317200,
+  "core_llvm_parse_median_ms": 0.287957,
+  "core_llvm_compile_materialized_median_ms": 4.404784,
+  "core_llvm_total_materialized_median_ms": 4.707839,
+  "core_total_materialized_speedup_median": 14.482433,
+  "core_total_materialized_speedup_aggregate": 18.617252,
+  "runtime_equalized_bc_liric_parse_median_ms": 0.179600,
+  "runtime_equalized_bc_liric_compile_materialized_median_ms": 21.300250,
+  "runtime_equalized_bc_liric_total_materialized_median_ms": 21.551600,
+  "runtime_equalized_bc_llvm_parse_median_ms": 10.819792,
+  "runtime_equalized_bc_llvm_compile_materialized_median_ms": 361.866466,
+  "runtime_equalized_bc_llvm_total_materialized_median_ms": 372.506779,
+  "runtime_equalized_bc_total_materialized_speedup_median": 17.277990,
+  "runtime_equalized_bc_total_materialized_speedup_aggregate": 6.621201,
   "artifacts": {
-    "compat_check_jsonl": "/tmp/liric_bench_readme_smoke/compat_check.jsonl",
-    "bench_ll_jsonl": "/tmp/liric_bench_readme_smoke/bench_ll.jsonl",
-    "bench_ll_summary_json": "/tmp/liric_bench_readme_smoke/bench_ll_summary.json",
+    "bench_corpus_compare_summary_json": "/tmp/liric_bench/bench_corpus_compare_summary.json",
+    "bench_corpus_compare_core_jsonl": "/tmp/liric_bench/bench_corpus_compare_core.jsonl",
+    "bench_corpus_compare_runtime_equalized_bc_jsonl": "/tmp/liric_bench/bench_corpus_compare_runtime_equalized_bc.jsonl",
     "published_snapshot_json": "/home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_snapshot.json",
     "published_table_md": "/home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_table.md"
   }

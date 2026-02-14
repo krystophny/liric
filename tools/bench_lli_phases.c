@@ -2,10 +2,12 @@
 // Measures parse, JIT compile, symbol lookup, and execution in one process.
 
 #include <llvm-c/Core.h>
+#include <llvm-c/BitReader.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/LLJIT.h>
+#include <llvm-c/Linker.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/Support.h>
 #include <llvm-c/Target.h>
@@ -38,8 +40,10 @@ typedef struct {
     const char *func_name;
     const char *sig;
     const char *input_file;
+    const char *runtime_bc_file;
     int iters;
     int json_output;
+    int no_exec;
     const char *load_libs[64];
     int num_load_libs;
 } args_t;
@@ -146,8 +150,10 @@ static int parse_args(int argc, char **argv, args_t *a) {
     a->func_name = "main";
     a->sig = "i32";
     a->input_file = NULL;
+    a->runtime_bc_file = NULL;
     a->iters = 1;
     a->json_output = 0;
+    a->no_exec = 0;
     a->num_load_libs = 0;
 
     for (i = 1; i < argc; i++) {
@@ -156,6 +162,8 @@ static int parse_args(int argc, char **argv, args_t *a) {
             if (a->iters <= 0) a->iters = 1;
         } else if (strcmp(argv[i], "--json") == 0) {
             a->json_output = 1;
+        } else if (strcmp(argv[i], "--no-exec") == 0) {
+            a->no_exec = 1;
         } else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) {
             a->func_name = argv[++i];
         } else if (strcmp(argv[i], "--sig") == 0 && i + 1 < argc) {
@@ -166,6 +174,8 @@ static int parse_args(int argc, char **argv, args_t *a) {
                 return 1;
             }
             a->load_libs[a->num_load_libs++] = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            a->runtime_bc_file = argv[++i];
         } else if (argv[i][0] != '-') {
             a->input_file = argv[i];
         } else {
@@ -177,7 +187,7 @@ static int parse_args(int argc, char **argv, args_t *a) {
     if (!a->input_file) {
         fprintf(stderr,
             "usage: bench_lli_phases [--iters N] [--json] [--func NAME] [--sig SIG] "
-            "[--load-lib LIB] file.ll\n");
+            "[--load-lib LIB] [--runtime-bc FILE] [--no-exec] file.ll\n");
         return 1;
     }
 
@@ -188,8 +198,12 @@ int main(int argc, char **argv) {
     args_t a;
     size_t src_len = 0;
     char *src = NULL;
+    size_t runtime_bc_len = 0;
+    char *runtime_bc = NULL;
     int i;
-    double parse_total = 0.0;
+    double parse_input_total = 0.0;
+    double parse_runtime_total = 0.0;
+    double merge_runtime_total = 0.0;
     double jit_total = 0.0;
     double lookup_total = 0.0;
     double exec_total = 0.0;
@@ -209,6 +223,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to read %s\n", a.input_file);
         return 1;
     }
+    if (a.runtime_bc_file) {
+        runtime_bc = read_file(a.runtime_bc_file, &runtime_bc_len);
+        if (!runtime_bc) {
+            fprintf(stderr, "failed to read runtime bitcode %s\n", a.runtime_bc_file);
+            free(src);
+            return 1;
+        }
+    }
 
     LLVMInitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
@@ -216,7 +238,9 @@ int main(int argc, char **argv) {
     for (i = 0; i < a.iters; i++) {
         LLVMContextRef ctx = NULL;
         LLVMMemoryBufferRef buf = NULL;
+        LLVMMemoryBufferRef runtime_buf = NULL;
         LLVMModuleRef mod = NULL;
+        LLVMModuleRef runtime_mod = NULL;
         LLVMOrcLLJITRef jit = NULL;
         LLVMOrcThreadSafeContextRef ts_ctx = NULL;
         LLVMOrcThreadSafeModuleRef ts_mod = NULL;
@@ -248,10 +272,53 @@ int main(int argc, char **argv) {
             if (err_msg) LLVMDisposeMessage(err_msg);
             LLVMContextDispose(ctx);
             free(src);
+            free(runtime_bc);
             return 1;
         }
         t1 = now_ms();
-        parse_total += (t1 - t0);
+        parse_input_total += (t1 - t0);
+
+        if (runtime_bc) {
+            runtime_buf = LLVMCreateMemoryBufferWithMemoryRangeCopy(runtime_bc, runtime_bc_len, "runtime_bc");
+            if (!runtime_buf) {
+                fprintf(stderr, "failed to create runtime memory buffer\n");
+                LLVMDisposeModule(mod);
+                LLVMContextDispose(ctx);
+                free(src);
+                free(runtime_bc);
+                return 1;
+            }
+
+            t0 = now_ms();
+            if (LLVMParseBitcodeInContext2(ctx, runtime_buf, &runtime_mod) != 0 || !runtime_mod) {
+                fprintf(stderr, "failed to parse runtime bitcode: %s\n", a.runtime_bc_file);
+                LLVMDisposeMemoryBuffer(runtime_buf);
+                LLVMDisposeModule(mod);
+                LLVMContextDispose(ctx);
+                free(src);
+                free(runtime_bc);
+                return 1;
+            }
+            t1 = now_ms();
+            parse_runtime_total += (t1 - t0);
+
+            t0 = now_ms();
+            if (LLVMLinkModules2(mod, runtime_mod) != 0) {
+                fprintf(stderr, "failed to merge runtime bitcode module\n");
+                LLVMDisposeMemoryBuffer(runtime_buf);
+                LLVMDisposeModule(runtime_mod);
+                LLVMDisposeModule(mod);
+                LLVMContextDispose(ctx);
+                free(src);
+                free(runtime_bc);
+                return 1;
+            }
+            t1 = now_ms();
+            merge_runtime_total += (t1 - t0);
+            runtime_mod = NULL;
+            LLVMDisposeMemoryBuffer(runtime_buf);
+            runtime_buf = NULL;
+        }
 
         err = LLVMOrcCreateLLJIT(&jit, NULL);
         if (err) {
@@ -261,6 +328,7 @@ int main(int argc, char **argv) {
             LLVMDisposeModule(mod);
             LLVMContextDispose(ctx);
             free(src);
+            free(runtime_bc);
             return 1;
         }
 
@@ -271,6 +339,7 @@ int main(int argc, char **argv) {
             LLVMDisposeModule(mod);
             LLVMContextDispose(ctx);
             free(src);
+            free(runtime_bc);
             return 1;
         }
         ts_mod = LLVMOrcCreateNewThreadSafeModule(mod, ts_ctx);
@@ -286,6 +355,7 @@ int main(int argc, char **argv) {
             LLVMOrcDisposeThreadSafeContext(ts_ctx);
             LLVMContextDispose(ctx);
             free(src);
+            free(runtime_bc);
             return 1;
         }
         t1 = now_ms();
@@ -303,24 +373,28 @@ int main(int argc, char **argv) {
             LLVMOrcDisposeThreadSafeContext(ts_ctx);
             LLVMContextDispose(ctx);
             free(src);
+            free(runtime_bc);
             return 1;
         }
 
-        t0 = now_ms();
-        run_rc = run_symbol(addr, a.sig, &retcode_last);
-        t1 = now_ms();
-        exec_total += (t1 - t0);
-        if (run_rc != 0) {
-            if (run_rc == 2) {
-                fprintf(stderr, "unsupported signature: %s\n", a.sig);
-            } else {
-                fprintf(stderr, "failed to run function '%s'\n", a.func_name);
+        if (!a.no_exec) {
+            t0 = now_ms();
+            run_rc = run_symbol(addr, a.sig, &retcode_last);
+            t1 = now_ms();
+            exec_total += (t1 - t0);
+            if (run_rc != 0) {
+                if (run_rc == 2) {
+                    fprintf(stderr, "unsupported signature: %s\n", a.sig);
+                } else {
+                    fprintf(stderr, "failed to run function '%s'\n", a.func_name);
+                }
+                LLVMOrcDisposeLLJIT(jit);
+                LLVMOrcDisposeThreadSafeContext(ts_ctx);
+                LLVMContextDispose(ctx);
+                free(src);
+                free(runtime_bc);
+                return 1;
             }
-            LLVMOrcDisposeLLJIT(jit);
-            LLVMOrcDisposeThreadSafeContext(ts_ctx);
-            LLVMContextDispose(ctx);
-            free(src);
-            return 1;
         }
 
         LLVMOrcDisposeLLJIT(jit);
@@ -329,34 +403,42 @@ int main(int argc, char **argv) {
     }
 
     double iters_d = (double)a.iters;
-    double avg_parse = parse_total / iters_d;
+    double avg_parse_input = parse_input_total / iters_d;
+    double avg_parse_runtime = parse_runtime_total / iters_d;
+    double avg_merge_runtime = merge_runtime_total / iters_d;
+    double avg_parse = avg_parse_input + avg_parse_runtime + avg_merge_runtime;
     double avg_add = jit_total / iters_d;
     double avg_lookup = lookup_total / iters_d;
     double avg_exec = exec_total / iters_d;
     double avg_compile = avg_add + avg_lookup;
     double avg_total = avg_parse + avg_add + avg_lookup + avg_exec;
+    double avg_compile_materialized = avg_add + avg_lookup;
 
     if (a.json_output) {
         printf("{\"file\":\"%s\",\"iters\":%d,"
+               "\"parse_input_ms\":%.6f,\"parse_runtime_bc_ms\":%.6f,\"merge_runtime_ms\":%.6f,"
                "\"parse_ms\":%.6f,\"add_module_ms\":%.6f,\"lookup_ms\":%.6f,"
-               "\"compile_ms\":%.6f,\"exec_ms\":%.6f,"
+               "\"compile_materialized_ms\":%.6f,\"compile_ms\":%.6f,\"exec_ms\":%.6f,"
                "\"total_ms\":%.6f,\"retcode\":%d}\n",
                a.input_file, a.iters,
+               avg_parse_input, avg_parse_runtime, avg_merge_runtime,
                avg_parse, avg_add, avg_lookup,
-               avg_compile, avg_exec,
+               avg_compile_materialized, avg_compile, avg_exec,
                avg_total, retcode_last);
     } else {
         printf("file:       %s\n", a.input_file);
         printf("iters:      %d\n", a.iters);
-        printf("parse:      %.6f ms\n", avg_parse);
+        printf("parse:      %.6f ms (input %.6f + runtime_bc %.6f + merge %.6f)\n",
+               avg_parse, avg_parse_input, avg_parse_runtime, avg_merge_runtime);
         printf("add_module: %.6f ms  (lazy registration)\n", avg_add);
         printf("lookup:     %.6f ms  (triggers lazy compile)\n", avg_lookup);
-        printf("compile:    %.6f ms  (add_module + lookup)\n", avg_compile);
+        printf("compile:    %.6f ms  (add_module + lookup)\n", avg_compile_materialized);
         printf("exec:       %.6f ms\n", avg_exec);
         printf("total:      %.6f ms\n", avg_total);
         printf("retcode:    %d\n", retcode_last);
     }
 
     free(src);
+    free(runtime_bc);
     return 0;
 }

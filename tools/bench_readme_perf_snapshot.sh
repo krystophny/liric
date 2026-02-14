@@ -4,12 +4,17 @@ set -euo pipefail
 usage() {
     cat <<'USAGE'
 usage: bench_readme_perf_snapshot.sh [options]
-  --build-dir PATH       build dir containing bench tools (default: ./build)
+  --build-dir PATH       build dir containing benchmark tools (default: ./build)
   --bench-dir PATH       benchmark output dir (default: /tmp/liric_bench)
   --out-dir PATH         output dir for published artifacts (default: docs/benchmarks)
-  --iters N              iterations for bench_ll (default: 3)
-  --compat-timeout N     timeout seconds for bench_compat_check (default: 15)
-  --no-run               do not execute benchmarks; consume existing artifacts
+  --iters N              iterations for corpus comparator (default: 3)
+  --timeout N            timeout seconds per command (default: 30)
+  --corpus PATH          corpus TSV (default: tools/corpus_100.tsv)
+  --cache-dir PATH       corpus cache dir (default: /tmp/liric_lfortran_mass/cache)
+  --runtime-bc PATH      runtime bitcode path (default: /tmp/liric_bench/runtime/lfortran_intrinsics.bc)
+  --runtime-lib PATH     runtime shared library path for core track (auto-detect by default)
+  --lfortran-src PATH    lfortran source root for runtime-bc auto-build (default: ../lfortran)
+  --no-run               do not execute benchmarks; consume existing comparator artifacts
   -h, --help             show this help
 
 Outputs:
@@ -17,9 +22,7 @@ Outputs:
   <out-dir>/readme_perf_table.md
 
 Default run mode executes:
-  1) bench_compat_check --timeout <compat-timeout>
-  2) bench_ll --iters <iters>
-Then publishes a date-stamped snapshot and README-ready markdown table.
+  bench_corpus_compare (dual track: core + runtime_equalized_bc)
 USAGE
 }
 
@@ -78,17 +81,16 @@ fmt_fixed() {
     awk -v v="$val" -v d="$digits" 'BEGIN { printf("%.*f", d, v + 0.0) }'
 }
 
-calc_speedup() {
-    local numerator="$1"
-    local denominator="$2"
-    awk -v n="$numerator" -v d="$denominator" 'BEGIN { if (d == 0.0) printf("0.000"); else printf("%.3f", n / d) }'
-}
-
 build_dir="./build"
 bench_dir="/tmp/liric_bench"
 out_dir="docs/benchmarks"
 iters="3"
-compat_timeout="15"
+timeout_sec="30"
+corpus_tsv="tools/corpus_100.tsv"
+cache_dir="/tmp/liric_lfortran_mass/cache"
+runtime_bc="/tmp/liric_bench/runtime/lfortran_intrinsics.bc"
+runtime_lib=""
+lfortran_src="../lfortran"
 no_run="0"
 
 while [[ $# -gt 0 ]]; do
@@ -113,9 +115,34 @@ while [[ $# -gt 0 ]]; do
             iters="$2"
             shift 2
             ;;
-        --compat-timeout)
+        --timeout)
             [[ $# -ge 2 ]] || die "missing value for $1"
-            compat_timeout="$2"
+            timeout_sec="$2"
+            shift 2
+            ;;
+        --corpus)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            corpus_tsv="$2"
+            shift 2
+            ;;
+        --cache-dir)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            cache_dir="$2"
+            shift 2
+            ;;
+        --runtime-bc)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            runtime_bc="$2"
+            shift 2
+            ;;
+        --runtime-lib)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            runtime_lib="$2"
+            shift 2
+            ;;
+        --lfortran-src)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            lfortran_src="$2"
             shift 2
             ;;
         --no-run)
@@ -135,37 +162,93 @@ done
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
-if [[ "$no_run" == "0" ]]; then
-    [[ -x "${build_dir}/bench_compat_check" ]] || die "missing executable: ${build_dir}/bench_compat_check"
-    [[ -x "${build_dir}/bench_ll" ]] || die "missing executable: ${build_dir}/bench_ll"
-
-    "${build_dir}/bench_compat_check" --timeout "$compat_timeout" --bench-dir "$bench_dir"
-    "${build_dir}/bench_ll" --iters "$iters" --bench-dir "$bench_dir"
+if [[ -z "$runtime_lib" ]]; then
+    for cand in \
+        "${lfortran_src}/build/src/runtime/liblfortran_runtime.so" \
+        "${lfortran_src}/build/src/runtime/liblfortran_runtime.so."* \
+        "${lfortran_src}/build/src/runtime/liblfortran_runtime.dylib" \
+        "${lfortran_src}/build-llvm-release/src/runtime/liblfortran_runtime.so" \
+        "${lfortran_src}/build-llvm-release/src/runtime/liblfortran_runtime.so."* \
+        "${lfortran_src}/build-llvm-release/src/runtime/liblfortran_runtime.dylib" \
+        "${lfortran_src}/build-liric/src/runtime/liblfortran_runtime.so" \
+        "${lfortran_src}/build-liric/src/runtime/liblfortran_runtime.so."* \
+        "${lfortran_src}/build-liric/src/runtime/liblfortran_runtime.dylib" \
+        "${lfortran_src}/build_liric/src/runtime/liblfortran_runtime.so" \
+        "${lfortran_src}/build_liric/src/runtime/liblfortran_runtime.so."* \
+        "${lfortran_src}/build_liric/src/runtime/liblfortran_runtime.dylib"; do
+        if [[ -f "$cand" ]]; then
+            runtime_lib="$cand"
+            break
+        fi
+    done
 fi
 
-compat_check_jsonl="$(to_abs_path "${bench_dir}/compat_check.jsonl")"
-bench_ll_jsonl="$(to_abs_path "${bench_dir}/bench_ll.jsonl")"
-bench_ll_summary="$(to_abs_path "${bench_dir}/bench_ll_summary.json")"
+if [[ "$no_run" == "0" ]]; then
+    [[ -x "${build_dir}/bench_corpus_compare" ]] || die "missing executable: ${build_dir}/bench_corpus_compare"
+    [[ -x "${build_dir}/liric_probe_runner" ]] || die "missing executable: ${build_dir}/liric_probe_runner"
+    [[ -x "${build_dir}/bench_lli_phases" ]] || die "missing executable: ${build_dir}/bench_lli_phases"
 
-[[ -s "$compat_check_jsonl" ]] || die "missing artifact: ${compat_check_jsonl}"
-[[ -s "$bench_ll_jsonl" ]] || die "missing artifact: ${bench_ll_jsonl}"
-[[ -s "$bench_ll_summary" ]] || die "missing artifact: ${bench_ll_summary}"
+    run_cmd=(
+        "${build_dir}/bench_corpus_compare"
+        --probe-runner "${build_dir}/liric_probe_runner"
+        --lli-phases "${build_dir}/bench_lli_phases"
+        --runtime-bc "$runtime_bc"
+        --lfortran-src "$lfortran_src"
+        --corpus "$corpus_tsv"
+        --cache-dir "$cache_dir"
+        --bench-dir "$bench_dir"
+        --iters "$iters"
+        --timeout "$timeout_sec"
+    )
+    if [[ -n "$runtime_lib" ]]; then
+        run_cmd+=(--runtime-lib "$runtime_lib")
+    fi
+    "${run_cmd[@]}"
+fi
 
-status="$(json_string_field "$bench_ll_summary" "status")"
-[[ "$status" == "OK" ]] || die "bench_ll_summary status must be OK (got '${status}')"
+summary_path="$(to_abs_path "${bench_dir}/bench_corpus_compare_summary.json")"
+core_jsonl="$(to_abs_path "${bench_dir}/bench_corpus_compare_core.jsonl")"
+runtime_jsonl="$(to_abs_path "${bench_dir}/bench_corpus_compare_runtime_equalized_bc.jsonl")"
 
-tests="$(json_int_field "$bench_ll_summary" "tests")"
-summary_iters="$(json_int_field "$bench_ll_summary" "iters")"
-liric_parse_ms="$(json_number_field "$bench_ll_summary" "liric_parse_median_ms")"
-liric_compile_ms="$(json_number_field "$bench_ll_summary" "liric_compile_median_ms")"
-lli_parse_ms="$(json_number_field "$bench_ll_summary" "lli_parse_median_ms")"
-lli_jit_ms="$(json_number_field "$bench_ll_summary" "lli_jit_median_ms")"
+[[ -s "$summary_path" ]] || die "missing artifact: ${summary_path}"
+[[ -e "$core_jsonl" ]] || die "missing artifact: ${core_jsonl}"
+[[ -s "$runtime_jsonl" ]] || die "missing artifact: ${runtime_jsonl}"
 
-liric_total_ms="$(awk -v a="$liric_parse_ms" -v b="$liric_compile_ms" 'BEGIN { printf("%.6f", a + b) }')"
-llvm_total_ms="$(awk -v a="$lli_parse_ms" -v b="$lli_jit_ms" 'BEGIN { printf("%.6f", a + b) }')"
-parse_speedup="$(calc_speedup "$lli_parse_ms" "$liric_parse_ms")"
-compile_speedup="$(calc_speedup "$lli_jit_ms" "$liric_compile_ms")"
-total_speedup="$(calc_speedup "$llvm_total_ms" "$liric_total_ms")"
+status="$(json_string_field "$summary_path" "status")"
+dataset_name="$(json_string_field "$summary_path" "dataset_name")"
+expected_tests="$(json_int_field "$summary_path" "expected_tests")"
+attempted_tests="$(json_int_field "$summary_path" "attempted_tests")"
+summary_iters="$(json_int_field "$summary_path" "iters")"
+core_completed="$(json_int_field "$summary_path" "core_completed")"
+runtime_completed="$(json_int_field "$summary_path" "runtime_equalized_bc_completed")"
+
+[[ "$dataset_name" == "corpus_100" ]] || die "dataset_name must be corpus_100 (got '${dataset_name}')"
+[[ "$expected_tests" -eq 100 ]] || die "expected_tests must be 100 (got '${expected_tests}')"
+[[ "$attempted_tests" -gt 0 ]] || die "attempted_tests must be > 0"
+[[ "$summary_iters" -gt 0 ]] || die "iters must be > 0"
+
+core_liric_parse="$(json_number_field "$summary_path" "core_liric_parse_median_ms")"
+core_liric_compile_mat="$(json_number_field "$summary_path" "core_liric_compile_materialized_median_ms")"
+core_liric_total_mat="$(json_number_field "$summary_path" "core_liric_total_materialized_median_ms")"
+core_llvm_parse="$(json_number_field "$summary_path" "core_llvm_parse_median_ms")"
+core_llvm_compile_mat="$(json_number_field "$summary_path" "core_llvm_compile_materialized_median_ms")"
+core_llvm_total_mat="$(json_number_field "$summary_path" "core_llvm_total_materialized_median_ms")"
+core_speedup_total_median="$(json_number_field "$summary_path" "core_total_materialized_speedup_median")"
+core_speedup_total_agg="$(json_number_field "$summary_path" "core_total_materialized_speedup_aggregate")"
+
+rt_liric_parse="$(json_number_field "$summary_path" "runtime_equalized_bc_liric_parse_median_ms")"
+rt_liric_compile_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_liric_compile_materialized_median_ms")"
+rt_liric_total_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_liric_total_materialized_median_ms")"
+rt_llvm_parse="$(json_number_field "$summary_path" "runtime_equalized_bc_llvm_parse_median_ms")"
+rt_llvm_compile_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_llvm_compile_materialized_median_ms")"
+rt_llvm_total_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_llvm_total_materialized_median_ms")"
+rt_speedup_total_median="$(json_number_field "$summary_path" "runtime_equalized_bc_total_materialized_speedup_median")"
+rt_speedup_total_agg="$(json_number_field "$summary_path" "runtime_equalized_bc_total_materialized_speedup_aggregate")"
+
+runtime_status="partial"
+if [[ "$runtime_completed" -eq "$expected_tests" ]]; then
+    runtime_status="complete"
+fi
 
 generated_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 benchmark_commit="$(git -C "$repo_root" rev-parse HEAD)"
@@ -194,6 +277,7 @@ table_path="${out_abs}/readme_perf_table.md"
 
 cat > "$snapshot_path" <<EOF_JSON
 {
+  "schema_version": 2,
   "generated_at_utc": "$(json_escape "$generated_at_utc")",
   "benchmark_commit": "$(json_escape "$benchmark_commit")",
   "host": {
@@ -204,31 +288,34 @@ cat > "$snapshot_path" <<EOF_JSON
     "cc": "$(json_escape "$cc_version")",
     "lli": "$(json_escape "$lli_version")"
   },
-  "dataset": {
-    "tests": ${tests},
-    "iters": ${summary_iters}
-  },
-  "published_table": {
-    "parse": {
-      "liric_ms": ${liric_parse_ms},
-      "llvm_orc_ms": ${lli_parse_ms},
-      "speedup": ${parse_speedup}
-    },
-    "compile": {
-      "liric_ms": ${liric_compile_ms},
-      "llvm_orc_ms": ${lli_jit_ms},
-      "speedup": ${compile_speedup}
-    },
-    "total_parse_compile": {
-      "liric_ms": ${liric_total_ms},
-      "llvm_orc_ms": ${llvm_total_ms},
-      "speedup": ${total_speedup}
-    }
-  },
+  "status": "$(json_escape "$status")",
+  "dataset_name": "$(json_escape "$dataset_name")",
+  "expected_tests": ${expected_tests},
+  "attempted_tests": ${attempted_tests},
+  "iters": ${summary_iters},
+  "canonical_track": "runtime_equalized_bc",
+  "core_completed_tests": ${core_completed},
+  "runtime_equalized_bc_completed_tests": ${runtime_completed},
+  "core_liric_parse_median_ms": ${core_liric_parse},
+  "core_liric_compile_materialized_median_ms": ${core_liric_compile_mat},
+  "core_liric_total_materialized_median_ms": ${core_liric_total_mat},
+  "core_llvm_parse_median_ms": ${core_llvm_parse},
+  "core_llvm_compile_materialized_median_ms": ${core_llvm_compile_mat},
+  "core_llvm_total_materialized_median_ms": ${core_llvm_total_mat},
+  "core_total_materialized_speedup_median": ${core_speedup_total_median},
+  "core_total_materialized_speedup_aggregate": ${core_speedup_total_agg},
+  "runtime_equalized_bc_liric_parse_median_ms": ${rt_liric_parse},
+  "runtime_equalized_bc_liric_compile_materialized_median_ms": ${rt_liric_compile_mat},
+  "runtime_equalized_bc_liric_total_materialized_median_ms": ${rt_liric_total_mat},
+  "runtime_equalized_bc_llvm_parse_median_ms": ${rt_llvm_parse},
+  "runtime_equalized_bc_llvm_compile_materialized_median_ms": ${rt_llvm_compile_mat},
+  "runtime_equalized_bc_llvm_total_materialized_median_ms": ${rt_llvm_total_mat},
+  "runtime_equalized_bc_total_materialized_speedup_median": ${rt_speedup_total_median},
+  "runtime_equalized_bc_total_materialized_speedup_aggregate": ${rt_speedup_total_agg},
   "artifacts": {
-    "compat_check_jsonl": "$(json_escape "$compat_check_jsonl")",
-    "bench_ll_jsonl": "$(json_escape "$bench_ll_jsonl")",
-    "bench_ll_summary_json": "$(json_escape "$bench_ll_summary")",
+    "bench_corpus_compare_summary_json": "$(json_escape "$summary_path")",
+    "bench_corpus_compare_core_jsonl": "$(json_escape "$core_jsonl")",
+    "bench_corpus_compare_runtime_equalized_bc_jsonl": "$(json_escape "$runtime_jsonl")",
     "published_snapshot_json": "$(json_escape "$snapshot_path")",
     "published_table_md": "$(json_escape "$table_path")"
   }
@@ -242,20 +329,20 @@ Generated: ${generated_at_utc}
 Benchmark commit: ${benchmark_commit}
 Host: ${host_cpu} (${host_kernel})
 Toolchain: ${cc_version}; ${lli_version}
-Dataset: ${tests} tests from tests/ll, ${summary_iters} iterations
+Dataset: ${dataset_name} (expected ${expected_tests}, attempted ${attempted_tests}, iters ${summary_iters})
+Canonical track: runtime_equalized_bc (${runtime_status}; completed ${runtime_completed}/${expected_tests})
 
 Artifacts:
-- ${compat_check_jsonl}
-- ${bench_ll_jsonl}
-- ${bench_ll_summary}
+- ${summary_path}
+- ${core_jsonl}
+- ${runtime_jsonl}
 - ${snapshot_path}
 
-| Phase | liric (ms) | LLVM ORC (ms) | Speedup |
-|-------|-----------:|--------------:|--------:|
-| Parse | $(fmt_fixed "$liric_parse_ms" 3) | $(fmt_fixed "$lli_parse_ms" 3) | $(fmt_fixed "$parse_speedup" 1)x |
-| Compile | $(fmt_fixed "$liric_compile_ms" 3) | $(fmt_fixed "$lli_jit_ms" 3) | $(fmt_fixed "$compile_speedup" 1)x |
-| Total (parse+compile) | $(fmt_fixed "$liric_total_ms" 3) | $(fmt_fixed "$llvm_total_ms" 3) | $(fmt_fixed "$total_speedup" 1)x |
+| Track | Completed | liric parse (ms) | liric compile+lookup (ms) | liric total materialized (ms) | LLVM parse (ms) | LLVM add+lookup (ms) | LLVM total materialized (ms) | Speedup total (median) | Speedup total (aggregate) |
+|-------|----------:|-----------------:|--------------------------:|------------------------------:|----------------:|---------------------:|-----------------------------:|-----------------------:|--------------------------:|
+| core | ${core_completed}/${attempted_tests} | $(fmt_fixed "$core_liric_parse" 3) | $(fmt_fixed "$core_liric_compile_mat" 3) | $(fmt_fixed "$core_liric_total_mat" 3) | $(fmt_fixed "$core_llvm_parse" 3) | $(fmt_fixed "$core_llvm_compile_mat" 3) | $(fmt_fixed "$core_llvm_total_mat" 3) | $(fmt_fixed "$core_speedup_total_median" 2)x | $(fmt_fixed "$core_speedup_total_agg" 2)x |
+| runtime_equalized_bc (canonical) | ${runtime_completed}/${expected_tests} | $(fmt_fixed "$rt_liric_parse" 3) | $(fmt_fixed "$rt_liric_compile_mat" 3) | $(fmt_fixed "$rt_liric_total_mat" 3) | $(fmt_fixed "$rt_llvm_parse" 3) | $(fmt_fixed "$rt_llvm_compile_mat" 3) | $(fmt_fixed "$rt_llvm_total_mat" 3) | $(fmt_fixed "$rt_speedup_total_median" 2)x | $(fmt_fixed "$rt_speedup_total_agg" 2)x |
 EOF_MD
 
 echo "Published snapshot: ${snapshot_path}"
-echo "Published table:    ${table_path}"
+echo "Published table: ${table_path}"

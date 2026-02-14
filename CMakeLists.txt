@@ -237,6 +237,9 @@ target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+add_executable(bench_corpus_compare tools/bench_corpus_compare.c)
+target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
+
 add_executable(bench_exe_matrix tools/bench_exe_matrix.c)
 target_link_libraries(bench_exe_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
@@ -501,6 +504,14 @@ add_test(
         -DBENCH_CORPUS=$<TARGET_FILE:bench_corpus>
         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_corpus_empty_dataset_gate.cmake
+)
+
+add_test(
+    NAME bench_corpus_compare_empty_dataset_gate
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_CORPUS_COMPARE=$<TARGET_FILE:bench_corpus_compare>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_corpus_compare_empty_dataset_gate.cmake
 )
 
 add_test(
