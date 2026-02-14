@@ -41,6 +41,7 @@ typedef struct {
     const char *bench_dir;
     int iters;
     int timeout_sec;
+    int allow_empty;
 } cfg_t;
 
 typedef struct {
@@ -486,6 +487,7 @@ static void usage(void) {
     printf("  --lli PATH            path to lli\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
     printf("  --bench-dir PATH      benchmark dir (default: /tmp/liric_bench)\n");
+    printf("  --allow-empty         allow empty effective dataset (default: fail)\n");
 }
 
 static cfg_t parse_args(int argc, char **argv) {
@@ -503,6 +505,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.iters = 3;
     cfg.timeout_sec = 15;
+    cfg.allow_empty = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -528,6 +531,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lli_phases = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
             cfg.bench_dir = argv[++i];
+        } else if (strcmp(argv[i], "--allow-empty") == 0) {
+            cfg.allow_empty = 1;
         } else {
             die("unknown argument", argv[i]);
         }
@@ -834,7 +839,32 @@ int main(int argc, char **argv) {
     }
 
     if (rows.n == 0) {
-        die("no benchmark results", NULL);
+        char *summary_path = path_join2(cfg.bench_dir, "bench_ll_summary.json");
+        FILE *sf = fopen(summary_path, "w");
+        if (sf) {
+            fprintf(sf,
+                    "{"
+                    "\"status\":\"EMPTY DATASET\","
+                    "\"allow_empty\":%s,"
+                    "\"tests\":%zu,"
+                    "\"completed\":0,"
+                    "\"iters\":%d"
+                    "}\n",
+                    cfg.allow_empty ? "true" : "false",
+                    tests.n,
+                    cfg.iters);
+            fclose(sf);
+        }
+        fprintf(stderr, "EMPTY DATASET: no benchmark results (attempted=%zu, completed=0)\n", tests.n);
+        printf("  Summary: %s\n", summary_path);
+        free(summary_path);
+        free(compat_path);
+        free(ll_dir);
+        free(jsonl_path);
+        free(runtime_dir);
+        strlist_free(&tests);
+        rowlist_free(&rows);
+        return cfg.allow_empty ? 0 : 1;
     }
 
     {
@@ -916,6 +946,8 @@ int main(int argc, char **argv) {
             if (sf) {
                 fprintf(sf,
                         "{"
+                        "\"status\":\"OK\","
+                        "\"allow_empty\":%s,"
                         "\"tests\":%zu,"
                         "\"iters\":%d,"
                         "\"wall\":{"
@@ -945,6 +977,7 @@ int main(int argc, char **argv) {
                         "\"legacy_parse_jit_speedup_median\":%.6f"
                         "}"
                         "}\n",
+                        cfg.allow_empty ? "true" : "false",
                         rows.n, cfg.iters,
                         median(lw, rows.n), median(ew, rows.n), median(wall_sp, rows.n), sum_lw, sum_ew,
                         median(lik, rows.n), median(eik, rows.n), median(fair_sp, rows.n), sum_lik, sum_eik,

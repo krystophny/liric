@@ -45,6 +45,7 @@ typedef struct {
     int keep_fail_workdirs;
     int fail_sample_limit;
     int require_zero_skips;
+    int allow_empty;
     const char *fail_log_dir;
     double lookup_dispatch_share_pct;
 } cfg_t;
@@ -1631,6 +1632,7 @@ static void usage(void) {
     printf("  --fail-sample-limit N limit number of compat tests processed (default: all)\n");
     printf("  --min-completed N    fail if completed tests < N (default: 0)\n");
     printf("  --require-zero-skips fail if any test is skipped (default: off)\n");
+    printf("  --allow-empty        allow empty effective dataset (default: fail)\n");
     printf("  --lookup-dispatch-share-pct N  optional profile-derived lookup/dispatch share percentage\n");
 }
 
@@ -1649,6 +1651,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.keep_fail_workdirs = 0;
     cfg.fail_sample_limit = 0;
     cfg.require_zero_skips = 0;
+    cfg.allow_empty = 0;
     cfg.fail_log_dir = NULL;
     cfg.min_completed = 0;
     cfg.lookup_dispatch_share_pct = -1.0;
@@ -1691,6 +1694,8 @@ static cfg_t parse_args(int argc, char **argv) {
             if (cfg.min_completed < 0) cfg.min_completed = 0;
         } else if (strcmp(argv[i], "--require-zero-skips") == 0) {
             cfg.require_zero_skips = 1;
+        } else if (strcmp(argv[i], "--allow-empty") == 0) {
+            cfg.allow_empty = 1;
         } else if (strcmp(argv[i], "--lookup-dispatch-share-pct") == 0 && i + 1 < argc) {
             cfg.lookup_dispatch_share_pct = atof(argv[++i]);
             if (cfg.lookup_dispatch_share_pct < 0.0)
@@ -1797,6 +1802,7 @@ int main(int argc, char **argv) {
     printf("  keep_fail_workdirs: %s\n", cfg.keep_fail_workdirs ? "on" : "off");
     printf("  min_completed: %d\n", cfg.min_completed);
     printf("  require_zero_skips: %s\n", cfg.require_zero_skips ? "on" : "off");
+    printf("  allow_empty: %s\n", cfg.allow_empty ? "on" : "off");
     if (cfg.lookup_dispatch_share_pct >= 0.0) {
         printf("  lookup_dispatch_share_pct: %.3f\n", cfg.lookup_dispatch_share_pct);
     }
@@ -2436,6 +2442,7 @@ next_test:
         size_t completed_timed = rows.n;
         size_t completed = completed_timed + compat_nonzero_completed;
         size_t skipped = (attempted >= completed) ? (attempted - completed) : 0;
+        int empty_dataset = (completed == 0);
         FILE *sf = fopen(summary_path, "w");
         FILE *fsf = fopen(fail_summary_path, "w");
         if (!sf) die("failed to open output", summary_path);
@@ -2453,7 +2460,9 @@ next_test:
         fprintf(sf, "  \"completion_threshold_met\": %s,\n",
                 completed >= (size_t)cfg.min_completed ? "true" : "false");
         fprintf(sf, "  \"require_zero_skips\": %s,\n", cfg.require_zero_skips ? "true" : "false");
+        fprintf(sf, "  \"allow_empty\": %s,\n", cfg.allow_empty ? "true" : "false");
         fprintf(sf, "  \"zero_skip_gate_met\": %s,\n", skipped == 0 ? "true" : "false");
+        fprintf(sf, "  \"status\": \"%s\",\n", empty_dataset ? "EMPTY DATASET" : "OK");
         {
             char *ec = json_escape(compat_path);
             char *eo = json_escape(opts_path);
@@ -2578,6 +2587,7 @@ next_test:
         fprintf(fsf, "  \"attempted\": %zu,\n", attempted);
         fprintf(fsf, "  \"completed\": %zu,\n", completed);
         fprintf(fsf, "  \"failed\": %zu,\n", skipped);
+        fprintf(fsf, "  \"status\": \"%s\",\n", empty_dataset ? "EMPTY DATASET" : "OK");
         {
             char *efj = json_escape(fail_jsonl_path);
             char *efd = json_escape(fail_log_dir);
@@ -2604,6 +2614,7 @@ next_test:
 
         printf("\n  Accounting: attempted=%zu completed=%zu skipped=%zu\n",
                attempted, completed, skipped);
+        printf("  Status: %s\n", empty_dataset ? "EMPTY DATASET" : "OK");
         if (compat_nonzero_completed > 0) {
             printf("    completed_nonzero_compat=%zu\n", compat_nonzero_completed);
         }
@@ -2616,9 +2627,11 @@ next_test:
         printf("  Failure details: %s\n", fail_jsonl_path);
         printf("  Failure summary: %s\n", fail_summary_path);
 
-        if (completed == 0) {
-            fprintf(stderr, "no benchmark results completed\n");
-            exit_code = 1;
+        if (empty_dataset) {
+            fprintf(stderr, "EMPTY DATASET: no benchmark results completed (attempted=%zu, completed=0)\n",
+                    attempted);
+            if (!cfg.allow_empty)
+                exit_code = 1;
         }
         if (completed < (size_t)cfg.min_completed) {
             fprintf(stderr, "completion gate failed: completed=%zu < min_completed=%d\n",

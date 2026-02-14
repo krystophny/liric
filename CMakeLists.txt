@@ -479,11 +479,35 @@ add_test(
 )
 
 add_test(
+    NAME bench_ll_empty_dataset_gate
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_LL=$<TARGET_FILE:bench_ll>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_ll_empty_dataset_gate.cmake
+)
+
+add_test(
+    NAME bench_corpus_empty_dataset_gate
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_CORPUS=$<TARGET_FILE:bench_corpus>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_corpus_empty_dataset_gate.cmake
+)
+
+add_test(
     NAME bench_api_nonzero_compat
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_nonzero_compat.cmake
+)
+
+add_test(
+    NAME bench_api_empty_dataset_gate
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_API=$<TARGET_FILE:bench_api>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_empty_dataset_gate.cmake
 )
 
 add_test(
