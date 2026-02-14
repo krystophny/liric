@@ -608,6 +608,17 @@ add_test(
 )
 
 add_test(
+    NAME bench_readme_perf_gate
+    COMMAND ${CMAKE_COMMAND}
+        -DGATE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/bench_readme_perf_gate.sh
+        -DREADME_FILE=${CMAKE_CURRENT_SOURCE_DIR}/README.md
+        -DSNAPSHOT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/docs/benchmarks/readme_perf_snapshot.json
+        -DTABLE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/docs/benchmarks/readme_perf_table.md
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_readme_perf_gate.cmake
+)
+
+add_test(
     NAME nightly_mass_workflow_contract
     COMMAND ${CMAKE_COMMAND}
         -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/nightly_mass.yml

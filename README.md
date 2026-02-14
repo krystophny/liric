@@ -133,6 +133,12 @@ Regenerate end-to-end:
   --compat-timeout 15
 ```
 
+Validate published README benchmark artifacts:
+
+```bash
+./tools/bench_readme_perf_gate.sh
+```
+
 ### Benchmarks
 
 ```bash
