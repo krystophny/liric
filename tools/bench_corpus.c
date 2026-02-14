@@ -321,6 +321,16 @@ static void set_default_cfg(bench_cfg_t *cfg) {
     cfg->timeout_sec = 30;
 }
 
+static void print_empty_dataset_help(const bench_cfg_t *cfg) {
+    fprintf(stderr, "EMPTY DATASET: no tests found in corpus\n");
+    fprintf(stderr, "  corpus: %s\n", cfg->corpus_tsv);
+    fprintf(stderr, "  cache-dir: %s\n", cfg->cache_dir);
+    fprintf(stderr, "  expected: <cache-dir>/<case_id>/raw.ll for entries in corpus TSV\n");
+    fprintf(stderr, "  bootstrap cache (default path):\n");
+    fprintf(stderr, "    ./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass\n");
+    fprintf(stderr, "  override cache location with: --cache-dir PATH\n");
+}
+
 int main(int argc, char **argv) {
     bench_cfg_t cfg;
     int top_n = 0;
@@ -380,7 +390,7 @@ int main(int argc, char **argv) {
     corpus_entry_t entries[MAX_TESTS];
     int n = load_corpus(cfg.corpus_tsv, cfg.cache_dir, entries, MAX_TESTS);
     if (n <= 0) {
-        fprintf(stderr, "EMPTY DATASET: no tests found in corpus\n");
+        print_empty_dataset_help(&cfg);
         if (csv_mode)
             printf("name,parse_us,compile_us,jit_us,exec_us,total_us\n");
         printf("Status: EMPTY DATASET\n");

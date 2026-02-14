@@ -136,6 +136,8 @@ Liric compile averages 21 us/function. LLVM ORC averages 1.98 ms/function.
 ./build/bench_compat_check --timeout 15   # correctness gate
 ./build/bench_ll --iters 3                # liric JIT vs lli
 ./build/bench_api --iters 3               # lfortran LLVM vs lfortran+liric
+# prerequisite for bench_corpus: populate /tmp/liric_lfortran_mass/cache
+./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass
 ./build/bench_corpus --iters 3            # 100-case focused corpus
 ./build/bench_tcc --iters 10              # liric vs TCC micro-benchmarks
 ```
