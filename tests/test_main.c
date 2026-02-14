@@ -165,6 +165,7 @@ int test_jit_global_struct_inttoptr_immediate_init(void);
 int test_jit_aggregate_load_store_copy(void);
 int test_jit_call_stack_args(void);
 int test_jit_call_many_stack_args(void);
+int test_jit_call_gt16_args(void);
 int test_jit_fsub_double(void);
 int test_jit_fdiv_double(void);
 int test_jit_fneg_double(void);
@@ -432,6 +433,7 @@ int main(void) {
     RUN_TEST(test_jit_aggregate_load_store_copy);
     RUN_TEST(test_jit_call_stack_args);
     RUN_TEST(test_jit_call_many_stack_args);
+    RUN_TEST(test_jit_call_gt16_args);
     RUN_TEST(test_jit_fsub_double);
     RUN_TEST(test_jit_fdiv_double);
     RUN_TEST(test_jit_fneg_double);

@@ -374,6 +374,53 @@ static int test_global_lookup_set_initializer_and_jit() {
     return 0;
 }
 
+static int test_duplicate_global_names_are_uniquified() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("global_unique_names", ctx);
+    llvm::Type *i8 = llvm::Type::getInt8Ty(ctx);
+    llvm::ArrayType *arr1 = llvm::ArrayType::get(i8, 1);
+    const uint8_t a_init[1] = {'A'};
+    const uint8_t b_init[1] = {'B'};
+
+    llvm::GlobalVariable *ga = mod.createGlobalVariable(
+        "dup_global", arr1, true, llvm::GlobalValue::ExternalLinkage,
+        a_init, sizeof(a_init));
+    llvm::GlobalVariable *gb = mod.createGlobalVariable(
+        "dup_global", arr1, true, llvm::GlobalValue::ExternalLinkage,
+        b_init, sizeof(b_init));
+    TEST_ASSERT(ga != nullptr, "first duplicate global created");
+    TEST_ASSERT(gb != nullptr, "second duplicate global created");
+
+    lc_value_t *vga = llvm::detail::lookup_value_wrapper(ga);
+    lc_value_t *vgb = llvm::detail::lookup_value_wrapper(gb);
+    TEST_ASSERT(vga != nullptr, "first global wrapper value");
+    TEST_ASSERT(vgb != nullptr, "second global wrapper value");
+    TEST_ASSERT(vga->global.name != nullptr, "first global has name");
+    TEST_ASSERT(vgb->global.name != nullptr, "second global has name");
+    TEST_ASSERT(std::strcmp(vga->global.name, vgb->global.name) != 0,
+                "duplicate global names are uniquified");
+
+    lr_module_t *ir = lc_module_get_ir(mod.getCompat());
+    TEST_ASSERT(ir != nullptr, "module ir");
+    lr_global_t *ga_ir = nullptr;
+    lr_global_t *gb_ir = nullptr;
+    for (lr_global_t *g = ir->first_global; g; g = g->next) {
+        if (!ga_ir && g->name && std::strcmp(g->name, vga->global.name) == 0)
+            ga_ir = g;
+        if (!gb_ir && g->name && std::strcmp(g->name, vgb->global.name) == 0)
+            gb_ir = g;
+    }
+    TEST_ASSERT(ga_ir != nullptr, "first unique global present in IR");
+    TEST_ASSERT(gb_ir != nullptr, "second unique global present in IR");
+    TEST_ASSERT(ga_ir->init_data != nullptr, "first unique global initializer");
+    TEST_ASSERT(gb_ir->init_data != nullptr, "second unique global initializer");
+    TEST_ASSERT_EQ(((const uint8_t *)ga_ir->init_data)[0], (uint8_t)'A',
+                   "first unique initializer byte");
+    TEST_ASSERT_EQ(((const uint8_t *)gb_ir->init_data)[0], (uint8_t)'B',
+                   "second unique initializer byte");
+    return 0;
+}
+
 static int test_function_creation() {
     llvm::LLVMContext ctx;
     llvm::Module mod("funcs", ctx);
@@ -1422,6 +1469,7 @@ int main() {
     RUN_TEST(test_constant_data_array_addnull);
     RUN_TEST(test_constant_struct_and_array_bytes);
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
+    RUN_TEST(test_duplicate_global_names_are_uniquified);
     RUN_TEST(test_parse_assembly_wrapper_fast_path);
 
     fprintf(stderr, "\nFunction tests:\n");

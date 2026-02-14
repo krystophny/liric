@@ -1400,7 +1400,8 @@ static int x86_64_compile_emit(void *compile_ctx,
                                const lr_compile_inst_desc_t *desc) {
     x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
     x86_compile_ctx_t *cc;
-    lr_operand_t ops[16];
+    lr_operand_t ops_stack[16];
+    lr_operand_t *ops = ops_stack;
     lr_inst_t inst_header;
 
     if (!ctx || !desc || !ctx->has_current_block)
@@ -1433,34 +1434,26 @@ static int x86_64_compile_emit(void *compile_ctx,
 
     uint32_t nops = desc->num_operands;
     if (nops > 16) {
-        lr_operand_t *heap_ops = lr_arena_array_uninit(
-            cc->arena, lr_operand_t, nops);
-        if (!heap_ops)
+        ops = lr_arena_array_uninit(cc->arena, lr_operand_t, nops);
+        if (!ops)
             return -1;
-        for (uint32_t i = 0; i < nops; i++)
-            heap_ops[i] = operand_from_desc(&desc->operands[i]);
-        memset(&inst_header, 0, sizeof(inst_header));
-        inst_header.op = desc->op;
-        inst_header.operands = heap_ops;
-        inst_header.num_operands = nops;
-        inst_header.type = desc->type;
-        inst_header.dest = desc->dest;
-        inst_header.icmp_pred = (lr_icmp_pred_t)desc->icmp_pred;
-        inst_header.fcmp_pred = (lr_fcmp_pred_t)desc->fcmp_pred;
-        inst_header.call_external_abi = desc->call_external_abi;
-        inst_header.call_vararg = desc->call_vararg;
-        inst_header.call_fixed_args = desc->call_fixed_args;
-        inst_header.indices = (uint32_t *)desc->indices;
-        inst_header.num_indices = desc->num_indices;
-        /* Copy the first 16 into the local array so the switch can
-           reference ops[] uniformly for most operands. */
-        memcpy(ops, heap_ops, 16 * sizeof(lr_operand_t));
-    } else {
-        for (uint32_t i = 0; i < nops; i++)
-            ops[i] = operand_from_desc(&desc->operands[i]);
-        memset(&inst_header, 0, sizeof(inst_header));
-        inst_header.op = desc->op;
     }
+    for (uint32_t i = 0; i < nops; i++)
+        ops[i] = operand_from_desc(&desc->operands[i]);
+
+    memset(&inst_header, 0, sizeof(inst_header));
+    inst_header.op = desc->op;
+    inst_header.operands = ops;
+    inst_header.num_operands = nops;
+    inst_header.type = desc->type;
+    inst_header.dest = desc->dest;
+    inst_header.icmp_pred = (lr_icmp_pred_t)desc->icmp_pred;
+    inst_header.fcmp_pred = (lr_fcmp_pred_t)desc->fcmp_pred;
+    inst_header.call_external_abi = desc->call_external_abi;
+    inst_header.call_vararg = desc->call_vararg;
+    inst_header.call_fixed_args = desc->call_fixed_args;
+    inst_header.indices = (uint32_t *)desc->indices;
+    inst_header.num_indices = desc->num_indices;
 
     cc->current_inst = &inst_header;
 

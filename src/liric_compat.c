@@ -253,6 +253,53 @@ static lr_global_t *find_global_linear(lr_module_t *m, const char *name) {
     return NULL;
 }
 
+static char *dup_cstr(const char *s) {
+    size_t n;
+    char *out;
+    if (!s)
+        return NULL;
+    n = strlen(s);
+    out = (char *)malloc(n + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+static int symbol_name_in_use(lc_module_compat_t *mod, const char *name) {
+    if (!mod || !mod->mod || !name || !name[0])
+        return 0;
+    return find_func_linear(mod->mod, name) != NULL ||
+           find_global_linear(mod->mod, name) != NULL;
+}
+
+static char *make_unique_symbol_name(lc_module_compat_t *mod,
+                                     const char *name) {
+    size_t base_len;
+    if (!mod || !name || !name[0])
+        return NULL;
+    if (!symbol_name_in_use(mod, name))
+        return dup_cstr(name);
+
+    base_len = strlen(name);
+    for (uint32_t suffix = 1; suffix < UINT32_MAX; suffix++) {
+        char suffix_buf[32];
+        int ns = snprintf(suffix_buf, sizeof(suffix_buf), ".%u", suffix);
+        char *candidate;
+        if (ns <= 0 || (size_t)ns >= sizeof(suffix_buf))
+            return NULL;
+        candidate = (char *)malloc(base_len + (size_t)ns + 1);
+        if (!candidate)
+            return NULL;
+        memcpy(candidate, name, base_len);
+        memcpy(candidate + base_len, suffix_buf, (size_t)ns + 1);
+        if (!symbol_name_in_use(mod, candidate))
+            return candidate;
+        free(candidate);
+    }
+    return NULL;
+}
+
 static void cache_func_by_symbol(lc_module_compat_t *mod, uint32_t sym_id,
                                  lr_func_t *func) {
     if (!mod || !func || sym_id == UINT32_MAX)
@@ -1399,16 +1446,23 @@ static int global_add_reloc(lc_module_compat_t *mod, lr_global_t *g,
 }
 
 lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
-                              lr_type_t *type, bool is_const,
-                              const void *init_data, size_t init_size) {
+                             lr_type_t *type, bool is_const,
+                             const void *init_data, size_t init_size) {
     const char *actual_name = name;
     char auto_name[32];
+    char *unique_name = NULL;
+    if (!mod || !mod->mod)
+        return safe_undef(mod);
     if (!name || name[0] == '\0') {
         snprintf(auto_name, sizeof(auto_name), ".str.%u",
                  mod->mod->num_globals);
         actual_name = auto_name;
     }
-    lr_global_t *g = lr_global_create(mod->mod, actual_name, type, is_const);
+    unique_name = make_unique_symbol_name(mod, actual_name);
+    if (!unique_name)
+        return safe_undef(mod);
+    lr_global_t *g = lr_global_create(mod->mod, unique_name, type, is_const);
+    free(unique_name);
     if (init_data && init_size > 0) {
         g->init_data = lr_arena_alloc_uninit(mod->mod->arena, init_size, 1);
         memcpy(g->init_data, init_data, init_size);
@@ -1422,10 +1476,18 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
 }
 
 lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
-                               lr_type_t *type) {
-    lr_global_t *g = lr_global_create(mod->mod, name, type, false);
+                              lr_type_t *type) {
+    char *unique_name;
+    lr_global_t *g;
+    if (!mod || !mod->mod || !name || !name[0])
+        return safe_undef(mod);
+    unique_name = make_unique_symbol_name(mod, name);
+    if (!unique_name)
+        return safe_undef(mod);
+    g = lr_global_create(mod->mod, unique_name, type, false);
+    free(unique_name);
     g->is_external = true;
-    uint32_t sym_id = compat_symbol_id(mod, name);
+    uint32_t sym_id = compat_symbol_id(mod, g->name);
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
@@ -2563,20 +2625,28 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
 static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     lr_jit_t *session_jit;
     lr_func_t *f;
+    uint32_t module_defs = 0;
     int rc;
 
     if (compat_finish_active_func(mod) != 0)
-        return -1;
+        return lr_jit_add_module(jit, mod->mod);
 
     session_jit = lr_session_jit(mod->session);
 
     for (f = mod->mod->first_func; f; f = f->next) {
         if (!f->name || !f->name[0])
             continue;
+        if (!f->is_decl)
+            module_defs++;
         void *addr = lr_jit_get_function(session_jit, f->name);
         if (addr)
             lr_jit_add_symbol(jit, f->name, addr);
     }
+
+    /* DIRECT mode can materialize definitions in the session-owned JIT,
+       leaving only declarations in the backing module. */
+    if (module_defs == 0)
+        return 0;
 
     rc = lr_jit_add_module(jit, mod->mod);
     return rc;
