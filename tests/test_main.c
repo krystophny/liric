@@ -93,6 +93,7 @@ int test_target_x86_streaming_hooks_phi_smoke(void);
 int test_target_aarch64_streaming_hooks_smoke(void);
 int test_target_aarch64_streaming_fp_convert_ops(void);
 int test_target_riscv64_streaming_hooks_smoke(void);
+int test_target_riscv64_streaming_reports_unsupported_ops(void);
 int test_parse_auto_selects_ll_frontend(void);
 int test_parse_auto_selects_wasm_frontend(void);
 int test_parse_auto_selects_bc_frontend(void);
@@ -361,6 +362,7 @@ int main(void) {
     RUN_TEST(test_target_aarch64_streaming_hooks_smoke);
     RUN_TEST(test_target_aarch64_streaming_fp_convert_ops);
     RUN_TEST(test_target_riscv64_streaming_hooks_smoke);
+    RUN_TEST(test_target_riscv64_streaming_reports_unsupported_ops);
     RUN_TEST(test_parse_auto_selects_ll_frontend);
     RUN_TEST(test_parse_auto_selects_wasm_frontend);
     RUN_TEST(test_parse_auto_selects_bc_frontend);

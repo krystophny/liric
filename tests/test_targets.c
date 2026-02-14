@@ -727,6 +727,82 @@ int test_target_riscv64_streaming_hooks_smoke(void) {
     return 0;
 }
 
+int test_target_riscv64_streaming_reports_unsupported_ops(void) {
+    const lr_opcode_t unsupported_ops[] = {
+        LR_OP_ALLOCA,
+        LR_OP_BR,
+        LR_OP_CALL,
+        LR_OP_CONDBR,
+        LR_OP_EXTRACTVALUE,
+        LR_OP_FCMP,
+        LR_OP_FPTOUI,
+        LR_OP_GEP,
+        LR_OP_ICMP,
+        LR_OP_INSERTVALUE,
+        LR_OP_INTTOPTR,
+        LR_OP_LOAD,
+        LR_OP_PTRTOINT,
+        LR_OP_SELECT,
+        LR_OP_STORE,
+        LR_OP_UITOFP,
+        LR_OP_UNREACHABLE,
+    };
+    const char *targets[] = {"riscv64gc", "riscv64im"};
+
+    for (size_t ti = 0; ti < sizeof(targets) / sizeof(targets[0]); ti++) {
+        lr_arena_t *module_arena = lr_arena_create(0);
+        lr_arena_t *compile_arena = lr_arena_create(0);
+        lr_module_t *m = NULL;
+        const lr_target_t *t = lr_target_by_name(targets[ti]);
+        lr_compile_func_meta_t meta;
+        void *compile_ctx = NULL;
+        uint8_t code[4096];
+
+        TEST_ASSERT(module_arena != NULL, "module arena create");
+        TEST_ASSERT(compile_arena != NULL, "compile arena create");
+        TEST_ASSERT(t != NULL, "riscv target exists");
+
+        m = lr_module_create(module_arena);
+        TEST_ASSERT(m != NULL, "module create");
+
+        memset(&meta, 0, sizeof(meta));
+        meta.ret_type = m->type_i32;
+        meta.num_params = 0;
+        meta.next_vreg = 8;
+        meta.mode = LR_COMPILE_ISEL;
+
+        TEST_ASSERT_EQ(t->compile_begin(&compile_ctx, &meta, m,
+                                        code, sizeof(code), compile_arena),
+                       0, "compile_begin succeeds");
+        TEST_ASSERT(compile_ctx != NULL, "compile ctx exists");
+        TEST_ASSERT_EQ(t->compile_set_block(compile_ctx, 0), 0, "set block 0");
+
+        for (size_t oi = 0; oi < sizeof(unsupported_ops) / sizeof(unsupported_ops[0]); oi++) {
+            lr_compile_inst_desc_t desc;
+            int rc;
+
+            memset(&desc, 0, sizeof(desc));
+            desc.op = unsupported_ops[oi];
+            desc.type = m->type_void;
+
+            rc = t->compile_emit(compile_ctx, &desc);
+            if (rc != -2) {
+                fprintf(stderr,
+                        "  FAIL: %s unsupported op %d returned %d, expected -2 (line %d)\n",
+                        targets[ti], (int)unsupported_ops[oi], rc, __LINE__);
+                lr_arena_destroy(compile_arena);
+                lr_arena_destroy(module_arena);
+                return 1;
+            }
+        }
+
+        lr_arena_destroy(compile_arena);
+        lr_arena_destroy(module_arena);
+    }
+
+    return 0;
+}
+
 int test_parse_auto_selects_ll_frontend(void) {
     const char *src =
         "define i32 @main() {\n"
