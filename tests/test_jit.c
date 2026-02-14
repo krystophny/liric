@@ -2,6 +2,7 @@
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
 #include "../src/jit.h"
+#include "../src/objfile.h"
 #include "../src/llvm_backend.h"
 #include "../src/platform/platform.h"
 #include <stdio.h>
@@ -1860,6 +1861,66 @@ int test_jit_internal_global_address_relocation(void) {
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);
     return 0;
+}
+
+int test_jit_patch_relocs_from_skips_prior_entries(void) {
+#if !defined(__x86_64__) && !defined(_M_X64) && !defined(__aarch64__)
+    return 0;
+#else
+    lr_jit_t *jit = lr_jit_create();
+    lr_objfile_ctx_t ctx;
+    int rc;
+    uint32_t missing_idx;
+    uint32_t live_idx;
+    void *live_addr = (void *)(uintptr_t)&cache_override_symbol_one;
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    memset(&ctx, 0, sizeof(ctx));
+    missing_idx = lr_obj_ensure_symbol(&ctx, "reloc_missing_symbol", false, 0, 0);
+    live_idx = lr_obj_ensure_symbol(&ctx, "reloc_live_symbol", false, 0, 0);
+    TEST_ASSERT(missing_idx != UINT32_MAX, "missing symbol added");
+    TEST_ASSERT(live_idx != UINT32_MAX, "live symbol added");
+
+#if defined(__x86_64__) || defined(_M_X64)
+    lr_obj_add_reloc(&ctx, 0, missing_idx, LR_RELOC_X86_64_64);
+    lr_obj_add_reloc(&ctx, 8, live_idx, LR_RELOC_X86_64_64);
+    jit->code_size = 16;
+#else
+    lr_obj_add_reloc(&ctx, 0, missing_idx, LR_RELOC_ARM64_PAGEOFF12);
+    lr_obj_add_reloc(&ctx, 4, live_idx, LR_RELOC_ARM64_PAGEOFF12);
+    jit->code_size = 8;
+#endif
+    TEST_ASSERT_EQ(ctx.num_relocs, 2, "two relocs registered");
+
+    lr_jit_add_symbol(jit, "reloc_live_symbol", live_addr);
+    lr_jit_begin_update(jit);
+    TEST_ASSERT(jit->update_active, "jit update is active");
+    memset(jit->code_buf, 0, jit->code_size);
+
+    rc = lr_jit_patch_relocs_from(jit, &ctx, 1);
+    TEST_ASSERT_EQ(rc, 0, "patch from second reloc succeeds");
+#if defined(__x86_64__) || defined(_M_X64)
+    uint64_t patched_addr = 0;
+    memcpy(&patched_addr, jit->code_buf + 8, sizeof(patched_addr));
+    TEST_ASSERT_EQ((uintptr_t)patched_addr, (uintptr_t)live_addr,
+                   "second reloc patched expected address");
+#else
+    uint32_t patched_insn = 0;
+    memcpy(&patched_insn, jit->code_buf + 4, sizeof(patched_insn));
+    TEST_ASSERT(patched_insn != 0, "second reloc patched instruction");
+#endif
+
+    rc = lr_jit_patch_relocs_from(jit, &ctx, 0);
+    TEST_ASSERT_EQ(rc, -1, "patch from first reloc fails on unresolved symbol");
+
+    if (jit->update_active) {
+        jit->update_dirty = true;
+        lr_jit_end_update(jit);
+    }
+    lr_objfile_ctx_destroy(&ctx);
+    lr_jit_destroy(jit);
+    return 0;
+#endif
 }
 
 int test_jit_external_call_abs(void) {

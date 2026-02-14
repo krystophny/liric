@@ -1399,8 +1399,12 @@ static void *alloc_got_slot(lr_jit_t *j, void *target_addr) {
     return slot;
 }
 
-static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char **missing_symbol) {
+static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
+                            uint32_t reloc_start,
+                            const char **missing_symbol) {
     if (!j || !ctx)
+        return -1;
+    if (reloc_start > ctx->num_relocs)
         return -1;
     void **got_slots = NULL;
     void **resolved_targets = NULL;
@@ -1418,7 +1422,7 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx, const char
     }
 
     int rc = 0;
-    for (uint32_t i = 0; i < ctx->num_relocs; i++) {
+    for (uint32_t i = reloc_start; i < ctx->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &ctx->relocs[i];
         if (rel->symbol_idx >= ctx->num_symbols) {
             rc = -1;
@@ -2198,7 +2202,7 @@ static int materialize_lazy_function(lr_jit_t *j, lr_lazy_func_entry_t *entry) {
     while (1) {
         JIT_PROF_START(patch_fixups);
         const char *missing_symbol = NULL;
-        if (apply_jit_relocs(j, &fixup_ctx, &missing_symbol) == 0) {
+        if (apply_jit_relocs(j, &fixup_ctx, 0, &missing_symbol) == 0) {
             JIT_PROF_END(patch_fixups);
             break;
         }
@@ -2406,7 +2410,7 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
 
     JIT_PROF_START(patch_fixups);
     const char *missing_symbol = NULL;
-    if (apply_jit_relocs(j, &fixup_ctx, &missing_symbol) != 0) {
+    if (apply_jit_relocs(j, &fixup_ctx, 0, &missing_symbol) != 0) {
         JIT_PROF_END(patch_fixups);
         if (missing_symbol)
             fprintf(stderr, "unresolved symbol: %s\n", missing_symbol);
@@ -2482,7 +2486,12 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
 }
 
 int lr_jit_patch_relocs(lr_jit_t *j, const struct lr_objfile_ctx *ctx) {
-    return apply_jit_relocs(j, ctx, NULL);
+    return apply_jit_relocs(j, ctx, 0, NULL);
+}
+
+int lr_jit_patch_relocs_from(lr_jit_t *j, const struct lr_objfile_ctx *ctx,
+                             uint32_t reloc_start) {
+    return apply_jit_relocs(j, ctx, reloc_start, NULL);
 }
 
 void lr_jit_destroy(lr_jit_t *j) {
