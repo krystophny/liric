@@ -53,11 +53,10 @@ bool lr_target_is_host_compatible(const lr_target_t *t) {
 }
 
 bool lr_target_can_compile(const lr_target_t *target, lr_compile_mode_t mode) {
-    if (!target || !target->compile_begin || !target->compile_end)
+    if (!target || !target->compile_begin || !target->compile_emit ||
+        !target->compile_set_block || !target->compile_end)
         return false;
     if (mode != LR_COMPILE_ISEL && mode != LR_COMPILE_COPY_PATCH)
-        return false;
-    if (!!target->compile_emit != !!target->compile_set_block)
         return false;
     return true;
 }
@@ -134,11 +133,8 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
     lr_operand_desc_t *operands = NULL;
     uint32_t *indices = NULL;
 
-    if (!target || !compile_ctx || !func)
-        return -1;
-    if (!target->compile_set_block && !target->compile_emit)
-        return 0;
-    if (!target->compile_set_block || !target->compile_emit)
+    if (!target || !compile_ctx || !func ||
+        !target->compile_set_block || !target->compile_emit)
         return -1;
 
     if (replay_phi_copies(target, compile_ctx, func) != 0)
