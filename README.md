@@ -63,6 +63,9 @@ All frontends produce `lr_module_t`, a register-based SSA IR with explicit CFG.
 
 Selected via `LIRIC_COMPILE_MODE` env var (`isel` | `copy_patch` | `llvm`).
 
+`LR_MODE_DIRECT` streaming fast-path is available only with `isel` or `copy_patch`.
+When `LIRIC_COMPILE_MODE=llvm`, session DIRECT mode falls back to the IR path.
+
 | Backend | Coverage | Mechanism | Targets |
 |---------|----------|-----------|---------|
 | ISel (default) | full | single-pass select + encode | x86_64, aarch64, riscv64 |
@@ -98,7 +101,7 @@ C core                ir.h, jit.h      (lr_module_t, lr_jit_t, arena allocator)
 
 The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
 
-**DIRECT mode** streams instructions directly to the backend (compile_begin/emit/end) without constructing persistent IR. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
+**DIRECT mode** streams instructions directly to the backend (compile_begin/emit/end) without constructing persistent IR when compile mode is `isel` or `copy_patch`. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
 
 ## Platform Support
 

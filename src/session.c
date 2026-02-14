@@ -1,5 +1,6 @@
 #include "arena.h"
 #include "bc_decode.h"
+#include "compile_mode.h"
 #include "ir.h"
 #include "jit.h"
 #include "liric.h"
@@ -91,6 +92,7 @@ struct lr_session {
     /* DIRECT mode blob capture for exe/obj emission */
     lr_objfile_ctx_t direct_obj_ctx;
     bool direct_obj_ctx_active;
+    bool direct_mode_warned;
     uint32_t direct_reloc_base;
     lr_func_blob_t *blobs;
     uint32_t blob_count;
@@ -268,6 +270,22 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            lr_target_can_compile(s->jit->target, s->jit->mode);
 }
 
+static void maybe_warn_direct_mode_fallback(struct lr_session *s) {
+    const char *mode_name = NULL;
+    if (!s || s->direct_mode_warned)
+        return;
+    if (s->cfg.mode != SESSION_MODE_DIRECT || !s->jit ||
+        s->jit->mode != LR_COMPILE_LLVM) {
+        return;
+    }
+    mode_name = lr_compile_mode_name(s->jit->mode);
+    fprintf(stderr,
+            "liric session: LR_MODE_DIRECT fast-path supports "
+            "LIRIC_COMPILE_MODE=isel/copy_patch; got %s, falling back to IR\n",
+            mode_name ? mode_name : "unknown");
+    s->direct_mode_warned = true;
+}
+
 static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
     if (need <= s->blob_cap)
         return 0;
@@ -297,8 +315,13 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     lr_compile_func_meta_t meta;
     int rc;
 
-    if (!direct_mode_enabled(s) || !s->cur_func)
+    if (!s || !s->cur_func)
         return 0;
+
+    if (!direct_mode_enabled(s)) {
+        maybe_warn_direct_mode_fallback(s);
+        return 0;
+    }
 
     /* Initialize the obj_ctx for relocation capture on first function */
     if (init_direct_obj_ctx(s) != 0) {

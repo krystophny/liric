@@ -1,5 +1,6 @@
 #include <liric/liric_session.h>
 #include "ir.h"
+#include "llvm_backend.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -284,6 +285,116 @@ int test_session_stream_isel_fast_path(void) {
     }
     return 0;
 #endif
+}
+
+int test_session_direct_llvm_mode_ir_fallback_contract(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
+    lr_module_t *m = NULL;
+    lr_func_t *f = NULL;
+    lr_session_t *s = NULL;
+    lr_type_t *i32 = NULL;
+    int rc = -1;
+    void *addr = NULL;
+    int result = 1;
+    char prev_mode_buf[64] = {0};
+
+    if (prev_mode)
+        (void)snprintf(prev_mode_buf, sizeof(prev_mode_buf), "%s", prev_mode);
+
+    set_compile_mode_env("llvm");
+    cfg.mode = LR_MODE_DIRECT;
+    s = lr_session_create(&cfg, &err);
+    if (!s) {
+        fprintf(stderr, "  FAIL: session create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    i32 = lr_type_i32_s(s);
+    if (!i32) {
+        fprintf(stderr, "  FAIL: i32 type (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    rc = lr_session_func_begin(s, "session_direct_llvm_fallback", i32, NULL, 0, false, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: func begin (%s) (line %d)\n", err.msg, __LINE__);
+        goto cleanup;
+    }
+
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: set block (%s) (line %d)\n", err.msg, __LINE__);
+        goto cleanup;
+    }
+    lr_emit_ret(s, LR_IMM(42, i32));
+
+    m = lr_session_module(s);
+    if (!m) {
+        fprintf(stderr, "  FAIL: module available (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    f = find_func_by_name(m, "session_direct_llvm_fallback");
+    if (!f) {
+        fprintf(stderr, "  FAIL: function exists in module (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    if (!f->first_block) {
+        fprintf(stderr, "  FAIL: function block exists (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    if (!f->first_block->first) {
+        fprintf(stderr,
+                "  FAIL: llvm mode disables direct streaming and records IR (line %d)\n",
+                __LINE__);
+        goto cleanup;
+    }
+
+    rc = lr_session_func_end(s, &addr, &err);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (lr_llvm_jit_is_available()) {
+        typedef int (*fn_t)(void);
+        fn_t fn;
+        if (rc != 0) {
+            fprintf(stderr,
+                    "  FAIL: func end succeeds with llvm jit available (%s) (line %d)\n",
+                    err.msg, __LINE__);
+            goto cleanup;
+        }
+        if (!addr) {
+            fprintf(stderr, "  FAIL: compiled function address (line %d)\n", __LINE__);
+            goto cleanup;
+        }
+        fn_ptr_cast(&fn, addr);
+        if (fn() != 42) {
+            fprintf(stderr, "  FAIL: session_direct_llvm_fallback() == 42 (line %d)\n", __LINE__);
+            goto cleanup;
+        }
+    } else {
+        if (rc == 0) {
+            fprintf(stderr, "  FAIL: func end fails without llvm jit api (line %d)\n", __LINE__);
+            goto cleanup;
+        }
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: func end fails when llvm backend disabled (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+#endif
+
+    result = 0;
+
+cleanup:
+    if (s)
+        lr_session_destroy(s);
+    if (prev_mode && prev_mode[0]) {
+        set_compile_mode_env(prev_mode_buf);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    return result;
 }
 
 int test_session_stream_stencil_unsupported_fallback(void) {
