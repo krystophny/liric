@@ -3,6 +3,8 @@ if(NOT DEFINED CLI OR NOT DEFINED INPUT OR NOT DEFINED WORKDIR OR NOT DEFINED TA
     message(FATAL_ERROR "CLI, INPUT, WORKDIR, TARGET, EXPECT_RC, and QEMU are required")
 endif()
 
+file(MAKE_DIRECTORY "${WORKDIR}")
+
 set(EXE "${WORKDIR}/liric_riscv_test.out")
 file(REMOVE "${EXE}")
 
