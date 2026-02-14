@@ -239,6 +239,9 @@ target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+add_executable(bench_exe_matrix tools/bench_exe_matrix.c)
+target_link_libraries(bench_exe_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
+
 option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
 if(WITH_BENCH_TCC)
     find_path(LIRTCC_INCLUDE_DIR libtcc.h)
@@ -500,6 +503,14 @@ add_test(
         -DBENCH_CORPUS=$<TARGET_FILE:bench_corpus>
         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_corpus_empty_dataset_gate.cmake
+)
+
+add_test(
+    NAME bench_exe_matrix_modes
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_EXE_MATRIX=$<TARGET_FILE:bench_exe_matrix>
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_exe_matrix_modes.cmake
 )
 
 add_test(
