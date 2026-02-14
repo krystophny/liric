@@ -2,6 +2,8 @@ if(NOT DEFINED CLI OR NOT DEFINED INPUT OR NOT DEFINED WORKDIR OR NOT DEFINED MO
     message(FATAL_ERROR "CLI, INPUT, WORKDIR, and MODE are required")
 endif()
 
+file(MAKE_DIRECTORY "${WORKDIR}")
+
 if(MODE STREQUAL "default")
     set(EXE "${WORKDIR}/a.out")
     file(REMOVE "${EXE}")
@@ -35,6 +37,10 @@ if(MODE STREQUAL "default")
 elseif(MODE STREQUAL "output")
     if(NOT DEFINED OUT)
         message(FATAL_ERROR "OUT is required for MODE=output")
+    endif()
+    get_filename_component(OUT_DIR "${OUT}" DIRECTORY)
+    if(OUT_DIR)
+        file(MAKE_DIRECTORY "${OUT_DIR}")
     endif()
     file(REMOVE "${OUT}")
 

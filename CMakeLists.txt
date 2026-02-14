@@ -361,7 +361,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_default_emits_exe
         -DMODE=default
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_mode.cmake
 )
@@ -371,8 +371,8 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_custom_out
+        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_output_flag_emits_exe
+        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_output_flag_emits_exe/liric_cli_custom_out
         -DMODE=output
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_mode.cmake
 )
@@ -403,7 +403,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:liric_bin>
             -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_math.ll
-            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_intrinsic_math
             -DEXPECT_RC=20
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
     )
@@ -413,7 +413,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:liric_bin>
             -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_mem.ll
-            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_intrinsic_mem
             -DEXPECT_RC=130
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
     )
@@ -427,7 +427,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND ${CMAKE_COMMAND}
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_riscv64im_qemu_ret42
                 -DTARGET=riscv64im
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=42
@@ -439,7 +439,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND ${CMAKE_COMMAND}
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_add_imm_42.ll
-                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_riscv64im_qemu_add_immediates
                 -DTARGET=riscv64im
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=42
@@ -451,7 +451,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND ${CMAKE_COMMAND}
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_fp_ret_9.ll
-                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_riscv64gc_qemu_fp
                 -DTARGET=riscv64gc
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=9
