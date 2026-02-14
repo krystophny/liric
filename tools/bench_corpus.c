@@ -325,6 +325,7 @@ int main(int argc, char **argv) {
     bench_cfg_t cfg;
     int top_n = 0;
     int csv_mode = 0;
+    int allow_empty = 0;
     const char *single_name = NULL;
     int iters = 1;
 
@@ -352,11 +353,13 @@ int main(int argc, char **argv) {
             cfg.timeout_sec = atoi(argv[++i]);
             if (cfg.timeout_sec <= 0)
                 cfg.timeout_sec = 30;
+        } else if (strcmp(argv[i], "--allow-empty") == 0) {
+            allow_empty = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: bench_corpus [--top N] [--csv] [--single NAME] [--iters N]\n");
             printf("                   [--probe-runner PATH] [--runtime-bc PATH]\n");
             printf("                   [--lfortran-src PATH] [--corpus PATH] [--cache-dir PATH]\n");
-            printf("                   [--timeout SEC]\n");
+            printf("                   [--timeout SEC] [--allow-empty]\n");
             return 0;
         }
     }
@@ -377,8 +380,11 @@ int main(int argc, char **argv) {
     corpus_entry_t entries[MAX_TESTS];
     int n = load_corpus(cfg.corpus_tsv, cfg.cache_dir, entries, MAX_TESTS);
     if (n <= 0) {
-        fprintf(stderr, "no tests found in corpus\n");
-        return 1;
+        fprintf(stderr, "EMPTY DATASET: no tests found in corpus\n");
+        if (csv_mode)
+            printf("name,parse_us,compile_us,jit_us,exec_us,total_us\n");
+        printf("Status: EMPTY DATASET\n");
+        return allow_empty ? 0 : 1;
     }
 
     // Filter to single test if requested
@@ -438,6 +444,14 @@ found:
         if (!csv_mode) fprintf(stderr, "\r%*s\r", 60, "");
     }
 
+    if (ok_count == 0) {
+        fprintf(stderr, "EMPTY DATASET: no runnable tests completed (attempted=%d)\n", n);
+        if (csv_mode)
+            printf("name,parse_us,compile_us,jit_us,exec_us,total_us\n");
+        printf("Status: EMPTY DATASET\n");
+        return allow_empty ? 0 : 1;
+    }
+
     // Sort by compile time (parse + compile)
     qsort(results, (size_t)n, sizeof(timing_result_t), cmp_by_compile);
 
@@ -491,6 +505,7 @@ found:
     printf("Compile: %6.1f ms (%.0f%%)\n", sum_compile / 1e3,
            100.0 * sum_compile / (sum_parse + sum_compile));
     printf("JIT total: %5.1f ms\n", (sum_parse + sum_compile) / 1e3);
+    printf("Status: OK\n");
 
     return 0;
 }
