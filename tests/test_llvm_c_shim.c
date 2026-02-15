@@ -1,6 +1,7 @@
 #include <llvm-c/LiricSession.h>
 #include <liric/liric_legacy.h>
 #include <liric/liric_compat.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -19,6 +20,20 @@
         return 1; \
     } \
 } while (0)
+
+static void set_compile_mode_env(const char *value) {
+#if defined(_WIN32)
+    if (value)
+        (void)_putenv_s("LIRIC_COMPILE_MODE", value);
+    else
+        (void)_putenv_s("LIRIC_COMPILE_MODE", "");
+#else
+    if (value)
+        (void)setenv("LIRIC_COMPILE_MODE", value, 1);
+    else
+        (void)unsetenv("LIRIC_COMPILE_MODE");
+#endif
+}
 
 int test_llvm_c_shim_add_and_lookup(void) {
     lc_context_t *ctx = lc_context_create();
@@ -69,4 +84,90 @@ int test_llvm_c_shim_add_and_lookup(void) {
     lc_module_destroy(mod);
     lc_context_destroy(ctx);
     return 0;
+}
+
+int test_llvm_c_shim_direct_llvm_mode_hard_fail(void) {
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    LLVMLiricSessionStateRef state = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *fn_ty = NULL;
+    lc_value_t *fnv = NULL;
+    lr_func_t *f = NULL;
+    lc_value_t *bb = NULL;
+    lc_value_t *c1 = NULL;
+    int rc = -1;
+    int result = 1;
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    char old_mode_buf[64] = {0};
+
+    if (old_mode)
+        (void)snprintf(old_mode_buf, sizeof(old_mode_buf), "%s", old_mode);
+
+    set_compile_mode_env("llvm");
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    mod = lc_module_create(ctx, "llvm_c_shim_hard_fail");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    i32 = lc_get_int_type(mod, 32);
+    if (!i32) {
+        fprintf(stderr, "  FAIL: i32 type (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    fn_ty = lr_type_func_new(lc_module_get_ir(mod), i32, NULL, 0, false);
+    if (!fn_ty) {
+        fprintf(stderr, "  FAIL: function type (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    fnv = lc_func_create(mod, "main", fn_ty);
+    if (!fnv) {
+        fprintf(stderr, "  FAIL: function create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    f = lc_value_get_func(fnv);
+    if (!f) {
+        fprintf(stderr, "  FAIL: function unwrap (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    bb = lc_block_create(mod, f, "entry");
+    if (!bb) {
+        fprintf(stderr, "  FAIL: block create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    c1 = lc_value_const_int(mod, i32, 1, 32);
+    if (!c1) {
+        fprintf(stderr, "  FAIL: const create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    lc_create_ret(mod, lc_value_get_block(bb), c1);
+
+    state = LLVMLiricSessionCreate();
+    if (!state) {
+        fprintf(stderr, "  FAIL: shim state create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: DIRECT+llvm add module must hard fail (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    result = 0;
+
+cleanup:
+    if (old_mode && old_mode[0])
+        set_compile_mode_env(old_mode_buf);
+    else
+        set_compile_mode_env(NULL);
+    LLVMLiricSessionDispose(state);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return result;
 }

@@ -9,7 +9,6 @@
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h"
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h"
 #include "llvm/ExecutionEngine/Orc/SymbolStringPool.h"
-#include <dlfcn.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -77,9 +76,6 @@ public:
         (void)SearchOrder;
         const std::string &name = *Name;
         void *addr = LLVMLiricSessionLookup(session_, name.c_str());
-        if (!addr) {
-            addr = dlsym(RTLD_DEFAULT, name.c_str());
-        }
         if (!addr) {
             return make_error("Symbol not found: " + name);
         }
