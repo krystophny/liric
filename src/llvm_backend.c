@@ -280,11 +280,13 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
     }
 
     if (LLVMParseIRInContext(ctx, mem, &mod, &msg) != 0 || !mod) {
+        /* LLVMParseIRInContext consumes the buffer even on parse failure. */
+        mem = NULL;
         set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
                 msg ? msg : "unknown parse error");
         goto done;
     }
-    /* Ownership transfers to the module on parse success. */
+    /* Ownership transfers to LLVM parser/module on parse success. */
     mem = NULL;
 
     LLVMSetTarget(mod, triple);
@@ -468,6 +470,8 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     }
 
     if (LLVMParseIRInContext(parse_ctx, mem, &mod, &parse_msg) != 0 || !mod) {
+        /* LLVMParseIRInContext consumes the buffer even on parse failure. */
+        mem = NULL;
         set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
                 parse_msg ? parse_msg : "unknown parse error");
         goto done;
