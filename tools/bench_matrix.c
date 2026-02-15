@@ -639,7 +639,7 @@ static void write_row_ir(FILE *rf,
                          double sp_total) {
     char *e_summary = json_escape(summary_path);
     fprintf(rf,
-            "{\"lane\":\"ir_file\",\"track\":\"runtime_equalized\","
+            "{\"lane\":\"ir_file\",\"track\":\"corpus_canonical\","
             "\"mode\":\"%s\",\"baseline\":\"llvm\",\"status\":\"%s\","
             "\"attempted\":%lld,\"completed\":%lld,"
             "\"speedup_nonparse_median\":%.6f,\"speedup_total_median\":%.6f,"
@@ -908,9 +908,9 @@ int main(int argc, char **argv) {
 
                     (void)json_get_string(json, "status", status, sizeof(status));
                     (void)json_get_int64(json, "attempted_tests", &attempted);
-                    (void)json_get_int64(json, "runtime_equalized_bc_completed", &completed);
-                    (void)json_get_double(json, "runtime_equalized_bc_compile_materialized_speedup_median", &sp_nonparse);
-                    (void)json_get_double(json, "runtime_equalized_bc_total_materialized_speedup_median", &sp_total);
+                    (void)json_get_int64(json, "completed_tests", &completed);
+                    (void)json_get_double(json, "compile_materialized_speedup_median", &sp_nonparse);
+                    (void)json_get_double(json, "total_materialized_speedup_median", &sp_total);
 
                     ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted);
                     write_row_ir(rows, mode, sum_path, status, attempted, completed, sp_nonparse, sp_total);

@@ -1,7 +1,6 @@
 // Corpus benchmark comparator: liric_probe_runner vs bench_lli_phases on corpus_100.
-// Publishes per-track jsonl and a summary JSON suitable for README snapshot generation.
+// Publishes one canonical JSONL and one summary JSON.
 
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -46,8 +45,6 @@ typedef struct {
 
     double llvm_parse_ms;
     double llvm_parse_input_ms;
-    double llvm_parse_runtime_bc_ms;
-    double llvm_merge_runtime_ms;
     double llvm_add_module_ms;
     double llvm_lookup_ms;
     double llvm_compile_materialized_ms;
@@ -76,10 +73,6 @@ typedef struct {
 } cfg_t;
 
 typedef struct {
-    const char *track_name;
-} track_cfg_t;
-
-typedef struct {
     size_t attempted;
     size_t completed;
 
@@ -91,8 +84,6 @@ typedef struct {
 
     double llvm_parse_median_ms;
     double llvm_parse_input_median_ms;
-    double llvm_parse_runtime_bc_median_ms;
-    double llvm_merge_runtime_median_ms;
     double llvm_add_module_median_ms;
     double llvm_lookup_median_ms;
     double llvm_compile_materialized_median_ms;
@@ -105,7 +96,7 @@ typedef struct {
 
     double liric_total_materialized_aggregate_ms;
     double llvm_total_materialized_aggregate_ms;
-} track_summary_t;
+} summary_t;
 
 static double now_ms(void) {
     struct timespec ts;
@@ -560,13 +551,12 @@ static cfg_t parse_args(int argc, char **argv) {
     return cfg;
 }
 
-static track_summary_t summarize_rows(const rowlist_t *rows) {
-    track_summary_t s;
+static void summarize_rows(const rowlist_t *rows, summary_t *s) {
     size_t i;
-    memset(&s, 0, sizeof(s));
-    s.completed = rows->n;
+    memset(s, 0, sizeof(*s));
+    s->completed = rows->n;
     if (rows->n == 0)
-        return s;
+        return;
 
     {
         size_t n = rows->n;
@@ -575,21 +565,17 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
         double *ll = (double *)malloc(n * sizeof(double));
         double *lcm = (double *)malloc(n * sizeof(double));
         double *ltm = (double *)malloc(n * sizeof(double));
-
         double *ep = (double *)malloc(n * sizeof(double));
         double *epi = (double *)malloc(n * sizeof(double));
-        double *epr = (double *)malloc(n * sizeof(double));
-        double *emr = (double *)malloc(n * sizeof(double));
         double *eam = (double *)malloc(n * sizeof(double));
         double *el = (double *)malloc(n * sizeof(double));
         double *ecm = (double *)malloc(n * sizeof(double));
         double *etm = (double *)malloc(n * sizeof(double));
-
         double *spc = (double *)malloc(n * sizeof(double));
         double *spt = (double *)malloc(n * sizeof(double));
 
-        if (!lp || !lc || !ll || !lcm || !ltm || !ep || !epi || !epr || !emr ||
-            !eam || !el || !ecm || !etm || !spc || !spt) {
+        if (!lp || !lc || !ll || !lcm || !ltm || !ep || !epi || !eam ||
+            !el || !ecm || !etm || !spc || !spt) {
             die("out of memory", NULL);
         }
 
@@ -600,44 +586,35 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
             ll[i] = r->liric_lookup_ms;
             lcm[i] = r->liric_compile_materialized_ms;
             ltm[i] = r->liric_total_materialized_ms;
-
             ep[i] = r->llvm_parse_ms;
             epi[i] = r->llvm_parse_input_ms;
-            epr[i] = r->llvm_parse_runtime_bc_ms;
-            emr[i] = r->llvm_merge_runtime_ms;
             eam[i] = r->llvm_add_module_ms;
             el[i] = r->llvm_lookup_ms;
             ecm[i] = r->llvm_compile_materialized_ms;
             etm[i] = r->llvm_total_materialized_ms;
-
             spc[i] = r->compile_materialized_speedup;
             spt[i] = r->total_materialized_speedup;
-
-            s.liric_total_materialized_aggregate_ms += r->liric_total_materialized_ms;
-            s.llvm_total_materialized_aggregate_ms += r->llvm_total_materialized_ms;
+            s->liric_total_materialized_aggregate_ms += r->liric_total_materialized_ms;
+            s->llvm_total_materialized_aggregate_ms += r->llvm_total_materialized_ms;
         }
 
-        s.liric_parse_median_ms = median(lp, n);
-        s.liric_compile_median_ms = median(lc, n);
-        s.liric_lookup_median_ms = median(ll, n);
-        s.liric_compile_materialized_median_ms = median(lcm, n);
-        s.liric_total_materialized_median_ms = median(ltm, n);
+        s->liric_parse_median_ms = median(lp, n);
+        s->liric_compile_median_ms = median(lc, n);
+        s->liric_lookup_median_ms = median(ll, n);
+        s->liric_compile_materialized_median_ms = median(lcm, n);
+        s->liric_total_materialized_median_ms = median(ltm, n);
+        s->llvm_parse_median_ms = median(ep, n);
+        s->llvm_parse_input_median_ms = median(epi, n);
+        s->llvm_add_module_median_ms = median(eam, n);
+        s->llvm_lookup_median_ms = median(el, n);
+        s->llvm_compile_materialized_median_ms = median(ecm, n);
+        s->llvm_total_materialized_median_ms = median(etm, n);
+        s->compile_materialized_speedup_median = median(spc, n);
+        s->total_materialized_speedup_median = median(spt, n);
 
-        s.llvm_parse_median_ms = median(ep, n);
-        s.llvm_parse_input_median_ms = median(epi, n);
-        s.llvm_parse_runtime_bc_median_ms = median(epr, n);
-        s.llvm_merge_runtime_median_ms = median(emr, n);
-        s.llvm_add_module_median_ms = median(eam, n);
-        s.llvm_lookup_median_ms = median(el, n);
-        s.llvm_compile_materialized_median_ms = median(ecm, n);
-        s.llvm_total_materialized_median_ms = median(etm, n);
-
-        s.compile_materialized_speedup_median = median(spc, n);
-        s.total_materialized_speedup_median = median(spt, n);
-
-        if (s.liric_total_materialized_aggregate_ms > 0.0) {
-            s.total_materialized_speedup_aggregate =
-                s.llvm_total_materialized_aggregate_ms / s.liric_total_materialized_aggregate_ms;
+        if (s->liric_total_materialized_aggregate_ms > 0.0) {
+            s->total_materialized_speedup_aggregate =
+                s->llvm_total_materialized_aggregate_ms / s->liric_total_materialized_aggregate_ms;
         }
         {
             double liric_compile_agg = 0.0;
@@ -647,7 +624,7 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
                 llvm_compile_agg += ecm[i];
             }
             if (liric_compile_agg > 0.0)
-                s.compile_materialized_speedup_aggregate = llvm_compile_agg / liric_compile_agg;
+                s->compile_materialized_speedup_aggregate = llvm_compile_agg / liric_compile_agg;
         }
 
         free(lp);
@@ -657,8 +634,6 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
         free(ltm);
         free(ep);
         free(epi);
-        free(epr);
-        free(emr);
         free(eam);
         free(el);
         free(ecm);
@@ -666,15 +641,12 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
         free(spc);
         free(spt);
     }
-
-    return s;
 }
 
-static int run_track(const cfg_t *cfg,
+static int run_suite(const cfg_t *cfg,
                      const testlist_t *tests,
-                     const track_cfg_t *track,
                      const char *jsonl_path,
-                     track_summary_t *out_summary) {
+                     summary_t *out_summary) {
     FILE *jf;
     size_t i;
     rowlist_t rows;
@@ -686,16 +658,14 @@ static int run_track(const cfg_t *cfg,
     jf = fopen(jsonl_path, "w");
     if (!jf) die("failed to open output", jsonl_path);
 
-    printf("Track %s: %zu tests, %d iterations each\n",
-           track->track_name, tests->n, cfg->iters);
+    printf("Corpus compare: %zu tests, %d iterations each\n", tests->n, cfg->iters);
 
     for (i = 0; i < tests->n; i++) {
         const test_case_t *t = &tests->items[i];
         size_t ok_n = 0;
         int skipped = 0;
-        int parse_only = 0;
+        int parse_only = !ll_has_defined_main(t->ll_path);
         size_t it;
-        int has_main = ll_has_defined_main(t->ll_path);
 
         double *liric_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *liric_compile = (double *)calloc((size_t)cfg->iters, sizeof(double));
@@ -703,24 +673,20 @@ static int run_track(const cfg_t *cfg,
 
         double *llvm_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_parse_input = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_parse_runtime = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_merge_runtime = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_add_module = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_lookup = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_compile_mat = (double *)calloc((size_t)cfg->iters, sizeof(double));
 
-        if (!liric_parse || !liric_compile || !liric_lookup || !llvm_parse || !llvm_parse_input ||
-            !llvm_parse_runtime || !llvm_merge_runtime || !llvm_add_module || !llvm_lookup || !llvm_compile_mat) {
+        if (!liric_parse || !liric_compile || !liric_lookup || !llvm_parse ||
+            !llvm_parse_input || !llvm_add_module || !llvm_lookup || !llvm_compile_mat) {
             die("out of memory", NULL);
         }
-
-        parse_only = !has_main;
 
         for (it = 0; it < (size_t)cfg->iters; it++) {
             cmd_result_t rp, ri;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
-            double e_parse = 0.0, e_parse_input = 0.0, e_parse_runtime = 0.0;
-            double e_merge = 0.0, e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
+            double e_parse = 0.0, e_parse_input = 0.0;
+            double e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
 
             char *probe_argv[20];
             int pk = 0;
@@ -776,7 +742,6 @@ static int run_track(const cfg_t *cfg,
                 }
                 llvm_argv[ek++] = (char *)t->ll_path;
                 llvm_argv[ek] = NULL;
-
                 ri = run_cmd(llvm_argv, cfg->timeout_sec, NULL);
             }
 
@@ -790,10 +755,6 @@ static int run_track(const cfg_t *cfg,
             }
             if (!json_get_number(ri.stdout_text, "\"parse_input_ms\"", &e_parse_input))
                 e_parse_input = e_parse;
-            if (!json_get_number(ri.stdout_text, "\"parse_runtime_bc_ms\"", &e_parse_runtime))
-                e_parse_runtime = 0.0;
-            if (!json_get_number(ri.stdout_text, "\"merge_runtime_ms\"", &e_merge))
-                e_merge = 0.0;
             if (!json_get_number(ri.stdout_text, "\"compile_materialized_ms\"", &e_compile_mat))
                 e_compile_mat = e_add + e_lookup;
 
@@ -805,8 +766,6 @@ static int run_track(const cfg_t *cfg,
 
             llvm_parse[ok_n] = e_parse;
             llvm_parse_input[ok_n] = e_parse_input;
-            llvm_parse_runtime[ok_n] = e_parse_runtime;
-            llvm_merge_runtime[ok_n] = e_merge;
             llvm_add_module[ok_n] = e_add;
             llvm_lookup[ok_n] = e_lookup;
             llvm_compile_mat[ok_n] = e_compile_mat;
@@ -827,8 +786,6 @@ static int run_track(const cfg_t *cfg,
 
             r.llvm_parse_ms = median(llvm_parse, ok_n);
             r.llvm_parse_input_ms = median(llvm_parse_input, ok_n);
-            r.llvm_parse_runtime_bc_ms = median(llvm_parse_runtime, ok_n);
-            r.llvm_merge_runtime_ms = median(llvm_merge_runtime, ok_n);
             r.llvm_add_module_ms = median(llvm_add_module, ok_n);
             r.llvm_lookup_ms = median(llvm_lookup, ok_n);
             r.llvm_compile_materialized_ms = median(llvm_compile_mat, ok_n);
@@ -851,8 +808,6 @@ static int run_track(const cfg_t *cfg,
                     "\"liric_total_materialized_median_ms\":%.6f,"
                     "\"llvm_parse_median_ms\":%.6f,"
                     "\"llvm_parse_input_median_ms\":%.6f,"
-                    "\"llvm_parse_runtime_bc_median_ms\":%.6f,"
-                    "\"llvm_merge_runtime_median_ms\":%.6f,"
                     "\"llvm_add_module_median_ms\":%.6f,"
                     "\"llvm_lookup_median_ms\":%.6f,"
                     "\"llvm_compile_materialized_median_ms\":%.6f,"
@@ -862,8 +817,7 @@ static int run_track(const cfg_t *cfg,
                     t->name, ok_n,
                     r.liric_parse_ms, r.liric_compile_ms, r.liric_lookup_ms,
                     r.liric_compile_materialized_ms, r.liric_total_materialized_ms,
-                    r.llvm_parse_ms,
-                    r.llvm_parse_input_ms, r.llvm_parse_runtime_bc_ms, r.llvm_merge_runtime_ms,
+                    r.llvm_parse_ms, r.llvm_parse_input_ms,
                     r.llvm_add_module_ms, r.llvm_lookup_ms,
                     r.llvm_compile_materialized_ms, r.llvm_total_materialized_ms,
                     r.compile_materialized_speedup, r.total_materialized_speedup);
@@ -878,8 +832,6 @@ static int run_track(const cfg_t *cfg,
         free(liric_lookup);
         free(llvm_parse);
         free(llvm_parse_input);
-        free(llvm_parse_runtime);
-        free(llvm_merge_runtime);
         free(llvm_add_module);
         free(llvm_lookup);
         free(llvm_compile_mat);
@@ -887,11 +839,10 @@ static int run_track(const cfg_t *cfg,
 
     fclose(jf);
 
-    *out_summary = summarize_rows(&rows);
+    summarize_rows(&rows, out_summary);
     out_summary->attempted = tests->n;
 
-    printf("Track %s complete: %zu/%zu\n",
-           track->track_name,
+    printf("Corpus compare complete: %zu/%zu\n",
            out_summary->completed,
            out_summary->attempted);
 
@@ -902,20 +853,14 @@ static int run_track(const cfg_t *cfg,
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     testlist_t tests;
-    track_cfg_t core = {"core"};
-    track_cfg_t runtime_eq = {"runtime_equalized_bc"};
+    summary_t summary;
 
-    track_summary_t core_summary;
-    track_summary_t runtime_summary;
-
-    char *core_jsonl;
-    char *runtime_jsonl;
+    char *jsonl_path;
     char *summary_path;
     FILE *sf;
     const char *status;
 
-    memset(&core_summary, 0, sizeof(core_summary));
-    memset(&runtime_summary, 0, sizeof(runtime_summary));
+    memset(&summary, 0, sizeof(summary));
 
     if (mkdir_p(cfg.bench_dir) != 0)
         die("failed to create bench dir", cfg.bench_dir);
@@ -950,16 +895,14 @@ int main(int argc, char **argv) {
         return cfg.allow_empty ? 0 : 1;
     }
 
-    core_jsonl = path_join2(cfg.bench_dir, "bench_corpus_compare_core.jsonl");
-    runtime_jsonl = path_join2(cfg.bench_dir, "bench_corpus_compare_runtime_equalized_bc.jsonl");
+    jsonl_path = path_join2(cfg.bench_dir, "bench_corpus_compare.jsonl");
     summary_path = path_join2(cfg.bench_dir, "bench_corpus_compare_summary.json");
 
-    run_track(&cfg, &tests, &core, core_jsonl, &core_summary);
-    run_track(&cfg, &tests, &runtime_eq, runtime_jsonl, &runtime_summary);
+    run_suite(&cfg, &tests, jsonl_path, &summary);
 
-    if (runtime_summary.completed == 0 || runtime_summary.attempted == 0)
+    if (summary.completed == 0 || summary.attempted == 0)
         status = "EMPTY DATASET";
-    else if (runtime_summary.completed < runtime_summary.attempted)
+    else if (summary.completed < summary.attempted)
         status = "PARTIAL";
     else
         status = "OK";
@@ -973,102 +916,54 @@ int main(int argc, char **argv) {
             "\"dataset_name\":\"corpus_100\","
             "\"expected_tests\":100,"
             "\"attempted_tests\":%zu,"
+            "\"completed_tests\":%zu,"
             "\"iters\":%d,"
-            "\"core_completed\":%zu,"
-            "\"runtime_equalized_bc_completed\":%zu,"
-            "\"core_liric_parse_median_ms\":%.6f,"
-            "\"core_liric_compile_median_ms\":%.6f,"
-            "\"core_liric_lookup_median_ms\":%.6f,"
-            "\"core_liric_compile_materialized_median_ms\":%.6f,"
-            "\"core_liric_total_materialized_median_ms\":%.6f,"
-            "\"core_llvm_parse_median_ms\":%.6f,"
-            "\"core_llvm_parse_input_median_ms\":%.6f,"
-            "\"core_llvm_parse_runtime_bc_median_ms\":%.6f,"
-            "\"core_llvm_merge_runtime_median_ms\":%.6f,"
-            "\"core_llvm_add_module_median_ms\":%.6f,"
-            "\"core_llvm_lookup_median_ms\":%.6f,"
-            "\"core_llvm_compile_materialized_median_ms\":%.6f,"
-            "\"core_llvm_total_materialized_median_ms\":%.6f,"
-            "\"core_compile_materialized_speedup_median\":%.6f,"
-            "\"core_total_materialized_speedup_median\":%.6f,"
-            "\"core_compile_materialized_speedup_aggregate\":%.6f,"
-            "\"core_total_materialized_speedup_aggregate\":%.6f,"
-            "\"core_liric_total_materialized_aggregate_ms\":%.6f,"
-            "\"core_llvm_total_materialized_aggregate_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_parse_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_compile_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_lookup_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_compile_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_total_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_parse_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_parse_input_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_parse_runtime_bc_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_merge_runtime_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_add_module_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_lookup_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_compile_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_total_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_compile_materialized_speedup_median\":%.6f,"
-            "\"runtime_equalized_bc_total_materialized_speedup_median\":%.6f,"
-            "\"runtime_equalized_bc_compile_materialized_speedup_aggregate\":%.6f,"
-            "\"runtime_equalized_bc_total_materialized_speedup_aggregate\":%.6f,"
-            "\"runtime_equalized_bc_liric_total_materialized_aggregate_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_total_materialized_aggregate_ms\":%.6f"
+            "\"liric_parse_median_ms\":%.6f,"
+            "\"liric_compile_median_ms\":%.6f,"
+            "\"liric_lookup_median_ms\":%.6f,"
+            "\"liric_compile_materialized_median_ms\":%.6f,"
+            "\"liric_total_materialized_median_ms\":%.6f,"
+            "\"llvm_parse_median_ms\":%.6f,"
+            "\"llvm_parse_input_median_ms\":%.6f,"
+            "\"llvm_add_module_median_ms\":%.6f,"
+            "\"llvm_lookup_median_ms\":%.6f,"
+            "\"llvm_compile_materialized_median_ms\":%.6f,"
+            "\"llvm_total_materialized_median_ms\":%.6f,"
+            "\"compile_materialized_speedup_median\":%.6f,"
+            "\"total_materialized_speedup_median\":%.6f,"
+            "\"compile_materialized_speedup_aggregate\":%.6f,"
+            "\"total_materialized_speedup_aggregate\":%.6f,"
+            "\"liric_total_materialized_aggregate_ms\":%.6f,"
+            "\"llvm_total_materialized_aggregate_ms\":%.6f"
             "}\n",
             status,
-            tests.n,
+            summary.attempted,
+            summary.completed,
             cfg.iters,
-            core_summary.completed,
-            runtime_summary.completed,
-            core_summary.liric_parse_median_ms,
-            core_summary.liric_compile_median_ms,
-            core_summary.liric_lookup_median_ms,
-            core_summary.liric_compile_materialized_median_ms,
-            core_summary.liric_total_materialized_median_ms,
-            core_summary.llvm_parse_median_ms,
-            core_summary.llvm_parse_input_median_ms,
-            core_summary.llvm_parse_runtime_bc_median_ms,
-            core_summary.llvm_merge_runtime_median_ms,
-            core_summary.llvm_add_module_median_ms,
-            core_summary.llvm_lookup_median_ms,
-            core_summary.llvm_compile_materialized_median_ms,
-            core_summary.llvm_total_materialized_median_ms,
-            core_summary.compile_materialized_speedup_median,
-            core_summary.total_materialized_speedup_median,
-            core_summary.compile_materialized_speedup_aggregate,
-            core_summary.total_materialized_speedup_aggregate,
-            core_summary.liric_total_materialized_aggregate_ms,
-            core_summary.llvm_total_materialized_aggregate_ms,
-            runtime_summary.liric_parse_median_ms,
-            runtime_summary.liric_compile_median_ms,
-            runtime_summary.liric_lookup_median_ms,
-            runtime_summary.liric_compile_materialized_median_ms,
-            runtime_summary.liric_total_materialized_median_ms,
-            runtime_summary.llvm_parse_median_ms,
-            runtime_summary.llvm_parse_input_median_ms,
-            runtime_summary.llvm_parse_runtime_bc_median_ms,
-            runtime_summary.llvm_merge_runtime_median_ms,
-            runtime_summary.llvm_add_module_median_ms,
-            runtime_summary.llvm_lookup_median_ms,
-            runtime_summary.llvm_compile_materialized_median_ms,
-            runtime_summary.llvm_total_materialized_median_ms,
-            runtime_summary.compile_materialized_speedup_median,
-            runtime_summary.total_materialized_speedup_median,
-            runtime_summary.compile_materialized_speedup_aggregate,
-            runtime_summary.total_materialized_speedup_aggregate,
-            runtime_summary.liric_total_materialized_aggregate_ms,
-            runtime_summary.llvm_total_materialized_aggregate_ms);
+            summary.liric_parse_median_ms,
+            summary.liric_compile_median_ms,
+            summary.liric_lookup_median_ms,
+            summary.liric_compile_materialized_median_ms,
+            summary.liric_total_materialized_median_ms,
+            summary.llvm_parse_median_ms,
+            summary.llvm_parse_input_median_ms,
+            summary.llvm_add_module_median_ms,
+            summary.llvm_lookup_median_ms,
+            summary.llvm_compile_materialized_median_ms,
+            summary.llvm_total_materialized_median_ms,
+            summary.compile_materialized_speedup_median,
+            summary.total_materialized_speedup_median,
+            summary.compile_materialized_speedup_aggregate,
+            summary.total_materialized_speedup_aggregate,
+            summary.liric_total_materialized_aggregate_ms,
+            summary.llvm_total_materialized_aggregate_ms);
 
     fclose(sf);
 
     printf("Summary: %s\n", summary_path);
-    printf("  core: %zu/%zu completed\n", core_summary.completed, core_summary.attempted);
-    printf("  runtime_equalized_bc: %zu/%zu completed\n",
-           runtime_summary.completed,
-           runtime_summary.attempted);
+    printf("  completed: %zu/%zu\n", summary.completed, summary.attempted);
 
-    free(core_jsonl);
-    free(runtime_jsonl);
+    free(jsonl_path);
     free(summary_path);
     testlist_free(&tests);
 

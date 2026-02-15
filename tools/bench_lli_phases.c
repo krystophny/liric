@@ -198,8 +198,6 @@ int main(int argc, char **argv) {
     char *src = NULL;
     int i;
     double parse_input_total = 0.0;
-    double parse_runtime_total = 0.0;
-    double merge_runtime_total = 0.0;
     double jit_total = 0.0;
     double lookup_total = 0.0;
     double exec_total = 0.0;
@@ -346,9 +344,7 @@ int main(int argc, char **argv) {
 
     double iters_d = (double)a.iters;
     double avg_parse_input = parse_input_total / iters_d;
-    double avg_parse_runtime = parse_runtime_total / iters_d;
-    double avg_merge_runtime = merge_runtime_total / iters_d;
-    double avg_parse = avg_parse_input + avg_parse_runtime + avg_merge_runtime;
+    double avg_parse = avg_parse_input;
     double avg_add = jit_total / iters_d;
     double avg_lookup = lookup_total / iters_d;
     double avg_exec = exec_total / iters_d;
@@ -358,20 +354,18 @@ int main(int argc, char **argv) {
 
     if (a.json_output) {
         printf("{\"file\":\"%s\",\"iters\":%d,"
-               "\"parse_input_ms\":%.6f,\"parse_runtime_bc_ms\":%.6f,\"merge_runtime_ms\":%.6f,"
-               "\"parse_ms\":%.6f,\"add_module_ms\":%.6f,\"lookup_ms\":%.6f,"
+               "\"parse_input_ms\":%.6f,\"parse_ms\":%.6f,"
+               "\"add_module_ms\":%.6f,\"lookup_ms\":%.6f,"
                "\"compile_materialized_ms\":%.6f,\"compile_ms\":%.6f,\"exec_ms\":%.6f,"
                "\"total_ms\":%.6f,\"retcode\":%d}\n",
                a.input_file, a.iters,
-               avg_parse_input, avg_parse_runtime, avg_merge_runtime,
-               avg_parse, avg_add, avg_lookup,
+               avg_parse_input, avg_parse, avg_add, avg_lookup,
                avg_compile_materialized, avg_compile, avg_exec,
                avg_total, retcode_last);
     } else {
         printf("file:       %s\n", a.input_file);
         printf("iters:      %d\n", a.iters);
-        printf("parse:      %.6f ms (input %.6f + runtime_bc %.6f + merge %.6f)\n",
-               avg_parse, avg_parse_input, avg_parse_runtime, avg_merge_runtime);
+        printf("parse:      %.6f ms\n", avg_parse);
         printf("add_module: %.6f ms  (lazy registration)\n", avg_add);
         printf("lookup:     %.6f ms  (triggers lazy compile)\n", avg_lookup);
         printf("compile:    %.6f ms  (add_module + lookup)\n", avg_compile_materialized);
