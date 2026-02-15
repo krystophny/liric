@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <cmath>
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 
 #include <llvm/Config/llvm-config.h>
 #include <llvm/AsmParser/Parser.h>

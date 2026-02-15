@@ -6,7 +6,7 @@
 #include <system_error>
 
 #include <liric/liric_legacy.h>
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
