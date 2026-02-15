@@ -1057,6 +1057,39 @@ void lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len) {
     j->runtime_bc_loaded = false;
 }
 
+int lr_jit_ensure_runtime_bc_loaded(lr_jit_t *j, lr_module_t *m,
+                                    char *err, size_t err_len) {
+    char rt_err[256] = {0};
+    lr_module_t *rt = NULL;
+
+    if (err && err_len > 0)
+        err[0] = '\0';
+    if (!j || !m) {
+        if (err && err_len > 0)
+            (void)snprintf(err, err_len, "invalid runtime module load arguments");
+        return -1;
+    }
+    if (!j->runtime_bc_data || j->runtime_bc_loaded)
+        return 0;
+
+    rt = lr_parse_bc_with_arena(j->runtime_bc_data, j->runtime_bc_len,
+                                m->arena, rt_err, sizeof(rt_err));
+    if (!rt) {
+        if (err && err_len > 0) {
+            (void)snprintf(err, err_len, "runtime bitcode parse failed: %s",
+                           rt_err[0] ? rt_err : "unknown parse error");
+        }
+        return -1;
+    }
+    if (lr_module_merge(m, rt) != 0) {
+        if (err && err_len > 0)
+            (void)snprintf(err, err_len, "runtime bitcode merge failed");
+        return -1;
+    }
+    j->runtime_bc_loaded = true;
+    return 0;
+}
+
 static void register_builtin_symbols(lr_jit_t *j) {
     size_t n = lr_platform_intrinsic_count();
     for (size_t i = 0; i < n; i++) {
@@ -2286,22 +2319,14 @@ done:
 }
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
+    char runtime_err[256] = {0};
     if (!j || !j->target || !m) return -1;
 
-    if (j->runtime_bc_data && !j->runtime_bc_loaded) {
-        char rt_err[256] = {0};
-        lr_module_t *rt = lr_parse_bc_with_arena(j->runtime_bc_data, j->runtime_bc_len,
-                                                 m->arena, rt_err, sizeof(rt_err));
-        if (!rt) {
-            fprintf(stderr, "runtime bitcode parse failed: %s\n",
-                    rt_err[0] ? rt_err : "unknown parse error");
-            return -1;
-        }
-        if (lr_module_merge(m, rt) != 0) {
-            fprintf(stderr, "runtime bitcode merge failed\n");
-            return -1;
-        }
-        j->runtime_bc_loaded = true;
+    if (lr_jit_ensure_runtime_bc_loaded(j, m, runtime_err,
+                                        sizeof(runtime_err)) != 0) {
+        if (runtime_err[0])
+            fprintf(stderr, "%s\n", runtime_err);
+        return -1;
     }
 
     if (j->mode == LR_COMPILE_LLVM) {

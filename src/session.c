@@ -195,6 +195,27 @@ static size_t align_up_size(size_t value, size_t alignment) {
     return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
+static int ensure_runtime_and_globals_ready(struct lr_session *s,
+                                            session_error_t *err) {
+    char runtime_err[256] = {0};
+    if (!s || !s->jit || !s->module)
+        return 0;
+
+    if (lr_jit_ensure_runtime_bc_loaded(s->jit, s->module,
+                                        runtime_err, sizeof(runtime_err)) != 0) {
+        err_set(err, S_ERR_BACKEND, "%s",
+                runtime_err[0] ? runtime_err : "runtime bitcode load failed");
+        return -1;
+    }
+    if (s->module->first_global) {
+        if (lr_jit_materialize_globals(s->jit, s->module) != 0) {
+            err_set(err, S_ERR_BACKEND, "global materialization failed");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int ensure_phi_copy_capacity(struct lr_session *s, uint32_t need) {
     session_phi_copy_entry_t *new_entries = NULL;
     uint32_t new_cap = 0;
@@ -1080,6 +1101,11 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
     s->compile_start = 0;
     s->compile_active = false;
     s->emitted_count = 0;
+    if (ensure_runtime_and_globals_ready(s, err) != 0) {
+        s->cur_func->is_decl = true;
+        finish_function_state(s);
+        return -1;
+    }
     if (begin_direct_compile(s, err) != 0) {
         s->cur_func->is_decl = true;
         finish_function_state(s);
@@ -1111,8 +1137,10 @@ int lr_session_func_begin_existing(struct lr_session *s, lr_module_t *module,
     s->compile_active = false;
     s->emitted_count = 0;
 
-    if (module->first_global)
-        lr_jit_materialize_globals(s->jit, module);
+    if (ensure_runtime_and_globals_ready(s, err) != 0) {
+        finish_function_state(s);
+        return -1;
+    }
 
     if (begin_direct_compile(s, err) != 0) {
         finish_function_state(s);
