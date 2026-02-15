@@ -287,6 +287,11 @@ static int run_timed(const char *probe_runner, const char *runtime_bc,
         usleep(1000);
     }
 
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        result->ok = 0;
+        return -1;
+    }
+
     // Parse TIMING line
     char *timing_line = strstr(stderr_buf, "TIMING ");
     if (!timing_line) {
