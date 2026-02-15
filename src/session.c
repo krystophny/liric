@@ -19,10 +19,18 @@ typedef enum session_mode {
     SESSION_MODE_IR = 1,
 } session_mode_t;
 
+typedef enum session_backend {
+    SESSION_BACKEND_DEFAULT = 0,
+    SESSION_BACKEND_ISEL = 1,
+    SESSION_BACKEND_COPY_PATCH = 2,
+    SESSION_BACKEND_LLVM = 3,
+} session_backend_t;
+
 /* Session config mirrors the public lr_session_config_t. */
 typedef struct session_config {
     session_mode_t mode;
     const char *target;
+    session_backend_t backend;
 } session_config_t;
 
 /* Error mirrors the public lr_error_t. */
@@ -267,6 +275,28 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            s->jit &&
            s->jit->target &&
            lr_target_can_compile(s->jit->target, s->jit->mode);
+}
+
+static int session_backend_to_mode(session_backend_t backend,
+                                   lr_compile_mode_t *out_mode) {
+    if (!out_mode)
+        return -1;
+    switch (backend) {
+    case SESSION_BACKEND_DEFAULT:
+        *out_mode = lr_compile_mode_from_env();
+        return 0;
+    case SESSION_BACKEND_ISEL:
+        *out_mode = LR_COMPILE_ISEL;
+        return 0;
+    case SESSION_BACKEND_COPY_PATCH:
+        *out_mode = LR_COMPILE_COPY_PATCH;
+        return 0;
+    case SESSION_BACKEND_LLVM:
+        *out_mode = LR_COMPILE_LLVM;
+        return 0;
+    default:
+        return -1;
+    }
 }
 
 static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
@@ -781,12 +811,21 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     const session_config_t *cfg = (const session_config_t *)cfg_ptr;
     struct lr_session *s = NULL;
     lr_arena_t *arena = NULL;
+    lr_compile_mode_t mode = LR_COMPILE_ISEL;
     err_clear(err);
 
-    if (cfg && cfg->mode != SESSION_MODE_DIRECT &&
-        cfg->mode != SESSION_MODE_IR) {
-        err_set(err, S_ERR_ARGUMENT, "invalid session mode");
-        return NULL;
+    if (cfg) {
+        if (cfg->mode != SESSION_MODE_DIRECT &&
+            cfg->mode != SESSION_MODE_IR) {
+            err_set(err, S_ERR_ARGUMENT, "invalid session mode");
+            return NULL;
+        }
+        if (session_backend_to_mode(cfg->backend, &mode) != 0) {
+            err_set(err, S_ERR_ARGUMENT, "invalid session backend");
+            return NULL;
+        }
+    } else {
+        mode = lr_compile_mode_from_env();
     }
 
     s = (struct lr_session *)calloc(1, sizeof(*s));
@@ -798,6 +837,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     if (cfg) {
         s->cfg.mode = cfg->mode;
         s->cfg.target = cfg->target;
+        s->cfg.backend = cfg->backend;
     }
 
     arena = lr_arena_create(0);
@@ -826,6 +866,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
         err_set(err, S_ERR_BACKEND, "jit creation failed");
         return NULL;
     }
+    s->jit->mode = mode;
 
     return s;
 }

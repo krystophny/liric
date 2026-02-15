@@ -342,6 +342,56 @@ cleanup:
     return result;
 }
 
+int test_session_explicit_backend_overrides_env(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
+    lr_session_t *s = NULL;
+    lr_type_t *i32 = NULL;
+    uint32_t b0;
+    int rc;
+    void *addr = NULL;
+    typedef int (*fn_t)(void);
+    fn_t fn = NULL;
+    char prev_mode_buf[64] = {0};
+
+    if (prev_mode)
+        (void)snprintf(prev_mode_buf, sizeof(prev_mode_buf), "%s", prev_mode);
+
+    set_compile_mode_env("llvm");
+    cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create with explicit backend");
+
+    i32 = lr_type_i32_s(s);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    rc = lr_session_func_begin(s, "session_explicit_backend_isel", i32,
+                               NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    b0 = lr_session_block(s);
+    rc = lr_session_set_block(s, b0, &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+    lr_emit_ret(s, LR_IMM(42, i32));
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+    TEST_ASSERT(addr != NULL, "compiled function address");
+
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT(fn != NULL, "cast function");
+    TEST_ASSERT_EQ(fn(), 42, "session_explicit_backend_isel() == 42");
+
+    lr_session_destroy(s);
+    if (prev_mode && prev_mode[0]) {
+        set_compile_mode_env(prev_mode_buf);
+    } else {
+        set_compile_mode_env(NULL);
+    }
+    return 0;
+}
+
 int test_session_stream_stencil_unsupported_fallback(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;

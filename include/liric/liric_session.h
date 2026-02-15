@@ -22,9 +22,17 @@ typedef enum lr_session_mode {
     LR_MODE_IR = 1,
 } lr_session_mode_t;
 
+typedef enum lr_session_backend {
+    LR_SESSION_BACKEND_DEFAULT = 0,
+    LR_SESSION_BACKEND_ISEL = 1,
+    LR_SESSION_BACKEND_COPY_PATCH = 2,
+    LR_SESSION_BACKEND_LLVM = 3,
+} lr_session_backend_t;
+
 typedef struct lr_session_config {
     lr_session_mode_t mode;
     const char *target;
+    lr_session_backend_t backend; /* default: LR_SESSION_BACKEND_DEFAULT */
 } lr_session_config_t;
 
 /* ---- Error ------------------------------------------------------------- */

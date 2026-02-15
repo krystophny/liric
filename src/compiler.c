@@ -68,94 +68,30 @@ static void compiler_err_from_session(lr_compiler_error_t *err,
     }
 }
 
-static const char *backend_env_name(lr_backend_t backend) {
-    switch (backend) {
-    case LR_BACKEND_ISEL:
-        return "isel";
-    case LR_BACKEND_COPY_PATCH:
-        return "copy_patch";
-    case LR_BACKEND_LLVM:
-        return "llvm";
-    default:
-        return NULL;
-    }
-}
-
-static int backend_from_env(lr_backend_t *out_backend) {
-    const char *env = getenv("LIRIC_COMPILE_MODE");
+static int backend_to_session_backend(lr_backend_t backend,
+                                      lr_session_backend_t *out_backend) {
     if (!out_backend)
         return -1;
-    if (!env || !env[0]) {
-        *out_backend = LR_BACKEND_ISEL;
+    switch (backend) {
+    case LR_BACKEND_ISEL:
+        *out_backend = LR_SESSION_BACKEND_ISEL;
         return 0;
-    }
-    if (strcmp(env, "isel") == 0) {
-        *out_backend = LR_BACKEND_ISEL;
+    case LR_BACKEND_COPY_PATCH:
+        *out_backend = LR_SESSION_BACKEND_COPY_PATCH;
         return 0;
-    }
-    if (strcmp(env, "copy_patch") == 0 || strcmp(env, "stencil") == 0) {
-        *out_backend = LR_BACKEND_COPY_PATCH;
+    case LR_BACKEND_LLVM:
+        *out_backend = LR_SESSION_BACKEND_LLVM;
         return 0;
-    }
-    if (strcmp(env, "llvm") == 0) {
-        *out_backend = LR_BACKEND_LLVM;
-        return 0;
-    }
-    return -1;
-}
-
-static void env_restore(const char *old_value, int had_old) {
-    if (had_old) {
-        setenv("LIRIC_COMPILE_MODE", old_value, 1);
-    } else {
-        unsetenv("LIRIC_COMPILE_MODE");
-    }
-}
-
-static int with_backend_env(lr_backend_t backend, lr_session_t **out_session,
-                            const lr_session_config_t *cfg,
-                            lr_compiler_error_t *err) {
-    const char *new_mode = backend_env_name(backend);
-    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
-    char *old_copy = NULL;
-    int had_old = 0;
-    lr_error_t serr = {0};
-    lr_session_t *session = NULL;
-
-    if (!new_mode) {
-        compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT,
-                         "invalid backend");
+    default:
         return -1;
     }
-
-    if (old_mode) {
-        had_old = 1;
-        old_copy = strdup(old_mode);
-        if (!old_copy) {
-            compiler_err_set(err, LR_COMPILER_ERR_BACKEND,
-                             "failed to preserve prior backend env");
-            return -1;
-        }
-    }
-
-    setenv("LIRIC_COMPILE_MODE", new_mode, 1);
-    session = lr_session_create(cfg, &serr);
-    env_restore(old_copy, had_old);
-    free(old_copy);
-
-    if (!session) {
-        compiler_err_from_session(err, &serr);
-        return -1;
-    }
-
-    *out_session = session;
-    return 0;
 }
 
 lr_compiler_t *lr_compiler_create(const lr_compiler_config_t *cfg,
                                   lr_compiler_error_t *err) {
     lr_compiler_t *c = NULL;
     lr_session_config_t scfg;
+    lr_error_t serr = {0};
     lr_policy_t policy = LR_POLICY_DIRECT;
     lr_backend_t backend = LR_BACKEND_ISEL;
     const char *target = NULL;
@@ -166,22 +102,25 @@ lr_compiler_t *lr_compiler_create(const lr_compiler_config_t *cfg,
         policy = cfg->policy;
         backend = cfg->backend;
         target = cfg->target;
-    } else {
-        if (backend_from_env(&backend) != 0) {
-            compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT,
-                             "invalid LIRIC_COMPILE_MODE value");
-            return NULL;
-        }
     }
 
     if (policy != LR_POLICY_DIRECT && policy != LR_POLICY_IR) {
         compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT, "invalid policy");
         return NULL;
     }
+    if (policy == LR_POLICY_DIRECT && backend == LR_BACKEND_LLVM) {
+        compiler_err_set(err, LR_COMPILER_ERR_UNSUPPORTED,
+                         "DIRECT policy unsupported for backend=llvm");
+        return NULL;
+    }
 
     memset(&scfg, 0, sizeof(scfg));
     scfg.mode = (policy == LR_POLICY_DIRECT) ? LR_MODE_DIRECT : LR_MODE_IR;
     scfg.target = target;
+    if (backend_to_session_backend(backend, &scfg.backend) != 0) {
+        compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT, "invalid backend");
+        return NULL;
+    }
 
     c = (lr_compiler_t *)calloc(1, sizeof(*c));
     if (!c) {
@@ -189,7 +128,9 @@ lr_compiler_t *lr_compiler_create(const lr_compiler_config_t *cfg,
         return NULL;
     }
 
-    if (with_backend_env(backend, &c->session, &scfg, err) != 0) {
+    c->session = lr_session_create(&scfg, &serr);
+    if (!c->session) {
+        compiler_err_from_session(err, &serr);
         free(c);
         return NULL;
     }
