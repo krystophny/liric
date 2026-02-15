@@ -27,6 +27,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=ON` (LLVM C API backend).
+Optional install compatibility: `-DLIRIC_INSTALL_COMPAT_HEADERS=ON` installs deprecated `<liric/liric_compat.h>` forwarding header.
 
 ### LLVM Backend
 
@@ -64,7 +65,7 @@ All frontends produce `lr_module_t`, a register-based SSA IR with explicit CFG.
 Selected via `LIRIC_COMPILE_MODE` env var (`isel` | `copy_patch` | `llvm`).
 
 `LR_MODE_DIRECT` streaming fast-path is available only with `isel` or `copy_patch`.
-When `LIRIC_COMPILE_MODE=llvm`, session DIRECT mode falls back to the IR path.
+When compile mode is `llvm`, DIRECT mode hard-fails (no fallback).
 
 | Backend | Coverage | Mechanism | Targets |
 |---------|----------|-----------|---------|
@@ -87,21 +88,31 @@ DIRECT mode captures relocatable machine code blobs during streaming compilation
 
 ## Programmatic APIs
 
-For building IR without parsing text:
+For building and compiling without invoking the CLI:
 
 ```
-C++ LLVM 21 headers   include/llvm/**  (86 header-only wrappers, drop-in replacement)
+C public API (default) include/liric/liric.h       (lr_compiler_* unified API)
         |
-C compat API          liric_compat.h   (lc_value_t handles, deferred PHI, ~150 functions)
+Session API           include/liric/liric_session.h (DIRECT/IR, internal/advanced)
         |
-C session API         liric_session.h  (lr_session_emit(), DIRECT/IR modes)
+C++ LLVM 21 headers   include/llvm/**              (header-only wrappers)
         |
-C core                ir.h, jit.h      (lr_module_t, lr_jit_t, arena allocator)
+LLVM-compat C shim    include/llvm-c/**            (LLVMLiric* + lc_* surface)
+        |
+C core                ir.h, jit.h                  (lr_module_t, lr_jit_t, arena allocator)
 ```
 
 The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
 
 **DIRECT mode** streams instructions directly to the backend (compile_begin/emit/end) without constructing persistent IR when compile mode is `isel` or `copy_patch`. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
+
+`lr_compiler_create(NULL, ...)` defaults to DIRECT + ISEL and does not read `LIRIC_COMPILE_MODE`. Backend/policy selection is explicit via `lr_compiler_config_t`.
+
+### LLVM C Symbol Namespace
+
+Liric intentionally does not export the exact LLVM C API symbol names. The shim uses `LLVMLiric*` (and `lc_*`) names to avoid linker symbol collisions with real LLVM.
+
+If an integration chooses to use real LLVM C API names, it must choose one implementation at link time (typically via build flags/ifdefs) and avoid linking both implementations into the same process.
 
 ## Platform Support
 
@@ -157,7 +168,7 @@ Validate published README benchmark artifacts:
 
 ## Source Map
 
-All C source is in `src/`. Public headers in `include/liric/`. C++ compat headers in `include/llvm/`.
+All C source is in `src/`. Public headers in `include/liric/`. C++ compat headers in `include/llvm/`. LLVM-compatible C shim headers are in `include/llvm-c/`.
 
 | Component | Key files |
 |-----------|-----------|
