@@ -4,7 +4,6 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -13,10 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+
+#include "bench_common.h"
 
 typedef struct {
     char **items;
@@ -24,13 +22,7 @@ typedef struct {
     size_t cap;
 } strlist_t;
 
-typedef struct {
-    int rc;
-    char *stdout_text;
-    char *stderr_text;
-    double elapsed_ms;
-    int timed_out;
-} cmd_result_t;
+typedef bench_cmd_result_t cmd_result_t;
 
 typedef struct {
     const char *lfortran;
@@ -162,12 +154,6 @@ typedef struct {
 #define TRACKER_TARGET_RUN_SPEEDUP_MIN 10.0
 #define TRACKER_TARGET_LOOKUP_DISPATCH_PCT 0.25
 
-static double now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
 static void die(const char *msg, const char *path) {
     if (path) fprintf(stderr, "%s: %s\n", msg, path);
     else fprintf(stderr, "%s\n", msg);
@@ -191,42 +177,22 @@ static void ensure_dir(const char *path) {
 }
 
 static char *xstrdup(const char *s) {
-    size_t n;
     char *p;
-    if (!s) return NULL;
-    n = strlen(s);
-    p = (char *)malloc(n + 1);
-    if (!p) die("out of memory", NULL);
-    memcpy(p, s, n + 1);
+    p = bench_xstrdup(s);
+    if (!p && s) die("out of memory", NULL);
     return p;
 }
 
 static char *to_abs_path(const char *path) {
-    char cwd[PATH_MAX];
-    size_t nc, np;
     char *out;
-    if (!path) return NULL;
-    if (path[0] == '/') return xstrdup(path);
-    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed", NULL);
-    nc = strlen(cwd);
-    np = strlen(path);
-    out = (char *)malloc(nc + 1 + np + 1);
-    if (!out) die("out of memory", NULL);
-    memcpy(out, cwd, nc);
-    out[nc] = '/';
-    memcpy(out + nc + 1, path, np + 1);
+    out = bench_to_abs_path(path);
+    if (!out && path) die("failed to resolve absolute path", path);
     return out;
 }
 
 static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + nb + (need ? 2 : 1));
+    char *out = bench_path_join2(a, b);
     if (!out) die("out of memory", NULL);
-    memcpy(out, a, na);
-    if (need) out[na++] = '/';
-    memcpy(out + na, b, nb);
-    out[na + nb] = '\0';
     return out;
 }
 
@@ -264,166 +230,17 @@ static int remove_tree(const char *path) {
     return rmdir(path);
 }
 
-static char *read_all_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    long len;
-    size_t nread;
-    char *buf;
-    if (!f) return xstrdup("");
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    len = ftell(f);
-    if (len < 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    buf = (char *)malloc((size_t)len + 1);
-    if (!buf) die("out of memory", NULL);
-    nread = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[nread] = '\0';
-    return buf;
-}
-
-static int wait_with_timeout(pid_t pid, int timeout_ms, int *status_out) {
-    int status;
-    pid_t r;
-
-    if (timeout_ms <= 0) {
-        do {
-            r = waitpid(pid, &status, 0);
-        } while (r < 0 && errno == EINTR);
-        if (r < 0) {
-            *status_out = 0;
-            return -1;
-        }
-        *status_out = status;
-        return 0;
-    }
-
-    {
-        /* On some hosts, shell startup can consume a large fraction of very
-         * small timeout budgets used by tests. Keep requested behavior for
-         * normal timeouts while adding bounded startup grace for sub-second
-         * budgets to avoid false timeout classification. */
-        int effective_timeout_ms = timeout_ms;
-        if (effective_timeout_ms > 0 && effective_timeout_ms < 1000)
-            effective_timeout_ms += 300;
-
-        const double deadline_ms = now_ms() + (double)effective_timeout_ms;
-        for (;;) {
-            r = waitpid(pid, &status, WNOHANG);
-            if (r == pid) {
-                *status_out = status;
-                return 0;
-            }
-            if (r == 0) {
-                struct timespec ts;
-                if (now_ms() >= deadline_ms) {
-                    /* One final non-blocking check avoids racey false timeouts
-                     * when process exit lands exactly at the deadline. */
-                    r = waitpid(pid, &status, WNOHANG);
-                    if (r == pid) {
-                        *status_out = status;
-                        return 0;
-                    }
-                    (void)kill(pid, SIGKILL);
-                    do {
-                        r = waitpid(pid, &status, 0);
-                    } while (r < 0 && errno == EINTR);
-                    if (r < 0) {
-                        *status_out = 0;
-                        return -1;
-                    }
-                    *status_out = status;
-                    return 1;
-                }
-                ts.tv_sec = 0;
-                ts.tv_nsec = 1000000L; // 1ms polling interval
-                nanosleep(&ts, NULL);
-                continue;
-            }
-            if (errno == EINTR) continue;
-            *status_out = 0;
-            return -1;
-        }
-    }
-}
-
 static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_lib_dir,
                             const char *work_dir) {
+    bench_run_cmd_opts_t opts;
     cmd_result_t r;
-    char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
-    char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
-    int out_fd, err_fd;
-    int status = 0;
-    pid_t pid;
-    double t0;
-
-    r.rc = -1;
-    r.stdout_text = xstrdup("");
-    r.stderr_text = xstrdup("");
-    r.elapsed_ms = 0.0;
-    r.timed_out = 0;
-
-    out_fd = mkstemp(out_tpl);
-    if (out_fd < 0) die("mkstemp failed", NULL);
-    err_fd = mkstemp(err_tpl);
-    if (err_fd < 0) die("mkstemp failed", NULL);
-
-    pid = fork();
-    if (pid < 0) die("fork failed", NULL);
-
-    if (pid == 0) {
-        if (work_dir && chdir(work_dir) != 0) _exit(127);
-        if (env_lib_dir) {
-            setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
-            setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
-        }
-        {
-            int devnull = open("/dev/null", O_RDONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                close(devnull);
-            }
-        }
-        if (dup2(out_fd, STDOUT_FILENO) < 0) _exit(127);
-        if (dup2(err_fd, STDERR_FILENO) < 0) _exit(127);
-        close(out_fd);
-        close(err_fd);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-
-    t0 = now_ms();
-    close(out_fd);
-    close(err_fd);
-
-    if (wait_with_timeout(pid, timeout_ms, &status) == 1) {
-        r.timed_out = 1;
-        r.rc = -99;
-    } else if (WIFEXITED(status)) {
-        r.rc = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        r.rc = -WTERMSIG(status);
-    } else {
-        r.rc = -1;
-    }
-    r.elapsed_ms = now_ms() - t0;
-
-    free(r.stdout_text);
-    free(r.stderr_text);
-    r.stdout_text = read_all_file(out_tpl);
-    r.stderr_text = read_all_file(err_tpl);
-    unlink(out_tpl);
-    unlink(err_tpl);
-
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    opts.timeout_ms = timeout_ms;
+    opts.timeout_grace_ms = (timeout_ms > 0 && timeout_ms < 1000) ? 300 : 0;
+    opts.env_lib_dir = env_lib_dir;
+    opts.work_dir = work_dir;
+    if (bench_run_cmd(&opts, &r) != 0) die("failed to run command", argv[0]);
     return r;
 }
 
@@ -460,10 +277,7 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
 }
 
 static void free_cmd_result(cmd_result_t *r) {
-    free(r->stdout_text);
-    free(r->stderr_text);
-    r->stdout_text = NULL;
-    r->stderr_text = NULL;
+    bench_free_cmd_result(r);
 }
 
 static void strlist_init(strlist_t *l) {
@@ -626,44 +440,12 @@ static void validate_compat_artifacts(const strlist_t *tests,
     }
 }
 
-static int cmp_double(const void *a, const void *b) {
-    const double *da = (const double *)a;
-    const double *db = (const double *)b;
-    if (*da < *db) return -1;
-    if (*da > *db) return 1;
-    return 0;
-}
-
 static double median(const double *vals, size_t n) {
-    double *tmp;
-    double out;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    if (n % 2 == 0) out = 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
-    else out = tmp[n / 2];
-    free(tmp);
-    return out;
+    return bench_median(vals, n);
 }
 
 static double percentile(const double *vals, size_t n, double p) {
-    double *tmp;
-    double k, frac, out;
-    size_t f, c;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    k = ((double)(n - 1)) * p / 100.0;
-    f = (size_t)k;
-    c = (f + 1 < n) ? (f + 1) : f;
-    frac = k - (double)f;
-    out = tmp[f] + frac * (tmp[c] - tmp[f]);
-    free(tmp);
-    return out;
+    return bench_percentile(vals, n, p);
 }
 
 static void rowlist_push(rowlist_t *l, row_t row) {

@@ -227,13 +227,13 @@ add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
 
-add_executable(bench_compat_check tools/bench_compat_check.c)
+add_executable(bench_compat_check tools/bench_compat_check.c tools/bench_common.c)
 target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_ll tools/bench_ll.c)
+add_executable(bench_ll tools/bench_ll.c tools/bench_common.c)
 target_link_libraries(bench_ll PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_api tools/bench_api.c)
+add_executable(bench_api tools/bench_api.c tools/bench_common.c)
 target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_api_callgrind_hot tools/bench_api_callgrind_hot.c)
@@ -242,7 +242,7 @@ target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_corpus_compare tools/bench_corpus_compare.c)
+add_executable(bench_corpus_compare tools/bench_corpus_compare.c tools/bench_common.c)
 target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_exe_matrix tools/bench_exe_matrix.c)

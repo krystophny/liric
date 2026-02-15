@@ -2,19 +2,16 @@
 // C replacement for tools/bench_ll.py with fair in-process LLVM timing.
 
 #include <ctype.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <limits.h>
-#include <time.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+#include "bench_common.h"
 
 typedef struct {
     char **items;
@@ -22,13 +19,7 @@ typedef struct {
     size_t cap;
 } strlist_t;
 
-typedef struct {
-    int rc;
-    char *stdout_text;
-    char *stderr_text;
-    double elapsed_ms;
-    int timed_out;
-} cmd_result_t;
+typedef bench_cmd_result_t cmd_result_t;
 
 typedef struct {
     const char *probe_runner;
@@ -63,12 +54,6 @@ typedef struct {
     size_t cap;
 } rowlist_t;
 
-static double now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
 static void die(const char *msg, const char *path) {
     if (path) fprintf(stderr, "%s: %s\n", msg, path);
     else fprintf(stderr, "%s\n", msg);
@@ -81,185 +66,46 @@ static int file_exists(const char *path) {
 }
 
 static char *xstrdup(const char *s) {
-    size_t n;
     char *p;
-    if (!s) return NULL;
-    n = strlen(s);
-    p = (char *)malloc(n + 1);
-    if (!p) die("out of memory", NULL);
-    memcpy(p, s, n + 1);
+    p = bench_xstrdup(s);
+    if (!p && s) die("out of memory", NULL);
     return p;
 }
 
 static char *to_abs_path(const char *path) {
-    char cwd[PATH_MAX];
-    size_t nc, np;
     char *out;
-    if (!path) return NULL;
-    if (path[0] == '/') return xstrdup(path);
-    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed", NULL);
-    nc = strlen(cwd);
-    np = strlen(path);
-    out = (char *)malloc(nc + 1 + np + 1);
-    if (!out) die("out of memory", NULL);
-    memcpy(out, cwd, nc);
-    out[nc] = '/';
-    memcpy(out + nc + 1, path, np + 1);
+    out = bench_to_abs_path(path);
+    if (!out && path) die("failed to resolve absolute path", path);
     return out;
 }
 
 static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + nb + (need ? 2 : 1));
+    char *out = bench_path_join2(a, b);
     if (!out) die("out of memory", NULL);
-    memcpy(out, a, na);
-    if (need) out[na++] = '/';
-    memcpy(out + na, b, nb);
-    out[na + nb] = '\0';
     return out;
 }
 
 static char *dirname_dup(const char *path) {
-    const char *slash = strrchr(path, '/');
-    size_t n;
-    char *out;
-    if (!slash) return xstrdup(".");
-    n = (size_t)(slash - path);
-    if (n == 0) n = 1;
-    out = (char *)malloc(n + 1);
+    char *out = bench_dirname_dup(path);
     if (!out) die("out of memory", NULL);
-    memcpy(out, path, n);
-    out[n] = '\0';
     return out;
-}
-
-static char *read_all_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    long len;
-    size_t nread;
-    char *buf;
-    if (!f) return xstrdup("");
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    len = ftell(f);
-    if (len < 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    buf = (char *)malloc((size_t)len + 1);
-    if (!buf) die("out of memory", NULL);
-    nread = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[nread] = '\0';
-    return buf;
-}
-
-static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
-    double start = now_ms();
-    int status;
-    while (1) {
-        pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) {
-            *status_out = status;
-            return 0;
-        }
-        if (r < 0) {
-            *status_out = 0;
-            return -1;
-        }
-        if ((now_ms() - start) > timeout_sec * 1000.0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            *status_out = status;
-            return 1;
-        }
-        usleep(10000);
-    }
 }
 
 static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *env_lib_dir,
                             const char *work_dir) {
+    bench_run_cmd_opts_t opts;
     cmd_result_t r;
-    char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
-    char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
-    int out_fd, err_fd;
-    int status = 0;
-    pid_t pid;
-    double t0;
-
-    r.rc = -1;
-    r.stdout_text = xstrdup("");
-    r.stderr_text = xstrdup("");
-    r.elapsed_ms = 0.0;
-    r.timed_out = 0;
-
-    out_fd = mkstemp(out_tpl);
-    if (out_fd < 0) die("mkstemp failed", NULL);
-    err_fd = mkstemp(err_tpl);
-    if (err_fd < 0) die("mkstemp failed", NULL);
-
-    pid = fork();
-    if (pid < 0) die("fork failed", NULL);
-
-    if (pid == 0) {
-        if (work_dir && chdir(work_dir) != 0) _exit(127);
-        if (env_lib_dir) {
-            setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
-            setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
-        }
-        {
-            int devnull = open("/dev/null", O_RDONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                close(devnull);
-            }
-        }
-        if (dup2(out_fd, STDOUT_FILENO) < 0) _exit(127);
-        if (dup2(err_fd, STDERR_FILENO) < 0) _exit(127);
-        close(out_fd);
-        close(err_fd);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-
-    t0 = now_ms();
-    close(out_fd);
-    close(err_fd);
-
-    if (wait_with_timeout(pid, timeout_sec, &status) == 1) {
-        r.timed_out = 1;
-        r.rc = -99;
-    } else if (WIFEXITED(status)) {
-        r.rc = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        r.rc = -WTERMSIG(status);
-    } else {
-        r.rc = -1;
-    }
-    r.elapsed_ms = now_ms() - t0;
-
-    free(r.stdout_text);
-    free(r.stderr_text);
-    r.stdout_text = read_all_file(out_tpl);
-    r.stderr_text = read_all_file(err_tpl);
-    unlink(out_tpl);
-    unlink(err_tpl);
-
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    opts.timeout_ms = timeout_sec > 0 ? timeout_sec * 1000 : 0;
+    opts.env_lib_dir = env_lib_dir;
+    opts.work_dir = work_dir;
+    if (bench_run_cmd(&opts, &r) != 0) die("failed to run command", argv[0]);
     return r;
 }
 
 static void free_cmd_result(cmd_result_t *r) {
-    free(r->stdout_text);
-    free(r->stderr_text);
-    r->stdout_text = NULL;
-    r->stderr_text = NULL;
+    bench_free_cmd_result(r);
 }
 
 static void strlist_init(strlist_t *l) {
@@ -287,44 +133,12 @@ static void strlist_free(strlist_t *l) {
     l->n = l->cap = 0;
 }
 
-static int cmp_double(const void *a, const void *b) {
-    const double *da = (const double *)a;
-    const double *db = (const double *)b;
-    if (*da < *db) return -1;
-    if (*da > *db) return 1;
-    return 0;
-}
-
 static double median(const double *vals, size_t n) {
-    double *tmp;
-    double out;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    if (n % 2 == 0) out = 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
-    else out = tmp[n / 2];
-    free(tmp);
-    return out;
+    return bench_median(vals, n);
 }
 
 static double percentile(const double *vals, size_t n, double p) {
-    double *tmp;
-    double k, frac, out;
-    size_t f, c;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    k = ((double)(n - 1)) * p / 100.0;
-    f = (size_t)k;
-    c = (f + 1 < n) ? (f + 1) : f;
-    frac = k - (double)f;
-    out = tmp[f] + frac * (tmp[c] - tmp[f]);
-    free(tmp);
-    return out;
+    return bench_percentile(vals, n, p);
 }
 
 static int parse_probe_timing(const char *stderr_text, double *out_parse_ms,
@@ -361,13 +175,7 @@ static int parse_probe_timing(const char *stderr_text, double *out_parse_ms,
 }
 
 static int json_get_number(const char *json, const char *key, double *out_val) {
-    const char *p = strstr(json, key);
-    if (!p) return 0;
-    p += strlen(key);
-    while (*p && (*p == ' ' || *p == '\t' || *p == ':')) p++;
-    if (!*p) return 0;
-    *out_val = strtod(p, NULL);
-    return 1;
+    return bench_json_get_number(json, key, out_val);
 }
 
 static void rowlist_push(rowlist_t *l, row_t row) {
@@ -686,7 +494,6 @@ int main(int argc, char **argv) {
                 double eik = median(lli_parse_jit_lookup, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
                 double fair_sp = lik > 0 ? eik / lik : 0.0;
-                double legacy_sp = li > 0 ? ei / li : 0.0;
                 row_t row;
 
                 row.name = xstrdup(tests.items[i]);
@@ -713,8 +520,8 @@ int main(int argc, char **argv) {
                     "\"lli_parse_median_ms\":%.6f,\"lli_jit_median_ms\":%.6f,\"lli_lookup_median_ms\":%.6f,"
                     "\"liric_parse_compile_median_ms\":%.6f,\"liric_parse_compile_lookup_median_ms\":%.6f,"
                     "\"lli_parse_jit_median_ms\":%.6f,\"lli_parse_jit_lookup_median_ms\":%.6f,"
-                    "\"materialization_speedup\":%.6f,\"legacy_parse_jit_speedup\":%.6f}\n",
-                    tests.items[i], ok_n, lw, ew, wall_sp, lp, lc, ll, ep, ej, el, li, lik, ei, eik, fair_sp, legacy_sp);
+                    "\"materialization_speedup\":%.6f}\n",
+                    tests.items[i], ok_n, lw, ew, wall_sp, lp, lc, ll, ep, ej, el, li, lik, ei, eik, fair_sp);
 
                 printf("  [%zu/%zu] %s: wall %.1fms vs %.1fms (%.2fx), materialized %.3fms vs %.3fms (%.2fx)\n",
                        i + 1, tests.n, tests.items[i], lw, ew, wall_sp, lik, eik, fair_sp);
@@ -782,7 +589,6 @@ int main(int argc, char **argv) {
         double *eik = (double *)malloc(rows.n * sizeof(double));
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
         double *fair_sp = (double *)malloc(rows.n * sizeof(double));
-        double *legacy_sp = (double *)malloc(rows.n * sizeof(double));
         size_t j;
         size_t wall_faster = 0;
         size_t fair_faster = 0;
@@ -805,7 +611,6 @@ int main(int argc, char **argv) {
             eik[j] = rows.items[j].lli_parse_jit_lookup_ms;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
             fair_sp[j] = lik[j] > 0 ? eik[j] / lik[j] : 0.0;
-            legacy_sp[j] = li[j] > 0 ? ei[j] / li[j] : 0.0;
             if (wall_sp[j] > 1.0) wall_faster++;
             if (fair_sp[j] > 1.0) fair_faster++;
             sum_lw += lw[j];
@@ -837,8 +642,6 @@ int main(int argc, char **argv) {
                median(ep, rows.n), median(ej, rows.n), median(el, rows.n));
         printf("  P90/P95:   %.2fx / %.2fx\n", percentile(fair_sp, rows.n, 90), percentile(fair_sp, rows.n, 95));
         printf("  Faster:    %zu/%zu (%.1f%%)\n", fair_faster, rows.n, 100.0 * (double)fair_faster / (double)rows.n);
-        printf("  Legacy:    parse+compile vs parse+jit speedup median %.2fx (not materialization-fair)\n",
-               median(legacy_sp, rows.n));
 
         printf("\n  Results: %s\n", jsonl_path);
         {
@@ -873,8 +676,7 @@ int main(int argc, char **argv) {
                         "\"liric_parse_compile_lookup_median_ms\":%.6f,"
                         "\"lli_parse_jit_median_ms\":%.6f,"
                         "\"lli_parse_jit_lookup_median_ms\":%.6f,"
-                        "\"lli_parse_jit_lookup_aggregate_ms\":%.6f,"
-                        "\"legacy_parse_jit_speedup_median\":%.6f"
+                        "\"lli_parse_jit_lookup_aggregate_ms\":%.6f"
                         "}"
                         "}\n",
                         cfg.allow_empty ? "true" : "false",
@@ -882,8 +684,7 @@ int main(int argc, char **argv) {
                         median(lw, rows.n), median(ew, rows.n), median(wall_sp, rows.n), sum_lw, sum_ew,
                         median(lik, rows.n), median(eik, rows.n), median(fair_sp, rows.n), sum_lik, sum_eik,
                         median(lp, rows.n), median(lc, rows.n), median(ll, rows.n), median(ep, rows.n), median(ej, rows.n), median(el, rows.n),
-                        median(li, rows.n), median(lik, rows.n), median(ei, rows.n), median(eik, rows.n), sum_eik,
-                        median(legacy_sp, rows.n));
+                        median(li, rows.n), median(lik, rows.n), median(ei, rows.n), median(eik, rows.n), sum_eik);
                 fclose(sf);
             }
         }
@@ -903,7 +704,6 @@ int main(int argc, char **argv) {
         free(eik);
         free(wall_sp);
         free(fair_sp);
-        free(legacy_sp);
         free(summary_path);
     }
 

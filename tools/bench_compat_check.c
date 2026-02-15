@@ -3,8 +3,6 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,11 +10,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <limits.h>
-#include <time.h>
 #include <unistd.h>
+
+#include "bench_common.h"
 
 typedef struct {
     char **items;
@@ -24,13 +21,7 @@ typedef struct {
     size_t cap;
 } strlist_t;
 
-typedef struct {
-    int rc;
-    char *stdout_text;
-    char *stderr_text;
-    double elapsed_ms;
-    int timed_out;
-} cmd_result_t;
+typedef bench_cmd_result_t cmd_result_t;
 
 typedef struct {
     char *name;
@@ -67,12 +58,6 @@ typedef struct {
     char *source;
 } name_opt_t;
 
-static double now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
 static void die(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -100,30 +85,16 @@ static void ensure_dir(const char *path) {
 }
 
 static char *xstrdup(const char *s) {
-    size_t n;
     char *p;
-    if (!s) return NULL;
-    n = strlen(s);
-    p = (char *)malloc(n + 1);
-    if (!p) die("out of memory");
-    memcpy(p, s, n + 1);
+    p = bench_xstrdup(s);
+    if (!p && s) die("out of memory");
     return p;
 }
 
 static char *to_abs_path(const char *path) {
-    char cwd[PATH_MAX];
-    size_t nc, np;
     char *out;
-    if (!path) return NULL;
-    if (path[0] == '/') return xstrdup(path);
-    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed: %s", strerror(errno));
-    nc = strlen(cwd);
-    np = strlen(path);
-    out = (char *)malloc(nc + 1 + np + 1);
-    if (!out) die("out of memory");
-    memcpy(out, cwd, nc);
-    out[nc] = '/';
-    memcpy(out + nc + 1, path, np + 1);
+    out = bench_to_abs_path(path);
+    if (!out && path) die("failed to resolve absolute path %s", path);
     return out;
 }
 
@@ -165,56 +136,15 @@ static void strlist_free(strlist_t *l) {
 }
 
 static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + nb + (need ? 2 : 1));
+    char *out = bench_path_join2(a, b);
     if (!out) die("out of memory");
-    memcpy(out, a, na);
-    if (need) out[na++] = '/';
-    memcpy(out + na, b, nb);
-    out[na + nb] = '\0';
     return out;
 }
 
 static char *dirname_dup(const char *path) {
-    const char *slash = strrchr(path, '/');
-    size_t n;
-    char *out;
-    if (!slash) return xstrdup(".");
-    n = (size_t)(slash - path);
-    if (n == 0) n = 1;
-    out = (char *)malloc(n + 1);
+    char *out = bench_dirname_dup(path);
     if (!out) die("out of memory");
-    memcpy(out, path, n);
-    out[n] = '\0';
     return out;
-}
-
-static char *read_all_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    long len;
-    size_t nread;
-    char *buf;
-    if (!f) return xstrdup("");
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    len = ftell(f);
-    if (len < 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    buf = (char *)malloc((size_t)len + 1);
-    if (!buf) die("out of memory");
-    nread = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[nread] = '\0';
-    return buf;
 }
 
 static char *json_escape(const char *s) {
@@ -275,124 +205,22 @@ static char *normalize_output(const char *s) {
     return out;
 }
 
-static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
-    double start = now_ms();
-    int status;
-    while (1) {
-        pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) {
-            *status_out = status;
-            return 0;
-        }
-        if (r < 0) {
-            *status_out = 0;
-            return -1;
-        }
-        if ((now_ms() - start) > timeout_sec * 1000.0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            *status_out = status;
-            return 1;
-        }
-        usleep(10000);
-    }
-}
-
 static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *stdout_path,
                             const char *env_lib_dir, const char *work_dir) {
+    bench_run_cmd_opts_t opts;
     cmd_result_t r;
-    char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
-    char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
-    int out_fd = -1, err_fd = -1;
-    int status = 0;
-    pid_t pid;
-    double t0;
-    const char *out_read_path = stdout_path;
-
-    r.rc = -1;
-    r.stdout_text = xstrdup("");
-    r.stderr_text = xstrdup("");
-    r.elapsed_ms = 0.0;
-    r.timed_out = 0;
-
-    if (!stdout_path) {
-        out_fd = mkstemp(out_tpl);
-        if (out_fd < 0) die("mkstemp failed for stdout");
-        out_read_path = out_tpl;
-    }
-    err_fd = mkstemp(err_tpl);
-    if (err_fd < 0) die("mkstemp failed for stderr");
-
-    pid = fork();
-    if (pid < 0) die("fork failed: %s", strerror(errno));
-
-    if (pid == 0) {
-        int fdout;
-        int fderr;
-        if (work_dir && chdir(work_dir) != 0) _exit(127);
-        if (env_lib_dir) {
-            setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
-            setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
-        }
-
-        if (stdout_path) {
-            fdout = open(stdout_path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
-            if (fdout < 0) _exit(127);
-        } else {
-            fdout = out_fd;
-        }
-        fderr = err_fd;
-
-        {
-            int devnull = open("/dev/null", O_RDONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                close(devnull);
-            }
-        }
-        if (dup2(fdout, STDOUT_FILENO) < 0) _exit(127);
-        if (dup2(fderr, STDERR_FILENO) < 0) _exit(127);
-
-        close(fdout);
-        close(fderr);
-
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-
-    t0 = now_ms();
-    if (!stdout_path) close(out_fd);
-    close(err_fd);
-
-    if (wait_with_timeout(pid, timeout_sec, &status) == 1) {
-        r.timed_out = 1;
-        r.rc = -99;
-    } else if (WIFEXITED(status)) {
-        r.rc = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        r.rc = -WTERMSIG(status);
-    } else {
-        r.rc = -1;
-    }
-    r.elapsed_ms = now_ms() - t0;
-
-    if (!stdout_path) {
-        free(r.stdout_text);
-        r.stdout_text = read_all_file(out_read_path);
-        unlink(out_read_path);
-    }
-    free(r.stderr_text);
-    r.stderr_text = read_all_file(err_tpl);
-    unlink(err_tpl);
-
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    opts.timeout_ms = timeout_sec > 0 ? timeout_sec * 1000 : 0;
+    opts.stdout_path = stdout_path;
+    opts.env_lib_dir = env_lib_dir;
+    opts.work_dir = work_dir;
+    if (bench_run_cmd(&opts, &r) != 0) die("failed to run command: %s", argv[0]);
     return r;
 }
 
 static void free_cmd_result(cmd_result_t *r) {
-    free(r->stdout_text);
-    free(r->stderr_text);
-    r->stdout_text = NULL;
-    r->stderr_text = NULL;
+    bench_free_cmd_result(r);
 }
 
 static char *strip_comments_keep_quotes(const char *text) {
@@ -605,7 +433,7 @@ static void free_testlist(testlist_t *l) {
 }
 
 static testlist_t parse_integration_runs(const char *cmake_path) {
-    char *text = read_all_file(cmake_path);
+    char *text = bench_read_all_file(cmake_path);
     char *clean = strip_comments_keep_quotes(text);
     char *integration_dir = dirname_dup(cmake_path);
     size_t i = 0, n = strlen(clean);
