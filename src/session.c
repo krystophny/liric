@@ -92,7 +92,6 @@ struct lr_session {
     /* DIRECT mode blob capture for exe/obj emission */
     lr_objfile_ctx_t direct_obj_ctx;
     bool direct_obj_ctx_active;
-    bool direct_mode_warned;
     uint32_t direct_reloc_base;
     lr_func_blob_t *blobs;
     uint32_t blob_count;
@@ -270,22 +269,6 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            lr_target_can_compile(s->jit->target, s->jit->mode);
 }
 
-static void maybe_warn_direct_mode_fallback(struct lr_session *s) {
-    const char *mode_name = NULL;
-    if (!s || s->direct_mode_warned)
-        return;
-    if (s->cfg.mode != SESSION_MODE_DIRECT || !s->jit ||
-        s->jit->mode != LR_COMPILE_LLVM) {
-        return;
-    }
-    mode_name = lr_compile_mode_name(s->jit->mode);
-    fprintf(stderr,
-            "liric session: LR_MODE_DIRECT fast-path supports "
-            "LIRIC_COMPILE_MODE=isel/copy_patch; got %s, falling back to IR\n",
-            mode_name ? mode_name : "unknown");
-    s->direct_mode_warned = true;
-}
-
 static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
     if (need <= s->blob_cap)
         return 0;
@@ -318,9 +301,18 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     if (!s || !s->cur_func)
         return 0;
 
-    if (!direct_mode_enabled(s)) {
-        maybe_warn_direct_mode_fallback(s);
+    if (s->cfg.mode != SESSION_MODE_DIRECT)
         return 0;
+    if (!direct_mode_enabled(s)) {
+        const char *mode_name = (s && s->jit) ?
+            lr_compile_mode_name(s->jit->mode) : "unknown";
+        const char *target_name = (s && s->jit && s->jit->target &&
+                                   s->jit->target->name) ?
+            s->jit->target->name : "unknown";
+        err_set(err, S_ERR_MODE,
+                "DIRECT policy unsupported for target=%s mode=%s",
+                target_name, mode_name ? mode_name : "unknown");
+        return -1;
     }
 
     /* Initialize the obj_ctx for relocation capture on first function */
@@ -1315,17 +1307,10 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             resolved_call_ops[0].type = s->module->type_ptr;
             resolved_call_ops[0].global_offset = 0;
             normalized.operands = resolved_call_ops;
-        } else if (s->emitted_count == 0) {
-            /* Fall back before streaming emits so unresolved calls can use normal IR/JIT lowering. */
-            if (s->compile_opened_update && s->jit->update_active)
-                lr_jit_end_update(s->jit);
-            s->compile_active = false;
-            s->compile_opened_update = false;
-            s->compile_ctx = NULL;
-            s->module->obj_ctx = NULL;
         } else {
             err_set(err, S_ERR_BACKEND,
-                    "direct call target unresolved after streaming began");
+                    "direct call target unresolved: %s",
+                    callee_name ? callee_name : "(unknown)");
             return 0;
         }
     }

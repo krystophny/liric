@@ -287,16 +287,13 @@ int test_session_stream_isel_fast_path(void) {
 #endif
 }
 
-int test_session_direct_llvm_mode_ir_fallback_contract(void) {
+int test_session_direct_llvm_mode_hard_fail_contract(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err = {0};
     const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
-    lr_module_t *m = NULL;
-    lr_func_t *f = NULL;
     lr_session_t *s = NULL;
     lr_type_t *i32 = NULL;
     int rc = -1;
-    void *addr = NULL;
     int result = 1;
     char prev_mode_buf[64] = {0};
 
@@ -317,72 +314,20 @@ int test_session_direct_llvm_mode_ir_fallback_contract(void) {
         goto cleanup;
     }
 
-    rc = lr_session_func_begin(s, "session_direct_llvm_fallback", i32, NULL, 0, false, &err);
-    if (rc != 0) {
-        fprintf(stderr, "  FAIL: func begin (%s) (line %d)\n", err.msg, __LINE__);
+    rc = lr_session_func_begin(s, "session_direct_llvm_hard_fail", i32, NULL, 0, false, &err);
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: func begin fails in DIRECT+llvm mode (line %d)\n", __LINE__);
         goto cleanup;
     }
-
-    rc = lr_session_set_block(s, lr_session_block(s), &err);
-    if (rc != 0) {
-        fprintf(stderr, "  FAIL: set block (%s) (line %d)\n", err.msg, __LINE__);
+    if (err.code != LR_ERR_MODE) {
+        fprintf(stderr, "  FAIL: error code is LR_ERR_MODE (line %d)\n", __LINE__);
         goto cleanup;
     }
-    lr_emit_ret(s, LR_IMM(42, i32));
-
-    m = lr_session_module(s);
-    if (!m) {
-        fprintf(stderr, "  FAIL: module available (line %d)\n", __LINE__);
-        goto cleanup;
-    }
-    f = find_func_by_name(m, "session_direct_llvm_fallback");
-    if (!f) {
-        fprintf(stderr, "  FAIL: function exists in module (line %d)\n", __LINE__);
-        goto cleanup;
-    }
-    if (!f->first_block) {
-        fprintf(stderr, "  FAIL: function block exists (line %d)\n", __LINE__);
-        goto cleanup;
-    }
-    if (!f->first_block->first) {
-        fprintf(stderr,
-                "  FAIL: llvm mode disables direct streaming and records IR (line %d)\n",
+    if (!strstr(err.msg, "DIRECT policy unsupported")) {
+        fprintf(stderr, "  FAIL: error mentions DIRECT policy unsupported (line %d)\n",
                 __LINE__);
         goto cleanup;
     }
-
-    rc = lr_session_func_end(s, &addr, &err);
-#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
-    if (lr_llvm_jit_is_available()) {
-        typedef int (*fn_t)(void);
-        fn_t fn;
-        if (rc != 0) {
-            fprintf(stderr,
-                    "  FAIL: func end succeeds with llvm jit available (%s) (line %d)\n",
-                    err.msg, __LINE__);
-            goto cleanup;
-        }
-        if (!addr) {
-            fprintf(stderr, "  FAIL: compiled function address (line %d)\n", __LINE__);
-            goto cleanup;
-        }
-        fn_ptr_cast(&fn, addr);
-        if (fn() != 42) {
-            fprintf(stderr, "  FAIL: session_direct_llvm_fallback() == 42 (line %d)\n", __LINE__);
-            goto cleanup;
-        }
-    } else {
-        if (rc == 0) {
-            fprintf(stderr, "  FAIL: func end fails without llvm jit api (line %d)\n", __LINE__);
-            goto cleanup;
-        }
-    }
-#else
-    if (rc == 0) {
-        fprintf(stderr, "  FAIL: func end fails when llvm backend disabled (line %d)\n", __LINE__);
-        goto cleanup;
-    }
-#endif
 
     result = 0;
 

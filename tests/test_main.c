@@ -216,7 +216,7 @@ int test_session_add_args(void);
 int test_session_arithmetic_chain(void);
 int test_session_stream_stencil_fast_path(void);
 int test_session_stream_isel_fast_path(void);
-int test_session_direct_llvm_mode_ir_fallback_contract(void);
+int test_session_direct_llvm_mode_hard_fail_contract(void);
 int test_session_stream_stencil_unsupported_fallback(void);
 int test_session_add_phi_copy_api(void);
 int test_session_icmp_branch(void);
@@ -502,7 +502,7 @@ int main(void) {
     RUN_TEST(test_session_arithmetic_chain);
     RUN_TEST(test_session_stream_stencil_fast_path);
     RUN_TEST(test_session_stream_isel_fast_path);
-    RUN_TEST(test_session_direct_llvm_mode_ir_fallback_contract);
+    RUN_TEST(test_session_direct_llvm_mode_hard_fail_contract);
     RUN_TEST(test_session_stream_stencil_unsupported_fallback);
     RUN_TEST(test_session_add_phi_copy_api);
     RUN_TEST(test_session_icmp_branch);

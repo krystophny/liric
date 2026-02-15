@@ -139,6 +139,7 @@ add_library(liric STATIC
     src/target_riscv64.c
     src/jit.c
     src/liric.c
+    src/compiler.c
     src/liric_compat.c
     src/stencil_data.c
     src/stencil_runtime.c

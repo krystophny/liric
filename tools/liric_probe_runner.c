@@ -1,7 +1,4 @@
-#include "../src/ir.h"
-#include "../src/jit.h"
-#include "../src/liric.h"
-
+#include <liric/liric.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -87,6 +84,25 @@ static void free_file(file_buf_t *f) {
     }
 }
 
+static int backend_from_env(lr_backend_t *out_backend) {
+    const char *mode = getenv("LIRIC_COMPILE_MODE");
+    if (!out_backend)
+        return -1;
+    if (!mode || !mode[0] || strcmp(mode, "isel") == 0) {
+        *out_backend = LR_BACKEND_ISEL;
+        return 0;
+    }
+    if (strcmp(mode, "copy_patch") == 0 || strcmp(mode, "stencil") == 0) {
+        *out_backend = LR_BACKEND_COPY_PATCH;
+        return 0;
+    }
+    if (strcmp(mode, "llvm") == 0) {
+        *out_backend = LR_BACKEND_LLVM;
+        return 0;
+    }
+    return -1;
+}
+
 static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     char argv0[] = "liric";
     char *host_argv[] = {argv0, NULL};
@@ -95,7 +111,7 @@ static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     if (strcmp(sig, "i32") == 0) {
         int32_t (*fn)(void) = NULL;
         int32_t ret = 0;
-        lr_jit_fn_to_ptr(&fn, sym);
+        memcpy(&fn, &sym, sizeof(sym));
         if (!fn) return 3;
         ret = fn();
         return ignore_retcode ? 0 : (int)(ret & 0xff);
@@ -104,7 +120,7 @@ static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     if (strcmp(sig, "i64") == 0) {
         int64_t (*fn)(void) = NULL;
         int64_t ret = 0;
-        lr_jit_fn_to_ptr(&fn, sym);
+        memcpy(&fn, &sym, sizeof(sym));
         if (!fn) return 3;
         ret = fn();
         return ignore_retcode ? 0 : (int)(ret & 0xff);
@@ -112,7 +128,7 @@ static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
 
     if (strcmp(sig, "void") == 0) {
         void (*fn)(void) = NULL;
-        lr_jit_fn_to_ptr(&fn, sym);
+        memcpy(&fn, &sym, sizeof(sym));
         if (!fn) return 3;
         fn();
         return 0;
@@ -121,7 +137,7 @@ static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     if (strcmp(sig, "i32_argc_argv") == 0) {
         int32_t (*fn)(int, char **) = NULL;
         int32_t ret = 0;
-        lr_jit_fn_to_ptr(&fn, sym);
+        memcpy(&fn, &sym, sizeof(sym));
         if (!fn) return 3;
         ret = fn(host_argc, host_argv);
         return ignore_retcode ? 0 : (int)(ret & 0xff);
@@ -130,7 +146,7 @@ static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     if (strcmp(sig, "i64_argc_argv") == 0) {
         int64_t (*fn)(int, char **) = NULL;
         int64_t ret = 0;
-        lr_jit_fn_to_ptr(&fn, sym);
+        memcpy(&fn, &sym, sizeof(sym));
         if (!fn) return 3;
         ret = fn(host_argc, host_argv);
         return ignore_retcode ? 0 : (int)(ret & 0xff);
@@ -138,7 +154,7 @@ static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
 
     if (strcmp(sig, "void_argc_argv") == 0) {
         void (*fn)(int, char **) = NULL;
-        lr_jit_fn_to_ptr(&fn, sym);
+        memcpy(&fn, &sym, sizeof(sym));
         if (!fn) return 3;
         fn(host_argc, host_argv);
         return 0;
@@ -257,11 +273,11 @@ int main(int argc, char **argv) {
     }
     if (timing) t_read_end = now_us();
 
-    if (timing) t_parse_start = now_us();
-    char err[512] = {0};
-    lr_module_t *m = lr_parse_ll(src.data, src.len, err, sizeof(err));
-    if (!m) {
-        if (timing) t_parse_end = now_us();
+    lr_backend_t backend = LR_BACKEND_ISEL;
+    lr_compiler_config_t cfg = {0};
+    lr_compiler_error_t cerr = {0};
+    lr_compiler_t *compiler = NULL;
+    if (backend_from_env(&backend) != 0) {
         print_timing_line(timing, t_read_start, t_read_end,
                           t_parse_start, t_parse_end,
                           t_jit_create_start, t_jit_create_end,
@@ -269,17 +285,20 @@ int main(int argc, char **argv) {
                           t_compile_start, t_compile_end,
                           t_lookup_start, t_lookup_end,
                           t_exec_start, t_exec_end);
-        fprintf(stderr, "parse error: %s\n", err);
+        fprintf(stderr, "invalid LIRIC_COMPILE_MODE value\n");
         if (have_runtime_bc)
             free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
-    if (timing) t_parse_end = now_us();
+
+    cfg.policy = LR_POLICY_DIRECT;
+    cfg.backend = backend;
+    cfg.target = NULL;
 
     if (timing) t_jit_create_start = now_us();
-    lr_jit_t *jit = lr_jit_create();
-    if (!jit) {
+    compiler = lr_compiler_create(&cfg, &cerr);
+    if (!compiler) {
         if (timing) t_jit_create_end = now_us();
         print_timing_line(timing, t_read_start, t_read_end,
                           t_parse_start, t_parse_end,
@@ -288,8 +307,8 @@ int main(int argc, char **argv) {
                           t_compile_start, t_compile_end,
                           t_lookup_start, t_lookup_end,
                           t_exec_start, t_exec_end);
-        fprintf(stderr, "failed to create JIT\n");
-        lr_module_free(m);
+        fprintf(stderr, "compiler create failed: %s\n",
+                cerr.msg[0] ? cerr.msg : "unknown error");
         if (have_runtime_bc)
             free_file(&runtime_bc);
         free_file(&src);
@@ -300,12 +319,27 @@ int main(int argc, char **argv) {
     if (have_runtime_bc) {
         if (!getenv("LIRIC_JIT_LAZY"))
             setenv("LIRIC_JIT_LAZY", "1", 0);
-        lr_jit_set_runtime_bc(jit, (const uint8_t *)runtime_bc.data, runtime_bc.len);
+        if (lr_compiler_set_runtime_bc(compiler, (const uint8_t *)runtime_bc.data,
+                                       runtime_bc.len, &cerr) != 0) {
+            print_timing_line(timing, t_read_start, t_read_end,
+                              t_parse_start, t_parse_end,
+                              t_jit_create_start, t_jit_create_end,
+                              t_load_lib_start, t_load_lib_end,
+                              t_compile_start, t_compile_end,
+                              t_lookup_start, t_lookup_end,
+                              t_exec_start, t_exec_end);
+            fprintf(stderr, "failed to set runtime bc: %s\n",
+                    cerr.msg[0] ? cerr.msg : "unknown error");
+            lr_compiler_destroy(compiler);
+            free_file(&runtime_bc);
+            free_file(&src);
+            return 1;
+        }
     }
 
     if (timing) t_load_lib_start = now_us();
     for (int i = 0; i < num_load_libs; i++) {
-        if (lr_jit_load_library(jit, load_libs[i]) != 0) {
+        if (lr_compiler_load_library(compiler, load_libs[i], &cerr) != 0) {
             if (timing) t_load_lib_end = now_us();
             print_timing_line(timing, t_read_start, t_read_end,
                               t_parse_start, t_parse_end,
@@ -314,9 +348,9 @@ int main(int argc, char **argv) {
                               t_compile_start, t_compile_end,
                               t_lookup_start, t_lookup_end,
                               t_exec_start, t_exec_end);
-            fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
-            lr_jit_destroy(jit);
-            lr_module_free(m);
+            fprintf(stderr, "failed to load library '%s': %s\n", load_libs[i],
+                    cerr.msg[0] ? cerr.msg : "unknown error");
+            lr_compiler_destroy(compiler);
             if (have_runtime_bc)
                 free_file(&runtime_bc);
             free_file(&src);
@@ -325,10 +359,9 @@ int main(int argc, char **argv) {
     }
     if (timing) t_load_lib_end = now_us();
 
-    if (timing) t_compile_start = now_us();
-    int rc = lr_jit_add_module(jit, m);
-    if (rc != 0) {
-        if (timing) t_compile_end = now_us();
+    if (timing) t_parse_start = now_us();
+    if (lr_compiler_feed_auto(compiler, (const uint8_t *)src.data, src.len, &cerr) != 0) {
+        if (timing) t_parse_end = now_us();
         print_timing_line(timing, t_read_start, t_read_end,
                           t_parse_start, t_parse_end,
                           t_jit_create_start, t_jit_create_end,
@@ -336,18 +369,22 @@ int main(int argc, char **argv) {
                           t_compile_start, t_compile_end,
                           t_lookup_start, t_lookup_end,
                           t_exec_start, t_exec_end);
-        fprintf(stderr, "JIT compilation failed\n");
-        lr_jit_destroy(jit);
-        lr_module_free(m);
+        fprintf(stderr, "streaming compile failed: %s\n",
+                cerr.msg[0] ? cerr.msg : "unknown error");
+        lr_compiler_destroy(compiler);
         if (have_runtime_bc)
             free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
-    if (timing) t_compile_end = now_us();
+    if (timing) t_parse_end = now_us();
+    if (timing) {
+        t_compile_start = t_parse_end;
+        t_compile_end = t_parse_end;
+    }
 
     if (timing) t_lookup_start = now_us();
-    void *sym = lr_jit_get_function(jit, func_name);
+    void *sym = lr_compiler_lookup(compiler, func_name);
     if (timing) t_lookup_end = now_us();
     if (!sym) {
         print_timing_line(timing, t_read_start, t_read_end,
@@ -358,8 +395,7 @@ int main(int argc, char **argv) {
                           t_lookup_start, t_lookup_end,
                           t_exec_start, t_exec_end);
         fprintf(stderr, "function '%s' not found\n", func_name);
-        lr_jit_destroy(jit);
-        lr_module_free(m);
+        lr_compiler_destroy(compiler);
         if (have_runtime_bc)
             free_file(&runtime_bc);
         free_file(&src);
@@ -381,8 +417,7 @@ int main(int argc, char **argv) {
                       t_lookup_start, t_lookup_end,
                       t_exec_start, t_exec_end);
 
-    lr_jit_destroy(jit);
-    lr_module_free(m);
+    lr_compiler_destroy(compiler);
     if (have_runtime_bc)
         free_file(&runtime_bc);
     free_file(&src);
