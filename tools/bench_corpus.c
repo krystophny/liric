@@ -46,6 +46,7 @@ typedef struct {
 typedef struct {
     const char *probe_runner;
     const char *runtime_bc;
+    const char *runtime_lib;
     const char *lfortran_src;
     const char *corpus_tsv;
     const char *cache_dir;
@@ -232,6 +233,7 @@ static int load_corpus(const char *tsv_path, const char *cache_dir,
 }
 
 static int run_timed(const char *probe_runner, const char *runtime_bc,
+                     const char *runtime_lib,
                      const char *ll_path, timing_result_t *result,
                      int timeout_sec) {
     int stderr_pipe[2];
@@ -247,12 +249,23 @@ static int run_timed(const char *probe_runner, const char *runtime_bc,
         dup2(stderr_pipe[1], STDERR_FILENO);
         close(stderr_pipe[1]);
 
-        const char *args[] = {
-            probe_runner, "--timing", "--ignore-retcode",
-            "--runtime-bc", runtime_bc,
-            "--func", "main", "--sig", "i32_argc_argv",
-            ll_path, NULL
-        };
+        const char *args[16];
+        int ai = 0;
+        args[ai++] = probe_runner;
+        args[ai++] = "--timing";
+        args[ai++] = "--ignore-retcode";
+        args[ai++] = "--runtime-bc";
+        args[ai++] = runtime_bc;
+        if (runtime_lib && runtime_lib[0]) {
+            args[ai++] = "--load-lib";
+            args[ai++] = runtime_lib;
+        }
+        args[ai++] = "--func";
+        args[ai++] = "main";
+        args[ai++] = "--sig";
+        args[ai++] = "i32_argc_argv";
+        args[ai++] = ll_path;
+        args[ai++] = NULL;
         execvp(args[0], (char *const *)args);
         _exit(127);
     }
@@ -318,8 +331,13 @@ static int cmp_by_compile(const void *a, const void *b) {
 }
 
 static void set_default_cfg(bench_cfg_t *cfg) {
+    const char *default_runtime_dylib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+    const char *default_runtime_so = "../lfortran/build/src/runtime/liblfortran_runtime.so";
     cfg->probe_runner = "./build/liric_probe_runner";
     cfg->runtime_bc = "/tmp/liric_bench/runtime/lfortran_intrinsics.bc";
+    cfg->runtime_lib = file_exists(default_runtime_dylib)
+        ? default_runtime_dylib
+        : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
     cfg->lfortran_src = "../lfortran";
     cfg->corpus_tsv = "tools/corpus_100.tsv";
     cfg->cache_dir = "/tmp/liric_lfortran_mass/cache";
@@ -358,6 +376,8 @@ int main(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
             cfg.runtime_bc = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
+            cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
             cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
@@ -373,6 +393,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: bench_corpus [--top N] [--csv] [--single NAME] [--iters N]\n");
             printf("                   [--probe-runner PATH] [--runtime-bc PATH]\n");
+            printf("                   [--runtime-lib PATH]\n");
             printf("                   [--lfortran-src PATH] [--corpus PATH] [--cache-dir PATH]\n");
             printf("                   [--timeout SEC] [--allow-empty]\n");
             return 0;
@@ -416,7 +437,8 @@ int main(int argc, char **argv) {
     }
 found:
 
-    fprintf(stderr, "Corpus: %d tests, runtime-bc: %s\n", n, cfg.runtime_bc);
+    fprintf(stderr, "Corpus: %d tests, runtime-bc: %s, runtime-lib: %s\n",
+            n, cfg.runtime_bc, cfg.runtime_lib ? cfg.runtime_lib : "(none)");
     fprintf(stderr, "Iterations: %d\n\n", iters);
 
     timing_result_t results[MAX_TESTS];
@@ -434,7 +456,8 @@ found:
                 fflush(stderr);
             }
 
-            run_timed(cfg.probe_runner, cfg.runtime_bc, entries[i].ll_path, &r,
+            run_timed(cfg.probe_runner, cfg.runtime_bc, cfg.runtime_lib,
+                      entries[i].ll_path, &r,
                       cfg.timeout_sec);
 
             if (r.ok) {
