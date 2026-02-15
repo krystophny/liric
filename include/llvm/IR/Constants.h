@@ -7,7 +7,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/ArrayRef.h"
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include <string>
 #include <vector>
 

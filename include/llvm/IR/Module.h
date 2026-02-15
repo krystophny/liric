@@ -1,7 +1,7 @@
 #ifndef LLVM_IR_MODULE_H
 #define LLVM_IR_MODULE_H
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/DerivedTypes.h"

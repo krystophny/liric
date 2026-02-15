@@ -1,7 +1,7 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_LLJIT_H
 #define LLVM_EXECUTIONENGINE_ORC_LLJIT_H
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include <llvm-c/LiricSession.h>
 #include "llvm/ADT/StringRef.h"
 #include <string>

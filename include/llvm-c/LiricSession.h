@@ -1,7 +1,7 @@
 #ifndef LLVM_C_LIRICSESSION_H
 #define LLVM_C_LIRICSESSION_H
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 
 #ifdef __cplusplus
 extern "C" {
