@@ -9,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
 
 /* ---- Compat types (must match the public header exactly) ---- */
 
@@ -31,7 +32,7 @@ typedef struct lc_value {
         struct { uint32_t id; lr_func_t *func; void *phi_node; lr_type_t *alloc_type; } vreg;
         struct { int64_t val; unsigned width; } const_int;
         struct { double val; bool is_double; } const_fp;
-        struct { uint32_t id; const char *name; lr_func_t *func; } global;
+        struct { uint32_t id; const char *name; lr_func_t *func; int64_t offset; } global;
         struct { uint32_t param_idx; lr_func_t *func; } argument;
         struct { lr_block_t *block; lr_func_t *func; } block;
         struct { const void *data; size_t size; } aggregate;
@@ -412,6 +413,7 @@ lr_operand_desc_t lc_value_to_desc(lc_value_t *val) {
     case LC_VAL_GLOBAL:
         d.kind = LR_OP_KIND_GLOBAL;
         d.global_id = val->global.id;
+        d.global_offset = val->global.offset;
         break;
     case LC_VAL_ARGUMENT:
         if (val->argument.func && val->argument.func->param_vregs
@@ -474,12 +476,17 @@ static lr_operand_t compat_desc_to_operand(const lr_operand_desc_t *d) {
 
 static int compat_finish_active_func(lc_module_compat_t *mod) {
     lr_error_t err;
+    int rc;
     if (!mod || !mod->session)
         return -1;
     if (!lr_session_cur_func(mod->session))
         return 0;
     memset(&err, 0, sizeof(err));
-    return lr_session_func_end(mod->session, NULL, &err);
+    rc = lr_session_func_end(mod->session, NULL, &err);
+    if (rc != 0 && err.msg[0]) {
+        fprintf(stderr, "liric compat finalize failed: %s\n", err.msg);
+    }
+    return rc;
 }
 
 static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
@@ -735,6 +742,27 @@ lc_value_t *lc_value_global(lc_module_compat_t *mod, uint32_t id,
     v->type = type;
     v->global.id = id;
     v->global.name = name;
+    v->global.func = NULL;
+    v->global.offset = 0;
+    return v;
+}
+
+lc_value_t *lc_value_global_with_addend(lc_module_compat_t *mod,
+                                         lc_value_t *base,
+                                         int64_t addend) {
+    lc_value_t *v;
+    int64_t combined;
+    if (!mod || !base || base->kind != LC_VAL_GLOBAL)
+        return safe_undef(mod);
+    if ((addend > 0 && base->global.offset > INT64_MAX - addend) ||
+        (addend < 0 && base->global.offset < INT64_MIN - addend))
+        return safe_undef(mod);
+    combined = base->global.offset + addend;
+    v = lc_value_global(mod, base->global.id, base->type, base->global.name);
+    if (!v)
+        return safe_undef(mod);
+    v->global.func = base->global.func;
+    v->global.offset = combined;
     return v;
 }
 
@@ -922,11 +950,32 @@ bool lc_type_struct_has_name(lr_type_t *ty) {
     return ty->struc.name != NULL;
 }
 
+static lc_value_t *create_func_value(lc_module_compat_t *mod,
+                                      lr_func_t *func);
+
 lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
                                         const char *name, lr_type_t *type) {
     if (!mod || !name) return safe_undef(mod);
     lr_module_t *m = mod->mod;
     uint32_t sym_id = UINT32_MAX;
+
+    if (type && type->kind == LR_TYPE_FUNC) {
+        lr_func_t *f = lookup_func_cached(mod, name, &sym_id);
+        if (!f) {
+            lr_type_t *ret = type->func.ret ? type->func.ret : m->type_void;
+            f = lr_func_declare(m, name, ret, type->func.params,
+                                type->func.num_params, type->func.vararg);
+            if (!f)
+                return safe_undef(mod);
+            if (sym_id == UINT32_MAX)
+                sym_id = compat_symbol_id(mod, name);
+            if (sym_id == UINT32_MAX)
+                return safe_undef(mod);
+            cache_func_by_symbol(mod, sym_id, f);
+        }
+        return create_func_value(mod, f);
+    }
+
     lr_global_t *g = lookup_global_cached(mod, name, &sym_id);
     if (!g) {
         if (sym_id == UINT32_MAX)
@@ -1150,13 +1199,29 @@ lc_value_t *lc_const_struct_from_values(lc_module_compat_t *mod,
     for (uint32_t i = 0; i < n; i++) {
         lr_type_t *field_ty = struct_ty->struc.fields[i];
         lc_value_t *elem = values ? values[i] : NULL;
-        if (!elem || !field_ty || field_ty->kind != LR_TYPE_PTR)
+        size_t off = lr_struct_field_offset(struct_ty, i);
+        if (!elem || !field_ty)
             continue;
-        if (elem->kind == LC_VAL_GLOBAL && elem->global.name) {
-            size_t off = lr_struct_field_offset(struct_ty, i);
+
+        if (field_ty->kind == LR_TYPE_PTR &&
+            elem->kind == LC_VAL_GLOBAL && elem->global.name) {
             if (lc_value_const_aggregate_add_reloc(mod, agg, off,
-                                                   elem->global.name, 0) != 0)
+                                                   elem->global.name,
+                                                   elem->global.offset) != 0)
                 return NULL;
+        }
+
+        if (elem->kind == LC_VAL_CONST_AGGREGATE) {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, elem);
+            if (!meta)
+                continue;
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                if (!cr->symbol_name)
+                    continue;
+                if (lc_value_const_aggregate_add_reloc(mod, agg,
+                        off + cr->offset, cr->symbol_name, cr->addend) != 0)
+                    return NULL;
+            }
         }
     }
     return agg;
@@ -1203,6 +1268,25 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
     if (!agg)
         return NULL;
 
+    for (uint64_t i = 0; i < n; i++) {
+        lc_value_t *elem = values ? values[i] : NULL;
+        size_t off = (size_t)i * elem_sz;
+        if (!elem)
+            continue;
+        if (elem->kind == LC_VAL_CONST_AGGREGATE) {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, elem);
+            if (!meta)
+                continue;
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                if (!cr->symbol_name)
+                    continue;
+                if (lc_value_const_aggregate_add_reloc(mod, agg,
+                        off + cr->offset, cr->symbol_name, cr->addend) != 0)
+                    return NULL;
+            }
+        }
+    }
+
     if (elem_ty && elem_ty->kind == LR_TYPE_PTR) {
         for (uint64_t i = 0; i < n; i++) {
             lc_value_t *elem = values ? values[i] : NULL;
@@ -1210,12 +1294,50 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
                 continue;
             size_t off = (size_t)i * elem_sz;
             if (lc_value_const_aggregate_add_reloc(mod, agg, off,
-                                                   elem->global.name, 0) != 0)
+                                                   elem->global.name,
+                                                   elem->global.offset) != 0)
                 return NULL;
         }
     }
 
     return agg;
+}
+
+int lc_const_gep_compute_offset(lr_type_t *base_type,
+                                 lc_value_t **indices,
+                                 uint32_t num_indices,
+                                 int64_t *out_offset) {
+    int64_t total = 0;
+    const lr_type_t *cur_ty = base_type;
+    if (!base_type || !out_offset)
+        return -1;
+
+    for (uint32_t i = 0; i < num_indices; i++) {
+        lc_value_t *idx = indices ? indices[i] : NULL;
+        lr_operand_desc_t d = lc_value_to_desc(idx);
+        lr_operand_t op;
+        lr_gep_step_t step;
+
+        if (d.kind != LR_OP_KIND_IMM_I64)
+            return -1;
+        op = compat_desc_to_operand(&d);
+        if (!lr_gep_analyze_step(cur_ty, i == 0, &op, &step))
+            return -1;
+        if (!step.is_const)
+            return -1;
+
+        if ((step.const_byte_offset > 0 &&
+             total > INT64_MAX - step.const_byte_offset) ||
+            (step.const_byte_offset < 0 &&
+             total < INT64_MIN - step.const_byte_offset)) {
+            return -1;
+        }
+        total += step.const_byte_offset;
+        cur_ty = step.next_type;
+    }
+
+    *out_offset = total;
+    return 0;
 }
 
 /* ---- Function ---- */
@@ -1254,6 +1376,11 @@ lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
 lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
                              lr_type_t *func_type) {
     if (!mod) return safe_undef(NULL);
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing)
+            return create_func_value(mod, existing);
+    }
     lr_type_t *ret = mod->mod->type_void;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
@@ -1589,7 +1716,8 @@ int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
         break;
     case LC_VAL_GLOBAL:
         if (!init_val->global.name ||
-            global_add_reloc(mod, g, 0, init_val->global.name, 0) != 0)
+            global_add_reloc(mod, g, 0, init_val->global.name,
+                             init_val->global.offset) != 0)
             return -1;
         break;
     default:

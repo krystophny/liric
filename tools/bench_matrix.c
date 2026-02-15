@@ -480,6 +480,10 @@ static int parse_lanes(cfg_t *cfg, const char *text) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
+    const char *default_runtime_dylib =
+        "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+    const char *default_runtime_so =
+        "../lfortran/build/src/runtime/liblfortran_runtime.so";
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.bench_dir = "/tmp/liric_bench";
@@ -496,6 +500,11 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_tcc = NULL;
     cfg.probe_runner = NULL;
     cfg.lli_phases = NULL;
+    cfg.runtime_lib = file_exists(default_runtime_dylib)
+                          ? default_runtime_dylib
+                          : (file_exists(default_runtime_so)
+                                 ? default_runtime_so
+                                 : NULL);
 
     set_all_modes(&cfg, 1);
     set_all_lanes(&cfg, 1);
@@ -983,6 +992,10 @@ int main(int argc, char **argv) {
                 if (cfg.test_dir) {
                     cmd[n++] = "--test-dir";
                     cmd[n++] = (char *)cfg.test_dir;
+                }
+                if (cfg.runtime_lib) {
+                    cmd[n++] = "--runtime-lib";
+                    cmd[n++] = (char *)cfg.runtime_lib;
                 }
                 cmd[n++] = NULL;
 

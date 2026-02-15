@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class Module;
@@ -313,14 +317,15 @@ public:
     static Constant *getGetElementPtr(Type *Ty, Constant *C,
                                       ArrayRef<Constant *> IdxList,
                                       bool InBounds = false) {
-        (void)Ty; (void)IdxList; (void)InBounds;
-        return C;
+        (void)InBounds;
+        return gepFromConstantIndices(Ty, C, IdxList);
     }
     static Constant *getGetElementPtr(Type *Ty, Constant *C,
                                       Constant *Idx,
                                       bool InBounds = false) {
-        (void)Ty; (void)Idx; (void)InBounds;
-        return C;
+        (void)InBounds;
+        Constant *arr[1] = { Idx };
+        return gepFromConstantIndices(Ty, C, ArrayRef<Constant *>(arr, 1));
     }
 
     static Constant *getCast(unsigned Op, Constant *C, Type *Ty) {
@@ -330,14 +335,52 @@ public:
 
     static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
                                               ArrayRef<Constant *> IdxList) {
-        (void)Ty; (void)IdxList;
-        return C;
+        return gepFromConstantIndices(Ty, C, IdxList);
     }
 
     static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
                                               ArrayRef<Value *> IdxList) {
-        (void)Ty; (void)IdxList;
-        return C;
+        std::vector<Constant *> const_idx;
+        const_idx.reserve(IdxList.size());
+        for (Value *v : IdxList) {
+            if (!v || !v->impl() || v->impl()->kind != LC_VAL_CONST_INT)
+                return C;
+            const_idx.push_back(static_cast<Constant *>(v));
+        }
+        return gepFromConstantIndices(Ty, C,
+                                      ArrayRef<Constant *>(const_idx.data(),
+                                                           const_idx.size()));
+    }
+
+private:
+    static Constant *gepFromConstantIndices(Type *Ty, Constant *C,
+                                            ArrayRef<Constant *> IdxList) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        lc_value_t *base;
+        std::vector<lc_value_t *> idx_vals;
+        int64_t addend = 0;
+
+        if (!Ty || !Ty->impl() || !C || !mod || !C->impl())
+            return C;
+        base = C->impl();
+        if (base->kind != LC_VAL_GLOBAL)
+            return C;
+
+        idx_vals.reserve(IdxList.size());
+        for (Constant *idx : IdxList) {
+            if (!idx || !idx->impl() || idx->impl()->kind != LC_VAL_CONST_INT)
+                return C;
+            idx_vals.push_back(idx->impl());
+        }
+
+        if (lc_const_gep_compute_offset(Ty->impl(),
+                idx_vals.empty() ? nullptr : idx_vals.data(),
+                static_cast<uint32_t>(idx_vals.size()),
+                &addend) != 0) {
+            return C;
+        }
+        return static_cast<Constant *>(Value::wrap(
+            lc_value_global_with_addend(mod, base, addend)));
     }
 };
 
@@ -350,5 +393,9 @@ public:
 };
 
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

@@ -114,6 +114,8 @@ Liric intentionally does not export the exact LLVM C API symbol names. The shim 
 
 If an integration chooses to use real LLVM C API names, it must choose one implementation at link time (typically via build flags/ifdefs) and avoid linking both implementations into the same process.
 
+For LLVM-compat JIT sessions that need external runtime symbols, set `LIRIC_RUNTIME_LIB=/path/to/liblfortran_runtime.so` (or pass `--runtime-lib` in benchmark tools).
+
 ## Platform Support
 
 | Platform | JIT | Obj | Exe | Intrinsic blobs |
@@ -161,7 +163,8 @@ Validate published README benchmark artifacts:
 # lane tools (bench_matrix calls these internally)
 ./build/bench_compat_check --timeout 15   # correctness gate
 ./build/bench_ll --iters 3                # liric JIT vs lli
-./build/bench_api --iters 3               # lfortran LLVM vs lfortran+liric
+./build/bench_api --iters 3 --runtime-lib ../lfortran/build/src/runtime/liblfortran_runtime.so
+                                          # lfortran LLVM vs lfortran+liric
 # prerequisite for bench_corpus: populate /tmp/liric_lfortran_mass/cache
 ./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass
 ./build/bench_corpus --iters 3            # 100-case focused corpus

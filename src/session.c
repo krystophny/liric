@@ -340,9 +340,32 @@ static int init_direct_obj_ctx(struct lr_session *s) {
     return 0;
 }
 
+static bool module_has_defined_symbol_linear(const lr_module_t *m,
+                                             const char *name) {
+    if (!m || !name || !name[0])
+        return false;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || strcmp(f->name, name) != 0)
+            continue;
+        if (f->first_block || !f->is_decl)
+            return true;
+    }
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->name || strcmp(g->name, name) != 0)
+            continue;
+        if (!g->is_external)
+            return true;
+    }
+    return false;
+}
+
 static bool session_is_module_defined_symbol(struct lr_session *s,
                                              const char *name) {
-    if (!s || !s->module || !s->direct_obj_ctx_active || !name || !name[0])
+    if (!s || !s->module || !name || !name[0])
+        return false;
+    if (module_has_defined_symbol_linear(s->module, name))
+        return true;
+    if (!s->direct_obj_ctx_active)
         return false;
     uint32_t sym_id = lr_module_intern_symbol(s->module, name);
     if (sym_id >= s->direct_obj_ctx.module_sym_count)
@@ -708,10 +731,33 @@ static int validate_block_termination(struct lr_session *s,
         return -1;
     }
     for (i = 0; i < s->block_count; i++) {
-        if (!s->block_seen[i] || !s->block_terminated[i]) {
-            err_set(err, S_ERR_STATE, "block %u is not terminated", i);
+        lr_block_t *b = (s->blocks && i < s->block_cap) ? s->blocks[i] : NULL;
+        bool terminated = false;
+
+        if (!b) {
+            err_set(err, S_ERR_STATE, "block %u is missing", i);
             return -1;
         }
+
+        terminated = s->block_seen[i] && s->block_terminated[i];
+        if (!terminated && b->last)
+            terminated = is_terminator(b->last->op);
+
+        if (!terminated) {
+            lr_inst_t *term = lr_inst_create(s->module->arena,
+                                             LR_OP_UNREACHABLE,
+                                             NULL, 0, NULL, 0);
+            if (!term) {
+                err_set(err, S_ERR_BACKEND,
+                        "failed to synthesize terminator for block %u", i);
+                return -1;
+            }
+            lr_block_append(b, term);
+            terminated = true;
+        }
+
+        s->block_seen[i] = true;
+        s->block_terminated[i] = terminated;
     }
     return 0;
 }

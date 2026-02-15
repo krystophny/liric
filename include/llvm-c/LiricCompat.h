@@ -30,7 +30,7 @@ typedef struct lc_value {
         struct { uint32_t id; lr_func_t *func; } vreg;
         struct { int64_t val; unsigned width; } const_int;
         struct { double val; bool is_double; } const_fp;
-        struct { uint32_t id; const char *name; lr_func_t *func; } global;
+        struct { uint32_t id; const char *name; lr_func_t *func; int64_t offset; } global;
         struct { uint32_t param_idx; lr_func_t *func; } argument;
         struct { lr_block_t *block; } block;
         struct { const void *data; size_t size; } aggregate;
@@ -109,6 +109,9 @@ lc_value_t *lc_value_const_null(lc_module_compat_t *mod, lr_type_t *type);
 lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);
 lc_value_t *lc_value_global(lc_module_compat_t *mod, uint32_t id,
                              lr_type_t *type, const char *name);
+lc_value_t *lc_value_global_with_addend(lc_module_compat_t *mod,
+                                         lc_value_t *base,
+                                         int64_t addend);
 lc_value_t *lc_value_argument(lc_module_compat_t *mod, uint32_t param_idx,
                                lr_type_t *type, lr_func_t *func);
 lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block);
@@ -162,6 +165,10 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
                                         lr_type_t *array_ty,
                                         lc_value_t **values,
                                         uint32_t num_values);
+int lc_const_gep_compute_offset(lr_type_t *base_type,
+                                 lc_value_t **indices,
+                                 uint32_t num_indices,
+                                 int64_t *out_offset);
 
 /* ---- Function ---- */
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,

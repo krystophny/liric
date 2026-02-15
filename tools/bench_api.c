@@ -27,6 +27,7 @@ typedef bench_cmd_result_t cmd_result_t;
 typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
+    const char *runtime_lib;
     const char *test_dir;
     const char *bench_dir;
     const char *compat_list;
@@ -248,6 +249,7 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const strlist_t *opt_toks,
                                          const char *extra_opt,
                                          const char *source_path,
+                                         const char *runtime_lib,
                                          int timeout_ms,
                                          const char *work_dir,
                                          int with_time_report) {
@@ -258,6 +260,9 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
     char **argv = (char **)calloc(argc_jit + 1, sizeof(char *));
     size_t k = 0;
     cmd_result_t r;
+    const char *saved_runtime = NULL;
+    char *saved_runtime_copy = NULL;
+    int had_runtime_env = 0;
     if (!argv) die("out of memory", NULL);
 
     argv[k++] = (char *)lfortran_bin;
@@ -271,7 +276,25 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
     argv[k++] = (char *)source_path;
     argv[k] = NULL;
 
+    if (runtime_lib && runtime_lib[0]) {
+        saved_runtime = getenv("LIRIC_RUNTIME_LIB");
+        if (saved_runtime) {
+            had_runtime_env = 1;
+            saved_runtime_copy = xstrdup(saved_runtime);
+        }
+        setenv("LIRIC_RUNTIME_LIB", runtime_lib, 1);
+    }
+
     r = run_cmd(argv, timeout_ms, NULL, work_dir);
+
+    if (runtime_lib && runtime_lib[0]) {
+        if (had_runtime_env)
+            setenv("LIRIC_RUNTIME_LIB", saved_runtime_copy, 1);
+        else
+            unsetenv("LIRIC_RUNTIME_LIB");
+    }
+
+    free(saved_runtime_copy);
     free(argv);
     return r;
 }
@@ -1419,6 +1442,7 @@ static void usage(void) {
     printf("usage: bench_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran)\n");
+    printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
     printf("  --test-dir PATH      path to integration_tests/ dir\n");
     printf("  --bench-dir PATH     output directory (default: /tmp/liric_bench)\n");
     printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
@@ -1441,6 +1465,7 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.lfortran = "../lfortran/build/src/bin/lfortran";
     cfg.lfortran_liric = "../lfortran/build-liric/src/bin/lfortran";
+    cfg.runtime_lib = NULL;
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
@@ -1463,6 +1488,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-liric") == 0 && i + 1 < argc) {
             cfg.lfortran_liric = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
+            cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
@@ -1511,6 +1538,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.lfortran_liric = to_abs_path(cfg.lfortran_liric);
     cfg.test_dir = to_abs_path(cfg.test_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
+    if (cfg.runtime_lib) cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     if (cfg.compat_list) cfg.compat_list = to_abs_path(cfg.compat_list);
     if (cfg.options_jsonl) cfg.options_jsonl = to_abs_path(cfg.options_jsonl);
     if (cfg.fail_log_dir) cfg.fail_log_dir = to_abs_path(cfg.fail_log_dir);
@@ -1590,6 +1618,8 @@ int main(int argc, char **argv) {
     printf("Benchmarking %zu tests, %d iterations each\n", tests.n, cfg.iters);
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
+    if (cfg.runtime_lib)
+        printf("  runtime_lib:   %s\n", cfg.runtime_lib);
     printf("  test_dir:      %s\n", cfg.test_dir);
     printf("  bench_dir:     %s\n", cfg.bench_dir);
     printf("  compat_list:   %s\n", compat_path);
@@ -1709,6 +1739,7 @@ int main(int argc, char **argv) {
                                                   &opt_toks,
                                                   extra_retry_opt,
                                                   source_path,
+                                                  cfg.runtime_lib,
                                                   cfg.timeout_ms,
                                                   attempt_work_dir,
                                                   attempt_with_time_report);
@@ -1723,6 +1754,7 @@ int main(int argc, char **argv) {
                                                    &opt_toks,
                                                    extra_retry_opt,
                                                    source_path,
+                                                   cfg.runtime_lib,
                                                    cfg.timeout_ms,
                                                    attempt_work_dir,
                                                    attempt_with_time_report);
