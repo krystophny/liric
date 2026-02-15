@@ -6,7 +6,7 @@
       "description": "IR corpus lane using bench_corpus_compare (LIRIC vs real LLVM phases)",
       "baseline": "llvm",
       "required": true,
-      "notes": "Expected to cover runtime_equalized track with full attempted==completed in strict mode."
+      "notes": "Expected to cover canonical corpus track with full attempted==completed in strict mode."
     },
     "api_e2e": {
       "description": "LFortran --jit end-to-end lane using bench_api",
