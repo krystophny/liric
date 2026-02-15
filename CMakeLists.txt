@@ -673,7 +673,14 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES
+    include/liric/liric.h
+    include/liric/liric_legacy.h
+    include/liric/liric_compat.h
+    include/liric/liric_ir_shared.h
+    include/liric/liric_types.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
+)
 install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 

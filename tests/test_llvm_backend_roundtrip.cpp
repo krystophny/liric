@@ -5,7 +5,7 @@
 #include <string>
 #include <system_error>
 
-#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <liric/liric_compat.h>
 
 #include <llvm/IR/BasicBlock.h>

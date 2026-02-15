@@ -1,7 +1,7 @@
 #ifndef LIRIC_TYPES_H
 #define LIRIC_TYPES_H
 
-#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <stddef.h>
 
 #ifdef __cplusplus

@@ -1,5 +1,4 @@
 #include "../src/ir.h"
-#include <liric/liric.h>
 #include <liric/liric_session.h>
 #include <stdio.h>
 

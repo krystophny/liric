@@ -8,7 +8,7 @@
 #include "../src/wasm_decode.h"
 #include "../src/wasm_to_ir.h"
 #include <liric/liric.h>
-#include <liric/liric_session.h>
+#include <liric/liric_legacy.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

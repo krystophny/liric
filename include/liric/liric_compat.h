@@ -1,7 +1,7 @@
 #ifndef LIRIC_COMPAT_H
 #define LIRIC_COMPAT_H
 
-#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <liric/liric_types.h>
 #include <stdio.h>
 

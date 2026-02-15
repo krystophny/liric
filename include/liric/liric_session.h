@@ -1,7 +1,7 @@
 #ifndef LIRIC_SESSION_H
 #define LIRIC_SESSION_H
 
-#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

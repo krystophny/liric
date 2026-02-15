@@ -18,7 +18,7 @@
 #include <spawn.h>
 #include <fcntl.h>
 #include <libtcc.h>
-#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 
 #define BENCH_DIR "/tmp/bench_tcc"
 
