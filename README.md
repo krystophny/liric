@@ -155,6 +155,10 @@ Validate published README benchmark artifacts:
 ### Benchmarks
 
 ```bash
+# canonical: all modes + all lanes + strict matrix accounting
+./build/bench_matrix --manifest tools/bench_manifest.json --modes all --lanes all --iters 1
+
+# lane tools (bench_matrix calls these internally)
 ./build/bench_compat_check --timeout 15   # correctness gate
 ./build/bench_ll --iters 3                # liric JIT vs lli
 ./build/bench_api --iters 3               # lfortran LLVM vs lfortran+liric

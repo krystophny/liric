@@ -248,6 +248,9 @@ target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_exe_matrix tools/bench_exe_matrix.c)
 target_link_libraries(bench_exe_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+add_executable(bench_matrix tools/bench_matrix.c)
+target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
+
 option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
 if(WITH_BENCH_TCC)
     find_path(LIRTCC_INCLUDE_DIR libtcc.h)
@@ -526,6 +529,11 @@ add_test(
         -DBENCH_EXE_MATRIX=$<TARGET_FILE:bench_exe_matrix>
         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_exe_matrix_modes.cmake
+)
+
+add_test(
+    NAME bench_matrix_help
+    COMMAND $<TARGET_FILE:bench_matrix> --help
 )
 
 add_test(

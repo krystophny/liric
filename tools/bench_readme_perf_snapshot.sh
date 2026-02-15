@@ -233,6 +233,8 @@ core_liric_total_mat="$(json_number_field "$summary_path" "core_liric_total_mate
 core_llvm_parse="$(json_number_field "$summary_path" "core_llvm_parse_median_ms")"
 core_llvm_compile_mat="$(json_number_field "$summary_path" "core_llvm_compile_materialized_median_ms")"
 core_llvm_total_mat="$(json_number_field "$summary_path" "core_llvm_total_materialized_median_ms")"
+core_speedup_nonparse_median="$(json_number_field "$summary_path" "core_compile_materialized_speedup_median")"
+core_speedup_nonparse_agg="$(json_number_field "$summary_path" "core_compile_materialized_speedup_aggregate")"
 core_speedup_total_median="$(json_number_field "$summary_path" "core_total_materialized_speedup_median")"
 core_speedup_total_agg="$(json_number_field "$summary_path" "core_total_materialized_speedup_aggregate")"
 
@@ -242,6 +244,8 @@ rt_liric_total_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_li
 rt_llvm_parse="$(json_number_field "$summary_path" "runtime_equalized_bc_llvm_parse_median_ms")"
 rt_llvm_compile_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_llvm_compile_materialized_median_ms")"
 rt_llvm_total_mat="$(json_number_field "$summary_path" "runtime_equalized_bc_llvm_total_materialized_median_ms")"
+rt_speedup_nonparse_median="$(json_number_field "$summary_path" "runtime_equalized_bc_compile_materialized_speedup_median")"
+rt_speedup_nonparse_agg="$(json_number_field "$summary_path" "runtime_equalized_bc_compile_materialized_speedup_aggregate")"
 rt_speedup_total_median="$(json_number_field "$summary_path" "runtime_equalized_bc_total_materialized_speedup_median")"
 rt_speedup_total_agg="$(json_number_field "$summary_path" "runtime_equalized_bc_total_materialized_speedup_aggregate")"
 
@@ -277,7 +281,7 @@ table_path="${out_abs}/readme_perf_table.md"
 
 cat > "$snapshot_path" <<EOF_JSON
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "generated_at_utc": "$(json_escape "$generated_at_utc")",
   "benchmark_commit": "$(json_escape "$benchmark_commit")",
   "host": {
@@ -302,6 +306,8 @@ cat > "$snapshot_path" <<EOF_JSON
   "core_llvm_parse_median_ms": ${core_llvm_parse},
   "core_llvm_compile_materialized_median_ms": ${core_llvm_compile_mat},
   "core_llvm_total_materialized_median_ms": ${core_llvm_total_mat},
+  "core_compile_materialized_speedup_median": ${core_speedup_nonparse_median},
+  "core_compile_materialized_speedup_aggregate": ${core_speedup_nonparse_agg},
   "core_total_materialized_speedup_median": ${core_speedup_total_median},
   "core_total_materialized_speedup_aggregate": ${core_speedup_total_agg},
   "runtime_equalized_bc_liric_parse_median_ms": ${rt_liric_parse},
@@ -310,6 +316,8 @@ cat > "$snapshot_path" <<EOF_JSON
   "runtime_equalized_bc_llvm_parse_median_ms": ${rt_llvm_parse},
   "runtime_equalized_bc_llvm_compile_materialized_median_ms": ${rt_llvm_compile_mat},
   "runtime_equalized_bc_llvm_total_materialized_median_ms": ${rt_llvm_total_mat},
+  "runtime_equalized_bc_compile_materialized_speedup_median": ${rt_speedup_nonparse_median},
+  "runtime_equalized_bc_compile_materialized_speedup_aggregate": ${rt_speedup_nonparse_agg},
   "runtime_equalized_bc_total_materialized_speedup_median": ${rt_speedup_total_median},
   "runtime_equalized_bc_total_materialized_speedup_aggregate": ${rt_speedup_total_agg},
   "artifacts": {
@@ -330,7 +338,7 @@ Benchmark commit: ${benchmark_commit}
 Host: ${host_cpu} (${host_kernel})
 Toolchain: ${cc_version}; ${lli_version}
 Dataset: ${dataset_name} (expected ${expected_tests}, attempted ${attempted_tests}, iters ${summary_iters})
-Canonical track: runtime_equalized_bc (${runtime_status}; completed ${runtime_completed}/${expected_tests})
+Canonical track: runtime_equalized (${runtime_status}; completed ${runtime_completed}/${expected_tests})
 
 Artifacts:
 - ${summary_path}
@@ -338,10 +346,12 @@ Artifacts:
 - ${runtime_jsonl}
 - ${snapshot_path}
 
-| Track | Completed | liric parse (ms) | liric compile+lookup (ms) | liric total materialized (ms) | LLVM parse (ms) | LLVM add+lookup (ms) | LLVM total materialized (ms) | Speedup total (median) | Speedup total (aggregate) |
-|-------|----------:|-----------------:|--------------------------:|------------------------------:|----------------:|---------------------:|-----------------------------:|-----------------------:|--------------------------:|
-| core | ${core_completed}/${attempted_tests} | $(fmt_fixed "$core_liric_parse" 3) | $(fmt_fixed "$core_liric_compile_mat" 3) | $(fmt_fixed "$core_liric_total_mat" 3) | $(fmt_fixed "$core_llvm_parse" 3) | $(fmt_fixed "$core_llvm_compile_mat" 3) | $(fmt_fixed "$core_llvm_total_mat" 3) | $(fmt_fixed "$core_speedup_total_median" 2)x | $(fmt_fixed "$core_speedup_total_agg" 2)x |
-| runtime_equalized_bc (canonical) | ${runtime_completed}/${expected_tests} | $(fmt_fixed "$rt_liric_parse" 3) | $(fmt_fixed "$rt_liric_compile_mat" 3) | $(fmt_fixed "$rt_liric_total_mat" 3) | $(fmt_fixed "$rt_llvm_parse" 3) | $(fmt_fixed "$rt_llvm_compile_mat" 3) | $(fmt_fixed "$rt_llvm_total_mat" 3) | $(fmt_fixed "$rt_speedup_total_median" 2)x | $(fmt_fixed "$rt_speedup_total_agg" 2)x |
+Legend: `input_only` excludes runtime-bc parse/merge overhead. `runtime_equalized` includes runtime-bc on both sides.
+
+| Track | Completed | liric parse (ms) | liric compile+lookup (ms) | liric total materialized (ms) | LLVM parse (ms) | LLVM add+lookup (ms) | LLVM total materialized (ms) | Speedup non-parse (median) | Speedup non-parse (aggregate) | Speedup total (median) | Speedup total (aggregate) |
+|-------|----------:|-----------------:|--------------------------:|------------------------------:|----------------:|---------------------:|-----------------------------:|----------------------------:|-------------------------------:|-----------------------:|--------------------------:|
+| input_only | ${core_completed}/${attempted_tests} | $(fmt_fixed "$core_liric_parse" 3) | $(fmt_fixed "$core_liric_compile_mat" 3) | $(fmt_fixed "$core_liric_total_mat" 3) | $(fmt_fixed "$core_llvm_parse" 3) | $(fmt_fixed "$core_llvm_compile_mat" 3) | $(fmt_fixed "$core_llvm_total_mat" 3) | $(fmt_fixed "$core_speedup_nonparse_median" 2)x | $(fmt_fixed "$core_speedup_nonparse_agg" 2)x | $(fmt_fixed "$core_speedup_total_median" 2)x | $(fmt_fixed "$core_speedup_total_agg" 2)x |
+| runtime_equalized (canonical) | ${runtime_completed}/${expected_tests} | $(fmt_fixed "$rt_liric_parse" 3) | $(fmt_fixed "$rt_liric_compile_mat" 3) | $(fmt_fixed "$rt_liric_total_mat" 3) | $(fmt_fixed "$rt_llvm_parse" 3) | $(fmt_fixed "$rt_llvm_compile_mat" 3) | $(fmt_fixed "$rt_llvm_total_mat" 3) | $(fmt_fixed "$rt_speedup_nonparse_median" 2)x | $(fmt_fixed "$rt_speedup_nonparse_agg" 2)x | $(fmt_fixed "$rt_speedup_total_median" 2)x | $(fmt_fixed "$rt_speedup_total_agg" 2)x |
 EOF_MD
 
 echo "Published snapshot: ${snapshot_path}"

@@ -119,7 +119,9 @@ published_table_md="$(json_string_field "$snapshot" "published_table_md")"
 [[ "$generated_at" =~ Z$ ]] || die "generated_at_utc must be UTC (Z suffix): ${generated_at}"
 [[ "$benchmark_commit" =~ ^[0-9a-fA-F]{7,40}$ ]] || die "benchmark_commit is not a git hash: ${benchmark_commit}"
 [[ "$dataset_name" == "corpus_100" ]] || die "dataset_name must be corpus_100 (got ${dataset_name})"
-[[ "$canonical_track" == "runtime_equalized_bc" ]] || die "canonical_track must be runtime_equalized_bc (got ${canonical_track})"
+if [[ "$canonical_track" != "runtime_equalized_bc" && "$canonical_track" != "runtime_equalized" ]]; then
+    die "canonical_track must be runtime_equalized_bc or runtime_equalized (got ${canonical_track})"
+fi
 [[ "$expected_tests" -eq 100 ]] || die "expected_tests must be 100 (got ${expected_tests})"
 [[ "$attempted_tests" -gt 0 ]] || die "attempted_tests must be > 0"
 [[ "$iters" -gt 0 ]] || die "iters must be > 0"
@@ -141,10 +143,12 @@ published_table_md="$(json_string_field "$snapshot" "published_table_md")"
 require_pattern "$table" '^Generated:[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}T' "table missing Generated line"
 require_pattern "$table" '^Benchmark commit:[[:space:]]+[0-9a-fA-F]{7,40}' "table missing benchmark commit line"
 require_pattern "$table" '^Dataset:[[:space:]]+corpus_100' "table missing corpus_100 dataset line"
-require_pattern "$table" '^Canonical track:[[:space:]]+runtime_equalized_bc' "table missing canonical track line"
+require_pattern "$table" '^Canonical track:[[:space:]]+runtime_equalized(_bc)?' "table missing canonical track line"
 require_pattern "$table" '^Artifacts:' "table missing Artifacts section"
-require_pattern "$table" '^\| Track \| Completed \| liric parse \(ms\) \| liric compile\+lookup \(ms\) \| liric total materialized \(ms\) \| LLVM parse \(ms\) \| LLVM add\+lookup \(ms\) \| LLVM total materialized \(ms\) \| Speedup total \(median\) \| Speedup total \(aggregate\) \|' "table missing metric header"
-require_pattern "$table" '^\| runtime_equalized_bc \(canonical\) \|' "table missing canonical track row"
+if ! grep -Eq '^\| Track \| Completed \| liric parse \(ms\) \| liric compile\+lookup \(ms\) \| liric total materialized \(ms\) \| LLVM parse \(ms\) \| LLVM add\+lookup \(ms\) \| LLVM total materialized \(ms\) \| (Speedup non-parse \(median\) \| Speedup non-parse \(aggregate\) \| )?Speedup total \(median\) \| Speedup total \(aggregate\) \|' "$table"; then
+    die "table missing metric header (${table})"
+fi
+require_pattern "$table" '^\| runtime_equalized(_bc)? \(canonical\) \|' "table missing canonical track row"
 
 require_pattern "$readme" 'docs/benchmarks/readme_perf_snapshot\.json' "README missing snapshot artifact path"
 require_pattern "$readme" 'docs/benchmarks/readme_perf_table\.md' "README missing table artifact path"
