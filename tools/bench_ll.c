@@ -692,7 +692,7 @@ int main(int argc, char **argv) {
                 probe_argv[7] = NULL;
 
                 rp = run_cmd(probe_argv, cfg.timeout_sec, NULL, work_dir);
-                if (rp.rc < 0 || !parse_probe_timing(rp.stderr_text, &parse_ms, &compile_ms, &lookup_ms)) {
+                if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &parse_ms, &compile_ms, &lookup_ms)) {
                     skipped = 1;
                     free_cmd_result(&rp);
                     break;
