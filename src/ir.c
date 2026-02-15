@@ -1265,13 +1265,32 @@ static void print_type(const lr_type_t *t, FILE *out) {
     }
 }
 
+static const char *block_name_by_id(const lr_module_t *m, uint32_t block_id) {
+    if (!m)
+        return NULL;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        for (const lr_block_t *b = f->first_block; b; b = b->next) {
+            if (b->id == block_id)
+                return b->name;
+        }
+    }
+    return NULL;
+}
+
 static void print_operand(const lr_operand_t *op, const lr_module_t *m,
                           FILE *out) {
     switch (op->kind) {
     case LR_VAL_VREG:    fprintf(out, "%%v%u", op->vreg); break;
     case LR_VAL_IMM_I64: fprintf(out, "%ld", (long)op->imm_i64); break;
     case LR_VAL_IMM_F64: fprintf(out, "%g", op->imm_f64); break;
-    case LR_VAL_BLOCK:   fprintf(out, "label %%bb%u", op->block_id); break;
+    case LR_VAL_BLOCK: {
+        const char *name = block_name_by_id(m, op->block_id);
+        if (name && name[0])
+            fprintf(out, "label %%%s", name);
+        else
+            fprintf(out, "label %%bb%u", op->block_id);
+        break;
+    }
     case LR_VAL_GLOBAL: {
         const char *name = lr_module_symbol_name(m, op->global_id);
         if (name) fprintf(out, "@%s", name);
@@ -1513,6 +1532,32 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
                 fprintf(out, " ");
             }
             print_operand(&inst->operands[i], m, out);
+        }
+        break;
+
+    case LR_OP_PHI:
+        if (inst->type)
+            print_type(inst->type, out);
+        for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+            const lr_operand_t *val = &inst->operands[i];
+            const lr_operand_t *blk = &inst->operands[i + 1];
+            if (i == 0)
+                fprintf(out, " ");
+            else
+                fprintf(out, ", ");
+            fprintf(out, "[ ");
+            print_operand(val, m, out);
+            fprintf(out, ", ");
+            if (blk->kind == LR_VAL_BLOCK) {
+                const char *name = block_name_by_id(m, blk->block_id);
+                if (name && name[0])
+                    fprintf(out, "%%%s", name);
+                else
+                    fprintf(out, "%%bb%u", blk->block_id);
+            } else {
+                print_operand(blk, m, out);
+            }
+            fprintf(out, " ]");
         }
         break;
 
