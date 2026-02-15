@@ -141,6 +141,7 @@ add_library(liric STATIC
     src/liric.c
     src/compiler.c
     src/liric_compat.c
+    src/llvm_c_shim.c
     src/stencil_data.c
     src/stencil_runtime.c
     src/session.c
@@ -329,6 +330,7 @@ add_executable(test_liric
     tests/test_stencil_gen.c
     tests/test_stencil_runtime.c
     tests/test_platform_os.c
+    tests/test_llvm_c_shim.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
@@ -682,6 +684,7 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
 )
 install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY include/llvm-c DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(WITH_LLVM_COMPAT)

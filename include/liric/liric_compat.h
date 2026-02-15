@@ -440,6 +440,10 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
 
 /* ---- Direct JIT materialization ---- */
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit);
+int lc_module_finalize_for_execution(lc_module_compat_t *mod);
+void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name);
+void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
+                                   void *addr);
 
 /* ---- Object file emission ---- */
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);

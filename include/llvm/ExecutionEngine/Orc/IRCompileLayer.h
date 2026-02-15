@@ -48,8 +48,8 @@ inline llvm::Error llvm::orc::IRCompileLayer::add(
     (void)JD;
     Module *M = TSM.getModuleUnlocked();
     if (!M) return make_error("Null module");
-    int rc = lc_module_add_to_jit(M->getCompat(), ES.getJIT());
-    if (rc != 0) return make_error("lc_module_add_to_jit failed");
+    int rc = ES.addCompatModule(M->getCompat());
+    if (rc != 0) return make_error("LLVMLiricSessionAddCompatModule failed");
     return Error::success();
 }
 

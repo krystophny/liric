@@ -2671,6 +2671,27 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     return lr_jit_add_module(jit, mod->mod);
 }
 
+int lc_module_finalize_for_execution(lc_module_compat_t *mod) {
+    if (!mod)
+        return -1;
+    return compat_finish_active_func(mod);
+}
+
+void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name) {
+    if (!mod || !name || !name[0])
+        return NULL;
+    if (compat_finish_active_func(mod) != 0)
+        return NULL;
+    return lr_session_lookup(mod->session, name);
+}
+
+void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
+                                   void *addr) {
+    if (!mod || !name || !name[0])
+        return;
+    lr_session_add_symbol(mod->session, name, addr);
+}
+
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
     char emit_err[256] = {0};
     if (!mod || !out) return -1;

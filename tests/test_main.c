@@ -242,6 +242,7 @@ int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
 int test_builder_compat_emit_object_to_file(void);
 int test_builder_compat_emit_object_llvm_mode_contract(void);
 int test_builder_compat_emit_executable_llvm_mode_contract(void);
+int test_llvm_c_shim_add_and_lookup(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -546,6 +547,7 @@ int main(void) {
     RUN_TEST(test_builder_compat_emit_object_to_file);
     RUN_TEST(test_builder_compat_emit_object_llvm_mode_contract);
     RUN_TEST(test_builder_compat_emit_executable_llvm_mode_contract);
+    RUN_TEST(test_llvm_c_shim_add_and_lookup);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)
