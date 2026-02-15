@@ -5,11 +5,9 @@ endif()
 set(root "${WORKDIR}/bench_corpus_empty_dataset_gate")
 set(cache_dir "${root}/cache")
 set(corpus "${root}/corpus.tsv")
-set(runtime_bc "${root}/runtime.bc")
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${root}")
-file(WRITE "${runtime_bc}" "placeholder")
 file(WRITE "${corpus}" "case_001\tfake_case\t123\n")
 
 find_program(TRUE_BIN NAMES true)
@@ -21,7 +19,7 @@ function(run_case allow_empty expect_rc)
     set(cmd
         "${BENCH_CORPUS}"
         --probe-runner "${TRUE_BIN}"
-        --runtime-bc "${runtime_bc}"
+        --runtime-lib "${TRUE_BIN}"
         --corpus "${corpus}"
         --cache-dir "${cache_dir}"
         --iters 1

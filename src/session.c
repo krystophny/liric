@@ -101,6 +101,8 @@ struct lr_session {
     lr_objfile_ctx_t direct_obj_ctx;
     bool direct_obj_ctx_active;
     uint32_t direct_reloc_base;
+    bool direct_pending_relocs;
+    uint32_t direct_pending_reloc_start;
     lr_func_blob_t *blobs;
     uint32_t blob_count;
     uint32_t blob_cap;
@@ -197,16 +199,9 @@ static size_t align_up_size(size_t value, size_t alignment) {
 
 static int ensure_runtime_and_globals_ready(struct lr_session *s,
                                             session_error_t *err) {
-    char runtime_err[256] = {0};
     if (!s || !s->jit || !s->module)
         return 0;
 
-    if (lr_jit_ensure_runtime_bc_loaded(s->jit, s->module,
-                                        runtime_err, sizeof(runtime_err)) != 0) {
-        err_set(err, S_ERR_BACKEND, "%s",
-                runtime_err[0] ? runtime_err : "runtime bitcode load failed");
-        return -1;
-    }
     if (s->module->first_global) {
         if (lr_jit_materialize_globals(s->jit, s->module) != 0) {
             err_set(err, S_ERR_BACKEND, "global materialization failed");
@@ -343,6 +338,17 @@ static int init_direct_obj_ctx(struct lr_session *s) {
         return -1;
     s->direct_obj_ctx_active = true;
     return 0;
+}
+
+static bool session_is_module_defined_symbol(struct lr_session *s,
+                                             const char *name) {
+    if (!s || !s->module || !s->direct_obj_ctx_active || !name || !name[0])
+        return false;
+    uint32_t sym_id = lr_module_intern_symbol(s->module, name);
+    if (sym_id >= s->direct_obj_ctx.module_sym_count)
+        return false;
+    return s->direct_obj_ctx.module_sym_defined &&
+           s->direct_obj_ctx.module_sym_defined[sym_id] != 0;
 }
 
 static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
@@ -553,13 +559,30 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     s->jit->code_size = s->compile_start + code_len;
     if (s->jit->update_active && code_len > 0)
         s->jit->update_dirty = true;
-    if (lr_jit_patch_relocs_from(s->jit, &s->direct_obj_ctx,
-                                 s->direct_reloc_base) != 0) {
-        err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
-        s->module->obj_ctx = NULL;
-        if (should_close_update && s->jit->update_active)
-            lr_jit_end_update(s->jit);
-        return -1;
+    {
+        const char *missing_symbol = NULL;
+        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                        s->direct_reloc_base,
+                                        &missing_symbol) != 0) {
+            if (session_is_module_defined_symbol(s, missing_symbol)) {
+                if (!s->direct_pending_relocs ||
+                    s->direct_reloc_base < s->direct_pending_reloc_start) {
+                    s->direct_pending_reloc_start = s->direct_reloc_base;
+                }
+                s->direct_pending_relocs = true;
+            } else {
+                if (missing_symbol && missing_symbol[0])
+                    err_set(err, S_ERR_BACKEND,
+                            "jit relocation patch failed (%s)",
+                            missing_symbol);
+                else
+                    err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
+                s->module->obj_ctx = NULL;
+                if (should_close_update && s->jit->update_active)
+                    lr_jit_end_update(s->jit);
+                return -1;
+            }
+        }
     }
 
     lr_jit_add_symbol(s->jit, s->cur_func->name,
@@ -571,6 +594,27 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         uint32_t sym_id = lr_module_intern_symbol(s->module, s->cur_func->name);
         if (sym_id < s->direct_obj_ctx.module_sym_count)
             s->direct_obj_ctx.module_sym_defined[sym_id] = 1;
+    }
+
+    if (s->direct_pending_relocs) {
+        const char *missing_symbol = NULL;
+        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                        s->direct_pending_reloc_start,
+                                        &missing_symbol) == 0) {
+            s->direct_pending_relocs = false;
+            s->direct_pending_reloc_start = 0;
+        } else if (!session_is_module_defined_symbol(s, missing_symbol)) {
+            if (missing_symbol && missing_symbol[0])
+                err_set(err, S_ERR_BACKEND,
+                        "jit relocation patch failed (%s)",
+                        missing_symbol);
+            else
+                err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
+            s->module->obj_ctx = NULL;
+            if (should_close_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
+            return -1;
+        }
     }
 
     s->module->obj_ctx = NULL;
@@ -932,6 +976,19 @@ void lr_session_add_symbol(struct lr_session *s, const char *name, void *addr) {
 void *lr_session_lookup(struct lr_session *s, const char *name) {
     if (!s || !s->jit || !name || !name[0])
         return NULL;
+    if (s->direct_pending_relocs && s->direct_obj_ctx_active) {
+        const char *missing_symbol = NULL;
+        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                        s->direct_pending_reloc_start,
+                                        &missing_symbol) == 0) {
+            s->direct_pending_relocs = false;
+            s->direct_pending_reloc_start = 0;
+        } else if (!session_is_module_defined_symbol(s, missing_symbol)) {
+            return NULL;
+        }
+        if (s->direct_pending_relocs)
+            return NULL;
+    }
     return lr_jit_get_function(s->jit, name);
 }
 

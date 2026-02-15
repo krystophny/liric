@@ -190,10 +190,10 @@ int main(int argc, char **argv) {
     const char *func_name = "main";
     const char *sig = "i32";
     const char *input_file = NULL;
-    const char *runtime_bc_file = NULL;
     int ignore_retcode = 0;
     int timing = 0;
     int no_exec = 0;
+    int parse_only = 0;
     const char *load_libs[64];
     int num_load_libs = 0;
 
@@ -208,6 +208,8 @@ int main(int argc, char **argv) {
             timing = 1;
         } else if (strcmp(argv[i], "--no-exec") == 0) {
             no_exec = 1;
+        } else if (strcmp(argv[i], "--parse-only") == 0) {
+            parse_only = 1;
         } else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
             if (num_load_libs < 64) {
                 load_libs[num_load_libs++] = argv[++i];
@@ -215,8 +217,6 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --load-lib options\n");
                 return 1;
             }
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            runtime_bc_file = argv[++i];
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         } else {
@@ -252,25 +252,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to read input file\n");
         return 1;
     }
-
-    file_buf_t runtime_bc = {0};
-    int have_runtime_bc = 0;
-    if (runtime_bc_file) {
-        if (read_file(runtime_bc_file, &runtime_bc) != 0) {
-            if (timing) t_read_end = now_us();
-            print_timing_line(timing, t_read_start, t_read_end,
-                              t_parse_start, t_parse_end,
-                              t_jit_create_start, t_jit_create_end,
-                              t_load_lib_start, t_load_lib_end,
-                              t_compile_start, t_compile_end,
-                              t_lookup_start, t_lookup_end,
-                              t_exec_start, t_exec_end);
-            fprintf(stderr, "failed to read runtime bc file: %s\n", runtime_bc_file);
-            free_file(&src);
-            return 1;
-        }
-        have_runtime_bc = 1;
-    }
     if (timing) t_read_end = now_us();
 
     lr_backend_t backend = LR_BACKEND_ISEL;
@@ -287,8 +268,6 @@ int main(int argc, char **argv) {
                           t_lookup_start, t_lookup_end,
                           t_exec_start, t_exec_end);
         fprintf(stderr, "invalid LIRIC_COMPILE_MODE value\n");
-        if (have_runtime_bc)
-            free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
@@ -313,33 +292,10 @@ int main(int argc, char **argv) {
                           t_exec_start, t_exec_end);
         fprintf(stderr, "compiler create failed: %s\n",
                 cerr.msg[0] ? cerr.msg : "unknown error");
-        if (have_runtime_bc)
-            free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
     if (timing) t_jit_create_end = now_us();
-
-    if (have_runtime_bc) {
-        if (!getenv("LIRIC_JIT_LAZY"))
-            setenv("LIRIC_JIT_LAZY", "1", 0);
-        if (lr_compiler_set_runtime_bc(compiler, (const uint8_t *)runtime_bc.data,
-                                       runtime_bc.len, &cerr) != 0) {
-            print_timing_line(timing, t_read_start, t_read_end,
-                              t_parse_start, t_parse_end,
-                              t_jit_create_start, t_jit_create_end,
-                              t_load_lib_start, t_load_lib_end,
-                              t_compile_start, t_compile_end,
-                              t_lookup_start, t_lookup_end,
-                              t_exec_start, t_exec_end);
-            fprintf(stderr, "failed to set runtime bc: %s\n",
-                    cerr.msg[0] ? cerr.msg : "unknown error");
-            lr_compiler_destroy(compiler);
-            free_file(&runtime_bc);
-            free_file(&src);
-            return 1;
-        }
-    }
 
     if (timing) t_load_lib_start = now_us();
     for (int i = 0; i < num_load_libs; i++) {
@@ -355,8 +311,6 @@ int main(int argc, char **argv) {
             fprintf(stderr, "failed to load library '%s': %s\n", load_libs[i],
                     cerr.msg[0] ? cerr.msg : "unknown error");
             lr_compiler_destroy(compiler);
-            if (have_runtime_bc)
-                free_file(&runtime_bc);
             free_file(&src);
             return 1;
         }
@@ -376,8 +330,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "streaming compile failed: %s\n",
                 cerr.msg[0] ? cerr.msg : "unknown error");
         lr_compiler_destroy(compiler);
-        if (have_runtime_bc)
-            free_file(&runtime_bc);
         free_file(&src);
         return 1;
     }
@@ -385,6 +337,19 @@ int main(int argc, char **argv) {
     if (timing) {
         t_compile_start = t_parse_end;
         t_compile_end = t_parse_end;
+    }
+
+    if (parse_only) {
+        print_timing_line(timing, t_read_start, t_read_end,
+                          t_parse_start, t_parse_end,
+                          t_jit_create_start, t_jit_create_end,
+                          t_load_lib_start, t_load_lib_end,
+                          t_compile_start, t_compile_end,
+                          t_lookup_start, t_lookup_end,
+                          t_exec_start, t_exec_end);
+        lr_compiler_destroy(compiler);
+        free_file(&src);
+        return 0;
     }
 
     if (timing) t_lookup_start = now_us();
@@ -400,8 +365,6 @@ int main(int argc, char **argv) {
                           t_exec_start, t_exec_end);
         fprintf(stderr, "function '%s' not found\n", func_name);
         lr_compiler_destroy(compiler);
-        if (have_runtime_bc)
-            free_file(&runtime_bc);
         free_file(&src);
         return 3;
     }
@@ -422,8 +385,6 @@ int main(int argc, char **argv) {
                       t_exec_start, t_exec_end);
 
     lr_compiler_destroy(compiler);
-    if (have_runtime_bc)
-        free_file(&runtime_bc);
     free_file(&src);
     return run_rc;
 }

@@ -66,9 +66,7 @@ typedef struct {
 typedef struct {
     const char *probe_runner;
     const char *lli_phases;
-    const char *runtime_bc;
     const char *runtime_lib;
-    const char *lfortran_src;
     const char *corpus_tsv;
     const char *cache_dir;
     const char *bench_dir;
@@ -79,7 +77,6 @@ typedef struct {
 
 typedef struct {
     const char *track_name;
-    int use_runtime_bc;
 } track_cfg_t;
 
 typedef struct {
@@ -186,20 +183,6 @@ static char *path_join2(const char *a, const char *b) {
     if (need) out[na++] = '/';
     memcpy(out + na, b, nb);
     out[na + nb] = '\0';
-    return out;
-}
-
-static char *dirname_dup(const char *path) {
-    const char *slash = strrchr(path, '/');
-    size_t n;
-    char *out;
-    if (!slash) return xstrdup(".");
-    n = (size_t)(slash - path);
-    if (n == 0) n = 1;
-    out = (char *)malloc(n + 1);
-    if (!out) die("out of memory", NULL);
-    memcpy(out, path, n);
-    out[n] = '\0';
     return out;
 }
 
@@ -371,6 +354,29 @@ static int parse_probe_timing(const char *stderr_text,
     return 0;
 }
 
+static int ll_has_defined_main(const char *ll_path) {
+    FILE *f;
+    char line[4096];
+    int has_main = 0;
+    f = fopen(ll_path, "r");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (strncmp(p, "define", 6) != 0 ||
+            !(p[6] == ' ' || p[6] == '\t'))
+            continue;
+        if (strstr(p, "@main(") || strstr(p, "@\"main\"(")) {
+            has_main = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return has_main;
+}
+
 static int json_get_number(const char *json, const char *key, double *out_val) {
     const char *p = strstr(json, key);
     if (!p) return 0;
@@ -481,86 +487,13 @@ static int load_corpus_tests(const cfg_t *cfg, testlist_t *tests) {
     return (int)tests->n;
 }
 
-static int run_exec(char *const argv[]) {
-    int status = 0;
-    pid_t pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    if (waitpid(pid, &status, 0) < 0)
-        return -1;
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-        return 128 + WTERMSIG(status);
-    return -1;
-}
-
-static int ensure_runtime_bc(const cfg_t *cfg) {
-    char *runtime_c = NULL;
-    char *include_dir = NULL;
-    char *out_dir = NULL;
-    int rc = -1;
-
-    if (file_exists(cfg->runtime_bc))
-        return 1;
-
-    runtime_c = path_join2(cfg->lfortran_src, "src/libasr/runtime/lfortran_intrinsics.c");
-    include_dir = path_join2(cfg->lfortran_src, "src");
-    if (!runtime_c || !include_dir) goto cleanup;
-    if (!file_exists(runtime_c)) {
-        fprintf(stderr, "runtime source not found: %s\n", runtime_c);
-        goto cleanup;
-    }
-
-    out_dir = dirname_dup(cfg->runtime_bc);
-    if (!out_dir || mkdir_p(out_dir) != 0) {
-        fprintf(stderr, "failed to create runtime bc directory: %s\n", out_dir ? out_dir : "(null)");
-        goto cleanup;
-    }
-
-    {
-        char include_flag[PATH_MAX + 3];
-        char *cc_argv[11];
-        snprintf(include_flag, sizeof(include_flag), "-I%s", include_dir);
-        cc_argv[0] = "clang";
-        cc_argv[1] = "-c";
-        cc_argv[2] = "-emit-llvm";
-        cc_argv[3] = "-O2";
-        cc_argv[4] = "-fno-exceptions";
-        cc_argv[5] = "-fno-unwind-tables";
-        cc_argv[6] = include_flag;
-        cc_argv[7] = "-o";
-        cc_argv[8] = (char *)cfg->runtime_bc;
-        cc_argv[9] = runtime_c;
-        cc_argv[10] = NULL;
-        fprintf(stderr, "Generating runtime bc: %s\n", cfg->runtime_bc);
-        rc = run_exec(cc_argv);
-        if (rc != 0)
-            fprintf(stderr, "failed to compile runtime bc (clang rc=%d)\n", rc);
-    }
-
-    rc = file_exists(cfg->runtime_bc) ? 1 : 0;
-
-cleanup:
-    free(runtime_c);
-    free(include_dir);
-    free(out_dir);
-    return rc;
-}
-
 static void usage(void) {
     printf("usage: bench_corpus_compare [options]\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           command timeout in seconds (default: 30)\n");
     printf("  --probe-runner PATH   path to liric_probe_runner\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
-    printf("  --runtime-bc PATH     path to runtime bitcode (auto-built if missing)\n");
-    printf("  --runtime-lib PATH    runtime shared library for core track (optional)\n");
-    printf("  --lfortran-src PATH   lfortran source root used to auto-build runtime bc\n");
+    printf("  --runtime-lib PATH    runtime shared library (required for runtime-dependent cases)\n");
     printf("  --corpus PATH         corpus TSV (default: tools/corpus_100.tsv)\n");
     printf("  --cache-dir PATH      corpus cache dir (default: /tmp/liric_lfortran_mass/cache)\n");
     printf("  --bench-dir PATH      benchmark output dir (default: /tmp/liric_bench)\n");
@@ -573,9 +506,7 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";
-    cfg.runtime_bc = "/tmp/liric_bench/runtime/lfortran_intrinsics.bc";
     cfg.runtime_lib = NULL;
-    cfg.lfortran_src = "../lfortran";
     cfg.corpus_tsv = "tools/corpus_100.tsv";
     cfg.cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg.bench_dir = "/tmp/liric_bench";
@@ -597,12 +528,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--lli-phases") == 0 && i + 1 < argc) {
             cfg.lli_phases = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
-            cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
             cfg.corpus_tsv = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
@@ -622,12 +549,10 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
-    cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
     if (cfg.runtime_lib && cfg.runtime_lib[0]) {
         if (!file_exists(cfg.runtime_lib)) die("runtime library not found", cfg.runtime_lib);
         cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     }
-    cfg.lfortran_src = to_abs_path(cfg.lfortran_src);
     cfg.corpus_tsv = to_abs_path(cfg.corpus_tsv);
     cfg.cache_dir = to_abs_path(cfg.cache_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
@@ -768,7 +693,9 @@ static int run_track(const cfg_t *cfg,
         const test_case_t *t = &tests->items[i];
         size_t ok_n = 0;
         int skipped = 0;
+        int parse_only = 0;
         size_t it;
+        int has_main = ll_has_defined_main(t->ll_path);
 
         double *liric_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *liric_compile = (double *)calloc((size_t)cfg->iters, sizeof(double));
@@ -787,57 +714,65 @@ static int run_track(const cfg_t *cfg,
             die("out of memory", NULL);
         }
 
+        parse_only = !has_main;
+
         for (it = 0; it < (size_t)cfg->iters; it++) {
             cmd_result_t rp, ri;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
             double e_parse = 0.0, e_parse_input = 0.0, e_parse_runtime = 0.0;
             double e_merge = 0.0, e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
 
-            char *probe_argv[14];
+            char *probe_argv[20];
             int pk = 0;
             probe_argv[pk++] = (char *)cfg->probe_runner;
             probe_argv[pk++] = "--timing";
             probe_argv[pk++] = "--no-exec";
-            probe_argv[pk++] = "--sig";
-            probe_argv[pk++] = "i32_argc_argv";
-            if (!track->use_runtime_bc && cfg->runtime_lib && cfg->runtime_lib[0]) {
+            if (parse_only) {
+                probe_argv[pk++] = "--parse-only";
+            } else {
+                probe_argv[pk++] = "--func";
+                probe_argv[pk++] = "main";
+                probe_argv[pk++] = "--sig";
+                probe_argv[pk++] = "i32_argc_argv";
+            }
+            if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                 probe_argv[pk++] = "--load-lib";
                 probe_argv[pk++] = (char *)cfg->runtime_lib;
-            }
-            if (track->use_runtime_bc) {
-                probe_argv[pk++] = "--runtime-bc";
-                probe_argv[pk++] = (char *)cfg->runtime_bc;
             }
             probe_argv[pk++] = (char *)t->ll_path;
             probe_argv[pk] = NULL;
 
             rp = run_cmd(probe_argv, cfg->timeout_sec, NULL);
-            if (rp.rc < 0 || !parse_probe_timing(rp.stderr_text, &l_parse, &l_compile, &l_lookup)) {
+            if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &l_parse, &l_compile, &l_lookup)) {
                 skipped = 1;
                 free_cmd_result(&rp);
                 break;
             }
+            if (parse_only) {
+                l_compile = 0.0;
+                l_lookup = 0.0;
+            }
             free_cmd_result(&rp);
 
             {
-                char *llvm_argv[18];
+                char *llvm_argv[20];
                 int ek = 0;
                 llvm_argv[ek++] = (char *)cfg->lli_phases;
                 llvm_argv[ek++] = "--json";
                 llvm_argv[ek++] = "--no-exec";
                 llvm_argv[ek++] = "--iters";
                 llvm_argv[ek++] = "1";
-                llvm_argv[ek++] = "--func";
-                llvm_argv[ek++] = "main";
-                llvm_argv[ek++] = "--sig";
-                llvm_argv[ek++] = "i32_argc_argv";
-                if (!track->use_runtime_bc && cfg->runtime_lib && cfg->runtime_lib[0]) {
+                if (parse_only) {
+                    llvm_argv[ek++] = "--parse-only";
+                } else {
+                    llvm_argv[ek++] = "--func";
+                    llvm_argv[ek++] = "main";
+                    llvm_argv[ek++] = "--sig";
+                    llvm_argv[ek++] = "i32_argc_argv";
+                }
+                if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                     llvm_argv[ek++] = "--load-lib";
                     llvm_argv[ek++] = (char *)cfg->runtime_lib;
-                }
-                if (track->use_runtime_bc) {
-                    llvm_argv[ek++] = "--runtime-bc";
-                    llvm_argv[ek++] = (char *)cfg->runtime_bc;
                 }
                 llvm_argv[ek++] = (char *)t->ll_path;
                 llvm_argv[ek] = NULL;
@@ -967,8 +902,8 @@ static int run_track(const cfg_t *cfg,
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     testlist_t tests;
-    track_cfg_t core = {"core", 0};
-    track_cfg_t runtime_eq = {"runtime_equalized_bc", 1};
+    track_cfg_t core = {"core"};
+    track_cfg_t runtime_eq = {"runtime_equalized_bc"};
 
     track_summary_t core_summary;
     track_summary_t runtime_summary;
@@ -984,9 +919,6 @@ int main(int argc, char **argv) {
 
     if (mkdir_p(cfg.bench_dir) != 0)
         die("failed to create bench dir", cfg.bench_dir);
-
-    if (!ensure_runtime_bc(&cfg))
-        die("runtime bc unavailable (set --runtime-bc or --lfortran-src)", cfg.runtime_bc);
 
     testlist_init(&tests);
     load_corpus_tests(&cfg, &tests);

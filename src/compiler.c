@@ -176,24 +176,6 @@ int lr_compiler_load_library(lr_compiler_t *c, const char *path,
     return 0;
 }
 
-int lr_compiler_set_runtime_bc(lr_compiler_t *c, const uint8_t *bc_data, size_t bc_len,
-                               lr_compiler_error_t *err) {
-    lr_jit_t *jit = NULL;
-    compiler_err_clear(err);
-    if (!c || !c->session || !bc_data || bc_len == 0) {
-        compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT,
-                         "invalid runtime bc arguments");
-        return -1;
-    }
-    jit = lr_session_jit(c->session);
-    if (!jit) {
-        compiler_err_set(err, LR_COMPILER_ERR_STATE, "compiler has no JIT");
-        return -1;
-    }
-    lr_jit_set_runtime_bc(jit, bc_data, bc_len);
-    return 0;
-}
-
 int lr_compiler_feed_ll(lr_compiler_t *c, const char *src, size_t len,
                         lr_compiler_error_t *err) {
     char parse_err[512] = {0};

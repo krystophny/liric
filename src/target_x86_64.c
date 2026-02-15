@@ -580,35 +580,56 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
             emit_mov_imm(ctx, reg, 0, preserve_flags);
             return;
         }
-        bool defined = false;
-        if (op->global_id < ctx->sym_count)
-            defined = ctx->sym_defined[op->global_id] != 0;
-        else
-            defined = is_symbol_defined_in_module(ctx->mod, sym_name);
         uint32_t sym_idx = lr_obj_ensure_symbol(ctx->obj_ctx, sym_name,
-                                                 false, 0, 0);
-        if (defined) {
-            /* LEA reg, [RIP + disp32] for defined symbols */
+                                                false, 0, 0);
+        if (sym_idx == UINT32_MAX) {
+            emit_mov_imm(ctx, reg, 0, preserve_flags);
+            return;
+        }
+
+        if (ctx->jit) {
+            /*
+             * DIRECT/session JIT paths can map code/data beyond rel32 reach.
+             * Emit absolute relocations there to avoid out-of-range failures.
+             */
             emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                      rex(true, reg >= 8, false, false));
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8D);
+                      rex(true, false, false, reg >= 8));
             emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                      modrm(0, reg, 5)); /* mod=00, rm=5 = RIP-relative */
-            size_t disp_off = ctx->pos;
-            emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
-            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
-                              LR_RELOC_X86_64_PC32);
+                      (uint8_t)(0xB8 + (reg & 7)));
+            size_t imm_off = ctx->pos;
+            emit_u64(ctx->buf, &ctx->pos, ctx->buflen, 0);
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)imm_off, sym_idx,
+                             LR_RELOC_X86_64_64);
         } else {
-            /* MOV reg, [RIP + disp32] for GOT entry (external symbols) */
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                      rex(true, reg >= 8, false, false));
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8B);
-            emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                      modrm(0, reg, 5));
-            size_t disp_off = ctx->pos;
-            emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
-            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
-                              LR_RELOC_X86_64_GOTPCREL);
+            bool defined = false;
+            if (op->global_id < ctx->sym_count)
+                defined = ctx->sym_defined[op->global_id] != 0;
+            else
+                defined = is_symbol_defined_in_module(ctx->mod, sym_name);
+
+            if (defined) {
+                /* LEA reg, [RIP + disp32] for defined symbols */
+                emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                          rex(true, reg >= 8, false, false));
+                emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8D);
+                emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                          modrm(0, reg, 5)); /* mod=00, rm=5 = RIP-relative */
+                size_t disp_off = ctx->pos;
+                emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+                lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
+                                 LR_RELOC_X86_64_PC32);
+            } else {
+                /* MOV reg, [RIP + disp32] for GOT entry (external symbols) */
+                emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                          rex(true, reg >= 8, false, false));
+                emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8B);
+                emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                          modrm(0, reg, 5));
+                size_t disp_off = ctx->pos;
+                emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+                lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
+                                 LR_RELOC_X86_64_GOTPCREL);
+            }
         }
         if (op->global_offset != 0)
             emit_add_imm(ctx, reg, op->global_offset);

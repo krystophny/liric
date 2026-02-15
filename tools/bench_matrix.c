@@ -49,9 +49,7 @@ typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
     const char *test_dir;
-    const char *runtime_bc;
     const char *runtime_lib;
-    const char *lfortran_src;
     const char *corpus;
     const char *cache_dir;
 
@@ -407,9 +405,7 @@ static void usage(void) {
     printf("  --timeout-ms N           timeout ms for bench_api (default: 3000)\n");
     printf("  --skip-compat-check      do not regenerate compat artifacts\n");
     printf("  --allow-partial          report failures but return 0\n");
-    printf("  --runtime-bc PATH        runtime bitcode\n");
     printf("  --runtime-lib PATH       runtime shared library\n");
-    printf("  --lfortran-src PATH      lfortran source root\n");
     printf("  --corpus PATH            corpus TSV\n");
     printf("  --cache-dir PATH         corpus cache directory\n");
     printf("  --lfortran PATH          lfortran LLVM binary (bench_api/compat)\n");
@@ -542,12 +538,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.run_compat_check = 0;
         } else if (strcmp(argv[i], "--allow-partial") == 0) {
             cfg.allow_partial = 1;
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
-            cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
             cfg.corpus = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
@@ -777,10 +769,6 @@ int main(int argc, char **argv) {
                 cmd[n++] = "--runtime-lib";
                 cmd[n++] = (char *)cfg.runtime_lib;
             }
-            if (cfg.lfortran_src) {
-                cmd[n++] = "--lfortran-src";
-                cmd[n++] = (char *)cfg.lfortran_src;
-            }
             if (cfg.lfortran) {
                 cmd[n++] = "--lfortran";
                 cmd[n++] = (char *)cfg.lfortran;
@@ -884,17 +872,9 @@ int main(int argc, char **argv) {
                 cmd[n++] = (char *)cfg.probe_runner;
                 cmd[n++] = "--lli-phases";
                 cmd[n++] = (char *)cfg.lli_phases;
-                if (cfg.runtime_bc) {
-                    cmd[n++] = "--runtime-bc";
-                    cmd[n++] = (char *)cfg.runtime_bc;
-                }
                 if (cfg.runtime_lib) {
                     cmd[n++] = "--runtime-lib";
                     cmd[n++] = (char *)cfg.runtime_lib;
-                }
-                if (cfg.lfortran_src) {
-                    cmd[n++] = "--lfortran-src";
-                    cmd[n++] = (char *)cfg.lfortran_src;
                 }
                 if (cfg.corpus) {
                     cmd[n++] = "--corpus";

@@ -8,7 +8,6 @@
 //   ./build/bench_corpus --single <name>    # run one test (for perf/callgrind)
 
 #include <fcntl.h>
-#include <errno.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -45,9 +44,7 @@ typedef struct {
 
 typedef struct {
     const char *probe_runner;
-    const char *runtime_bc;
     const char *runtime_lib;
-    const char *lfortran_src;
     const char *corpus_tsv;
     const char *cache_dir;
     int timeout_sec;
@@ -62,138 +59,6 @@ static double now_ms(void) {
 static int file_exists(const char *path) {
     struct stat st;
     return path && stat(path, &st) == 0;
-}
-
-static int mkdir_p(const char *path) {
-    char tmp[PATH_MAX];
-    size_t n;
-    if (!path || !path[0]) return -1;
-    n = strlen(path);
-    if (n >= sizeof(tmp)) return -1;
-    memcpy(tmp, path, n + 1);
-
-    if (tmp[n - 1] == '/')
-        tmp[n - 1] = '\0';
-
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-                return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-        return -1;
-    return 0;
-}
-
-static char *dirname_dup(const char *path) {
-    const char *slash = strrchr(path, '/');
-    size_t n;
-    char *out;
-    if (!slash) {
-        out = (char *)malloc(2);
-        if (!out) return NULL;
-        out[0] = '.';
-        out[1] = '\0';
-        return out;
-    }
-    n = (size_t)(slash - path);
-    if (n == 0) n = 1;
-    out = (char *)malloc(n + 1);
-    if (!out) return NULL;
-    memcpy(out, path, n);
-    out[n] = '\0';
-    return out;
-}
-
-static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + nb + (need ? 2 : 1));
-    if (!out) return NULL;
-    memcpy(out, a, na);
-    if (need) out[na++] = '/';
-    memcpy(out + na, b, nb);
-    out[na + nb] = '\0';
-    return out;
-}
-
-static int run_exec(char *const argv[]) {
-    int status = 0;
-    pid_t pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    if (waitpid(pid, &status, 0) < 0)
-        return -1;
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-        return 128 + WTERMSIG(status);
-    return -1;
-}
-
-static int ensure_runtime_bc(const char *lfortran_src, const char *runtime_bc_path) {
-    char *runtime_c = NULL;
-    char *include_dir = NULL;
-    char *out_dir = NULL;
-    int rc = -1;
-
-    if (file_exists(runtime_bc_path))
-        return 0;
-
-    runtime_c = path_join2(lfortran_src, "src/libasr/runtime/lfortran_intrinsics.c");
-    include_dir = path_join2(lfortran_src, "src");
-    if (!runtime_c || !include_dir) {
-        fprintf(stderr, "out of memory while preparing runtime bc build\n");
-        goto cleanup;
-    }
-    if (!file_exists(runtime_c)) {
-        fprintf(stderr, "lfortran runtime source not found: %s\n", runtime_c);
-        goto cleanup;
-    }
-    out_dir = dirname_dup(runtime_bc_path);
-    if (!out_dir || mkdir_p(out_dir) != 0) {
-        fprintf(stderr, "failed to create runtime bc directory: %s\n",
-                out_dir ? out_dir : "(null)");
-        goto cleanup;
-    }
-
-    {
-        char include_flag[PATH_MAX + 3];
-        snprintf(include_flag, sizeof(include_flag), "-I%s", include_dir);
-        char *argv[] = {
-            "clang",
-            "-c",
-            "-emit-llvm",
-            "-O2",
-            "-fno-exceptions",
-            "-fno-unwind-tables",
-            include_flag,
-            "-o",
-            (char *)runtime_bc_path,
-            runtime_c,
-            NULL
-        };
-        fprintf(stderr, "Generating runtime bc: %s\n", runtime_bc_path);
-        rc = run_exec(argv);
-        if (rc != 0) {
-            fprintf(stderr, "failed to compile runtime bc (clang rc=%d)\n", rc);
-            goto cleanup;
-        }
-    }
-
-    rc = 0;
-cleanup:
-    free(runtime_c);
-    free(include_dir);
-    free(out_dir);
-    return rc;
 }
 
 static int load_corpus(const char *tsv_path, const char *cache_dir,
@@ -232,8 +97,7 @@ static int load_corpus(const char *tsv_path, const char *cache_dir,
     return n;
 }
 
-static int run_timed(const char *probe_runner, const char *runtime_bc,
-                     const char *runtime_lib,
+static int run_timed(const char *probe_runner, const char *runtime_lib,
                      const char *ll_path, timing_result_t *result,
                      int timeout_sec) {
     int stderr_pipe[2];
@@ -254,8 +118,6 @@ static int run_timed(const char *probe_runner, const char *runtime_bc,
         args[ai++] = probe_runner;
         args[ai++] = "--timing";
         args[ai++] = "--ignore-retcode";
-        args[ai++] = "--runtime-bc";
-        args[ai++] = runtime_bc;
         if (runtime_lib && runtime_lib[0]) {
             args[ai++] = "--load-lib";
             args[ai++] = runtime_lib;
@@ -334,11 +196,9 @@ static void set_default_cfg(bench_cfg_t *cfg) {
     const char *default_runtime_dylib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
     const char *default_runtime_so = "../lfortran/build/src/runtime/liblfortran_runtime.so";
     cfg->probe_runner = "./build/liric_probe_runner";
-    cfg->runtime_bc = "/tmp/liric_bench/runtime/lfortran_intrinsics.bc";
     cfg->runtime_lib = file_exists(default_runtime_dylib)
         ? default_runtime_dylib
         : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
-    cfg->lfortran_src = "../lfortran";
     cfg->corpus_tsv = "tools/corpus_100.tsv";
     cfg->cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg->timeout_sec = 30;
@@ -374,12 +234,8 @@ int main(int argc, char **argv) {
             iters = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--probe-runner") == 0 && i + 1 < argc) {
             cfg.probe_runner = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
-            cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
             cfg.corpus_tsv = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
@@ -392,9 +248,8 @@ int main(int argc, char **argv) {
             allow_empty = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: bench_corpus [--top N] [--csv] [--single NAME] [--iters N]\n");
-            printf("                   [--probe-runner PATH] [--runtime-bc PATH]\n");
-            printf("                   [--runtime-lib PATH]\n");
-            printf("                   [--lfortran-src PATH] [--corpus PATH] [--cache-dir PATH]\n");
+            printf("                   [--probe-runner PATH] [--runtime-lib PATH]\n");
+            printf("                   [--corpus PATH] [--cache-dir PATH]\n");
             printf("                   [--timeout SEC] [--allow-empty]\n");
             return 0;
         }
@@ -404,12 +259,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "probe runner not found: %s\n", cfg.probe_runner);
         return 1;
     }
-    if (!file_exists(cfg.runtime_bc)) {
-        if (ensure_runtime_bc(cfg.lfortran_src, cfg.runtime_bc) != 0)
-            return 1;
-    }
-    if (!file_exists(cfg.runtime_bc)) {
-        fprintf(stderr, "runtime bc not found: %s\n", cfg.runtime_bc);
+    if (!cfg.runtime_lib || !cfg.runtime_lib[0] || !file_exists(cfg.runtime_lib)) {
+        fprintf(stderr, "runtime library not found: %s\n",
+                cfg.runtime_lib ? cfg.runtime_lib : "(null)");
         return 1;
     }
 
@@ -437,8 +289,8 @@ int main(int argc, char **argv) {
     }
 found:
 
-    fprintf(stderr, "Corpus: %d tests, runtime-bc: %s, runtime-lib: %s\n",
-            n, cfg.runtime_bc, cfg.runtime_lib ? cfg.runtime_lib : "(none)");
+    fprintf(stderr, "Corpus: %d tests, runtime-lib: %s\n",
+            n, cfg.runtime_lib ? cfg.runtime_lib : "(none)");
     fprintf(stderr, "Iterations: %d\n\n", iters);
 
     timing_result_t results[MAX_TESTS];
@@ -456,7 +308,7 @@ found:
                 fflush(stderr);
             }
 
-            run_timed(cfg.probe_runner, cfg.runtime_bc, cfg.runtime_lib,
+            run_timed(cfg.probe_runner, cfg.runtime_lib,
                       entries[i].ll_path, &r,
                       cfg.timeout_sec);
 

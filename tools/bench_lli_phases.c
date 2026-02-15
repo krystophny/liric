@@ -2,12 +2,10 @@
 // Measures parse, JIT compile, symbol lookup, and execution in one process.
 
 #include <llvm-c/Core.h>
-#include <llvm-c/BitReader.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/LLJIT.h>
-#include <llvm-c/Linker.h>
 #include <llvm-c/Orc.h>
 #include <llvm-c/Support.h>
 #include <llvm-c/Target.h>
@@ -40,10 +38,10 @@ typedef struct {
     const char *func_name;
     const char *sig;
     const char *input_file;
-    const char *runtime_bc_file;
     int iters;
     int json_output;
     int no_exec;
+    int parse_only;
     const char *load_libs[64];
     int num_load_libs;
 } args_t;
@@ -150,10 +148,10 @@ static int parse_args(int argc, char **argv, args_t *a) {
     a->func_name = "main";
     a->sig = "i32";
     a->input_file = NULL;
-    a->runtime_bc_file = NULL;
     a->iters = 1;
     a->json_output = 0;
     a->no_exec = 0;
+    a->parse_only = 0;
     a->num_load_libs = 0;
 
     for (i = 1; i < argc; i++) {
@@ -164,6 +162,8 @@ static int parse_args(int argc, char **argv, args_t *a) {
             a->json_output = 1;
         } else if (strcmp(argv[i], "--no-exec") == 0) {
             a->no_exec = 1;
+        } else if (strcmp(argv[i], "--parse-only") == 0) {
+            a->parse_only = 1;
         } else if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) {
             a->func_name = argv[++i];
         } else if (strcmp(argv[i], "--sig") == 0 && i + 1 < argc) {
@@ -174,8 +174,6 @@ static int parse_args(int argc, char **argv, args_t *a) {
                 return 1;
             }
             a->load_libs[a->num_load_libs++] = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            a->runtime_bc_file = argv[++i];
         } else if (argv[i][0] != '-') {
             a->input_file = argv[i];
         } else {
@@ -187,7 +185,7 @@ static int parse_args(int argc, char **argv, args_t *a) {
     if (!a->input_file) {
         fprintf(stderr,
             "usage: bench_lli_phases [--iters N] [--json] [--func NAME] [--sig SIG] "
-            "[--load-lib LIB] [--runtime-bc FILE] [--no-exec] file.ll\n");
+            "[--load-lib LIB] [--no-exec] [--parse-only] file.ll\n");
         return 1;
     }
 
@@ -198,8 +196,6 @@ int main(int argc, char **argv) {
     args_t a;
     size_t src_len = 0;
     char *src = NULL;
-    size_t runtime_bc_len = 0;
-    char *runtime_bc = NULL;
     int i;
     double parse_input_total = 0.0;
     double parse_runtime_total = 0.0;
@@ -223,14 +219,6 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to read %s\n", a.input_file);
         return 1;
     }
-    if (a.runtime_bc_file) {
-        runtime_bc = read_file(a.runtime_bc_file, &runtime_bc_len);
-        if (!runtime_bc) {
-            fprintf(stderr, "failed to read runtime bitcode %s\n", a.runtime_bc_file);
-            free(src);
-            return 1;
-        }
-    }
 
     LLVMInitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
@@ -238,9 +226,7 @@ int main(int argc, char **argv) {
     for (i = 0; i < a.iters; i++) {
         LLVMContextRef ctx = NULL;
         LLVMMemoryBufferRef buf = NULL;
-        LLVMMemoryBufferRef runtime_buf = NULL;
         LLVMModuleRef mod = NULL;
-        LLVMModuleRef runtime_mod = NULL;
         LLVMOrcLLJITRef jit = NULL;
         LLVMOrcThreadSafeContextRef ts_ctx = NULL;
         LLVMOrcThreadSafeModuleRef ts_mod = NULL;
@@ -272,133 +258,89 @@ int main(int argc, char **argv) {
             if (err_msg) LLVMDisposeMessage(err_msg);
             LLVMContextDispose(ctx);
             free(src);
-            free(runtime_bc);
             return 1;
         }
         t1 = now_ms();
         parse_input_total += (t1 - t0);
 
-        if (runtime_bc) {
-            runtime_buf = LLVMCreateMemoryBufferWithMemoryRangeCopy(runtime_bc, runtime_bc_len, "runtime_bc");
-            if (!runtime_buf) {
-                fprintf(stderr, "failed to create runtime memory buffer\n");
+        if (!a.parse_only) {
+            err = LLVMOrcCreateLLJIT(&jit, NULL);
+            if (err) {
+                char *msg = LLVMGetErrorMessage(err);
+                fprintf(stderr, "LLJIT create error: %s\n", msg ? msg : "unknown");
+                if (msg) LLVMDisposeErrorMessage(msg);
                 LLVMDisposeModule(mod);
                 LLVMContextDispose(ctx);
                 free(src);
-                free(runtime_bc);
                 return 1;
             }
 
-            t0 = now_ms();
-            if (LLVMParseBitcodeInContext2(ctx, runtime_buf, &runtime_mod) != 0 || !runtime_mod) {
-                fprintf(stderr, "failed to parse runtime bitcode: %s\n", a.runtime_bc_file);
-                LLVMDisposeMemoryBuffer(runtime_buf);
+            ts_ctx = LLVMOrcCreateNewThreadSafeContext();
+            if (!ts_ctx) {
+                fprintf(stderr, "failed to create thread-safe context\n");
+                LLVMOrcDisposeLLJIT(jit);
                 LLVMDisposeModule(mod);
                 LLVMContextDispose(ctx);
                 free(src);
-                free(runtime_bc);
                 return 1;
             }
-            t1 = now_ms();
-            parse_runtime_total += (t1 - t0);
+            ts_mod = LLVMOrcCreateNewThreadSafeModule(mod, ts_ctx);
 
             t0 = now_ms();
-            if (LLVMLinkModules2(mod, runtime_mod) != 0) {
-                fprintf(stderr, "failed to merge runtime bitcode module\n");
-                LLVMDisposeMemoryBuffer(runtime_buf);
-                LLVMDisposeModule(runtime_mod);
-                LLVMDisposeModule(mod);
-                LLVMContextDispose(ctx);
-                free(src);
-                free(runtime_bc);
-                return 1;
-            }
-            t1 = now_ms();
-            merge_runtime_total += (t1 - t0);
-            runtime_mod = NULL;
-            LLVMDisposeMemoryBuffer(runtime_buf);
-            runtime_buf = NULL;
-        }
-
-        err = LLVMOrcCreateLLJIT(&jit, NULL);
-        if (err) {
-            char *msg = LLVMGetErrorMessage(err);
-            fprintf(stderr, "LLJIT create error: %s\n", msg ? msg : "unknown");
-            if (msg) LLVMDisposeErrorMessage(msg);
-            LLVMDisposeModule(mod);
-            LLVMContextDispose(ctx);
-            free(src);
-            free(runtime_bc);
-            return 1;
-        }
-
-        ts_ctx = LLVMOrcCreateNewThreadSafeContext();
-        if (!ts_ctx) {
-            fprintf(stderr, "failed to create thread-safe context\n");
-            LLVMOrcDisposeLLJIT(jit);
-            LLVMDisposeModule(mod);
-            LLVMContextDispose(ctx);
-            free(src);
-            free(runtime_bc);
-            return 1;
-        }
-        ts_mod = LLVMOrcCreateNewThreadSafeModule(mod, ts_ctx);
-
-        t0 = now_ms();
-        dylib = LLVMOrcLLJITGetMainJITDylib(jit);
-        err = LLVMOrcLLJITAddLLVMIRModule(jit, dylib, ts_mod);
-        if (err) {
-            char *msg = LLVMGetErrorMessage(err);
-            fprintf(stderr, "JIT error: %s\n", msg ? msg : "unknown");
-            if (msg) LLVMDisposeErrorMessage(msg);
-            LLVMOrcDisposeLLJIT(jit);
-            LLVMOrcDisposeThreadSafeContext(ts_ctx);
-            LLVMContextDispose(ctx);
-            free(src);
-            free(runtime_bc);
-            return 1;
-        }
-        t1 = now_ms();
-        jit_total += (t1 - t0);
-
-        t0 = now_ms();
-        err = LLVMOrcLLJITLookup(jit, &addr, a.func_name);
-        t1 = now_ms();
-        lookup_total += (t1 - t0);
-        if (err) {
-            char *msg = LLVMGetErrorMessage(err);
-            fprintf(stderr, "lookup error (%s): %s\n", a.func_name, msg ? msg : "unknown");
-            if (msg) LLVMDisposeErrorMessage(msg);
-            LLVMOrcDisposeLLJIT(jit);
-            LLVMOrcDisposeThreadSafeContext(ts_ctx);
-            LLVMContextDispose(ctx);
-            free(src);
-            free(runtime_bc);
-            return 1;
-        }
-
-        if (!a.no_exec) {
-            t0 = now_ms();
-            run_rc = run_symbol(addr, a.sig, &retcode_last);
-            t1 = now_ms();
-            exec_total += (t1 - t0);
-            if (run_rc != 0) {
-                if (run_rc == 2) {
-                    fprintf(stderr, "unsupported signature: %s\n", a.sig);
-                } else {
-                    fprintf(stderr, "failed to run function '%s'\n", a.func_name);
-                }
+            dylib = LLVMOrcLLJITGetMainJITDylib(jit);
+            err = LLVMOrcLLJITAddLLVMIRModule(jit, dylib, ts_mod);
+            if (err) {
+                char *msg = LLVMGetErrorMessage(err);
+                fprintf(stderr, "JIT error: %s\n", msg ? msg : "unknown");
+                if (msg) LLVMDisposeErrorMessage(msg);
                 LLVMOrcDisposeLLJIT(jit);
                 LLVMOrcDisposeThreadSafeContext(ts_ctx);
                 LLVMContextDispose(ctx);
                 free(src);
-                free(runtime_bc);
                 return 1;
             }
-        }
+            t1 = now_ms();
+            jit_total += (t1 - t0);
 
-        LLVMOrcDisposeLLJIT(jit);
-        LLVMOrcDisposeThreadSafeContext(ts_ctx);
+            t0 = now_ms();
+            err = LLVMOrcLLJITLookup(jit, &addr, a.func_name);
+            t1 = now_ms();
+            lookup_total += (t1 - t0);
+            if (err) {
+                char *msg = LLVMGetErrorMessage(err);
+                fprintf(stderr, "lookup error (%s): %s\n", a.func_name, msg ? msg : "unknown");
+                if (msg) LLVMDisposeErrorMessage(msg);
+                LLVMOrcDisposeLLJIT(jit);
+                LLVMOrcDisposeThreadSafeContext(ts_ctx);
+                LLVMContextDispose(ctx);
+                free(src);
+                return 1;
+            }
+
+            if (!a.no_exec) {
+                t0 = now_ms();
+                run_rc = run_symbol(addr, a.sig, &retcode_last);
+                t1 = now_ms();
+                exec_total += (t1 - t0);
+                if (run_rc != 0) {
+                    if (run_rc == 2) {
+                        fprintf(stderr, "unsupported signature: %s\n", a.sig);
+                    } else {
+                        fprintf(stderr, "failed to run function '%s'\n", a.func_name);
+                    }
+                    LLVMOrcDisposeLLJIT(jit);
+                    LLVMOrcDisposeThreadSafeContext(ts_ctx);
+                    LLVMContextDispose(ctx);
+                    free(src);
+                    return 1;
+                }
+            }
+
+            LLVMOrcDisposeLLJIT(jit);
+            LLVMOrcDisposeThreadSafeContext(ts_ctx);
+        } else {
+            LLVMDisposeModule(mod);
+        }
         LLVMContextDispose(ctx);
     }
 
@@ -439,6 +381,5 @@ int main(int argc, char **argv) {
     }
 
     free(src);
-    free(runtime_bc);
     return 0;
 }

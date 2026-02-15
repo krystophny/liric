@@ -53,8 +53,6 @@ typedef struct {
     const char *lfortran;
     const char *probe_runner;
     const char *runtime_lib;
-    const char *runtime_bc;
-    const char *lfortran_src;
     const char *lli;
     const char *cmake;
     const char *bench_dir;
@@ -800,76 +798,6 @@ static const name_opt_t *find_option_by_name(const name_opt_t *opts, size_t n, c
     return NULL;
 }
 
-static char *derive_lfortran_src_from_cmake(const char *cmake_path) {
-    char *dir = dirname_dup(cmake_path);
-    char *root = NULL;
-    if (!dir)
-        return NULL;
-    root = dirname_dup(dir);
-    free(dir);
-    return root;
-}
-
-static int ensure_runtime_bc(cfg_t *cfg) {
-    char *runtime_c = NULL;
-    char *include_dir = NULL;
-    char *out_dir = NULL;
-    cmd_result_t cc_r;
-    int ok = 0;
-
-    if (!cfg || !cfg->runtime_bc || !cfg->lfortran_src)
-        return 0;
-    if (file_exists(cfg->runtime_bc))
-        return 1;
-
-    runtime_c = path_join2(cfg->lfortran_src, "src/libasr/runtime/lfortran_intrinsics.c");
-    include_dir = path_join2(cfg->lfortran_src, "src");
-    if (!runtime_c || !include_dir)
-        goto done;
-    if (!file_exists(runtime_c)) {
-        fprintf(stderr, "runtime source not found: %s\n", runtime_c);
-        goto done;
-    }
-
-    out_dir = dirname_dup(cfg->runtime_bc);
-    if (!out_dir)
-        goto done;
-    ensure_dir(out_dir);
-
-    {
-        char include_flag[PATH_MAX + 3];
-        char *cc_argv[11];
-        snprintf(include_flag, sizeof(include_flag), "-I%s", include_dir);
-        cc_argv[0] = "clang";
-        cc_argv[1] = "-c";
-        cc_argv[2] = "-emit-llvm";
-        cc_argv[3] = "-O2";
-        cc_argv[4] = "-fno-exceptions";
-        cc_argv[5] = "-fno-unwind-tables";
-        cc_argv[6] = include_flag;
-        cc_argv[7] = "-o";
-        cc_argv[8] = (char *)cfg->runtime_bc;
-        cc_argv[9] = runtime_c;
-        cc_argv[10] = NULL;
-        fprintf(stderr, "Generating runtime bc: %s\n", cfg->runtime_bc);
-        cc_r = run_cmd(cc_argv, 120, NULL, NULL, NULL);
-    }
-    if (cc_r.rc != 0) {
-        fprintf(stderr, "failed to generate runtime bc (clang rc=%d)\n", cc_r.rc);
-        if (cc_r.stderr_text && cc_r.stderr_text[0])
-            fprintf(stderr, "%s\n", cc_r.stderr_text);
-    } else {
-        ok = file_exists(cfg->runtime_bc);
-    }
-    free_cmd_result(&cc_r);
-
-done:
-    free(runtime_c);
-    free(include_dir);
-    free(out_dir);
-    return ok;
-}
-
 static void usage(void) {
     printf("usage: bench_compat_check [options]\n");
     printf("  --workers N            (ignored, kept for compatibility)\n");
@@ -879,9 +807,7 @@ static void usage(void) {
     printf("  --freeze-api N         frozen compat corpus size (default: 100)\n");
     printf("  --lfortran PATH        path to lfortran binary\n");
     printf("  --probe-runner PATH    path to liric_probe_runner\n");
-    printf("  --runtime-lib PATH     path to liblfortran_runtime (used by lli)\n");
-    printf("  --runtime-bc PATH      path to generated lfortran runtime bitcode\n");
-    printf("  --lfortran-src PATH    lfortran source root used to auto-build runtime bc (auto-derived from --cmake)\n");
+    printf("  --runtime-lib PATH     path to liblfortran_runtime (used by lli and liric)\n");
     printf("  --lli PATH             path to lli (default: lli)\n");
     printf("  --cmake PATH           path to integration_tests/CMakeLists.txt\n");
 }
@@ -895,8 +821,6 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.lfortran = "../lfortran/build/src/bin/lfortran";
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.runtime_lib = file_exists(default_runtime_dylib) ? default_runtime_dylib : default_runtime_so;
-    cfg.runtime_bc = "/tmp/liric_bench/runtime/lfortran_intrinsics.bc";
-    cfg.lfortran_src = NULL;
     cfg.lli = "lli";
     cfg.cmake = "../lfortran/integration_tests/CMakeLists.txt";
     cfg.bench_dir = "/tmp/liric_bench";
@@ -927,10 +851,6 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            cfg.runtime_bc = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
-            cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--lli") == 0 && i + 1 < argc) {
             cfg.lli = argv[++i];
         } else if (strcmp(argv[i], "--cmake") == 0 && i + 1 < argc) {
@@ -943,7 +863,6 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!file_exists(cfg.lfortran)) die("lfortran not found: %s", cfg.lfortran);
     if (!file_exists(cfg.probe_runner)) die("probe runner not found: %s", cfg.probe_runner);
     if (!file_exists(cfg.runtime_lib)) die("runtime lib not found: %s", cfg.runtime_lib);
-    if (!cfg.runtime_bc || !cfg.runtime_bc[0]) die("runtime bc path not set");
     if (!file_exists(cfg.cmake)) die("cmake file not found: %s", cfg.cmake);
 
     cfg.lfortran = to_abs_path(cfg.lfortran);
@@ -951,13 +870,6 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     cfg.cmake = to_abs_path(cfg.cmake);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
-    if (!cfg.lfortran_src || cfg.lfortran_src[0] == '\0') {
-        char *derived = derive_lfortran_src_from_cmake(cfg.cmake);
-        if (derived) cfg.lfortran_src = derived;
-    } else {
-        cfg.lfortran_src = to_abs_path(cfg.lfortran_src);
-    }
-    if (cfg.runtime_bc && cfg.runtime_bc[0]) cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
     if (strchr(cfg.lli, '/')) cfg.lli = to_abs_path(cfg.lli);
 
     return cfg;
@@ -965,8 +877,6 @@ static cfg_t parse_args(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
-    if (!ensure_runtime_bc(&cfg))
-        die("runtime bc unavailable (set --runtime-bc or --lfortran-src): %s", cfg.runtime_bc);
     testlist_t tests = parse_integration_runs(cfg.cmake);
     char *ll_dir = path_join2(cfg.bench_dir, "ll");
     char *bin_dir = path_join2(cfg.bench_dir, "bin");
@@ -1176,12 +1086,12 @@ int main(int argc, char **argv) {
         }
 
         {
-            char *jitv[7];
+            char *jitv[9];
             jitv[0] = (char *)cfg.probe_runner;
             jitv[1] = "--sig";
             jitv[2] = "i32_argc_argv";
-            jitv[3] = "--runtime-bc";
-            jitv[4] = (char *)cfg.runtime_bc;
+            jitv[3] = "--load-lib";
+            jitv[4] = (char *)cfg.runtime_lib;
             jitv[5] = ll_path;
             jitv[6] = NULL;
             jit_argv = jitv;

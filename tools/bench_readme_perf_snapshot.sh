@@ -11,9 +11,8 @@ usage: bench_readme_perf_snapshot.sh [options]
   --timeout N            timeout seconds per command (default: 30)
   --corpus PATH          corpus TSV (default: tools/corpus_100.tsv)
   --cache-dir PATH       corpus cache dir (default: /tmp/liric_lfortran_mass/cache)
-  --runtime-bc PATH      runtime bitcode path (default: /tmp/liric_bench/runtime/lfortran_intrinsics.bc)
   --runtime-lib PATH     runtime shared library path for core track (auto-detect by default)
-  --lfortran-src PATH    lfortran source root for runtime-bc auto-build (default: ../lfortran)
+  --lfortran-src PATH    lfortran source root for runtime-lib auto-detect (default: ../lfortran)
   --no-run               do not execute benchmarks; consume existing comparator artifacts
   -h, --help             show this help
 
@@ -88,7 +87,6 @@ iters="3"
 timeout_sec="30"
 corpus_tsv="tools/corpus_100.tsv"
 cache_dir="/tmp/liric_lfortran_mass/cache"
-runtime_bc="/tmp/liric_bench/runtime/lfortran_intrinsics.bc"
 runtime_lib=""
 lfortran_src="../lfortran"
 no_run="0"
@@ -128,11 +126,6 @@ while [[ $# -gt 0 ]]; do
         --cache-dir)
             [[ $# -ge 2 ]] || die "missing value for $1"
             cache_dir="$2"
-            shift 2
-            ;;
-        --runtime-bc)
-            [[ $# -ge 2 ]] || die "missing value for $1"
-            runtime_bc="$2"
             shift 2
             ;;
         --runtime-lib)
@@ -192,8 +185,6 @@ if [[ "$no_run" == "0" ]]; then
         "${build_dir}/bench_corpus_compare"
         --probe-runner "${build_dir}/liric_probe_runner"
         --lli-phases "${build_dir}/bench_lli_phases"
-        --runtime-bc "$runtime_bc"
-        --lfortran-src "$lfortran_src"
         --corpus "$corpus_tsv"
         --cache-dir "$cache_dir"
         --bench-dir "$bench_dir"

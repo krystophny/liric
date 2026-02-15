@@ -1,5 +1,4 @@
 #include "jit.h"
-#include "bc_decode.h"
 #include "compile_mode.h"
 #include "ir.h"
 #include "llvm_backend.h"
@@ -1048,46 +1047,6 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
         e->bucket_next = NULL;
     }
     update_last_symbol_lookup(j, e, hash);
-}
-
-void lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len) {
-    if (!j) return;
-    j->runtime_bc_data = bc_data;
-    j->runtime_bc_len = bc_len;
-    j->runtime_bc_loaded = false;
-}
-
-int lr_jit_ensure_runtime_bc_loaded(lr_jit_t *j, lr_module_t *m,
-                                    char *err, size_t err_len) {
-    char rt_err[256] = {0};
-    lr_module_t *rt = NULL;
-
-    if (err && err_len > 0)
-        err[0] = '\0';
-    if (!j || !m) {
-        if (err && err_len > 0)
-            (void)snprintf(err, err_len, "invalid runtime module load arguments");
-        return -1;
-    }
-    if (!j->runtime_bc_data || j->runtime_bc_loaded)
-        return 0;
-
-    rt = lr_parse_bc_with_arena(j->runtime_bc_data, j->runtime_bc_len,
-                                m->arena, rt_err, sizeof(rt_err));
-    if (!rt) {
-        if (err && err_len > 0) {
-            (void)snprintf(err, err_len, "runtime bitcode parse failed: %s",
-                           rt_err[0] ? rt_err : "unknown parse error");
-        }
-        return -1;
-    }
-    if (lr_module_merge(m, rt) != 0) {
-        if (err && err_len > 0)
-            (void)snprintf(err, err_len, "runtime bitcode merge failed");
-        return -1;
-    }
-    j->runtime_bc_loaded = true;
-    return 0;
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
@@ -2319,15 +2278,7 @@ done:
 }
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
-    char runtime_err[256] = {0};
     if (!j || !j->target || !m) return -1;
-
-    if (lr_jit_ensure_runtime_bc_loaded(j, m, runtime_err,
-                                        sizeof(runtime_err)) != 0) {
-        if (runtime_err[0])
-            fprintf(stderr, "%s\n", runtime_err);
-        return -1;
-    }
 
     if (j->mode == LR_COMPILE_LLVM) {
         char llvm_err[256] = {0};
@@ -2517,6 +2468,14 @@ int lr_jit_patch_relocs(lr_jit_t *j, const struct lr_objfile_ctx *ctx) {
 int lr_jit_patch_relocs_from(lr_jit_t *j, const struct lr_objfile_ctx *ctx,
                              uint32_t reloc_start) {
     return apply_jit_relocs(j, ctx, reloc_start, NULL);
+}
+
+int lr_jit_patch_relocs_from_ex(lr_jit_t *j, const struct lr_objfile_ctx *ctx,
+                                uint32_t reloc_start,
+                                const char **missing_symbol) {
+    if (missing_symbol)
+        *missing_symbol = NULL;
+    return apply_jit_relocs(j, ctx, reloc_start, missing_symbol);
 }
 
 void lr_jit_destroy(lr_jit_t *j) {

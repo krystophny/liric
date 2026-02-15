@@ -53,8 +53,6 @@ void lr_compiler_destroy(lr_compiler_t *c);
 int lr_compiler_add_symbol(lr_compiler_t *c, const char *name, void *addr);
 int lr_compiler_load_library(lr_compiler_t *c, const char *path,
                              lr_compiler_error_t *err);
-int lr_compiler_set_runtime_bc(lr_compiler_t *c, const uint8_t *bc_data, size_t bc_len,
-                               lr_compiler_error_t *err);
 
 int lr_compiler_feed_ll(lr_compiler_t *c, const char *src, size_t len,
                         lr_compiler_error_t *err);
