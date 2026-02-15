@@ -274,6 +274,7 @@ int main(int argc, char **argv) {
     if (timing) t_read_end = now_us();
 
     lr_backend_t backend = LR_BACKEND_ISEL;
+    lr_policy_t policy = LR_POLICY_DIRECT;
     lr_compiler_config_t cfg = {0};
     lr_compiler_error_t cerr = {0};
     lr_compiler_t *compiler = NULL;
@@ -292,7 +293,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    cfg.policy = LR_POLICY_DIRECT;
+    if (backend == LR_BACKEND_LLVM)
+        policy = LR_POLICY_IR;
+
+    cfg.policy = policy;
     cfg.backend = backend;
     cfg.target = NULL;
 
