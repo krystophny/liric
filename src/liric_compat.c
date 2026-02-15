@@ -1,5 +1,6 @@
 #include "ir.h"
 #include "arena.h"
+#include "compile_mode.h"
 #include "jit.h"
 #include "liric.h"
 #include "module_emit.h"
@@ -574,6 +575,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     lc_module_compat_t *cm = (lc_module_compat_t *)calloc(
         1, sizeof(lc_module_compat_t));
     lr_session_config_t cfg;
+    lr_compile_mode_t mode = lr_compile_mode_from_env();
     lr_arena_t *arena;
     if (!cm) return NULL;
 
@@ -583,7 +585,19 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
     memset(&cfg, 0, sizeof(cfg));
-    cfg.mode = LR_MODE_DIRECT;
+    cfg.mode = (mode == LR_COMPILE_LLVM) ? LR_MODE_IR : LR_MODE_DIRECT;
+    switch (mode) {
+    case LR_COMPILE_COPY_PATCH:
+        cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
+        break;
+    case LR_COMPILE_LLVM:
+        cfg.backend = LR_SESSION_BACKEND_LLVM;
+        break;
+    case LR_COMPILE_ISEL:
+    default:
+        cfg.backend = LR_SESSION_BACKEND_ISEL;
+        break;
+    }
     cm->session = lr_session_create(&cfg, NULL);
     if (!cm->session) {
         lr_arena_destroy(arena);
@@ -2695,22 +2709,33 @@ void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
     char emit_err[256] = {0};
     if (!mod || !out) return -1;
+    if (compat_finish_active_func(mod) != 0) return -1;
     return lr_emit_module_object_stream(mod->mod, NULL, out,
                                         emit_err, sizeof(emit_err));
 }
 
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     char emit_err[256] = {0};
+    int rc;
     if (!mod || !filename) return -1;
-    return lr_emit_module_object_path(mod->mod, NULL, filename,
-                                      emit_err, sizeof(emit_err));
+    if (compat_finish_active_func(mod) != 0) return -1;
+    rc = lr_emit_module_object_path(mod->mod, NULL, filename,
+                                    emit_err, sizeof(emit_err));
+    if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+        fprintf(stderr, "lc_module_emit_object: %s\n", emit_err);
+    return rc;
 }
 
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
     char emit_err[256] = {0};
+    int rc;
     if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
-    return lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
-                                          runtime_ll, runtime_len,
-                                          emit_err, sizeof(emit_err));
+    if (compat_finish_active_func(mod) != 0) return -1;
+    rc = lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
+                                        runtime_ll, runtime_len,
+                                        emit_err, sizeof(emit_err));
+    if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+        fprintf(stderr, "lc_module_emit_executable: %s\n", emit_err);
+    return rc;
 }
