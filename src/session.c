@@ -4,6 +4,7 @@
 #include "ir.h"
 #include "jit.h"
 #include "liric.h"
+#include "llvm_backend.h"
 #include "module_emit.h"
 #include "objfile.h"
 #include <stdarg.h>
@@ -94,6 +95,7 @@ struct lr_session {
     void *compile_ctx;
     size_t compile_start;
     bool compile_active;
+    bool direct_llvm_stream;
     bool compile_opened_update;
     uint32_t emitted_count;
 
@@ -409,6 +411,15 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
 
     if (s->cfg.mode != SESSION_MODE_DIRECT)
         return 0;
+    if (s->jit && s->jit->mode == LR_COMPILE_LLVM) {
+        if (!lr_llvm_jit_is_available()) {
+            err_set(err, S_ERR_MODE,
+                    "DIRECT+llvm requires llvm-c LLJIT support");
+            return -1;
+        }
+        s->direct_llvm_stream = true;
+        return 0;
+    }
     if (!direct_mode_enabled(s)) {
         const char *mode_name = (s && s->jit) ?
             lr_compile_mode_name(s->jit->mode) : "unknown";
@@ -784,6 +795,7 @@ static void finish_function_state(struct lr_session *s) {
     s->compile_ctx = NULL;
     s->compile_start = 0;
     s->compile_active = false;
+    s->direct_llvm_stream = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
 }
@@ -868,7 +880,9 @@ static int compile_current_function(struct lr_session *s, void **out_addr,
     if (s->cfg.mode == SESSION_MODE_IR && !out_addr)
         return 0;
 
-    if (s->cfg.mode == SESSION_MODE_IR)
+    if (s->cfg.mode == SESSION_MODE_IR ||
+        (s->cfg.mode == SESSION_MODE_DIRECT &&
+         s->jit && s->jit->mode == LR_COMPILE_LLVM))
         restore_toggled = true;
 
     for (f = s->module->first_func; f; f = f->next) {
@@ -1232,6 +1246,7 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
     s->compile_ctx = NULL;
     s->compile_start = 0;
     s->compile_active = false;
+    s->direct_llvm_stream = false;
     s->emitted_count = 0;
     s->ir_module_jit_ready = false;
     if (ensure_runtime_and_globals_ready(s, err) != 0) {
@@ -1268,6 +1283,7 @@ int lr_session_func_begin_existing(struct lr_session *s, lr_module_t *module,
     s->compile_ctx = NULL;
     s->compile_start = 0;
     s->compile_active = false;
+    s->direct_llvm_stream = false;
     s->emitted_count = 0;
     s->ir_module_jit_ready = false;
 
@@ -1415,6 +1431,7 @@ int lr_session_bind_ir(struct lr_session *s, lr_module_t *module,
     s->cur_func = func;
     s->cur_block = block;
     s->compile_active = false;
+    s->direct_llvm_stream = false;
     s->compile_ctx = NULL;
     s->ir_module_jit_ready = false;
     return 0;
@@ -1886,7 +1903,7 @@ bool lr_session_is_direct(struct lr_session *s) {
 }
 
 bool lr_session_is_compiling(struct lr_session *s) {
-    return s && s->compile_active;
+    return s && (s->compile_active || s->direct_llvm_stream);
 }
 
 lr_func_t *lr_session_cur_func(struct lr_session *s) {
