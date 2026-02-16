@@ -90,6 +90,17 @@ typedef struct {
     double llvm_total_materialized_aggregate_ms;
 } summary_t;
 
+typedef struct {
+    double read_ms;
+    double parse_ms;
+    double jit_create_ms;
+    double load_lib_ms;
+    double compile_ms;
+    double lookup_ms;
+    double exec_ms;
+    double total_ms;
+} probe_timing_t;
+
 static void die(const char *msg, const char *path) {
     if (path) fprintf(stderr, "%s: %s\n", msg, path);
     else fprintf(stderr, "%s\n", msg);
@@ -163,23 +174,21 @@ static double median(const double *vals, size_t n) {
 }
 
 static int parse_probe_timing(const char *stderr_text,
-                              double *out_parse_ms,
-                              double *out_compile_ms,
-                              double *out_lookup_ms) {
+                              probe_timing_t *out_timing) {
     const char *p = strstr(stderr_text, "TIMING ");
     double read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us;
     if (!p) return 0;
     if (sscanf(p,
                "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf lookup_us=%lf exec_us=%lf total_us=%lf",
                &read_us, &parse_us, &jit_create_us, &load_lib_us, &compile_us, &lookup_us, &exec_us, &total_us) == 8) {
-        (void)read_us;
-        (void)jit_create_us;
-        (void)load_lib_us;
-        (void)exec_us;
-        (void)total_us;
-        *out_parse_ms = parse_us / 1000.0;
-        *out_compile_ms = compile_us / 1000.0;
-        *out_lookup_ms = lookup_us / 1000.0;
+        out_timing->read_ms = read_us / 1000.0;
+        out_timing->parse_ms = parse_us / 1000.0;
+        out_timing->jit_create_ms = jit_create_us / 1000.0;
+        out_timing->load_lib_ms = load_lib_us / 1000.0;
+        out_timing->compile_ms = compile_us / 1000.0;
+        out_timing->lookup_ms = lookup_us / 1000.0;
+        out_timing->exec_ms = exec_us / 1000.0;
+        out_timing->total_ms = total_us / 1000.0;
         return 1;
     }
     return 0;
@@ -535,13 +544,36 @@ static int run_suite(const cfg_t *cfg,
         }
 
         for (it = 0; it < (size_t)cfg->iters; it++) {
-            cmd_result_t rp, ri;
+            cmd_result_t rp, ri, rp_parse_only;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
             double e_parse = 0.0, e_parse_input = 0.0;
             double e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
+            probe_timing_t tp_parse_only, tp_full;
+
+            memset(&tp_parse_only, 0, sizeof(tp_parse_only));
+            memset(&tp_full, 0, sizeof(tp_full));
 
             char *probe_argv[20];
+            char *probe_parse_argv[16];
             int pk = 0;
+            int ppk = 0;
+
+            /* First isolate parser-only frontend cost. */
+            probe_parse_argv[ppk++] = (char *)cfg->probe_runner;
+            probe_parse_argv[ppk++] = "--timing";
+            probe_parse_argv[ppk++] = "--parse-only";
+            probe_parse_argv[ppk++] = (char *)t->ll_path;
+            probe_parse_argv[ppk] = NULL;
+
+            rp_parse_only = run_cmd(probe_parse_argv, cfg->timeout_sec, NULL);
+            if (rp_parse_only.rc != 0 || !parse_probe_timing(rp_parse_only.stderr_text, &tp_parse_only)) {
+                skipped = 1;
+                free_cmd_result(&rp_parse_only);
+                break;
+            }
+            free_cmd_result(&rp_parse_only);
+
+            /* Then run the normal no-exec probe path to capture materialization/lookup. */
             probe_argv[pk++] = (char *)cfg->probe_runner;
             probe_argv[pk++] = "--timing";
             probe_argv[pk++] = "--no-exec";
@@ -563,16 +595,24 @@ static int run_suite(const cfg_t *cfg,
             probe_argv[pk] = NULL;
 
             rp = run_cmd(probe_argv, cfg->timeout_sec, NULL);
-            if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &l_parse, &l_compile, &l_lookup)) {
+            if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &tp_full)) {
                 skipped = 1;
                 free_cmd_result(&rp);
                 break;
             }
+            free_cmd_result(&rp);
+
+            l_parse = tp_parse_only.parse_ms;
             if (parse_only) {
                 l_compile = 0.0;
                 l_lookup = 0.0;
+            } else {
+                double feed_overhead_ms = tp_full.parse_ms - tp_parse_only.parse_ms;
+                if (feed_overhead_ms < 0.0)
+                    feed_overhead_ms = 0.0;
+                l_compile = tp_full.compile_ms + feed_overhead_ms;
+                l_lookup = tp_full.lookup_ms;
             }
-            free_cmd_result(&rp);
 
             {
                 char *llvm_argv[20];
