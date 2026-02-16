@@ -36,6 +36,9 @@ Use `--allow-partial` only for exploratory local runs.
 - `matrix_failures.jsonl`: one row per failing cell
 - `matrix_summary.json`: run-level status and accounting
 
+`matrix_rows.jsonl` also includes a `compat_check` preflight row (`mode=all`) so
+compatibility coverage is visible in the same result stream as benchmark cells.
+
 Lane-local artifacts remain in mode/lane subdirectories (for drill-down), for example:
 - `/tmp/liric_bench/isel/ir_file/bench_corpus_compare_summary.json`
 - `/tmp/liric_bench/llvm/api_e2e/bench_api_summary.json`
@@ -50,4 +53,5 @@ Lane-local artifacts remain in mode/lane subdirectories (for drill-down), for ex
 ## Notes
 
 - `api_e2e` lane regenerates compatibility artifacts via `bench_compat_check` unless `--skip-compat-check` is passed.
+- `bench_compat_check` is a lane preflight producer used by `bench_matrix`; run it standalone only for focused debugging.
 - `bench_tcc` now emits `bench_tcc_summary.json` so micro lane results can be gated in the unified matrix.

@@ -259,10 +259,10 @@ target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus_compare tools/bench_corpus_compare.c tools/bench_common.c)
 target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_exe_matrix tools/bench_exe_matrix.c)
+add_executable(bench_exe_matrix tools/bench_exe_matrix.c tools/bench_common.c)
 target_link_libraries(bench_exe_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_matrix tools/bench_matrix.c)
+add_executable(bench_matrix tools/bench_matrix.c tools/bench_common.c)
 target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)

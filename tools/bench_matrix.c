@@ -16,9 +16,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "bench_common.h"
 
 typedef enum {
     MODE_ISEL = 0,
@@ -64,10 +65,7 @@ typedef struct {
     int lanes[LANE_COUNT];
 } cfg_t;
 
-typedef struct {
-    int rc;
-    double elapsed_ms;
-} cmd_result_t;
+typedef bench_cmd_result_t cmd_result_t;
 
 static const char *k_mode_name[MODE_COUNT] = {"isel", "copy_patch", "llvm"};
 static const char *k_lane_name[LANE_COUNT] = {"ir_file", "api_e2e", "micro_c"};
@@ -129,65 +127,6 @@ static char *xstrdup(const char *s) {
         die("out of memory");
     memcpy(p, s, n + 1);
     return p;
-}
-
-static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + (size_t)need + nb + 1);
-    if (!out)
-        die("out of memory");
-    memcpy(out, a, na);
-    if (need)
-        out[na++] = '/';
-    memcpy(out + na, b, nb + 1);
-    return out;
-}
-
-static double now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
-static char *read_file_all(const char *path) {
-    FILE *f;
-    long n;
-    size_t r;
-    char *buf;
-
-    f = fopen(path, "rb");
-    if (!f)
-        return NULL;
-
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return NULL;
-    }
-    n = ftell(f);
-    if (n < 0) {
-        fclose(f);
-        return NULL;
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return NULL;
-    }
-
-    buf = (char *)malloc((size_t)n + 1);
-    if (!buf) {
-        fclose(f);
-        return NULL;
-    }
-
-    r = fread(buf, 1, (size_t)n, f);
-    fclose(f);
-    if (r != (size_t)n) {
-        free(buf);
-        return NULL;
-    }
-    buf[n] = '\0';
-    return buf;
 }
 
 static int json_find_value_start(const char *json, const char *key, const char **out) {
@@ -331,66 +270,17 @@ static void format_iso8601_utc(char *out, size_t out_sz) {
 }
 
 static int run_cmd(char *const argv[], cmd_result_t *out_res) {
-    pid_t pid;
-    int status;
-    double t0, t1;
-
-    t0 = now_ms();
-    pid = fork();
-    if (pid < 0)
-        return -1;
-
-    if (pid == 0) {
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-
-    for (;;) {
-        pid_t w = waitpid(pid, &status, 0);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        break;
-    }
-
-    t1 = now_ms();
-    out_res->elapsed_ms = t1 - t0;
-
-    if (WIFEXITED(status)) {
-        out_res->rc = WEXITSTATUS(status);
-        return 0;
-    }
-    if (WIFSIGNALED(status)) {
-        out_res->rc = -WTERMSIG(status);
-        return 0;
-    }
-
-    out_res->rc = -1;
-    return 0;
+    bench_run_cmd_opts_t opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    return bench_run_cmd(&opts, out_res);
 }
 
 static int run_cmd_with_mode(const char *mode, char *const argv[], cmd_result_t *out_res) {
-    const char *old = getenv("LIRIC_COMPILE_MODE");
-    char *old_copy = old ? xstrdup(old) : NULL;
-    int rc;
-
-    if (setenv("LIRIC_COMPILE_MODE", mode, 1) != 0) {
-        free(old_copy);
-        return -1;
-    }
-
-    rc = run_cmd(argv, out_res);
-
-    if (old_copy) {
-        setenv("LIRIC_COMPILE_MODE", old_copy, 1);
-        free(old_copy);
-    } else {
-        unsetenv("LIRIC_COMPILE_MODE");
-    }
-
-    return rc;
+    bench_run_cmd_opts_t opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    return bench_run_cmd_with_mode(mode, &opts, out_res);
 }
 
 static void usage(void) {
@@ -427,30 +317,6 @@ static void set_all_modes(cfg_t *cfg, int v) {
 static void set_all_lanes(cfg_t *cfg, int v) {
     for (int i = 0; i < LANE_COUNT; i++)
         cfg->lanes[i] = v;
-}
-
-static int parse_modes(cfg_t *cfg, const char *text) {
-    char *tmp = xstrdup(text);
-    char *save = NULL;
-    char *tok;
-
-    set_all_modes(cfg, 0);
-    tok = strtok_r(tmp, ",", &save);
-    while (tok) {
-        if (strcmp(tok, "isel") == 0)
-            cfg->modes[MODE_ISEL] = 1;
-        else if (strcmp(tok, "copy_patch") == 0)
-            cfg->modes[MODE_COPY_PATCH] = 1;
-        else if (strcmp(tok, "llvm") == 0)
-            cfg->modes[MODE_LLVM] = 1;
-        else {
-            free(tmp);
-            return -1;
-        }
-        tok = strtok_r(NULL, ",", &save);
-    }
-    free(tmp);
-    return 0;
 }
 
 static int parse_lanes(cfg_t *cfg, const char *text) {
@@ -523,7 +389,7 @@ static cfg_t parse_args(int argc, char **argv) {
             const char *v = argv[++i];
             if (strcmp(v, "all") == 0)
                 set_all_modes(&cfg, 1);
-            else if (parse_modes(&cfg, v) != 0)
+            else if (bench_parse_modes_csv(v, cfg.modes, MODE_COUNT) != 0)
                 die("invalid --modes value: %s", v);
         } else if (strcmp(argv[i], "--lanes") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
@@ -577,17 +443,17 @@ static cfg_t parse_args(int argc, char **argv) {
     }
 
     if (!cfg.bench_compat_check)
-        cfg.bench_compat_check = path_join2(cfg.build_dir, "bench_compat_check");
+        cfg.bench_compat_check = bench_path_join2(cfg.build_dir, "bench_compat_check");
     if (!cfg.bench_corpus_compare)
-        cfg.bench_corpus_compare = path_join2(cfg.build_dir, "bench_corpus_compare");
+        cfg.bench_corpus_compare = bench_path_join2(cfg.build_dir, "bench_corpus_compare");
     if (!cfg.bench_api)
-        cfg.bench_api = path_join2(cfg.build_dir, "bench_api");
+        cfg.bench_api = bench_path_join2(cfg.build_dir, "bench_api");
     if (!cfg.bench_tcc)
-        cfg.bench_tcc = path_join2(cfg.build_dir, "bench_tcc");
+        cfg.bench_tcc = bench_path_join2(cfg.build_dir, "bench_tcc");
     if (!cfg.probe_runner)
-        cfg.probe_runner = path_join2(cfg.build_dir, "liric_probe_runner");
+        cfg.probe_runner = bench_path_join2(cfg.build_dir, "liric_probe_runner");
     if (!cfg.lli_phases)
-        cfg.lli_phases = path_join2(cfg.build_dir, "bench_lli_phases");
+        cfg.lli_phases = bench_path_join2(cfg.build_dir, "bench_lli_phases");
 
     return cfg;
 }
@@ -712,6 +578,45 @@ static void write_row_tcc(FILE *rf,
     free(e_summary);
 }
 
+static long long count_lines_file(const char *path) {
+    FILE *f;
+    int c;
+    long long lines = 0;
+    int saw_data = 0;
+
+    if (!path) return 0;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    while ((c = fgetc(f)) != EOF) {
+        if (c == '\n') {
+            if (saw_data) lines++;
+            saw_data = 0;
+        } else if (!isspace((unsigned char)c)) {
+            saw_data = 1;
+        }
+    }
+    if (saw_data) lines++;
+    fclose(f);
+    return lines;
+}
+
+static void write_row_compat(FILE *rf,
+                             const char *status,
+                             long long compat_api_n,
+                             long long compat_ll_n,
+                             const char *bench_dir) {
+    char *e_bench_dir = json_escape(bench_dir ? bench_dir : "");
+    fprintf(rf,
+            "{\"lane\":\"compat_check\",\"mode\":\"all\",\"baseline\":\"lfortran_llvm\","
+            "\"status\":\"%s\",\"compat_api_count\":%lld,\"compat_ll_count\":%lld,"
+            "\"summary\":\"%s\"}\n",
+            status,
+            compat_api_n,
+            compat_ll_n,
+            e_bench_dir);
+    free(e_bench_dir);
+}
+
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     FILE *rows = NULL;
@@ -720,6 +625,7 @@ int main(int argc, char **argv) {
     char *fails_path = NULL;
     char *summary_path = NULL;
     char *compat_ll = NULL;
+    char *compat_api = NULL;
     char *compat_opts = NULL;
 
     int cells_attempted = 0;
@@ -739,11 +645,12 @@ int main(int argc, char **argv) {
     if (mkdir_p(cfg.bench_dir) != 0)
         die("failed to create bench dir: %s", cfg.bench_dir);
 
-    rows_path = path_join2(cfg.bench_dir, "matrix_rows.jsonl");
-    fails_path = path_join2(cfg.bench_dir, "matrix_failures.jsonl");
-    summary_path = path_join2(cfg.bench_dir, "matrix_summary.json");
-    compat_ll = path_join2(cfg.bench_dir, "compat_ll.txt");
-    compat_opts = path_join2(cfg.bench_dir, "compat_ll_options.jsonl");
+    rows_path = bench_path_join2(cfg.bench_dir, "matrix_rows.jsonl");
+    fails_path = bench_path_join2(cfg.bench_dir, "matrix_failures.jsonl");
+    summary_path = bench_path_join2(cfg.bench_dir, "matrix_summary.json");
+    compat_ll = bench_path_join2(cfg.bench_dir, "compat_ll.txt");
+    compat_api = bench_path_join2(cfg.bench_dir, "compat_api.txt");
+    compat_opts = bench_path_join2(cfg.bench_dir, "compat_ll_options.jsonl");
 
     rows = fopen(rows_path, "w");
     if (!rows)
@@ -787,6 +694,7 @@ int main(int argc, char **argv) {
             printf("[matrix] compat_check\n");
             if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
                 compat_ok = 0;
+                write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
                 write_failure_row(fails,
                                   "api_e2e",
                                   "all",
@@ -796,6 +704,7 @@ int main(int argc, char **argv) {
                                   cfg.bench_compat_check);
             } else if (!file_exists(compat_ll) || !file_exists(compat_opts)) {
                 compat_ok = 0;
+                write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
                 write_failure_row(fails,
                                   "api_e2e",
                                   "all",
@@ -803,6 +712,12 @@ int main(int argc, char **argv) {
                                   "compat_artifacts_missing",
                                   1,
                                   cfg.bench_dir);
+            } else {
+                write_row_compat(rows,
+                                 "OK",
+                                 count_lines_file(compat_api),
+                                 count_lines_file(compat_ll),
+                                 cfg.bench_dir);
             }
             ran_compat = 1;
         }
@@ -823,8 +738,8 @@ int main(int argc, char **argv) {
                 continue;
             lane = k_lane_name[li];
 
-            mode_dir = path_join2(cfg.bench_dir, mode);
-            lane_dir = path_join2(mode_dir, lane);
+            mode_dir = bench_path_join2(cfg.bench_dir, mode);
+            lane_dir = bench_path_join2(mode_dir, lane);
             if (mkdir_p(lane_dir) != 0)
                 die("failed to create lane dir: %s", lane_dir);
 
@@ -834,7 +749,7 @@ int main(int argc, char **argv) {
             if (li == LANE_IR_FILE) {
                 cmd_result_t r = {0};
                 char iters_buf[32], timeout_buf[32];
-                char *sum_path = path_join2(lane_dir, "bench_corpus_compare_summary.json");
+                char *sum_path = bench_path_join2(lane_dir, "bench_corpus_compare_summary.json");
                 char *cmd[40];
                 int n = 0;
                 char status[64] = "UNKNOWN";
@@ -905,7 +820,7 @@ int main(int argc, char **argv) {
                 }
 
                 {
-                    char *json = read_file_all(sum_path);
+                    char *json = bench_read_all_file(sum_path);
                     if (!json) {
                         write_failure_row(fails, lane, mode, "llvm", "summary_missing", 1, sum_path);
                         cells_failed++;
@@ -937,7 +852,7 @@ int main(int argc, char **argv) {
             } else if (li == LANE_API_E2E) {
                 cmd_result_t r = {0};
                 char iters_buf[32], timeout_buf[32], min_completed_buf[32];
-                char *sum_path = path_join2(lane_dir, "bench_api_summary.json");
+                char *sum_path = bench_path_join2(lane_dir, "bench_api_summary.json");
                 char *cmd[48];
                 int n = 0;
                 char status[64] = "UNKNOWN";
@@ -1009,7 +924,7 @@ int main(int argc, char **argv) {
                 }
 
                 {
-                    char *json = read_file_all(sum_path);
+                    char *json = bench_read_all_file(sum_path);
                     if (!json) {
                         write_failure_row(fails, lane, mode, "lfortran_llvm", "summary_missing", 1, sum_path);
                         cells_failed++;
@@ -1041,7 +956,7 @@ int main(int argc, char **argv) {
             } else if (li == LANE_MICRO_C) {
                 cmd_result_t r = {0};
                 char iters_buf[32];
-                char *sum_path = path_join2(lane_dir, "bench_tcc_summary.json");
+                char *sum_path = bench_path_join2(lane_dir, "bench_tcc_summary.json");
                 char *cmd[16];
                 int n = 0;
                 char status[64] = "UNKNOWN";
@@ -1076,7 +991,7 @@ int main(int argc, char **argv) {
                 }
 
                 {
-                    char *json = read_file_all(sum_path);
+                    char *json = bench_read_all_file(sum_path);
                     if (!json) {
                         write_failure_row(fails, lane, mode, "tcc", "summary_missing", 1, sum_path);
                         cells_failed++;
@@ -1164,6 +1079,7 @@ int main(int argc, char **argv) {
         free(fails_path);
         free(summary_path);
         free(compat_ll);
+        free(compat_api);
         free(compat_opts);
         return 1;
     }
@@ -1172,6 +1088,7 @@ int main(int argc, char **argv) {
     free(fails_path);
     free(summary_path);
     free(compat_ll);
+    free(compat_api);
     free(compat_opts);
 
     if (cells_failed > 0 && !cfg.allow_partial)
