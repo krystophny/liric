@@ -183,8 +183,8 @@ int test_target_requires_full_streaming_hooks(void) {
                 "target with full streaming hooks supports isel");
     TEST_ASSERT(lr_target_can_compile(&t, LR_COMPILE_COPY_PATCH),
                 "target with full streaming hooks supports copy_patch");
-    TEST_ASSERT(lr_target_can_compile(&t, LR_COMPILE_LLVM),
-                "target with full streaming hooks supports llvm-mode streaming");
+    TEST_ASSERT(!lr_target_can_compile(&t, LR_COMPILE_LLVM),
+                "target compile contract rejects llvm mode");
 
     t.compile_emit = NULL;
     TEST_ASSERT(!lr_target_can_compile(&t, LR_COMPILE_COPY_PATCH),
