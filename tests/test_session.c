@@ -287,7 +287,7 @@ int test_session_stream_isel_fast_path(void) {
 #endif
 }
 
-int test_session_direct_llvm_mode_hard_fail_contract(void) {
+int test_session_direct_llvm_mode_stream_contract(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err = {0};
     const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
@@ -314,19 +314,41 @@ int test_session_direct_llvm_mode_hard_fail_contract(void) {
         goto cleanup;
     }
 
-    rc = lr_session_func_begin(s, "session_direct_llvm_hard_fail", i32, NULL, 0, false, &err);
-    if (rc == 0) {
-        fprintf(stderr, "  FAIL: func begin fails in DIRECT+llvm mode (line %d)\n", __LINE__);
+    rc = lr_session_func_begin(s, "session_direct_llvm_stream", i32, NULL, 0, false, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: func begin succeeds in DIRECT+llvm mode (line %d)\n", __LINE__);
         goto cleanup;
     }
-    if (err.code != LR_ERR_MODE) {
-        fprintf(stderr, "  FAIL: error code is LR_ERR_MODE (line %d)\n", __LINE__);
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: set block succeeds (line %d)\n", __LINE__);
         goto cleanup;
     }
-    if (!strstr(err.msg, "DIRECT policy unsupported")) {
-        fprintf(stderr, "  FAIL: error mentions DIRECT policy unsupported (line %d)\n",
-                __LINE__);
-        goto cleanup;
+    lr_emit_ret(s, LR_IMM(42, i32));
+    {
+        void *addr = NULL;
+        typedef int (*fn_t)(void);
+        fn_t fn = NULL;
+        rc = lr_session_func_end(s, &addr, &err);
+        if (rc != 0 || !addr) {
+            fprintf(stderr, "  FAIL: func end succeeds in DIRECT+llvm mode (line %d)\n",
+                    __LINE__);
+            goto cleanup;
+        }
+        fn_ptr_cast(&fn, addr);
+        if (!fn || fn() != 42) {
+            fprintf(stderr, "  FAIL: compiled function returns 42 (line %d)\n", __LINE__);
+            goto cleanup;
+        }
+    }
+    {
+        lr_module_t *m = lr_session_module(s);
+        lr_func_t *f = find_func_by_name(m, "session_direct_llvm_stream");
+        if (!f || !f->first_block || f->first_block->first != NULL) {
+            fprintf(stderr, "  FAIL: DIRECT+llvm keeps streaming/no-IR fast path (line %d)\n",
+                    __LINE__);
+            goto cleanup;
+        }
     }
 
     result = 0;
@@ -392,7 +414,7 @@ int test_session_explicit_backend_overrides_env(void) {
     return 0;
 }
 
-int test_session_stream_stencil_unsupported_fallback(void) {
+int test_session_stream_stencil_no_ir_fallback(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
     const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
@@ -420,7 +442,7 @@ int test_session_stream_stencil_unsupported_fallback(void) {
     params[0] = i32;
     params[1] = i32;
 
-    rc = lr_session_func_begin(s, "session_stream_fallback", i32, params, 2, false, &err);
+    rc = lr_session_func_begin(s, "session_stream_no_fallback", i32, params, 2, false, &err);
     TEST_ASSERT_EQ(rc, 0, "func begin");
     va = lr_session_param(s, 0);
     vb = lr_session_param(s, 1);
@@ -447,13 +469,15 @@ int test_session_stream_stencil_unsupported_fallback(void) {
     TEST_ASSERT(addr != NULL, "compiled function address");
 
     fn_ptr_cast(&fn, addr);
-    TEST_ASSERT_EQ(fn(10, 3), 10, "fallback branch returns lhs when greater");
-    TEST_ASSERT_EQ(fn(2, 7), 7, "fallback branch returns rhs when greater");
+    TEST_ASSERT_EQ(fn(10, 3), 10, "branch returns lhs when greater");
+    TEST_ASSERT_EQ(fn(2, 7), 7, "branch returns rhs when greater");
 
     m = lr_session_module(s);
-    f = find_func_by_name(m, "session_stream_fallback");
+    f = find_func_by_name(m, "session_stream_no_fallback");
     TEST_ASSERT(f != NULL, "function exists in module");
-    TEST_ASSERT(f->first_block != NULL, "unsupported stream op falls back to IR path");
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        TEST_ASSERT(b->first == NULL, "DIRECT mode emits no IR instructions");
+    }
 
     lr_session_destroy(s);
     if (prev_mode) {

@@ -594,10 +594,8 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
     memset(&cfg, 0, sizeof(cfg));
-    /* LLVM-compatible builder path must preserve full IR semantics.
-     * Use IR mode unconditionally here; session DIRECT mode remains
-     * available via the native session API. */
-    cfg.mode = LR_MODE_IR;
+    /* Unified policy: DIRECT by default, no hidden IR fallback. */
+    cfg.mode = LR_MODE_DIRECT;
     switch (mode) {
     case LR_COMPILE_COPY_PATCH:
         cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
@@ -3123,31 +3121,41 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
 static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     lr_jit_t *session_jit;
     lr_func_t *f;
-    uint32_t module_defs = 0;
-    int rc;
+    lr_global_t *g;
 
     if (compat_finish_active_func(mod) != 0)
-        return lr_jit_add_module(jit, mod->mod);
+        return -1;
 
     session_jit = lr_session_jit(mod->session);
+    if (!session_jit)
+        return -1;
+
+    if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
+        return -1;
 
     for (f = mod->mod->first_func; f; f = f->next) {
+        void *addr = NULL;
         if (!f->name || !f->name[0])
             continue;
-        if (!f->is_decl)
-            module_defs++;
-        void *addr = lr_jit_get_function(session_jit, f->name);
+        addr = lr_jit_get_function(session_jit, f->name);
+        if (!f->is_decl && !addr)
+            return -1;
         if (addr)
             lr_jit_add_symbol(jit, f->name, addr);
     }
 
-    /* DIRECT mode can materialize definitions in the session-owned JIT,
-       leaving only declarations in the backing module. */
-    if (module_defs == 0)
-        return 0;
+    for (g = mod->mod->first_global; g; g = g->next) {
+        void *addr = NULL;
+        if (!g->name || !g->name[0])
+            continue;
+        addr = lr_jit_get_function(session_jit, g->name);
+        if (!g->is_external && !addr)
+            return -1;
+        if (addr)
+            lr_jit_add_symbol(jit, g->name, addr);
+    }
 
-    rc = lr_jit_add_module(jit, mod->mod);
-    return rc;
+    return 0;
 }
 
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
@@ -3203,6 +3211,12 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     int rc;
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (lr_session_is_direct(mod->session)) {
+        lr_error_t err = {0};
+        if (lr_session_emit_object(mod->session, filename, &err) != 0)
+            return -1;
+        return 0;
+    }
     rc = lr_emit_module_object_path(mod->mod, NULL, filename,
                                     emit_err, sizeof(emit_err));
     if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
@@ -3216,6 +3230,14 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
     int rc;
     if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (lr_session_is_direct(mod->session)) {
+        lr_error_t err = {0};
+        if (lr_session_emit_exe_with_runtime(mod->session, filename,
+                                             runtime_ll, runtime_len,
+                                             &err) != 0)
+            return -1;
+        return 0;
+    }
     rc = lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
                                         runtime_ll, runtime_len,
                                         emit_err, sizeof(emit_err));

@@ -16,7 +16,7 @@ usage: bench_api_clean_gate.sh [options]
   --test-dir PATH         path to integration_tests dir (forwarded to bench_api)
   --probe-runner PATH     path to liric_probe_runner (forwarded to bench_compat_check)
   --runtime-lib PATH      path to liblfortran_runtime for lli (forwarded to bench_compat_check)
-  --liric-compile-mode M  compile mode for liric backend in bench_api (default: llvm)
+  --liric-compile-mode M  compile mode for liric backend in bench_api (default: isel)
   --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
   --workers N             worker count hint (forwarded to bench_compat_check)
   --iters N               bench_api iterations (default: 1)
@@ -42,7 +42,7 @@ lfortran_liric_path=""
 test_dir=""
 probe_runner=""
 runtime_lib=""
-liric_compile_mode="llvm"
+liric_compile_mode="isel"
 cmake_path=""
 workers=""
 iters="1"

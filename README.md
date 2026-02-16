@@ -13,7 +13,7 @@ There are two compilation paths. Both produce JIT, object files, or executables.
 **DIRECT path** -- stream instructions from the programmatic API, no IR:
 
 ```
-  Session API  -->  ISel / C&P (streaming)  -->  JIT + blob capture  -->  JIT, .o, exe
+  Session API  -->  streaming backend compile hooks  -->  JIT + blob capture  -->  JIT, .o, exe
 ```
 
 The IR path is used by the CLI and `lr_session_compile_*()`. The DIRECT path is
@@ -64,13 +64,15 @@ All frontends produce `lr_module_t`, a register-based SSA IR with explicit CFG.
 
 Selected via `LIRIC_COMPILE_MODE` env var (`isel` | `copy_patch` | `llvm`).
 
-`LR_MODE_DIRECT` streaming fast-path is available only with `isel` or `copy_patch`.
-When compile mode is `llvm`, DIRECT mode hard-fails (no fallback).
+`LR_MODE_DIRECT` is the default path across programmatic APIs.
+Unsupported operations fail fast with explicit errors (no fallback/replay path).
+In IR mode, `llvm` uses the real LLVM backend (when enabled). In DIRECT mode,
+streaming compilation uses target compile hooks.
 
 | Backend | Coverage | Mechanism | Targets |
 |---------|----------|-----------|---------|
 | ISel (default) | full | single-pass select + encode | x86_64, aarch64, riscv64 |
-| Copy-and-patch | partial (ALU ops) | template memcpy + sentinel patch, ISel fallback | x86_64 |
+| Copy-and-patch | partial (ALU ops) | template memcpy + sentinel patch, strict no-fallback | x86_64 |
 | Real LLVM | full | LLVM C API, obj/exe only | all LLVM targets |
 
 ISel uses stack-based register allocation (every vreg gets a stack slot, computation through scratch registers) with fused instruction selection and binary encoding in one pass.
@@ -104,7 +106,7 @@ C core                ir.h, jit.h                  (lr_module_t, lr_jit_t, arena
 
 The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
 
-**DIRECT mode** streams instructions directly to the backend (compile_begin/emit/end) without constructing persistent IR when compile mode is `isel` or `copy_patch`. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
+**DIRECT mode** streams instructions directly to backend compile hooks (`compile_begin`/`emit`/`end`) without constructing persistent IR. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
 
 `lr_compiler_create(NULL, ...)` defaults to DIRECT + ISEL and does not read `LIRIC_COMPILE_MODE`. Backend/policy selection is explicit via `lr_compiler_config_t`.
 

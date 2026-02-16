@@ -1840,8 +1840,32 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
         return -1;
     }
+
+    if (s->blob_count > 0) {
+        const lr_target_t *target = session_resolve_target(s);
+        if (!target) {
+            err_set(err, S_ERR_BACKEND, "target not found");
+            return -1;
+        }
+        FILE *out = fopen(path, "wb");
+        if (!out) {
+            err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
+            return -1;
+        }
+        /* Runtime LL is ignored on DIRECT blob emission path. */
+        int rc = lr_emit_executable_from_blobs(s->blobs, s->blob_count,
+                                               s->module, target, out,
+                                               "main");
+        (void)fclose(out);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "blob executable emission failed");
+            return -1;
+        }
+        return 0;
+    }
+
     if (lr_emit_module_executable_path(s->module, s->cfg.target, path,
-                                       "_start", runtime_ll, runtime_len,
+                                       "main", runtime_ll, runtime_len,
                                        backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err :

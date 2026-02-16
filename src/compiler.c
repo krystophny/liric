@@ -108,12 +108,6 @@ lr_compiler_t *lr_compiler_create(const lr_compiler_config_t *cfg,
         compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT, "invalid policy");
         return NULL;
     }
-    if (policy == LR_POLICY_DIRECT && backend == LR_BACKEND_LLVM) {
-        compiler_err_set(err, LR_COMPILER_ERR_UNSUPPORTED,
-                         "DIRECT policy unsupported for backend=llvm");
-        return NULL;
-    }
-
     memset(&scfg, 0, sizeof(scfg));
     scfg.mode = (policy == LR_POLICY_DIRECT) ? LR_MODE_DIRECT : LR_MODE_IR;
     scfg.target = target;

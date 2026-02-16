@@ -1518,7 +1518,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.runtime_lib = NULL;
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
     if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
-        cfg.liric_compile_mode = "llvm";
+        cfg.liric_compile_mode = "isel";
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;

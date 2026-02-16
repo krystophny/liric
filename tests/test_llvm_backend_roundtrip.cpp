@@ -20,8 +20,6 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
-extern "C" int lr_llvm_jit_is_available(void);
-
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -223,23 +221,11 @@ static int test_wrapper_jit_mode_llvm(void) {
     }
 
     int rc = lc_module_add_to_jit(mod.getCompat(), jit);
-    if (lr_llvm_jit_is_available()) {
-        if (rc != 0) {
-            std::fprintf(stderr, "  FAIL: add module to jit\n");
-            lr_jit_destroy(jit);
-            restore_mode_env(old_copy);
-            return 1;
-        }
-    } else if (rc == 0) {
-        std::fprintf(stderr,
-                     "  FAIL: llvm mode jit expected failure without LLJIT API\n");
+    if (rc != 0) {
+        std::fprintf(stderr, "  FAIL: add module to jit\n");
         lr_jit_destroy(jit);
         restore_mode_env(old_copy);
         return 1;
-    } else {
-        lr_jit_destroy(jit);
-        restore_mode_env(old_copy);
-        return 0;
     }
 
     void *main_addr = lr_jit_get_function(jit, "main");
