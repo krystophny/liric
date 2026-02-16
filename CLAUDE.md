@@ -28,6 +28,14 @@ Optional build flags:
 
 Clean build takes ~110ms. No external dependencies beyond a C compiler and CMake (plus a C++17 compiler when `WITH_LLVM_COMPAT=ON`).
 
+**MANDATORY: Rebuild lfortran after every liric change.** The `bench_api` / `api_e2e` lane
+runs `lfortran --jit` as an external binary. That binary links against liric. If lfortran is
+not rebuilt with the current liric, benchmark results are invalid and failures are misleading.
+Always rebuild lfortran before running benchmarks:
+```bash
+cmake --build ../lfortran/build -j$(nproc)
+```
+
 ## Language Policy
 
 - Use C for compiler code, test harnesses, and benchmark infrastructure.
