@@ -613,24 +613,14 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
                                         s->direct_reloc_base,
                                         &missing_symbol) != 0) {
-            if (session_is_module_defined_symbol(s, missing_symbol)) {
-                if (!s->direct_pending_relocs ||
-                    s->direct_reloc_base < s->direct_pending_reloc_start) {
-                    s->direct_pending_reloc_start = s->direct_reloc_base;
-                }
-                s->direct_pending_relocs = true;
-            } else {
-                if (missing_symbol && missing_symbol[0])
-                    err_set(err, S_ERR_BACKEND,
-                            "jit relocation patch failed (%s)",
-                            missing_symbol);
-                else
-                    err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
-                s->module->obj_ctx = NULL;
-                if (should_close_update && s->jit->update_active)
-                    lr_jit_end_update(s->jit);
-                return -1;
+            /* In DIRECT mode, unresolved relocations are deferred until
+               lookup/execution time so forward references and late-bound
+               externals do not fail function emission. */
+            if (!s->direct_pending_relocs ||
+                s->direct_reloc_base < s->direct_pending_reloc_start) {
+                s->direct_pending_reloc_start = s->direct_reloc_base;
             }
+            s->direct_pending_relocs = true;
         }
     }
 
@@ -652,17 +642,8 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
                                         &missing_symbol) == 0) {
             s->direct_pending_relocs = false;
             s->direct_pending_reloc_start = 0;
-        } else if (!session_is_module_defined_symbol(s, missing_symbol)) {
-            if (missing_symbol && missing_symbol[0])
-                err_set(err, S_ERR_BACKEND,
-                        "jit relocation patch failed (%s)",
-                        missing_symbol);
-            else
-                err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
-            s->module->obj_ctx = NULL;
-            if (should_close_update && s->jit->update_active)
-                lr_jit_end_update(s->jit);
-            return -1;
+        } else {
+            (void)missing_symbol;
         }
     }
 

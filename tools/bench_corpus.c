@@ -1,9 +1,10 @@
 // Focused corpus benchmark: runs 100 curated tests through liric_probe_runner
-// with timing instrumentation. Supports profiling modes.
+// with timing instrumentation. Defaults to compile/JIT-only timing.
 //
 // Usage:
 //   ./build/bench_corpus                    # run all 100, print timing table
 //   ./build/bench_corpus --top 10           # show top 10 slowest
+//   ./build/bench_corpus --exec             # include program execution
 //   ./build/bench_corpus --csv              # output CSV for analysis
 //   ./build/bench_corpus --single <name>    # run one test (for perf/callgrind)
 
@@ -48,6 +49,7 @@ typedef struct {
     const char *corpus_tsv;
     const char *cache_dir;
     int timeout_sec;
+    int no_exec;
 } bench_cfg_t;
 
 static double now_ms(void) {
@@ -99,7 +101,7 @@ static int load_corpus(const char *tsv_path, const char *cache_dir,
 
 static int run_timed(const char *probe_runner, const char *runtime_lib,
                      const char *ll_path, timing_result_t *result,
-                     int timeout_sec) {
+                     int timeout_sec, int no_exec) {
     int stderr_pipe[2];
     if (pipe(stderr_pipe)) return -1;
 
@@ -113,11 +115,13 @@ static int run_timed(const char *probe_runner, const char *runtime_lib,
         dup2(stderr_pipe[1], STDERR_FILENO);
         close(stderr_pipe[1]);
 
-        const char *args[16];
+        const char *args[20];
         int ai = 0;
         args[ai++] = probe_runner;
         args[ai++] = "--timing";
         args[ai++] = "--ignore-retcode";
+        if (no_exec)
+            args[ai++] = "--no-exec";
         if (runtime_lib && runtime_lib[0]) {
             args[ai++] = "--load-lib";
             args[ai++] = runtime_lib;
@@ -202,6 +206,7 @@ static void set_default_cfg(bench_cfg_t *cfg) {
     cfg->corpus_tsv = "tools/corpus_100.tsv";
     cfg->cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg->timeout_sec = 30;
+    cfg->no_exec = 1;
 }
 
 static void print_empty_dataset_help(const bench_cfg_t *cfg) {
@@ -244,13 +249,17 @@ int main(int argc, char **argv) {
             cfg.timeout_sec = atoi(argv[++i]);
             if (cfg.timeout_sec <= 0)
                 cfg.timeout_sec = 30;
+        } else if (strcmp(argv[i], "--exec") == 0) {
+            cfg.no_exec = 0;
+        } else if (strcmp(argv[i], "--no-exec") == 0) {
+            cfg.no_exec = 1;
         } else if (strcmp(argv[i], "--allow-empty") == 0) {
             allow_empty = 1;
         } else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: bench_corpus [--top N] [--csv] [--single NAME] [--iters N]\n");
             printf("                   [--probe-runner PATH] [--runtime-lib PATH]\n");
             printf("                   [--corpus PATH] [--cache-dir PATH]\n");
-            printf("                   [--timeout SEC] [--allow-empty]\n");
+            printf("                   [--timeout SEC] [--exec|--no-exec] [--allow-empty]\n");
             return 0;
         }
     }
@@ -292,6 +301,7 @@ found:
     fprintf(stderr, "Corpus: %d tests, runtime-lib: %s\n",
             n, cfg.runtime_lib ? cfg.runtime_lib : "(none)");
     fprintf(stderr, "Iterations: %d\n\n", iters);
+    fprintf(stderr, "Execution: %s\n\n", cfg.no_exec ? "disabled (compile/JIT only)" : "enabled");
 
     timing_result_t results[MAX_TESTS];
     memset(results, 0, sizeof(results));
@@ -310,7 +320,7 @@ found:
 
             run_timed(cfg.probe_runner, cfg.runtime_lib,
                       entries[i].ll_path, &r,
-                      cfg.timeout_sec);
+                      cfg.timeout_sec, cfg.no_exec);
 
             if (r.ok) {
                 if (iter == 0) {
@@ -355,7 +365,7 @@ found:
                    results[i].parse_us + results[i].compile_us,
                    results[i].exec_us, results[i].total_us);
         }
-        return 0;
+        return (ok_count == n) ? 0 : 1;
     }
 
     // Print table
@@ -395,6 +405,15 @@ found:
     printf("Compile: %6.1f ms (%.0f%%)\n", sum_compile / 1e3,
            100.0 * sum_compile / (sum_parse + sum_compile));
     printf("JIT total: %5.1f ms\n", (sum_parse + sum_compile) / 1e3);
+    if (ok_count != n) {
+        printf("Failed tests (%d):\n", n - ok_count);
+        for (int i = 0; i < n; i++) {
+            if (!results[i].ok)
+                printf("  %s\n", results[i].name);
+        }
+        printf("Status: FAIL\n");
+        return 1;
+    }
     printf("Status: OK\n");
 
     return 0;
