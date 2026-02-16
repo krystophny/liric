@@ -106,7 +106,7 @@ bench_require_pattern "$table" '^\| corpus_canonical \(canonical\) \|' "table mi
 bench_require_pattern "$readme" 'docs/benchmarks/readme_perf_snapshot\.json' "README missing snapshot artifact path"
 bench_require_pattern "$readme" 'docs/benchmarks/readme_perf_table\.md' "README missing table artifact path"
 bench_require_pattern "$readme" '\./tools/bench_readme_perf_snapshot\.sh' "README missing snapshot regeneration command"
-bench_require_pattern "$readme" '\./build/bench_corpus_compare --iters' "README missing corpus comparator benchmark command"
+bench_require_pattern "$readme" '\./build/bench_lane_ir --iters' "README missing corpus comparator benchmark command"
 
 bench_forbid_pattern "$snapshot" '"published_table"[[:space:]]*:' "snapshot contains obsolete published_table object"
 bench_forbid_pattern "$snapshot" '"bench_ll_summary_json"[[:space:]]*:' "snapshot contains obsolete bench_ll artifact reference"

@@ -10,6 +10,22 @@
 #include <stdarg.h>
 #include <limits.h>
 
+static int compat_policy_from_env(lr_session_mode_t *out_mode) {
+    const char *p;
+    if (!out_mode)
+        return -1;
+    p = getenv("LIRIC_POLICY");
+    if (!p || !p[0] || strcmp(p, "direct") == 0) {
+        *out_mode = LR_MODE_DIRECT;
+        return 0;
+    }
+    if (strcmp(p, "ir") == 0) {
+        *out_mode = LR_MODE_IR;
+        return 0;
+    }
+    return -1;
+}
+
 /* ---- Compat types (must match the public header exactly) ---- */
 
 typedef enum lc_value_kind {
@@ -623,8 +639,12 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
     memset(&cfg, 0, sizeof(cfg));
-    /* Unified policy: DIRECT by default, no hidden IR fallback. */
-    cfg.mode = LR_MODE_DIRECT;
+    /* Unified policy: DIRECT default, explicit IR via LIRIC_POLICY=ir. */
+    if (compat_policy_from_env(&cfg.mode) != 0) {
+        lr_arena_destroy(arena);
+        free(cm);
+        return NULL;
+    }
     switch (ctx ? ctx->backend : LC_BACKEND_ISEL) {
     case LC_BACKEND_COPY_PATCH:
         cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;

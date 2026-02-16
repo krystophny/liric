@@ -249,6 +249,7 @@ target_link_libraries(bench_ll PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_api tools/bench_api.c tools/bench_common.c)
 target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
+set_target_properties(bench_api PROPERTIES OUTPUT_NAME bench_lane_api)
 
 add_executable(bench_api_callgrind_hot tools/bench_api_callgrind_hot.c)
 target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
@@ -258,6 +259,7 @@ target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_corpus_compare tools/bench_corpus_compare.c tools/bench_common.c)
 target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
+set_target_properties(bench_corpus_compare PROPERTIES OUTPUT_NAME bench_lane_ir)
 
 add_executable(bench_exe_matrix tools/bench_exe_matrix.c tools/bench_common.c)
 target_link_libraries(bench_exe_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
@@ -273,6 +275,7 @@ if(WITH_BENCH_TCC)
         add_executable(bench_tcc tools/bench_tcc.c)
         target_include_directories(bench_tcc PRIVATE src "${LIRTCC_INCLUDE_DIR}")
         target_link_libraries(bench_tcc PRIVATE liric "${LIRTCC_LIB}" ${LIRIC_PLATFORM_LIBS})
+        set_target_properties(bench_tcc PROPERTIES OUTPUT_NAME bench_lane_micro)
     else()
         message(STATUS "libtcc not found: bench_tcc target will not be built")
     endif()

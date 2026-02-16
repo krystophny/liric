@@ -35,6 +35,12 @@ typedef enum {
     LANE_COUNT = 3
 } lane_id_t;
 
+typedef enum {
+    POLICY_DIRECT = 0,
+    POLICY_IR = 1,
+    POLICY_COUNT = 2
+} policy_id_t;
+
 typedef struct {
     const char *bench_dir;
     const char *build_dir;
@@ -57,18 +63,21 @@ typedef struct {
     int iters;
     int timeout_sec;
     int timeout_ms;
+    int api_cases;
 
     int run_compat_check;
     int allow_partial;
 
     int modes[MODE_COUNT];
     int lanes[LANE_COUNT];
+    int policies[POLICY_COUNT];
 } cfg_t;
 
 typedef bench_cmd_result_t cmd_result_t;
 
 static const char *k_mode_name[MODE_COUNT] = {"isel", "copy_patch", "llvm"};
 static const char *k_lane_name[LANE_COUNT] = {"ir_file", "api_e2e", "micro_c"};
+static const char *k_policy_name[POLICY_COUNT] = {"direct", "ir"};
 
 static void die(const char *fmt, ...) {
     va_list ap;
@@ -289,8 +298,10 @@ static void usage(void) {
     printf("  --build-dir PATH         build dir for benchmark binaries (default: build)\n");
     printf("  --manifest PATH          manifest path recorded in summary (default: tools/bench_manifest.json)\n");
     printf("  --modes LIST             comma list or 'all': isel,copy_patch,llvm\n");
+    printf("  --policies LIST          comma list or 'all': direct,ir\n");
     printf("  --lanes LIST             comma list or 'all': ir_file,api_e2e,micro_c\n");
     printf("  --iters N                iterations forwarded to lane runners (default: 1)\n");
+    printf("  --api-cases N            api_e2e cases per cell (default: 100, 0=all)\n");
     printf("  --timeout N              timeout sec for corpus compare / compat (default: 15)\n");
     printf("  --timeout-ms N           timeout ms for bench_api (default: 3000)\n");
     printf("  --skip-compat-check      do not regenerate compat artifacts\n");
@@ -314,9 +325,36 @@ static void set_all_modes(cfg_t *cfg, int v) {
         cfg->modes[i] = v;
 }
 
+static void set_all_policies(cfg_t *cfg, int v) {
+    for (int i = 0; i < POLICY_COUNT; i++)
+        cfg->policies[i] = v;
+}
+
 static void set_all_lanes(cfg_t *cfg, int v) {
     for (int i = 0; i < LANE_COUNT; i++)
         cfg->lanes[i] = v;
+}
+
+static int parse_policies(cfg_t *cfg, const char *text) {
+    char *tmp = xstrdup(text);
+    char *save = NULL;
+    char *tok;
+
+    set_all_policies(cfg, 0);
+    tok = strtok_r(tmp, ",", &save);
+    while (tok) {
+        if (strcmp(tok, "direct") == 0)
+            cfg->policies[POLICY_DIRECT] = 1;
+        else if (strcmp(tok, "ir") == 0)
+            cfg->policies[POLICY_IR] = 1;
+        else {
+            free(tmp);
+            return -1;
+        }
+        tok = strtok_r(NULL, ",", &save);
+    }
+    free(tmp);
+    return 0;
 }
 
 static int parse_lanes(cfg_t *cfg, const char *text) {
@@ -356,6 +394,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.build_dir = "build";
     cfg.manifest = "tools/bench_manifest.json";
     cfg.iters = 1;
+    cfg.api_cases = 100;
     cfg.timeout_sec = 15;
     cfg.timeout_ms = 3000;
     cfg.run_compat_check = 1;
@@ -373,6 +412,7 @@ static cfg_t parse_args(int argc, char **argv) {
                                  : NULL);
 
     set_all_modes(&cfg, 1);
+    set_all_policies(&cfg, 1);
     set_all_lanes(&cfg, 1);
 
     for (i = 1; i < argc; i++) {
@@ -391,6 +431,12 @@ static cfg_t parse_args(int argc, char **argv) {
                 set_all_modes(&cfg, 1);
             else if (bench_parse_modes_csv(v, cfg.modes, MODE_COUNT) != 0)
                 die("invalid --modes value: %s", v);
+        } else if (strcmp(argv[i], "--policies") == 0 && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (strcmp(v, "all") == 0)
+                set_all_policies(&cfg, 1);
+            else if (parse_policies(&cfg, v) != 0)
+                die("invalid --policies value: %s", v);
         } else if (strcmp(argv[i], "--lanes") == 0 && i + 1 < argc) {
             const char *v = argv[++i];
             if (strcmp(v, "all") == 0)
@@ -401,6 +447,10 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.iters = atoi(argv[++i]);
             if (cfg.iters <= 0)
                 cfg.iters = 1;
+        } else if (strcmp(argv[i], "--api-cases") == 0 && i + 1 < argc) {
+            cfg.api_cases = atoi(argv[++i]);
+            if (cfg.api_cases < 0)
+                cfg.api_cases = 0;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             cfg.timeout_sec = atoi(argv[++i]);
             if (cfg.timeout_sec <= 0)
@@ -445,11 +495,11 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!cfg.bench_compat_check)
         cfg.bench_compat_check = bench_path_join2(cfg.build_dir, "bench_compat_check");
     if (!cfg.bench_corpus_compare)
-        cfg.bench_corpus_compare = bench_path_join2(cfg.build_dir, "bench_corpus_compare");
+        cfg.bench_corpus_compare = bench_path_join2(cfg.build_dir, "bench_lane_ir");
     if (!cfg.bench_api)
-        cfg.bench_api = bench_path_join2(cfg.build_dir, "bench_api");
+        cfg.bench_api = bench_path_join2(cfg.build_dir, "bench_lane_api");
     if (!cfg.bench_tcc)
-        cfg.bench_tcc = bench_path_join2(cfg.build_dir, "bench_tcc");
+        cfg.bench_tcc = bench_path_join2(cfg.build_dir, "bench_lane_micro");
     if (!cfg.probe_runner)
         cfg.probe_runner = bench_path_join2(cfg.build_dir, "liric_probe_runner");
     if (!cfg.lli_phases)
@@ -474,24 +524,35 @@ static int require_mode_selected(const cfg_t *cfg) {
     return 0;
 }
 
+static int require_policy_selected(const cfg_t *cfg) {
+    for (int i = 0; i < POLICY_COUNT; i++) {
+        if (cfg->policies[i])
+            return 1;
+    }
+    return 0;
+}
+
 static void write_failure_row(FILE *ff,
                               const char *lane,
                               const char *mode,
+                              const char *policy,
                               const char *baseline,
                               const char *reason,
                               int rc,
                               const char *summary_path) {
     char *e_lane = json_escape(lane);
     char *e_mode = json_escape(mode);
+    char *e_policy = json_escape(policy);
     char *e_base = json_escape(baseline);
     char *e_reason = json_escape(reason ? reason : "unknown");
     char *e_summary = json_escape(summary_path ? summary_path : "");
 
     fprintf(ff,
-            "{\"lane\":\"%s\",\"mode\":\"%s\",\"baseline\":\"%s\","
+            "{\"lane\":\"%s\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"%s\","
             "\"reason\":\"%s\",\"rc\":%d,\"summary\":\"%s\"}\n",
             e_lane,
             e_mode,
+            e_policy,
             e_base,
             e_reason,
             rc,
@@ -499,6 +560,7 @@ static void write_failure_row(FILE *ff,
 
     free(e_lane);
     free(e_mode);
+    free(e_policy);
     free(e_base);
     free(e_reason);
     free(e_summary);
@@ -506,6 +568,7 @@ static void write_failure_row(FILE *ff,
 
 static void write_row_ir(FILE *rf,
                          const char *mode,
+                         const char *policy,
                          const char *summary_path,
                          const char *status,
                          long long attempted,
@@ -515,11 +578,12 @@ static void write_row_ir(FILE *rf,
     char *e_summary = json_escape(summary_path);
     fprintf(rf,
             "{\"lane\":\"ir_file\",\"track\":\"corpus_canonical\","
-            "\"mode\":\"%s\",\"baseline\":\"llvm\",\"status\":\"%s\","
+            "\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"llvm\",\"status\":\"%s\","
             "\"attempted\":%lld,\"completed\":%lld,"
             "\"speedup_nonparse_median\":%.6f,\"speedup_total_median\":%.6f,"
             "\"summary\":\"%s\"}\n",
             mode,
+            policy,
             status,
             attempted,
             completed,
@@ -531,6 +595,7 @@ static void write_row_ir(FILE *rf,
 
 static void write_row_api(FILE *rf,
                           const char *mode,
+                          const char *policy,
                           const char *summary_path,
                           const char *status,
                           long long attempted,
@@ -539,10 +604,11 @@ static void write_row_api(FILE *rf,
                           int zero_skip_met) {
     char *e_summary = json_escape(summary_path);
     fprintf(rf,
-            "{\"lane\":\"api_e2e\",\"mode\":\"%s\",\"baseline\":\"lfortran_llvm\","
+            "{\"lane\":\"api_e2e\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"lfortran_llvm\","
             "\"status\":\"%s\",\"attempted\":%lld,\"completed\":%lld,\"skipped\":%lld,"
             "\"zero_skip_gate_met\":%s,\"summary\":\"%s\"}\n",
             mode,
+            policy,
             status,
             attempted,
             completed,
@@ -554,6 +620,7 @@ static void write_row_api(FILE *rf,
 
 static void write_row_tcc(FILE *rf,
                           const char *mode,
+                          const char *policy,
                           const char *summary_path,
                           const char *status,
                           long long total_cases,
@@ -563,11 +630,12 @@ static void write_row_tcc(FILE *rf,
                           double inproc_ratio) {
     char *e_summary = json_escape(summary_path);
     fprintf(rf,
-            "{\"lane\":\"micro_c\",\"mode\":\"%s\",\"baseline\":\"tcc\","
+            "{\"lane\":\"micro_c\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"tcc\","
             "\"status\":\"%s\",\"total_cases\":%lld,\"wall_passed\":%lld,"
             "\"inproc_passed\":%lld,\"speedup_wall_total\":%.6f,"
             "\"speedup_nonparse_total\":%.6f,\"summary\":\"%s\"}\n",
             mode,
+            policy,
             status,
             total_cases,
             wall_passed,
@@ -607,7 +675,7 @@ static void write_row_compat(FILE *rf,
                              const char *bench_dir) {
     char *e_bench_dir = json_escape(bench_dir ? bench_dir : "");
     fprintf(rf,
-            "{\"lane\":\"compat_check\",\"mode\":\"all\",\"baseline\":\"lfortran_llvm\","
+            "{\"lane\":\"compat_check\",\"mode\":\"all\",\"policy\":\"all\",\"baseline\":\"lfortran_llvm\","
             "\"status\":\"%s\",\"compat_api_count\":%lld,\"compat_ll_count\":%lld,"
             "\"summary\":\"%s\"}\n",
             status,
@@ -638,6 +706,8 @@ int main(int argc, char **argv) {
         die("no lanes selected");
     if (!require_mode_selected(&cfg))
         die("no modes selected");
+    if (!require_policy_selected(&cfg))
+        die("no policies selected");
 
     if (cfg.manifest && !file_exists(cfg.manifest))
         die("manifest missing: %s", cfg.manifest);
@@ -670,6 +740,7 @@ int main(int argc, char **argv) {
             write_failure_row(fails,
                               "api_e2e",
                               "all",
+                              "all",
                               "lfortran_llvm",
                               "bench_compat_check_missing",
                               127,
@@ -698,6 +769,7 @@ int main(int argc, char **argv) {
                 write_failure_row(fails,
                                   "api_e2e",
                                   "all",
+                                  "all",
                                   "lfortran_llvm",
                                   "bench_compat_check_failed",
                                   r.rc,
@@ -707,6 +779,7 @@ int main(int argc, char **argv) {
                 write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
                 write_failure_row(fails,
                                   "api_e2e",
+                                  "all",
                                   "all",
                                   "lfortran_llvm",
                                   "compat_artifacts_missing",
@@ -729,302 +802,335 @@ int main(int argc, char **argv) {
             continue;
         mode = k_mode_name[mi];
 
-        for (int li = 0; li < LANE_COUNT; li++) {
-            const char *lane;
-            char *mode_dir = NULL;
-            char *lane_dir = NULL;
-
-            if (!cfg.lanes[li])
+        for (int pi = 0; pi < POLICY_COUNT; pi++) {
+            const char *policy;
+            if (!cfg.policies[pi])
                 continue;
-            lane = k_lane_name[li];
+            policy = k_policy_name[pi];
 
-            mode_dir = bench_path_join2(cfg.bench_dir, mode);
-            lane_dir = bench_path_join2(mode_dir, lane);
-            if (mkdir_p(lane_dir) != 0)
-                die("failed to create lane dir: %s", lane_dir);
+            for (int li = 0; li < LANE_COUNT; li++) {
+                const char *lane;
+                char *mode_dir = NULL;
+                char *policy_dir = NULL;
+                char *lane_dir = NULL;
 
-            cells_attempted++;
-            printf("[matrix] mode=%s lane=%s\n", mode, lane);
-
-            if (li == LANE_IR_FILE) {
-                cmd_result_t r = {0};
-                char iters_buf[32], timeout_buf[32];
-                char *sum_path = bench_path_join2(lane_dir, "bench_corpus_compare_summary.json");
-                char *cmd[40];
-                int n = 0;
-                char status[64] = "UNKNOWN";
-                long long attempted = 0, completed = 0;
-                double sp_nonparse = 0.0, sp_total = 0.0;
-                int ok = 0;
-
-                if (!file_executable(cfg.bench_corpus_compare)) {
-                    write_failure_row(fails, lane, mode, "llvm", "bench_corpus_compare_missing", 127, cfg.bench_corpus_compare);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
+                if (!cfg.lanes[li])
                     continue;
-                }
-                if (!file_executable(cfg.probe_runner)) {
-                    write_failure_row(fails, lane, mode, "llvm", "liric_probe_runner_missing", 127, cfg.probe_runner);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
-                if (!file_executable(cfg.lli_phases)) {
-                    write_failure_row(fails, lane, mode, "llvm", "bench_lli_phases_missing", 127, cfg.lli_phases);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
+                lane = k_lane_name[li];
 
-                snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
-                snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_sec);
+                mode_dir = bench_path_join2(cfg.bench_dir, mode);
+                policy_dir = bench_path_join2(mode_dir, policy);
+                lane_dir = bench_path_join2(policy_dir, lane);
+                if (mkdir_p(lane_dir) != 0)
+                    die("failed to create lane dir: %s", lane_dir);
 
-                cmd[n++] = (char *)cfg.bench_corpus_compare;
-                cmd[n++] = "--bench-dir";
-                cmd[n++] = lane_dir;
-                cmd[n++] = "--iters";
-                cmd[n++] = iters_buf;
-                cmd[n++] = "--timeout";
-                cmd[n++] = timeout_buf;
-                cmd[n++] = "--probe-runner";
-                cmd[n++] = (char *)cfg.probe_runner;
-                cmd[n++] = "--lli-phases";
-                cmd[n++] = (char *)cfg.lli_phases;
-                if (cfg.runtime_lib) {
-                    cmd[n++] = "--runtime-lib";
-                    cmd[n++] = (char *)cfg.runtime_lib;
-                }
-                if (cfg.corpus) {
-                    cmd[n++] = "--corpus";
-                    cmd[n++] = (char *)cfg.corpus;
-                }
-                if (cfg.cache_dir) {
-                    cmd[n++] = "--cache-dir";
-                    cmd[n++] = (char *)cfg.cache_dir;
-                }
-                cmd[n++] = NULL;
+                cells_attempted++;
+                printf("[matrix] mode=%s policy=%s lane=%s\n", mode, policy, lane);
 
-                if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
-                    write_failure_row(fails, lane, mode, "llvm", "bench_corpus_compare_failed", r.rc, sum_path);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
+                if (li == LANE_IR_FILE) {
+                    cmd_result_t r = {0};
+                    char iters_buf[32], timeout_buf[32];
+                    char *sum_path = bench_path_join2(lane_dir, "bench_corpus_compare_summary.json");
+                    char *cmd[44];
+                    int n = 0;
+                    char status[64] = "UNKNOWN";
+                    long long attempted = 0, completed = 0;
+                    double sp_nonparse = 0.0, sp_total = 0.0;
+                    int ok = 0;
 
-                {
-                    char *json = bench_read_all_file(sum_path);
-                    if (!json) {
-                        write_failure_row(fails, lane, mode, "llvm", "summary_missing", 1, sum_path);
+                    if (!file_executable(cfg.bench_corpus_compare)) {
+                        write_failure_row(fails, lane, mode, policy, "llvm", "bench_corpus_compare_missing", 127, cfg.bench_corpus_compare);
                         cells_failed++;
                         free(sum_path);
                         free(mode_dir);
+                        free(policy_dir);
+                        free(lane_dir);
+                        continue;
+                    }
+                    if (!file_executable(cfg.probe_runner)) {
+                        write_failure_row(fails, lane, mode, policy, "llvm", "liric_probe_runner_missing", 127, cfg.probe_runner);
+                        cells_failed++;
+                        free(sum_path);
+                        free(mode_dir);
+                        free(policy_dir);
+                        free(lane_dir);
+                        continue;
+                    }
+                    if (!file_executable(cfg.lli_phases)) {
+                        write_failure_row(fails, lane, mode, policy, "llvm", "bench_lli_phases_missing", 127, cfg.lli_phases);
+                        cells_failed++;
+                        free(sum_path);
+                        free(mode_dir);
+                        free(policy_dir);
                         free(lane_dir);
                         continue;
                     }
 
-                    (void)json_get_string(json, "status", status, sizeof(status));
-                    (void)json_get_int64(json, "attempted_tests", &attempted);
-                    (void)json_get_int64(json, "completed_tests", &completed);
-                    (void)json_get_double(json, "compile_materialized_speedup_median", &sp_nonparse);
-                    (void)json_get_double(json, "total_materialized_speedup_median", &sp_total);
+                    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
+                    snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_sec);
 
-                    ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted);
-                    write_row_ir(rows, mode, sum_path, status, attempted, completed, sp_nonparse, sp_total);
-                    free(json);
-                }
+                    cmd[n++] = (char *)cfg.bench_corpus_compare;
+                    cmd[n++] = "--bench-dir";
+                    cmd[n++] = lane_dir;
+                    cmd[n++] = "--iters";
+                    cmd[n++] = iters_buf;
+                    cmd[n++] = "--timeout";
+                    cmd[n++] = timeout_buf;
+                    cmd[n++] = "--policy";
+                    cmd[n++] = (char *)policy;
+                    cmd[n++] = "--probe-runner";
+                    cmd[n++] = (char *)cfg.probe_runner;
+                    cmd[n++] = "--lli-phases";
+                    cmd[n++] = (char *)cfg.lli_phases;
+                    if (cfg.runtime_lib) {
+                        cmd[n++] = "--runtime-lib";
+                        cmd[n++] = (char *)cfg.runtime_lib;
+                    }
+                    if (cfg.corpus) {
+                        cmd[n++] = "--corpus";
+                        cmd[n++] = (char *)cfg.corpus;
+                    }
+                    if (cfg.cache_dir) {
+                        cmd[n++] = "--cache-dir";
+                        cmd[n++] = (char *)cfg.cache_dir;
+                    }
+                    cmd[n++] = NULL;
 
-                if (ok)
-                    cells_ok++;
-                else {
-                    write_failure_row(fails, lane, mode, "llvm", "ir_lane_incomplete", 1, sum_path);
-                    cells_failed++;
-                }
-
-                free(sum_path);
-            } else if (li == LANE_API_E2E) {
-                cmd_result_t r = {0};
-                char iters_buf[32], timeout_buf[32], min_completed_buf[32];
-                char *sum_path = bench_path_join2(lane_dir, "bench_api_summary.json");
-                char *cmd[48];
-                int n = 0;
-                char status[64] = "UNKNOWN";
-                long long attempted = 0, completed = 0, skipped = 0;
-                int zero_skip = 0;
-                int ok = 0;
-
-                if (!compat_ok) {
-                    write_failure_row(fails, lane, mode, "lfortran_llvm", "compat_check_unavailable", 1, cfg.bench_dir);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
-
-                if (!file_executable(cfg.bench_api)) {
-                    write_failure_row(fails, lane, mode, "lfortran_llvm", "bench_api_missing", 127, cfg.bench_api);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
-
-                snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
-                snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_ms);
-                snprintf(min_completed_buf, sizeof(min_completed_buf), "%d", 1);
-
-                cmd[n++] = (char *)cfg.bench_api;
-                cmd[n++] = "--bench-dir";
-                cmd[n++] = lane_dir;
-                cmd[n++] = "--iters";
-                cmd[n++] = iters_buf;
-                cmd[n++] = "--timeout-ms";
-                cmd[n++] = timeout_buf;
-                cmd[n++] = "--min-completed";
-                cmd[n++] = min_completed_buf;
-                cmd[n++] = "--require-zero-skips";
-                cmd[n++] = "--compat-list";
-                cmd[n++] = compat_ll;
-                cmd[n++] = "--options-jsonl";
-                cmd[n++] = compat_opts;
-                if (cfg.lfortran) {
-                    cmd[n++] = "--lfortran";
-                    cmd[n++] = (char *)cfg.lfortran;
-                }
-                if (cfg.lfortran_liric) {
-                    cmd[n++] = "--lfortran-liric";
-                    cmd[n++] = (char *)cfg.lfortran_liric;
-                }
-                if (cfg.test_dir) {
-                    cmd[n++] = "--test-dir";
-                    cmd[n++] = (char *)cfg.test_dir;
-                }
-                if (cfg.runtime_lib) {
-                    cmd[n++] = "--runtime-lib";
-                    cmd[n++] = (char *)cfg.runtime_lib;
-                }
-                cmd[n++] = NULL;
-
-                if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
-                    write_failure_row(fails, lane, mode, "lfortran_llvm", "bench_api_failed", r.rc, sum_path);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
-
-                {
-                    char *json = bench_read_all_file(sum_path);
-                    if (!json) {
-                        write_failure_row(fails, lane, mode, "lfortran_llvm", "summary_missing", 1, sum_path);
+                    if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
+                        write_failure_row(fails, lane, mode, policy, "llvm", "bench_corpus_compare_failed", r.rc, sum_path);
                         cells_failed++;
                         free(sum_path);
                         free(mode_dir);
+                        free(policy_dir);
                         free(lane_dir);
                         continue;
                     }
 
-                    (void)json_get_string(json, "status", status, sizeof(status));
-                    (void)json_get_int64(json, "attempted", &attempted);
-                    (void)json_get_int64(json, "completed", &completed);
-                    (void)json_get_int64(json, "skipped", &skipped);
-                    (void)json_get_bool(json, "zero_skip_gate_met", &zero_skip);
+                    {
+                        char *json = bench_read_all_file(sum_path);
+                        if (!json) {
+                            write_failure_row(fails, lane, mode, policy, "llvm", "summary_missing", 1, sum_path);
+                            cells_failed++;
+                            free(sum_path);
+                            free(mode_dir);
+                            free(policy_dir);
+                            free(lane_dir);
+                            continue;
+                        }
 
-                    ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted && skipped == 0 && zero_skip);
-                    write_row_api(rows, mode, sum_path, status, attempted, completed, skipped, zero_skip);
-                    free(json);
-                }
+                        (void)json_get_string(json, "status", status, sizeof(status));
+                        (void)json_get_int64(json, "attempted_tests", &attempted);
+                        (void)json_get_int64(json, "completed_tests", &completed);
+                        (void)json_get_double(json, "compile_materialized_speedup_median", &sp_nonparse);
+                        (void)json_get_double(json, "total_materialized_speedup_median", &sp_total);
 
-                if (ok)
-                    cells_ok++;
-                else {
-                    write_failure_row(fails, lane, mode, "lfortran_llvm", "api_lane_incomplete", 1, sum_path);
-                    cells_failed++;
-                }
+                        ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted);
+                        write_row_ir(rows, mode, policy, sum_path, status, attempted, completed, sp_nonparse, sp_total);
+                        free(json);
+                    }
 
-                free(sum_path);
-            } else if (li == LANE_MICRO_C) {
-                cmd_result_t r = {0};
-                char iters_buf[32];
-                char *sum_path = bench_path_join2(lane_dir, "bench_tcc_summary.json");
-                char *cmd[16];
-                int n = 0;
-                char status[64] = "UNKNOWN";
-                long long total_cases = 0, wall_passed = 0, inproc_passed = 0;
-                double wall_ratio = 0.0, inproc_ratio = 0.0;
-                int ok = 0;
+                    if (ok)
+                        cells_ok++;
+                    else {
+                        write_failure_row(fails, lane, mode, policy, "llvm", "ir_lane_incomplete", 1, sum_path);
+                        cells_failed++;
+                    }
 
-                if (!file_executable(cfg.bench_tcc)) {
-                    write_failure_row(fails, lane, mode, "tcc", "bench_tcc_missing", 127, cfg.bench_tcc);
-                    cells_failed++;
                     free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
+                } else if (li == LANE_API_E2E) {
+                    cmd_result_t r = {0};
+                    char iters_buf[32], timeout_buf[32], min_completed_buf[32], api_cases_buf[32];
+                    char *sum_path = bench_path_join2(lane_dir, "bench_api_summary.json");
+                    char *cmd[56];
+                    int n = 0;
+                    char status[64] = "UNKNOWN";
+                    long long attempted = 0, completed = 0, skipped = 0;
+                    int zero_skip = 0;
+                    int ok = 0;
 
-                snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
-                cmd[n++] = (char *)cfg.bench_tcc;
-                cmd[n++] = "--iters";
-                cmd[n++] = iters_buf;
-                cmd[n++] = "--bench-dir";
-                cmd[n++] = lane_dir;
-                cmd[n++] = NULL;
-
-                if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
-                    write_failure_row(fails, lane, mode, "tcc", "bench_tcc_failed", r.rc, sum_path);
-                    cells_failed++;
-                    free(sum_path);
-                    free(mode_dir);
-                    free(lane_dir);
-                    continue;
-                }
-
-                {
-                    char *json = bench_read_all_file(sum_path);
-                    if (!json) {
-                        write_failure_row(fails, lane, mode, "tcc", "summary_missing", 1, sum_path);
+                    if (!compat_ok) {
+                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "compat_check_unavailable", 1, cfg.bench_dir);
                         cells_failed++;
                         free(sum_path);
                         free(mode_dir);
+                        free(policy_dir);
                         free(lane_dir);
                         continue;
                     }
 
-                    (void)json_get_string(json, "status", status, sizeof(status));
-                    (void)json_get_int64(json, "total_cases", &total_cases);
-                    (void)json_get_int64(json, "wall_passed", &wall_passed);
-                    (void)json_get_int64(json, "inproc_passed", &inproc_passed);
-                    (void)json_get_double(json, "wall_speedup_ratio", &wall_ratio);
-                    (void)json_get_double(json, "inproc_speedup_ratio", &inproc_ratio);
+                    if (!file_executable(cfg.bench_api)) {
+                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "bench_api_missing", 127, cfg.bench_api);
+                        cells_failed++;
+                        free(sum_path);
+                        free(mode_dir);
+                        free(policy_dir);
+                        free(lane_dir);
+                        continue;
+                    }
 
-                    ok = (strcmp(status, "OK") == 0 && total_cases > 0 && wall_passed == total_cases && inproc_passed == total_cases);
-                    write_row_tcc(rows, mode, sum_path, status, total_cases, wall_passed, inproc_passed, wall_ratio, inproc_ratio);
-                    free(json);
+                    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
+                    snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_ms);
+                    snprintf(min_completed_buf, sizeof(min_completed_buf), "%d", 1);
+                    snprintf(api_cases_buf, sizeof(api_cases_buf), "%d", cfg.api_cases);
+
+                    cmd[n++] = (char *)cfg.bench_api;
+                    cmd[n++] = "--bench-dir";
+                    cmd[n++] = lane_dir;
+                    cmd[n++] = "--iters";
+                    cmd[n++] = iters_buf;
+                    cmd[n++] = "--timeout-ms";
+                    cmd[n++] = timeout_buf;
+                    cmd[n++] = "--min-completed";
+                    cmd[n++] = min_completed_buf;
+                    cmd[n++] = "--require-zero-skips";
+                    cmd[n++] = "--liric-policy";
+                    cmd[n++] = (char *)policy;
+                    cmd[n++] = "--compat-list";
+                    cmd[n++] = compat_ll;
+                    cmd[n++] = "--options-jsonl";
+                    cmd[n++] = compat_opts;
+                    if (cfg.api_cases > 0) {
+                        cmd[n++] = "--fail-sample-limit";
+                        cmd[n++] = api_cases_buf;
+                    }
+                    if (cfg.lfortran) {
+                        cmd[n++] = "--lfortran";
+                        cmd[n++] = (char *)cfg.lfortran;
+                    }
+                    if (cfg.lfortran_liric) {
+                        cmd[n++] = "--lfortran-liric";
+                        cmd[n++] = (char *)cfg.lfortran_liric;
+                    }
+                    if (cfg.test_dir) {
+                        cmd[n++] = "--test-dir";
+                        cmd[n++] = (char *)cfg.test_dir;
+                    }
+                    if (cfg.runtime_lib) {
+                        cmd[n++] = "--runtime-lib";
+                        cmd[n++] = (char *)cfg.runtime_lib;
+                    }
+                    cmd[n++] = NULL;
+
+                    if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
+                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "bench_api_failed", r.rc, sum_path);
+                        cells_failed++;
+                        free(sum_path);
+                        free(mode_dir);
+                        free(policy_dir);
+                        free(lane_dir);
+                        continue;
+                    }
+
+                    {
+                        char *json = bench_read_all_file(sum_path);
+                        if (!json) {
+                            write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "summary_missing", 1, sum_path);
+                            cells_failed++;
+                            free(sum_path);
+                            free(mode_dir);
+                            free(policy_dir);
+                            free(lane_dir);
+                            continue;
+                        }
+
+                        (void)json_get_string(json, "status", status, sizeof(status));
+                        (void)json_get_int64(json, "attempted", &attempted);
+                        (void)json_get_int64(json, "completed", &completed);
+                        (void)json_get_int64(json, "skipped", &skipped);
+                        (void)json_get_bool(json, "zero_skip_gate_met", &zero_skip);
+
+                        ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted && skipped == 0 && zero_skip);
+                        write_row_api(rows, mode, policy, sum_path, status, attempted, completed, skipped, zero_skip);
+                        free(json);
+                    }
+
+                    if (ok)
+                        cells_ok++;
+                    else {
+                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "api_lane_incomplete", 1, sum_path);
+                        cells_failed++;
+                    }
+
+                    free(sum_path);
+                } else if (li == LANE_MICRO_C) {
+                    cmd_result_t r = {0};
+                    char iters_buf[32];
+                    char *sum_path = bench_path_join2(lane_dir, "bench_tcc_summary.json");
+                    char *cmd[20];
+                    int n = 0;
+                    char status[64] = "UNKNOWN";
+                    long long total_cases = 0, wall_passed = 0, inproc_passed = 0;
+                    double wall_ratio = 0.0, inproc_ratio = 0.0;
+                    int ok = 0;
+
+                    if (!file_executable(cfg.bench_tcc)) {
+                        write_failure_row(fails, lane, mode, policy, "tcc", "bench_tcc_missing", 127, cfg.bench_tcc);
+                        cells_failed++;
+                        free(sum_path);
+                        free(mode_dir);
+                        free(policy_dir);
+                        free(lane_dir);
+                        continue;
+                    }
+
+                    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
+                    cmd[n++] = (char *)cfg.bench_tcc;
+                    cmd[n++] = "--iters";
+                    cmd[n++] = iters_buf;
+                    cmd[n++] = "--policy";
+                    cmd[n++] = (char *)policy;
+                    cmd[n++] = "--bench-dir";
+                    cmd[n++] = lane_dir;
+                    cmd[n++] = NULL;
+
+                    if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
+                        write_failure_row(fails, lane, mode, policy, "tcc", "bench_tcc_failed", r.rc, sum_path);
+                        cells_failed++;
+                        free(sum_path);
+                        free(mode_dir);
+                        free(policy_dir);
+                        free(lane_dir);
+                        continue;
+                    }
+
+                    {
+                        char *json = bench_read_all_file(sum_path);
+                        if (!json) {
+                            write_failure_row(fails, lane, mode, policy, "tcc", "summary_missing", 1, sum_path);
+                            cells_failed++;
+                            free(sum_path);
+                            free(mode_dir);
+                            free(policy_dir);
+                            free(lane_dir);
+                            continue;
+                        }
+
+                        (void)json_get_string(json, "status", status, sizeof(status));
+                        (void)json_get_int64(json, "total_cases", &total_cases);
+                        (void)json_get_int64(json, "wall_passed", &wall_passed);
+                        (void)json_get_int64(json, "inproc_passed", &inproc_passed);
+                        (void)json_get_double(json, "wall_speedup_ratio", &wall_ratio);
+                        (void)json_get_double(json, "inproc_speedup_ratio", &inproc_ratio);
+
+                        ok = (strcmp(status, "OK") == 0 && total_cases > 0 && wall_passed == total_cases && inproc_passed == total_cases);
+                        write_row_tcc(rows, mode, policy, sum_path, status, total_cases, wall_passed, inproc_passed, wall_ratio, inproc_ratio);
+                        free(json);
+                    }
+
+                    if (ok)
+                        cells_ok++;
+                    else {
+                        write_failure_row(fails, lane, mode, policy, "tcc", "micro_lane_incomplete", 1, sum_path);
+                        cells_failed++;
+                    }
+
+                    free(sum_path);
                 }
 
-                if (ok)
-                    cells_ok++;
-                else {
-                    write_failure_row(fails, lane, mode, "tcc", "micro_lane_incomplete", 1, sum_path);
-                    cells_failed++;
-                }
-
-                free(sum_path);
+                free(mode_dir);
+                free(policy_dir);
+                free(lane_dir);
             }
-
-            free(mode_dir);
-            free(lane_dir);
         }
     }
 

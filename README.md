@@ -133,7 +133,20 @@ Lane tools:
 Command used:
 
 ```bash
-./build/bench_matrix --modes all --policies all --lanes all --iters 1 --allow-partial
+# canonical: all modes + all lanes + strict matrix accounting
+./build/bench_matrix --manifest tools/bench_manifest.json --modes all --policies all --lanes all --iters 1
+
+# lane tools (bench_matrix calls these internally)
+./build/bench_compat_check --timeout 15   # correctness gate
+./build/bench_ll --iters 3                # liric JIT vs lli
+./build/bench_lane_api --iters 3 --runtime-lib ../lfortran/build/src/runtime/liblfortran_runtime.so --liric-policy direct
+                                          # lfortran LLVM vs lfortran+liric
+# prerequisite for bench_corpus: populate /tmp/liric_lfortran_mass/cache
+./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass
+./build/bench_corpus --iters 3            # 100-case focused corpus
+./build/bench_lane_ir --iters 3 --policy direct
+./build/bench_lane_micro --iters 10 --policy direct
+./build/bench_exe_matrix --iters 3        # ll->exe matrix: isel/copy_patch/llvm vs clang baseline
 ```
 
 Artifacts:
