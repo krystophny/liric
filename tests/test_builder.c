@@ -113,6 +113,55 @@ int test_builder_compat_add_to_jit(void) {
     return 0;
 }
 
+int test_builder_compat_direct_sparse_block_ids_finalize(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_sparse_blocks");
+    TEST_ASSERT(mod != NULL, "compat module create");
+
+    lr_module_t *ir = lc_module_get_ir(mod);
+    TEST_ASSERT(ir != NULL, "compat module ir");
+    lr_type_t *i32 = lc_get_int_type(mod, 32);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    lr_type_t *fn_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+    TEST_ASSERT(fn_ty != NULL, "function type");
+    lc_value_t *fn_val = lc_func_create(mod, "compat_sparse_ret42", fn_ty);
+    TEST_ASSERT(fn_val != NULL, "function create");
+    lr_func_t *fn = lc_value_get_func(fn_val);
+    TEST_ASSERT(fn != NULL, "function unwrap");
+
+    lr_block_t *entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
+    TEST_ASSERT(entry != NULL, "entry block");
+    /* Keep block id 1 detached to model sparse block ids in compat DIRECT flow. */
+    lr_block_t *gap = lc_value_get_block(lc_block_create_detached(mod, fn, "gap"));
+    TEST_ASSERT(gap != NULL, "detached gap block");
+    lr_block_t *exit = lc_value_get_block(lc_block_create(mod, fn, "exit"));
+    TEST_ASSERT(exit != NULL, "exit block");
+
+    lc_create_br(mod, entry, exit);
+    lc_value_t *c42 = lc_value_const_int(mod, i32, 42, 32);
+    TEST_ASSERT(c42 != NULL, "const 42");
+    lc_create_ret(mod, exit, c42);
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lc_module_add_to_jit(mod, jit);
+    TEST_ASSERT_EQ(rc, 0, "lc_module_add_to_jit handles sparse block ids");
+
+    typedef int (*fn_t)(void);
+    fn_t compiled;
+    GET_FN(compiled, jit, "compat_sparse_ret42");
+    TEST_ASSERT(compiled != NULL, "function lookup");
+    TEST_ASSERT_EQ(compiled(), 42, "compat_sparse_ret42() == 42");
+
+    lr_jit_destroy(jit);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
 int test_builder_compat_add_to_jit_null_args(void) {
     lc_context_t *ctx = lc_context_create();
     TEST_ASSERT(ctx != NULL, "context create");

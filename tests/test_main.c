@@ -238,6 +238,7 @@ int test_merge_declaration_replaced_by_definition(void);
 int test_merge_global_definition(void);
 int test_merge_jit_runs_merged_function(void);
 int test_builder_compat_add_to_jit(void);
+int test_builder_compat_direct_sparse_block_ids_finalize(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
 int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
@@ -545,6 +546,7 @@ int main(void) {
 
     fprintf(stderr, "\nCompat API tests:\n");
     RUN_TEST(test_builder_compat_add_to_jit);
+    RUN_TEST(test_builder_compat_direct_sparse_block_ids_finalize);
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
     RUN_TEST(test_builder_compat_memory_and_call_path);
     RUN_TEST(test_builder_compat_phi_finalize_add_incoming_after_finalize_noop);
