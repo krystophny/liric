@@ -29,6 +29,7 @@ typedef struct {
     const char *lfortran_liric;
     const char *runtime_lib;
     const char *liric_compile_mode;
+    const char *liric_policy;
     const char *test_dir;
     const char *bench_dir;
     const char *compat_list;
@@ -252,6 +253,7 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const char *source_path,
                                          const char *runtime_lib,
                                          const char *liric_compile_mode,
+                                         const char *liric_policy,
                                          int timeout_ms,
                                          const char *work_dir,
                                          int with_time_report) {
@@ -264,10 +266,13 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
     cmd_result_t r;
     const char *saved_runtime = NULL;
     const char *saved_mode = NULL;
+    const char *saved_policy = NULL;
     char *saved_runtime_copy = NULL;
     char *saved_mode_copy = NULL;
+    char *saved_policy_copy = NULL;
     int had_runtime_env = 0;
     int had_mode_env = 0;
+    int had_policy_env = 0;
     if (!argv) die("out of memory", NULL);
 
     argv[k++] = (char *)lfortran_bin;
@@ -297,6 +302,14 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
         }
         setenv("LIRIC_COMPILE_MODE", liric_compile_mode, 1);
     }
+    if (liric_policy && liric_policy[0]) {
+        saved_policy = getenv("LIRIC_POLICY");
+        if (saved_policy) {
+            had_policy_env = 1;
+            saved_policy_copy = xstrdup(saved_policy);
+        }
+        setenv("LIRIC_POLICY", liric_policy, 1);
+    }
 
     r = run_cmd(argv, timeout_ms, NULL, work_dir);
 
@@ -312,9 +325,16 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
         else
             unsetenv("LIRIC_COMPILE_MODE");
     }
+    if (liric_policy && liric_policy[0]) {
+        if (had_policy_env)
+            setenv("LIRIC_POLICY", saved_policy_copy, 1);
+        else
+            unsetenv("LIRIC_POLICY");
+    }
 
     free(saved_runtime_copy);
     free(saved_mode_copy);
+    free(saved_policy_copy);
     free(argv);
     return r;
 }
@@ -1469,6 +1489,11 @@ static int is_valid_liric_compile_mode(const char *mode) {
            strcmp(mode, "llvm") == 0;
 }
 
+static int is_valid_liric_policy(const char *policy) {
+    if (!policy || !policy[0]) return 0;
+    return strcmp(policy, "direct") == 0 || strcmp(policy, "ir") == 0;
+}
+
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
     if (!r) return "llvm_jit_failed";
     if (r->rc == -SIGABRT || r->rc == -SIGSEGV)
@@ -1488,11 +1513,12 @@ static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
 }
 
 static void usage(void) {
-    printf("usage: bench_api [options]\n");
+    printf("usage: bench_lane_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran)\n");
     printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
+    printf("  --liric-policy MODE  liric session policy: direct|ir\n");
     printf("  --test-dir PATH      path to integration_tests/ dir\n");
     printf("  --bench-dir PATH     output directory (default: /tmp/liric_bench)\n");
     printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
@@ -1519,6 +1545,9 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
     if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
         cfg.liric_compile_mode = "isel";
+    cfg.liric_policy = getenv("LIRIC_POLICY");
+    if (!cfg.liric_policy || !cfg.liric_policy[0])
+        cfg.liric_policy = "direct";
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
@@ -1545,6 +1574,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--liric-compile-mode") == 0 && i + 1 < argc) {
             cfg.liric_compile_mode = argv[++i];
+        } else if (strcmp(argv[i], "--liric-policy") == 0 && i + 1 < argc) {
+            cfg.liric_policy = argv[++i];
         } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
@@ -1589,6 +1620,8 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!is_valid_liric_compile_mode(cfg.liric_compile_mode))
         die("invalid --liric-compile-mode (expected isel|copy_patch|stencil|llvm)",
             cfg.liric_compile_mode);
+    if (!is_valid_liric_policy(cfg.liric_policy))
+        die("invalid --liric-policy (expected direct|ir)", cfg.liric_policy);
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
     if (!file_exists(cfg.lfortran_liric)) die("lfortran (WITH_LIRIC) not found", cfg.lfortran_liric);
@@ -1680,6 +1713,7 @@ int main(int argc, char **argv) {
     if (cfg.runtime_lib)
         printf("  runtime_lib:   %s\n", cfg.runtime_lib);
     printf("  liric_compile_mode: %s\n", cfg.liric_compile_mode);
+    printf("  liric_policy:  %s\n", cfg.liric_policy);
     printf("  test_dir:      %s\n", cfg.test_dir);
     printf("  bench_dir:     %s\n", cfg.bench_dir);
     printf("  compat_list:   %s\n", compat_path);
@@ -1801,6 +1835,7 @@ int main(int argc, char **argv) {
                                                   source_path,
                                                   cfg.runtime_lib,
                                                   NULL,
+                                                  NULL,
                                                   cfg.timeout_ms,
                                                   attempt_work_dir,
                                                   attempt_with_time_report);
@@ -1817,6 +1852,7 @@ int main(int argc, char **argv) {
                                                    source_path,
                                                    cfg.runtime_lib,
                                                    cfg.liric_compile_mode,
+                                                   cfg.liric_policy,
                                                    cfg.timeout_ms,
                                                    attempt_work_dir,
                                                    attempt_with_time_report);
@@ -2393,9 +2429,11 @@ next_test:
             char *ec = json_escape(compat_path);
             char *eo = json_escape(opts_path);
             char *em = json_escape(cfg.liric_compile_mode);
+            char *ep = json_escape(cfg.liric_policy);
         fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
         fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
         fprintf(sf, "  \"liric_compile_mode\": \"%s\",\n", em);
+        fprintf(sf, "  \"liric_policy\": \"%s\",\n", ep);
         {
             char *efj = json_escape(fail_jsonl_path);
             char *efl = json_escape(fail_log_dir);
@@ -2408,6 +2446,7 @@ next_test:
         free(ec);
         free(eo);
         free(em);
+        free(ep);
         }
         fprintf(sf, "  \"phase_split\": {\n");
         fprintf(sf, "    \"has_data\": %s,\n", split_has_data ? "true" : "false");

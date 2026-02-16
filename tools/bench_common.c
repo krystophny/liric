@@ -12,6 +12,8 @@
 #include <time.h>
 #include <unistd.h>
 
+static const char *k_bench_mode_names[BENCH_MODE_COUNT] = {"isel", "copy_patch", "llvm"};
+
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -268,12 +270,92 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
     return 0;
 }
 
+int bench_run_cmd_with_mode(const char *mode, const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
+    const char *old_mode;
+    char *old_mode_copy;
+    int rc;
+
+    if (!mode || !bench_is_supported_mode(mode) || !opts || !out)
+        return -1;
+
+    old_mode = getenv("LIRIC_COMPILE_MODE");
+    old_mode_copy = old_mode ? bench_xstrdup(old_mode) : NULL;
+    if (setenv("LIRIC_COMPILE_MODE", mode, 1) != 0) {
+        free(old_mode_copy);
+        return -1;
+    }
+
+    rc = bench_run_cmd(opts, out);
+
+    if (old_mode_copy) {
+        setenv("LIRIC_COMPILE_MODE", old_mode_copy, 1);
+        free(old_mode_copy);
+    } else {
+        unsetenv("LIRIC_COMPILE_MODE");
+    }
+
+    return rc;
+}
+
 void bench_free_cmd_result(bench_cmd_result_t *r) {
     if (!r) return;
     free(r->stdout_text);
     free(r->stderr_text);
     r->stdout_text = NULL;
     r->stderr_text = NULL;
+}
+
+int bench_is_supported_mode(const char *mode) {
+    size_t i;
+    if (!mode) return 0;
+    for (i = 0; i < BENCH_MODE_COUNT; i++) {
+        if (strcmp(mode, k_bench_mode_names[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+const char *bench_mode_name(size_t mode_idx) {
+    if (mode_idx >= BENCH_MODE_COUNT) return NULL;
+    return k_bench_mode_names[mode_idx];
+}
+
+int bench_parse_modes_csv(const char *csv, int *modes_out, size_t modes_len) {
+    char *tmp;
+    char *saveptr = NULL;
+    char *tok;
+    size_t i;
+    int any = 0;
+
+    if (!csv || !modes_out || modes_len < BENCH_MODE_COUNT) return -1;
+
+    if (strcmp(csv, "all") == 0) {
+        for (i = 0; i < BENCH_MODE_COUNT; i++) modes_out[i] = 1;
+        return 0;
+    }
+
+    for (i = 0; i < BENCH_MODE_COUNT; i++) modes_out[i] = 0;
+
+    tmp = bench_xstrdup(csv);
+    tok = strtok_r(tmp, ",", &saveptr);
+    while (tok) {
+        int found = 0;
+        for (i = 0; i < BENCH_MODE_COUNT; i++) {
+            if (strcmp(tok, k_bench_mode_names[i]) == 0) {
+                modes_out[i] = 1;
+                found = 1;
+                any = 1;
+                break;
+            }
+        }
+        if (!found) {
+            free(tmp);
+            return -1;
+        }
+        tok = strtok_r(NULL, ",", &saveptr);
+    }
+    free(tmp);
+
+    return any ? 0 : -1;
 }
 
 static int cmp_double(const void *a, const void *b) {

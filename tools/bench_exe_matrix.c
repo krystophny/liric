@@ -13,9 +13,9 @@
 #include <unistd.h>
 #include <spawn.h>
 
-extern char **environ;
+#include "bench_common.h"
 
-#define MAX_MODES 8
+extern char **environ;
 
 typedef struct {
     const char *name;
@@ -273,29 +273,6 @@ static int verify_exe(const char *path, int expected_rc) {
     return WEXITSTATUS(status) == expected_rc ? 0 : -1;
 }
 
-static int is_supported_mode(const char *mode) {
-    return strcmp(mode, "isel") == 0 ||
-           strcmp(mode, "copy_patch") == 0 ||
-           strcmp(mode, "llvm") == 0;
-}
-
-static int parse_modes(char *modes_csv, char **modes, int max_modes) {
-    char *tok;
-    int count = 0;
-
-    tok = strtok(modes_csv, ",");
-    while (tok) {
-        if (count >= max_modes)
-            return -1;
-        if (!is_supported_mode(tok))
-            return -1;
-        modes[count++] = tok;
-        tok = strtok(NULL, ",");
-    }
-
-    return count;
-}
-
 static void print_usage(void) {
     printf("usage: bench_exe_matrix [options]\n");
     printf("  --iters N            iterations per case/mode (default: 3)\n");
@@ -319,13 +296,13 @@ int main(int argc, char **argv) {
     const char *json_path_arg = NULL;
     char modes_csv[128] = "isel,copy_patch,llvm";
     char modes_desc[128] = "isel,copy_patch,llvm";
+    int mode_mask[BENCH_MODE_COUNT];
+    int mode_count = 0;
 
     char liric_path[PATH_MAX];
     char json_path[PATH_MAX];
 
-    char *modes[MAX_MODES];
-    int mode_count;
-    mode_summary_t summaries[MAX_MODES];
+    mode_summary_t summaries[BENCH_MODE_COUNT];
 
     const char *old_mode = getenv("LIRIC_COMPILE_MODE");
     char *old_mode_copy = NULL;
@@ -375,11 +352,14 @@ int main(int argc, char **argv) {
         snprintf(json_path, sizeof(json_path), "%s/bench_exe_matrix_summary.json", bench_dir);
     }
 
-    mode_count = parse_modes(modes_csv, modes, MAX_MODES);
-    if (mode_count <= 0) {
+    if (bench_parse_modes_csv(modes_csv, mode_mask, BENCH_MODE_COUNT) != 0) {
         fprintf(stderr, "error: invalid --modes value\n");
         free(old_mode_copy);
         return 1;
+    }
+    for (i = 0; i < BENCH_MODE_COUNT; i++) {
+        if (mode_mask[i])
+            mode_count++;
     }
 
     if (access(liric_path, X_OK) != 0) {
@@ -403,8 +383,9 @@ int main(int argc, char **argv) {
     printf("bench_exe_matrix: %d cases, %d iterations (best-of), modes=%s\n\n",
            NUM_CASES, iters, modes_desc);
 
-    for (i = 0; i < mode_count; i++) {
-        const char *mode = modes[i];
+    mode_count = 0;
+    for (i = 0; i < BENCH_MODE_COUNT; i++) {
+        const char *mode;
         int ci;
         char mode_dir[PATH_MAX];
 
@@ -412,6 +393,10 @@ int main(int argc, char **argv) {
         double llvm_total = 0.0;
         int liric_failures = 0;
         int llvm_failures = 0;
+
+        if (!mode_mask[i])
+            continue;
+        mode = bench_mode_name((size_t)i);
 
         snprintf(mode_dir, sizeof(mode_dir), "%s/%s", bench_dir, mode);
         if (mkdir_p(mode_dir) != 0) {
@@ -507,11 +492,12 @@ int main(int argc, char **argv) {
         printf("%-16s %12.0f %12.0f %7.2fx\n\n", "TOTAL", llvm_total, liric_total,
                (liric_total > 0.0 ? llvm_total / liric_total : 0.0));
 
-        summaries[i].mode = mode;
-        summaries[i].liric_total_us = liric_total;
-        summaries[i].llvm_total_us = llvm_total;
-        summaries[i].liric_failures = liric_failures;
-        summaries[i].llvm_failures = llvm_failures;
+        summaries[mode_count].mode = mode;
+        summaries[mode_count].liric_total_us = liric_total;
+        summaries[mode_count].llvm_total_us = llvm_total;
+        summaries[mode_count].liric_failures = liric_failures;
+        summaries[mode_count].llvm_failures = llvm_failures;
+        mode_count++;
 
         if (liric_failures != 0 || llvm_failures != 0)
             any_fail = 1;

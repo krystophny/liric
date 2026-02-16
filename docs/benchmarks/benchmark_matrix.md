@@ -4,10 +4,11 @@
 
 It replaces ad-hoc manual sequencing with one strict matrix run across:
 - Modes: `isel`, `copy_patch`, `llvm`
+- Policies: `direct`, `ir`
 - Lanes:
-  - `ir_file`: corpus-based LIRIC vs real LLVM baseline (`bench_corpus_compare` + `bench_lli_phases`)
-  - `api_e2e`: LFortran `--jit` backend comparison (`bench_api`)
-  - `micro_c`: TinyCC baseline lane (`bench_tcc`)
+  - `ir_file`: corpus-based LIRIC vs real LLVM baseline (`bench_lane_ir` + `bench_lli_phases`)
+  - `api_e2e`: LFortran `--jit` backend comparison (`bench_lane_api`)
+  - `micro_c`: TinyCC baseline lane (`bench_lane_micro`)
 
 ## Hard-fail policy
 
@@ -25,6 +26,7 @@ Use `--allow-partial` only for exploratory local runs.
   --manifest tools/bench_manifest.json \
   --bench-dir /tmp/liric_bench \
   --modes all \
+  --policies all \
   --lanes all \
   --iters 1
 ```
@@ -36,10 +38,13 @@ Use `--allow-partial` only for exploratory local runs.
 - `matrix_failures.jsonl`: one row per failing cell
 - `matrix_summary.json`: run-level status and accounting
 
+`matrix_rows.jsonl` also includes a `compat_check` preflight row (`mode=all, policy=all`) so
+compatibility coverage is visible in the same result stream as benchmark cells.
+
 Lane-local artifacts remain in mode/lane subdirectories (for drill-down), for example:
-- `/tmp/liric_bench/isel/ir_file/bench_corpus_compare_summary.json`
-- `/tmp/liric_bench/llvm/api_e2e/bench_api_summary.json`
-- `/tmp/liric_bench/copy_patch/micro_c/bench_tcc_summary.json`
+- `/tmp/liric_bench/isel/direct/ir_file/bench_corpus_compare_summary.json`
+- `/tmp/liric_bench/llvm/direct/api_e2e/bench_api_summary.json`
+- `/tmp/liric_bench/copy_patch/ir/micro_c/bench_tcc_summary.json`
 
 ## Baseline meaning
 
@@ -50,4 +55,5 @@ Lane-local artifacts remain in mode/lane subdirectories (for drill-down), for ex
 ## Notes
 
 - `api_e2e` lane regenerates compatibility artifacts via `bench_compat_check` unless `--skip-compat-check` is passed.
-- `bench_tcc` now emits `bench_tcc_summary.json` so micro lane results can be gated in the unified matrix.
+- `bench_compat_check` is a lane preflight producer used by `bench_matrix`; run it standalone only for focused debugging.
+- `bench_lane_micro` emits `bench_tcc_summary.json` so micro lane results can be gated in the unified matrix.

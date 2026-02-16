@@ -182,8 +182,8 @@ static void print_timing_line(int timing,
     double lookup_us = t_lookup_end - t_lookup_start;
     double exec_us = t_exec_end - t_exec_start;
     double total_us = read_us + parse_us + jit_create_us + load_lib_us + compile_us + lookup_us + exec_us;
-    fprintf(stderr, "TIMING read_us=%.1f parse_us=%.1f jit_create_us=%.1f "
-            "load_lib_us=%.1f compile_us=%.1f lookup_us=%.1f exec_us=%.1f total_us=%.1f\n",
+    fprintf(stderr, "TIMING read_us=%.3f parse_us=%.3f jit_create_us=%.3f "
+            "load_lib_us=%.3f compile_us=%.3f lookup_us=%.3f exec_us=%.3f total_us=%.3f\n",
             read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us);
 }
 

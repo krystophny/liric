@@ -12,15 +12,15 @@ usage: bench_api_clean_gate.sh [options]
   --build-dir PATH        build dir containing bench tools (default: ./build)
   --bench-dir PATH        benchmark output dir (default: /tmp/liric_bench)
   --lfortran PATH         path to lfortran+LLVM binary (forwarded to tools)
-  --lfortran-liric PATH   path to lfortran+WITH_LIRIC binary (forwarded to bench_api)
+  --lfortran-liric PATH   path to lfortran+WITH_LIRIC binary (forwarded to bench_lane_api)
   --test-dir PATH         path to integration_tests dir (forwarded to bench_api)
   --probe-runner PATH     path to liric_probe_runner (forwarded to bench_compat_check)
   --runtime-lib PATH      path to liblfortran_runtime for lli (forwarded to bench_compat_check)
-  --liric-compile-mode M  compile mode for liric backend in bench_api (default: isel)
+  --liric-compile-mode M  compile mode for liric backend in bench_lane_api (default: isel)
   --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
   --workers N             worker count hint (forwarded to bench_compat_check)
-  --iters N               bench_api iterations (default: 1)
-  --timeout-ms N          bench_api timeout in ms (default: 3000)
+  --iters N               bench_lane_api iterations (default: 1)
+  --timeout-ms N          bench_lane_api timeout in ms (default: 3000)
   --compat-timeout N      bench_compat_check timeout in seconds (default: 15)
   --no-run                only validate existing summary artifacts in bench-dir
   -h, --help              show this help
@@ -168,10 +168,10 @@ if [[ "$no_run" == "0" ]]; then
     fi
 
     bench_require_executable "${build_dir}/bench_compat_check"
-    bench_require_executable "${build_dir}/bench_api"
+    bench_require_executable "${build_dir}/bench_lane_api"
 
     "${build_dir}/bench_compat_check" "${compat_args[@]}"
-    "${build_dir}/bench_api" "${api_args[@]}"
+    "${build_dir}/bench_lane_api" "${api_args[@]}"
 fi
 
 summary_path="${bench_dir}/bench_api_summary.json"

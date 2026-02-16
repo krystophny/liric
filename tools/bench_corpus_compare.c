@@ -55,6 +55,7 @@ typedef struct {
     const char *probe_runner;
     const char *lli_phases;
     const char *runtime_lib;
+    const char *policy;
     const char *corpus_tsv;
     const char *cache_dir;
     const char *bench_dir;
@@ -88,6 +89,17 @@ typedef struct {
     double liric_total_materialized_aggregate_ms;
     double llvm_total_materialized_aggregate_ms;
 } summary_t;
+
+typedef struct {
+    double read_ms;
+    double parse_ms;
+    double jit_create_ms;
+    double load_lib_ms;
+    double compile_ms;
+    double lookup_ms;
+    double exec_ms;
+    double total_ms;
+} probe_timing_t;
 
 static void die(const char *msg, const char *path) {
     if (path) fprintf(stderr, "%s: %s\n", msg, path);
@@ -162,23 +174,21 @@ static double median(const double *vals, size_t n) {
 }
 
 static int parse_probe_timing(const char *stderr_text,
-                              double *out_parse_ms,
-                              double *out_compile_ms,
-                              double *out_lookup_ms) {
+                              probe_timing_t *out_timing) {
     const char *p = strstr(stderr_text, "TIMING ");
     double read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us;
     if (!p) return 0;
     if (sscanf(p,
                "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf lookup_us=%lf exec_us=%lf total_us=%lf",
                &read_us, &parse_us, &jit_create_us, &load_lib_us, &compile_us, &lookup_us, &exec_us, &total_us) == 8) {
-        (void)read_us;
-        (void)jit_create_us;
-        (void)load_lib_us;
-        (void)exec_us;
-        (void)total_us;
-        *out_parse_ms = parse_us / 1000.0;
-        *out_compile_ms = compile_us / 1000.0;
-        *out_lookup_ms = lookup_us / 1000.0;
+        out_timing->read_ms = read_us / 1000.0;
+        out_timing->parse_ms = parse_us / 1000.0;
+        out_timing->jit_create_ms = jit_create_us / 1000.0;
+        out_timing->load_lib_ms = load_lib_us / 1000.0;
+        out_timing->compile_ms = compile_us / 1000.0;
+        out_timing->lookup_ms = lookup_us / 1000.0;
+        out_timing->exec_ms = exec_us / 1000.0;
+        out_timing->total_ms = total_us / 1000.0;
         return 1;
     }
     return 0;
@@ -209,6 +219,10 @@ static int ll_has_defined_main(const char *ll_path) {
 
 static int json_get_number(const char *json, const char *key, double *out_val) {
     return bench_json_get_number(json, key, out_val);
+}
+
+static int is_valid_policy(const char *policy) {
+    return policy && (strcmp(policy, "direct") == 0 || strcmp(policy, "ir") == 0);
 }
 
 static void testlist_init(testlist_t *l) {
@@ -312,11 +326,12 @@ static int load_corpus_tests(const cfg_t *cfg, testlist_t *tests) {
 }
 
 static void usage(void) {
-    printf("usage: bench_corpus_compare [options]\n");
+    printf("usage: bench_lane_ir [options]\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           command timeout in seconds (default: 30)\n");
     printf("  --probe-runner PATH   path to liric_probe_runner\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
+    printf("  --policy MODE         liric session policy: direct|ir (default: direct)\n");
     printf("  --runtime-lib PATH    runtime shared library (required for runtime-dependent cases)\n");
     printf("  --corpus PATH         corpus TSV (default: tools/corpus_100.tsv)\n");
     printf("  --cache-dir PATH      corpus cache dir (default: /tmp/liric_lfortran_mass/cache)\n");
@@ -334,6 +349,7 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";
+    cfg.policy = "direct";
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so)
@@ -362,6 +378,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lli_phases = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            cfg.policy = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
             cfg.corpus_tsv = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
@@ -378,6 +396,7 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!file_exists(cfg.probe_runner)) die("probe runner not found", cfg.probe_runner);
     if (!file_exists(cfg.lli_phases)) die("bench_lli_phases not found", cfg.lli_phases);
     if (!file_exists(cfg.corpus_tsv)) die("corpus TSV not found", cfg.corpus_tsv);
+    if (!is_valid_policy(cfg.policy)) die("invalid --policy (expected direct|ir)", cfg.policy);
 
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
@@ -525,18 +544,41 @@ static int run_suite(const cfg_t *cfg,
         }
 
         for (it = 0; it < (size_t)cfg->iters; it++) {
-            cmd_result_t rp, ri;
+            cmd_result_t rp, ri, rp_parse_only;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
             double e_parse = 0.0, e_parse_input = 0.0;
             double e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
+            probe_timing_t tp_parse_only, tp_full;
+
+            memset(&tp_parse_only, 0, sizeof(tp_parse_only));
+            memset(&tp_full, 0, sizeof(tp_full));
 
             char *probe_argv[20];
+            char *probe_parse_argv[16];
             int pk = 0;
+            int ppk = 0;
+
+            /* First isolate parser-only frontend cost. */
+            probe_parse_argv[ppk++] = (char *)cfg->probe_runner;
+            probe_parse_argv[ppk++] = "--timing";
+            probe_parse_argv[ppk++] = "--parse-only";
+            probe_parse_argv[ppk++] = (char *)t->ll_path;
+            probe_parse_argv[ppk] = NULL;
+
+            rp_parse_only = run_cmd(probe_parse_argv, cfg->timeout_sec, NULL);
+            if (rp_parse_only.rc != 0 || !parse_probe_timing(rp_parse_only.stderr_text, &tp_parse_only)) {
+                skipped = 1;
+                free_cmd_result(&rp_parse_only);
+                break;
+            }
+            free_cmd_result(&rp_parse_only);
+
+            /* Then run the normal no-exec probe path to capture materialization/lookup. */
             probe_argv[pk++] = (char *)cfg->probe_runner;
             probe_argv[pk++] = "--timing";
             probe_argv[pk++] = "--no-exec";
             probe_argv[pk++] = "--policy";
-            probe_argv[pk++] = "ir";
+            probe_argv[pk++] = (char *)cfg->policy;
             if (parse_only) {
                 probe_argv[pk++] = "--parse-only";
             } else {
@@ -553,16 +595,24 @@ static int run_suite(const cfg_t *cfg,
             probe_argv[pk] = NULL;
 
             rp = run_cmd(probe_argv, cfg->timeout_sec, NULL);
-            if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &l_parse, &l_compile, &l_lookup)) {
+            if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &tp_full)) {
                 skipped = 1;
                 free_cmd_result(&rp);
                 break;
             }
+            free_cmd_result(&rp);
+
+            l_parse = tp_parse_only.parse_ms;
             if (parse_only) {
                 l_compile = 0.0;
                 l_lookup = 0.0;
+            } else {
+                double feed_overhead_ms = tp_full.parse_ms - tp_parse_only.parse_ms;
+                if (feed_overhead_ms < 0.0)
+                    feed_overhead_ms = 0.0;
+                l_compile = tp_full.compile_ms + feed_overhead_ms;
+                l_lookup = tp_full.lookup_ms;
             }
-            free_cmd_result(&rp);
 
             {
                 char *llvm_argv[20];
@@ -720,10 +770,12 @@ int main(int argc, char **argv) {
                     "{"
                     "\"status\":\"EMPTY DATASET\","
                     "\"dataset_name\":\"corpus_100\","
+                    "\"liric_policy\":\"%s\","
                     "\"expected_tests\":100,"
                     "\"attempted_tests\":0,"
                     "\"iters\":%d"
                     "}\n",
+                    cfg.policy,
                     cfg.iters);
             fclose(ef);
         }
@@ -761,6 +813,7 @@ int main(int argc, char **argv) {
             "{"
             "\"status\":\"%s\","
             "\"dataset_name\":\"corpus_100\","
+            "\"liric_policy\":\"%s\","
             "\"expected_tests\":100,"
             "\"attempted_tests\":%zu,"
             "\"completed_tests\":%zu,"
@@ -784,6 +837,7 @@ int main(int argc, char **argv) {
             "\"llvm_total_materialized_aggregate_ms\":%.6f"
             "}\n",
             status,
+            cfg.policy,
             summary.attempted,
             summary.completed,
             cfg.iters,
