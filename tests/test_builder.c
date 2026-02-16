@@ -373,10 +373,17 @@ int test_builder_compat_emit_object_llvm_mode_contract(void) {
     }
 
     rc = lc_module_emit_object(mod, path);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
     if (rc != 0) {
         fprintf(stderr, "  FAIL: llvm mode object emission expected success\n");
         goto cleanup;
     }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode object emission expected failure when backend disabled\n");
+        goto cleanup;
+    }
+#endif
     result = 0;
 
 cleanup:
@@ -417,10 +424,17 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void) {
     }
 
     rc = lc_module_emit_executable(mod, path, runtime_ll, strlen(runtime_ll));
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
     if (rc != 0) {
         fprintf(stderr, "  FAIL: llvm mode executable emission expected success\n");
         goto cleanup;
     }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: llvm mode executable emission expected failure when backend disabled\n");
+        goto cleanup;
+    }
+#endif
     result = 0;
 
 cleanup:

@@ -13,7 +13,7 @@ if(NOT CHMOD_EXE)
     message(FATAL_ERROR "chmod is required for llvm backend/compat policy test")
 endif()
 
-set(root "${WORKDIR}/llvm_backend_compat_policy")
+set(root "${WORKDIR}/llvm_backend_compat_policy_cases")
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${root}")
 
