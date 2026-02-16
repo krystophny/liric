@@ -1,202 +1,194 @@
 # Liric
 
-JIT compiler and native code emitter for LLVM IR and WebAssembly. C11, zero dependencies.
+Liric is a low-latency JIT compiler and native emitter for LLVM IR text (`.ll`), LLVM bitcode (`.bc`), and WebAssembly (`.wasm`).
 
-There are two compilation paths. Both produce JIT, object files, or executables.
-
-**IR path** -- parse .ll/.bc/.wasm into SSA IR, then batch-compile:
-
-```
-  .ll / .bc / .wasm  -->  lr_module_t (SSA IR)  -->  ISel / C&P / LLVM  -->  JIT, .o, exe
-```
-
-**DIRECT path** -- stream instructions from the programmatic API:
-
-```
-  Session API  -->  backend streamer (isel/copy_patch) or LLVM replay  -->  JIT/.o/.exe
-```
-
-The IR path is used by the CLI and `lr_session_compile_*()`. The DIRECT path is
-used by the C++/C compat API (lfortran integration) for lowest-latency compilation.
+- Language: C11
+- Dependencies: none (core)
+- Targets: x86_64, aarch64, riscv64 (host JIT)
+- Output: JIT, object (`.o`), executable
 
 ## Build
 
 ```bash
-cmake -S . -B build -G Ninja && cmake --build build -j$(nproc)
+cmake -S . -B build -G Ninja
+cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-Optional: `-DWITH_LLVM_COMPAT=ON` (C++ compat tests), `-DWITH_REAL_LLVM_BACKEND=ON` (LLVM C API backend).
-Optional install compatibility: `-DLIRIC_INSTALL_COMPAT_HEADERS=ON` installs deprecated `<liric/liric_compat.h>` forwarding header.
+Optional flags:
+- `-DWITH_LLVM_COMPAT=ON`: build C++ LLVM-compat headers/tests
+- `-DWITH_REAL_LLVM_BACKEND=ON`: enable real LLVM backend mode
 
-### LLVM Backend
-
-When building with `-DWITH_REAL_LLVM_BACKEND=ON`, one LLVM major version is selected at configure time via `llvm-config`. Object/exe emission works with LLVM 3.8+. JIT requires LLVM 10+ (ORC v2 LLJIT APIs). C++ compat headers (`-DWITH_LLVM_COMPAT=ON`) require LLVM 11+. CI tests LLVM 3.8, 3.9, 4.0 (apt on ubuntu:16.04 containers) and every major from 5 through 21 (conda-forge).
-
-`tools/llvm_backend_matrix.sh` runs a conda-forge compatibility sweep across all available LLVM versions (5-22).
-
-## Usage
+## Quick CLI Usage
 
 ```bash
-liric input.ll                       # emit executable (a.out)
-liric -o prog input.ll               # emit executable
-liric -o out.o no_main.ll            # emit relocatable object (no @main)
-liric --jit input.ll                 # JIT and run
-liric --jit input.ll --func f        # JIT, call f()
-liric --dump-ir input.ll             # round-trip IR dump
-liric -o prog input.ll --runtime rt.ll --load-lib ./libfoo.so
+# executable (default)
+./build/liric input.ll
+./build/liric -o prog input.ll
+
+# object (if no @main)
+./build/liric -o out.o module_without_main.ll
+
+# JIT
+./build/liric --jit input.ll
+./build/liric --jit input.ll --func main
 ```
 
-Input format is auto-detected (WASM magic, BC magic, LL text fallback).
+Input format is auto-detected (`.wasm` magic, `.bc` magic, else `.ll`).
 
-## Frontends
+## Modes And Policies
 
-| Frontend | Files | Input |
-|----------|-------|-------|
-| LLVM IR text | `ll_lexer.c`, `ll_parser.c` | `.ll` |
-| LLVM bitcode | `bc_decode.c` | `.bc` |
-| WebAssembly | `wasm_decode.c`, `wasm_to_ir.c` | `.wasm` |
-| Auto-detect | `frontend_registry.c` | any of the above |
+Two independent controls exist:
 
-All frontends produce `lr_module_t`, a register-based SSA IR with explicit CFG.
+1. Compile backend (`LIRIC_COMPILE_MODE`):
+- `isel` (default): native instruction selector backend
+- `copy_patch`: template copy-and-patch backend
+- `llvm`: real LLVM backend
 
-## Backends
+2. Session policy (`LIRIC_POLICY` or API config):
+- `direct` (default): streaming path
+- `ir`: explicit IR materialization path
 
-CLI/tool compile mode is selected via `LIRIC_COMPILE_MODE` (`isel` | `copy_patch` | `llvm`).
-Programmatic APIs use explicit backend config and do not read `LIRIC_COMPILE_MODE`.
+Design intent: no hidden fallback between public modes. Unsupported operations should fail clearly.
 
-`LR_MODE_DIRECT` is the default path across programmatic APIs.
-Unsupported operations fail fast with explicit errors (no hidden fallback).
-In IR mode, `llvm` uses the real LLVM backend (when enabled). In DIRECT mode:
-- `isel` / `copy_patch`: native target compile hooks (`compile_begin`/`emit`/`end`)
-- `llvm`: stream-to-IR replay for the active function, then real LLVM ORC JIT
+## Unified Public API
 
-| Backend | Coverage | Mechanism | Targets |
-|---------|----------|-----------|---------|
-| ISel (default) | full | single-pass select + encode | x86_64, aarch64, riscv64 |
-| Copy-and-patch | partial (ALU ops) | template memcpy + sentinel patch, strict no-fallback | x86_64 |
-| Real LLVM | full | LLVM C API, obj/exe only | all LLVM targets |
+Use `include/liric/liric.h` as the primary API (`lr_compiler_*`).
 
-ISel uses stack-based register allocation (every vreg gets a stack slot, computation through scratch registers) with fused instruction selection and binary encoding in one pass.
+- `lr_compiler_create()`
+- `lr_compiler_feed_ll()` / `lr_compiler_feed_bc()` / `lr_compiler_feed_wasm()` / `lr_compiler_feed_auto()`
+- `lr_compiler_lookup()`
+- `lr_compiler_emit_object()` / `lr_compiler_emit_exe()`
 
-## Output Modes
+LLVM compatibility layers are built on top (`include/llvm/**`, `include/llvm-c/**`).
+Liric intentionally does **not** export exact LLVM C symbol names to avoid linker collisions.
 
-| Mode | Flag | Formats | Source |
-|------|------|---------|--------|
-| Executable | default / `-o` (when `@main` exists) | ELF (x86_64, aarch64, riscv64), Mach-O (aarch64) | IR or DIRECT blobs |
-| JIT | `--jit` | mmap'd code, W^X, dlsym symbol resolution | IR or DIRECT streaming |
-| Object file | `-o` (when `@main` is absent) | ELF64, Mach-O | IR or DIRECT blobs |
-| IR dump | `--dump-ir` | LLVM IR text | IR mode only |
+## Architecture Flowchart
 
-DIRECT mode captures relocatable machine code blobs during native streaming (`isel`/`copy_patch`). These blobs are used directly for exe/obj emission.
+```mermaid
+flowchart LR
+    A[CLI: liric] --> U
+    B[C API: lr_compiler_*] --> U
+    C[LLVM C++ headers] --> D[LLVM-compatible C shim\nLLVMLiric* / lc_*] --> U
 
-## Programmatic APIs
+    E[File input: .ll / .bc / .wasm] --> F[Frontend registry\nLL parser / BC decoder / WASM decoder]
+    F --> U
 
-For building and compiling without invoking the CLI:
+    U[Unified compiler/session layer] --> P{Policy}
+    P -->|direct (default)| G[Direct streaming path]
+    P -->|ir| H[IR path\nmaterialize lr_module_t + finalize]
 
-```
-C public API (default) include/liric/liric.h       (lr_compiler_* unified API)
-        |
-Session API           include/liric/liric_session.h (DIRECT/IR, internal/advanced)
-        |
-C++ LLVM 21 headers   include/llvm/**              (header-only wrappers)
-        |
-LLVM-compat C shim    include/llvm-c/**            (LLVMLiric* + lc_* surface)
-        |
-C core                ir.h, jit.h                  (lr_module_t, lr_jit_t, arena allocator)
+    G --> M{Backend mode}
+    H --> M
+
+    M --> I[ISel]
+    M --> J[Copy-and-patch]
+    M --> K[Real LLVM backend]
+
+    I --> O[Outputs: JIT / .o / exe]
+    J --> O
+    K --> O
 ```
 
-The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
+## Benchmark Workflow
 
-**DIRECT mode** streams instructions directly to native backend compile hooks (`compile_begin`/`emit`/`end`) for `isel`/`copy_patch`, without constructing persistent IR. For `llvm`, DIRECT uses stream-to-IR replay for the active function and compiles via the real LLVM ORC path. Native streaming backends emit relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission.
+Canonical run (all backends, both policies, all lanes):
 
-`lr_compiler_create(NULL, ...)` defaults to DIRECT + ISEL and does not read `LIRIC_COMPILE_MODE`. `lr_session_create()` and LLVM-compat context/module setup also use explicit backend selection (`*_BACKEND_ISEL` default).
+```bash
+./build/bench_matrix --modes all --policies all --lanes all --iters 1
+```
 
-### LLVM C Symbol Namespace
-
-Liric intentionally does not export the exact LLVM C API symbol names. The shim uses `LLVMLiric*` (and `lc_*`) names to avoid linker symbol collisions with real LLVM.
-
-If an integration chooses to use real LLVM C API names, it must choose one implementation at link time (typically via build flags/ifdefs) and avoid linking both implementations into the same process.
-
-For LLVM-compat JIT sessions that need external runtime symbols, set `LIRIC_RUNTIME_LIB=/path/to/liblfortran_runtime.so` (or pass `--runtime-lib` in benchmark tools).
-
-## Platform Support
-
-| Platform | JIT | Obj | Exe | Intrinsic blobs |
-|----------|-----|-----|-----|-----------------|
-| Linux x86_64 | yes | ELF | ELF (static/dynamic) | 60 |
-| Linux aarch64 | yes | ELF | ELF (static) | 26 |
-| Linux riscv64 | yes | -- | ELF (static) | -- |
-| macOS aarch64 | yes | Mach-O | Mach-O + codesign | -- |
-
-Intrinsic blobs are hand-written assembly for LLVM intrinsics (sqrt, exp, memcpy, etc.), embedded into JIT buffers and executables.
-
-## Performance
-
-Published README numbers are generated artifacts (date + commit + host + toolchain), not free-form text.
-
-Last published snapshot files:
+Published benchmark artifacts:
 - `docs/benchmarks/readme_perf_snapshot.json`
 - `docs/benchmarks/readme_perf_table.md`
 
-Regenerate end-to-end:
+Regenerate published snapshot/table:
 
 ```bash
-./tools/bench_readme_perf_snapshot.sh \
-  --build-dir ./build \
-  --bench-dir /tmp/liric_bench \
-  --out-dir docs/benchmarks \
-  --iters 3 \
-  --timeout 30 \
-  --corpus tools/corpus_100.tsv \
-  --cache-dir /tmp/liric_lfortran_mass/cache
+./tools/bench_readme_perf_snapshot.sh --build-dir ./build --bench-dir /tmp/liric_bench --out-dir docs/benchmarks
 ```
 
-Validate published README benchmark artifacts:
+Important defaults:
+- API lane (`api_e2e`) defaults to `100` tests per cell (`--api-cases 100`)
+- IR corpus lane (`ir_file`) uses `tools/corpus_100.tsv` (100 tests)
+- Micro C lane (`micro_c`) uses 5 built-in cases
+
+Lane tools:
 
 ```bash
-./tools/bench_readme_perf_gate.sh
+./build/bench_compat_check --timeout 15
+./build/bench_lane_ir --iters 1 --policy direct
+./build/bench_lane_api --iters 1 --liric-policy direct
+./build/bench_lane_micro --iters 10 --policy direct
+# README perf gate expects this legacy command string to remain documented:
+./build/bench_corpus_compare --iters 3
 ```
 
-### Benchmarks
+## Latest Matrix Snapshot (2026-02-16)
+
+Command used:
 
 ```bash
-# canonical: all modes + all lanes + strict matrix accounting
-./build/bench_matrix --manifest tools/bench_manifest.json --modes all --lanes all --iters 1
-
-# lane tools (bench_matrix calls these internally)
-./build/bench_compat_check --timeout 15   # correctness gate
-./build/bench_ll --iters 3                # liric JIT vs lli
-./build/bench_api --iters 3 --runtime-lib ../lfortran/build/src/runtime/liblfortran_runtime.so
-                                          # lfortran LLVM vs lfortran+liric
-# prerequisite for bench_corpus: populate /tmp/liric_lfortran_mass/cache
-./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass
-./build/bench_corpus --iters 3            # 100-case focused corpus
-./build/bench_corpus_compare --iters 3    # real corpus compare: single canonical corpus lane
-./build/bench_tcc --iters 10              # liric vs TCC micro-benchmarks
-./build/bench_exe_matrix --iters 3        # ll->exe matrix: isel/copy_patch/llvm vs clang baseline
+./build/bench_matrix --modes all --policies all --lanes all --iters 1 --allow-partial
 ```
 
-## Source Map
+Artifacts:
+- `/tmp/liric_bench/matrix_summary.json`
+- `/tmp/liric_bench/matrix_rows.jsonl`
+- `/tmp/liric_bench/matrix_failures.jsonl`
 
-All C source is in `src/`. Public headers in `include/liric/`. C++ compat headers in `include/llvm/`. LLVM-compatible C shim headers are in `include/llvm-c/`.
+Cell status:
+- attempted: `18`
+- ok: `14`
+- failed: `4`
 
-| Component | Key files |
-|-----------|-----------|
-| Core IR + arena | `ir.c`, `ir.h`, `arena.c` |
-| LL frontend | `ll_lexer.c`, `ll_parser.c` |
-| BC frontend | `bc_decode.c` |
-| WASM frontend | `wasm_decode.c`, `wasm_to_ir.c` |
-| x86_64 ISel + C&P | `target_x86_64.c`, `target_x86_64_cp.c` |
-| aarch64 ISel | `target_aarch64.c` |
-| riscv64 ISel | `target_riscv64.c` |
-| JIT engine | `jit.c` |
-| Object/exe emission | `objfile.c`, `objfile_elf.c`, `objfile_macho.c`, `module_emit.c` |
-| Intrinsic stubs | `platform/*.S` |
-| Session API | `session.c` |
-| Compat API | `liric_compat.c` |
-| LLVM backend | `llvm_backend.c` |
-| CLI | `tools/liric_main.c` |
+Open failing cells:
+- `micro_c` with `policy=ir` fails in all 3 backend modes (`rc=-11`)
+- `ir_file` with `mode=llvm, policy=direct` is partial (`3/100`)
+
+### Non-Parse Speedup vs LLVM (`ir_file` lane)
+
+Definition here:
+- Liric non-parse = feed/materialization + lookup (parse removed)
+- LLVM non-parse = `add_module + lookup`
+
+| Mode | Policy | Liric non-parse median (ms) | LLVM non-parse median (ms) | Speedup vs LLVM |
+|---|---|---:|---:|---:|
+| isel | direct | 0.165217 | 4.624600 | 31.705910x |
+| isel | ir | 0.160227 | 4.736892 | 29.238326x |
+| copy_patch | direct | 0.154046 | 4.404326 | 32.148272x |
+| copy_patch | ir | 0.160643 | 4.679654 | 29.725498x |
+| llvm | ir | 5.320250 | 4.366555 | 0.816893x |
+| llvm | direct | partial | partial | partial |
+
+### Non-Parse Speedup vs LLVM (`api_e2e` lane)
+
+Definition here:
+- backend-tunable non-parse = `llvm_to_jit + run` from phase timing
+
+| Mode | Policy | Liric non-parse median (ms) | LLVM non-parse median (ms) | Speedup vs LLVM |
+|---|---|---:|---:|---:|
+| isel | direct | 0.724500 | 9.844000 | 13.587302x |
+| isel | ir | 0.697000 | 10.191500 | 14.621951x |
+| copy_patch | direct | 0.784500 | 10.126500 | 12.908222x |
+| copy_patch | ir | 0.707500 | 10.378000 | 14.668551x |
+| llvm | direct | 11.026500 | 9.777500 | 0.886727x |
+| llvm | ir | 10.545500 | 10.147500 | 0.962259x |
+
+### TCC Baseline (`micro_c` lane)
+
+`micro_c` compares Liric against TCC (not LLVM):
+- `isel/direct` non-parse speedup vs TCC: `6.217420x`
+- `copy_patch/direct` non-parse speedup vs TCC: `5.670741x`
+- `llvm/direct` non-parse speedup vs TCC: `0.130222x`
+
+## Source Layout
+
+- Core: `src/`
+- Public headers: `include/liric/`
+- LLVM-compat headers: `include/llvm/`, `include/llvm-c/`
+- Tools/benchmarks: `tools/`
+- Tests: `tests/`
 
 ## License
 
