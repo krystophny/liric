@@ -106,6 +106,7 @@ struct lr_session {
     lr_func_blob_t *blobs;
     uint32_t blob_count;
     uint32_t blob_cap;
+    bool ir_module_jit_ready;
 };
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
@@ -359,19 +360,44 @@ static bool module_has_defined_symbol_linear(const lr_module_t *m,
     return false;
 }
 
+static bool module_has_symbol_linear(const lr_module_t *m,
+                                     const char *name) {
+    if (!m || !name || !name[0])
+        return false;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return true;
+    }
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
 static bool session_is_module_defined_symbol(struct lr_session *s,
                                              const char *name) {
     if (!s || !s->module || !name || !name[0])
         return false;
     if (module_has_defined_symbol_linear(s->module, name))
         return true;
+    /* Forward references are legal in DIRECT mode: defer relocation
+       patching while a symbol is known to belong to the current module,
+       even if its body is emitted later. */
+    if (module_has_symbol_linear(s->module, name))
+        return true;
     if (!s->direct_obj_ctx_active)
         return false;
     uint32_t sym_id = lr_module_intern_symbol(s->module, name);
     if (sym_id >= s->direct_obj_ctx.module_sym_count)
         return false;
-    return s->direct_obj_ctx.module_sym_defined &&
-           s->direct_obj_ctx.module_sym_defined[sym_id] != 0;
+    if (s->direct_obj_ctx.module_sym_defined &&
+        s->direct_obj_ctx.module_sym_defined[sym_id] != 0)
+        return true;
+    if (s->direct_obj_ctx.module_sym_funcs &&
+        s->direct_obj_ctx.module_sym_funcs[sym_id])
+        return true;
+    return false;
 }
 
 static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
@@ -1020,6 +1046,7 @@ void lr_session_add_symbol(struct lr_session *s, const char *name, void *addr) {
 }
 
 void *lr_session_lookup(struct lr_session *s, const char *name) {
+    void *addr;
     if (!s || !s->jit || !name || !name[0])
         return NULL;
     if (s->direct_pending_relocs && s->direct_obj_ctx_active) {
@@ -1035,7 +1062,17 @@ void *lr_session_lookup(struct lr_session *s, const char *name) {
         if (s->direct_pending_relocs)
             return NULL;
     }
-    return lr_jit_get_function(s->jit, name);
+    addr = lr_jit_get_function(s->jit, name);
+    if (addr)
+        return addr;
+
+    if (s->cfg.mode == SESSION_MODE_IR && !s->ir_module_jit_ready) {
+        if (lr_jit_add_module(s->jit, s->module) != 0)
+            return NULL;
+        s->ir_module_jit_ready = true;
+        addr = lr_jit_get_function(s->jit, name);
+    }
+    return addr;
 }
 
 /* ---- Types (session-scoped singletons) --------------------------------- */
@@ -1083,6 +1120,13 @@ lr_type_t *lr_type_array_s(struct lr_session *s, lr_type_t *elem,
     return lr_type_array(s->module->arena, elem, count);
 }
 
+lr_type_t *lr_type_vector_s(struct lr_session *s, lr_type_t *elem,
+                             uint64_t count) {
+    if (!s || !s->module || !elem)
+        return NULL;
+    return lr_type_vector(s->module->arena, elem, count);
+}
+
 lr_type_t *lr_type_struct_s(struct lr_session *s, lr_type_t **fields,
                              uint32_t n, bool packed) {
     if (!s || !s->module || (n > 0 && !fields))
@@ -1115,6 +1159,7 @@ uint32_t lr_session_global(struct lr_session *s, const char *name,
         memcpy(g->init_data, init, init_size);
         g->init_size = init_size;
     }
+    s->ir_module_jit_ready = false;
     return g->id;
 }
 
@@ -1127,6 +1172,7 @@ uint32_t lr_session_global_extern(struct lr_session *s, const char *name,
     if (!g)
         return UINT32_MAX;
     g->is_external = true;
+    s->ir_module_jit_ready = false;
     return g->id;
 }
 
@@ -1147,6 +1193,7 @@ void lr_session_global_reloc(struct lr_session *s, uint32_t id, size_t offset,
     r->addend = 0;
     r->next = g->relocs;
     g->relocs = r;
+    s->ir_module_jit_ready = false;
 }
 
 uint32_t lr_session_intern(struct lr_session *s, const char *name) {
@@ -1173,6 +1220,7 @@ int lr_session_declare(struct lr_session *s, const char *name, lr_type_t *ret,
         err_set(err, S_ERR_BACKEND, "function declaration failed");
         return -1;
     }
+    s->ir_module_jit_ready = false;
     return 0;
 }
 
@@ -1204,6 +1252,7 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
     s->compile_start = 0;
     s->compile_active = false;
     s->emitted_count = 0;
+    s->ir_module_jit_ready = false;
     if (ensure_runtime_and_globals_ready(s, err) != 0) {
         s->cur_func->is_decl = true;
         finish_function_state(s);
@@ -1239,6 +1288,7 @@ int lr_session_func_begin_existing(struct lr_session *s, lr_module_t *module,
     s->compile_start = 0;
     s->compile_active = false;
     s->emitted_count = 0;
+    s->ir_module_jit_ready = false;
 
     if (ensure_runtime_and_globals_ready(s, err) != 0) {
         finish_function_state(s);
@@ -1297,8 +1347,10 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
         rc = finish_direct_compile(s, out_addr, err);
     else
         rc = compile_current_function(s, out_addr, err);
-    if (rc != 0)
+    if (rc != 0) {
+        finish_function_state(s);
         return -1;
+    }
 
     finish_function_state(s);
     return 0;
@@ -1383,6 +1435,7 @@ int lr_session_bind_ir(struct lr_session *s, lr_module_t *module,
     s->cur_block = block;
     s->compile_active = false;
     s->compile_ctx = NULL;
+    s->ir_module_jit_ready = false;
     return 0;
 }
 

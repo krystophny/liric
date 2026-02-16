@@ -6,6 +6,10 @@
 #include "llvm/ADT/StringRef.h"
 #include <string>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class Module;
@@ -54,5 +58,9 @@ public:
 inline int llvm::orc::LLJIT::addModule(llvm::Module &M) {
     return LLVMLiricSessionAddCompatModule(session_, M.getCompat());
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

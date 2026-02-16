@@ -1311,3 +1311,51 @@ int test_parser_streaming_callback_error_propagates(void) {
 
     return 0;
 }
+
+int test_parser_vector_type_roundtrip(void) {
+    const char *src =
+        "define <2 x float> @id(<2 x float> %x) {\n"
+        "entry:\n"
+        "  ret <2 x float> %x\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_module_t *m;
+    lr_func_t *f;
+    FILE *tmp;
+    char dump[1024] = {0};
+    size_t nread = 0;
+
+    m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    TEST_ASSERT(f->ret_type != NULL, "function return type exists");
+    TEST_ASSERT_EQ(f->ret_type->kind, LR_TYPE_VECTOR, "return type is vector");
+    TEST_ASSERT_EQ(f->num_params, 1, "single parameter");
+    TEST_ASSERT(f->param_types != NULL, "parameter type list exists");
+    TEST_ASSERT_EQ(f->param_types[0]->kind, LR_TYPE_VECTOR, "param type is vector");
+    TEST_ASSERT_EQ(f->param_types[0]->array.count, 2, "vector has 2 elements");
+    TEST_ASSERT_EQ(f->param_types[0]->array.elem->kind, LR_TYPE_FLOAT,
+                   "vector element type is float");
+
+    tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile for dump");
+    lr_module_dump(m, tmp);
+    fflush(tmp);
+    rewind(tmp);
+    nread = fread(dump, 1, sizeof(dump) - 1, tmp);
+    dump[nread] = '\0';
+    fclose(tmp);
+
+    TEST_ASSERT(strstr(dump, "define <2 x float> @id(") != NULL,
+                "dump preserves vector return type syntax");
+    TEST_ASSERT(strstr(dump, "ret <2 x float>") != NULL,
+                "dump preserves vector operand type syntax");
+    TEST_ASSERT(strstr(dump, "[2 x float]") == NULL,
+                "dump does not degrade vector to array syntax");
+
+    lr_arena_destroy(arena);
+    return 0;
+}

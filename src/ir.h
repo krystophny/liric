@@ -17,6 +17,7 @@ typedef enum lr_type_kind {
     LR_TYPE_DOUBLE,
     LR_TYPE_PTR,
     LR_TYPE_ARRAY,
+    LR_TYPE_VECTOR,
     LR_TYPE_STRUCT,
     LR_TYPE_FUNC,
 } lr_type_kind_t;
@@ -174,6 +175,7 @@ lr_module_t *lr_module_create(lr_arena_t *arena);
 lr_type_t *lr_type_func(lr_arena_t *a, lr_type_t *ret, lr_type_t **params,
                          uint32_t num_params, bool vararg);
 lr_type_t *lr_type_array(lr_arena_t *a, lr_type_t *elem, uint64_t count);
+lr_type_t *lr_type_vector(lr_arena_t *a, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_struct(lr_arena_t *a, lr_type_t **fields, uint32_t n,
                            bool packed, char *name);
 lr_func_t *lr_func_create(lr_module_t *m, const char *name, lr_type_t *ret,
@@ -216,7 +218,8 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 
 void lr_dump_func_signature(const lr_func_t *f, FILE *out);
 void lr_dump_block_label(const lr_block_t *b, FILE *out);
-void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out);
+void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
+                  const lr_func_t *f, FILE *out);
 void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out);
 void lr_module_dump(lr_module_t *m, FILE *out);
 

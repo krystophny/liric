@@ -19,6 +19,7 @@ enum lr_type_kind_public {
     LR_TYPE_DOUBLE,
     LR_TYPE_PTR,
     LR_TYPE_ARRAY,
+    LR_TYPE_VECTOR,
     LR_TYPE_STRUCT,
     LR_TYPE_FUNC,
 };

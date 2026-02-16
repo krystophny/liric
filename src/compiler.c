@@ -255,9 +255,18 @@ static int is_wasm_binary(const uint8_t *data, size_t len) {
 
 int lr_compiler_feed_auto(lr_compiler_t *c, const uint8_t *data, size_t len,
                           lr_compiler_error_t *err) {
+    lr_error_t sess_err = {0};
     if (!c || !data || len == 0) {
         compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT, "invalid auto input");
         return -1;
+    }
+    if (c->policy == LR_POLICY_IR) {
+        if (lr_session_compile_auto(c->session, data, len, NULL, &sess_err) != 0) {
+            compiler_err_from_session(err, &sess_err);
+            return -1;
+        }
+        compiler_err_clear(err);
+        return 0;
     }
     if (is_wasm_binary(data, len))
         return lr_compiler_feed_wasm(c, data, len, err);

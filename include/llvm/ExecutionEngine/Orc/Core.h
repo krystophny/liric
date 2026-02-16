@@ -13,6 +13,10 @@
 #include <string>
 #include <vector>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 namespace orc {
 
@@ -98,5 +102,9 @@ public:
 
 } // namespace orc
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

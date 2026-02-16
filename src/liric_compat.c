@@ -115,6 +115,8 @@ typedef struct lc_alloca_inst {
 
 /* Forward declaration for safe_undef */
 lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);
+void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                      lc_value_t *dst, lc_value_t *src, lc_value_t *size);
 
 /* ---- Value pool (slab-based to avoid pointer invalidation) ---- */
 
@@ -592,7 +594,10 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
     memset(&cfg, 0, sizeof(cfg));
-    cfg.mode = (mode == LR_COMPILE_LLVM) ? LR_MODE_IR : LR_MODE_DIRECT;
+    /* LLVM-compatible builder path must preserve full IR semantics.
+     * Use IR mode unconditionally here; session DIRECT mode remains
+     * available via the native session API. */
+    cfg.mode = LR_MODE_IR;
     switch (mode) {
     case LR_COMPILE_COPY_PATCH:
         cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
@@ -652,11 +657,9 @@ lr_module_t *lc_module_get_ir(lc_module_compat_t *mod) {
 }
 
 static void compat_dump_module(lr_module_t *m, FILE *out) {
-    lr_func_t *f;
     if (!m || !out)
         return;
-    for (f = m->first_func; f; f = f->next)
-        lr_dump_func(f, m, out);
+    lr_module_dump(m, out);
 }
 
 void lc_module_dump(lc_module_compat_t *mod) {
@@ -934,6 +937,7 @@ lr_type_t *lc_type_contained(lr_type_t *ty, unsigned idx) {
         if (idx < ty->func.num_params) return ty->func.params[idx];
         return NULL;
     case LR_TYPE_ARRAY:
+    case LR_TYPE_VECTOR:
         return ty->array.elem;
     default:
         return NULL;
@@ -1152,6 +1156,219 @@ static bool pack_constant_bytes_raw(const lc_value_t *value, const lr_type_t *ty
     }
 }
 
+static uint64_t read_le_u64_partial(const uint8_t *bytes, size_t n) {
+    uint64_t raw = 0;
+    size_t lim = n < sizeof(raw) ? n : sizeof(raw);
+    for (size_t i = 0; i < lim; i++)
+        raw |= ((uint64_t)bytes[i]) << (8u * i);
+    return raw;
+}
+
+static bool aggregate_extract_offset_and_type(lr_type_t *base_type,
+                                              unsigned *indices,
+                                              unsigned num_indices,
+                                              size_t *out_offset,
+                                              lr_type_t **out_type) {
+    lr_type_t *cur = base_type;
+    size_t off = 0;
+    unsigned i;
+    if (!base_type || !out_offset || !out_type)
+        return false;
+    for (i = 0; i < num_indices; i++) {
+        unsigned idx = indices ? indices[i] : 0u;
+        if (!cur)
+            return false;
+        if (cur->kind == LR_TYPE_STRUCT) {
+            if (idx >= cur->struc.num_fields)
+                return false;
+            off += lr_struct_field_offset(cur, idx);
+            cur = cur->struc.fields[idx];
+            continue;
+        }
+        if (cur->kind == LR_TYPE_ARRAY || cur->kind == LR_TYPE_VECTOR) {
+            size_t elem_sz;
+            if ((uint64_t)idx >= cur->array.count)
+                return false;
+            elem_sz = lr_type_size(cur->array.elem);
+            off += (size_t)idx * elem_sz;
+            cur = cur->array.elem;
+            continue;
+        }
+        return false;
+    }
+    *out_offset = off;
+    *out_type = cur;
+    return true;
+}
+
+static lc_value_t *const_extractvalue_fold(lc_module_compat_t *mod,
+                                           lc_value_t *agg,
+                                           unsigned *indices,
+                                           unsigned num_indices) {
+    lr_type_t *result_ty = NULL;
+    size_t off = 0;
+    size_t need = 0;
+    const uint8_t *src = NULL;
+    size_t avail = 0;
+    if (!mod || !agg || agg->kind != LC_VAL_CONST_AGGREGATE || !agg->type)
+        return NULL;
+    if (!aggregate_extract_offset_and_type(agg->type, indices, num_indices,
+                                           &off, &result_ty)) {
+        return NULL;
+    }
+    if (!result_ty)
+        return NULL;
+
+    need = lr_type_size(result_ty);
+    if (agg->aggregate.data && off < agg->aggregate.size) {
+        src = (const uint8_t *)agg->aggregate.data + off;
+        avail = agg->aggregate.size - off;
+    }
+
+    if (lc_type_is_integer(result_ty)) {
+        unsigned width = lc_type_int_width(result_ty);
+        uint64_t raw = read_le_u64_partial(src ? src : (const uint8_t *)"", avail);
+        if (width > 0 && width < 64) {
+            uint64_t mask = (UINT64_C(1) << width) - 1u;
+            raw &= mask;
+            if (raw & (UINT64_C(1) << (width - 1u)))
+                raw |= ~mask;
+        }
+        return lc_value_const_int(mod, result_ty, (int64_t)raw,
+                                  width ? width : 64u);
+    }
+
+    if (result_ty->kind == LR_TYPE_FLOAT) {
+        float f = 0.0f;
+        size_t n = avail < sizeof(f) ? avail : sizeof(f);
+        if (src && n > 0)
+            memcpy(&f, src, n);
+        return lc_value_const_fp(mod, result_ty, (double)f, false);
+    }
+
+    if (result_ty->kind == LR_TYPE_DOUBLE) {
+        double d = 0.0;
+        size_t n = avail < sizeof(d) ? avail : sizeof(d);
+        if (src && n > 0)
+            memcpy(&d, src, n);
+        return lc_value_const_fp(mod, result_ty, d, true);
+    }
+
+    if (result_ty->kind == LR_TYPE_PTR) {
+        lc_const_value_meta_t *meta = lookup_const_value_meta(mod, agg);
+        if (meta) {
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                if (cr->offset == off && cr->symbol_name && cr->symbol_name[0]) {
+                    uint32_t sym_id = compat_symbol_id(mod, cr->symbol_name);
+                    if (sym_id != UINT32_MAX) {
+                        lc_value_t *gv =
+                            lc_value_global(mod, sym_id, result_ty, cr->symbol_name);
+                        if (gv)
+                            gv->global.offset = cr->addend;
+                        return gv;
+                    }
+                }
+            }
+        }
+        if (!src || avail == 0 || read_le_u64_partial(src, avail) == 0)
+            return lc_value_const_null(mod, result_ty);
+        return safe_undef(mod);
+    }
+
+    if (result_ty->kind == LR_TYPE_STRUCT ||
+        result_ty->kind == LR_TYPE_ARRAY ||
+        result_ty->kind == LR_TYPE_VECTOR) {
+        lc_value_t *nested;
+        uint8_t *bytes = NULL;
+        if (need > 0) {
+            size_t n;
+            bytes = (uint8_t *)calloc(1, need);
+            if (!bytes)
+                return safe_undef(mod);
+            n = avail < need ? avail : need;
+            if (src && n > 0)
+                memcpy(bytes, src, n);
+        }
+        nested = lc_value_const_aggregate(mod, result_ty, bytes, need);
+        free(bytes);
+        if (!nested)
+            return safe_undef(mod);
+        if (need > 0) {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, agg);
+            if (meta) {
+                for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                    if (!cr->symbol_name)
+                        continue;
+                    if (cr->offset >= off && cr->offset < off + need) {
+                        (void)lc_value_const_aggregate_add_reloc(
+                            mod, nested, cr->offset - off, cr->symbol_name, cr->addend
+                        );
+                    }
+                }
+            }
+        }
+        return nested;
+    }
+
+    return NULL;
+}
+
+static lc_value_t *materialize_const_aggregate_global(lc_module_compat_t *mod,
+                                                      lc_value_t *agg) {
+    static uint32_t constagg_seq = 0;
+    char name[64];
+    size_t size;
+    lr_global_t *g;
+    uint32_t sym_id;
+    if (!mod || !agg || agg->kind != LC_VAL_CONST_AGGREGATE || !agg->type)
+        return safe_undef(mod);
+
+    size = lr_type_size(agg->type);
+    if (size == 0)
+        return safe_undef(mod);
+
+    (void)snprintf(name, sizeof(name), ".lc.constagg.%u", constagg_seq++);
+    g = lr_global_create(mod->mod, name, agg->type, true);
+    if (!g)
+        return safe_undef(mod);
+
+    g->init_data = (uint8_t *)lr_arena_alloc(mod->mod->arena, size, 1);
+    if (!g->init_data)
+        return safe_undef(mod);
+    memset(g->init_data, 0, size);
+    if (agg->aggregate.data && agg->aggregate.size > 0) {
+        size_t n = agg->aggregate.size < size ? agg->aggregate.size : size;
+        memcpy(g->init_data, agg->aggregate.data, n);
+    }
+    g->init_size = size;
+
+    {
+        lc_const_value_meta_t *meta = lookup_const_value_meta(mod, agg);
+        if (meta) {
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                lr_reloc_t *r;
+                if (!cr->symbol_name || cr->offset >= size)
+                    continue;
+                r = lr_arena_new(mod->mod->arena, lr_reloc_t);
+                if (!r)
+                    return safe_undef(mod);
+                r->offset = cr->offset;
+                r->addend = cr->addend;
+                r->symbol_name = lr_arena_strdup(mod->mod->arena,
+                                                 cr->symbol_name,
+                                                 strlen(cr->symbol_name));
+                r->next = g->relocs;
+                g->relocs = r;
+            }
+        }
+    }
+
+    sym_id = compat_symbol_id(mod, name);
+    if (sym_id != UINT32_MAX)
+        cache_global_by_symbol(mod, sym_id, g);
+    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+}
+
 bool lc_pack_constant_bytes(lc_value_t *value, lr_type_t *ty,
                              uint8_t *out, size_t out_size) {
     return pack_constant_bytes_raw(value, ty, out, out_size);
@@ -1237,12 +1454,58 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
     size_t total = 0;
     size_t elem_sz = 0;
     uint64_t n = 0;
-    if (!mod || !array_ty || array_ty->kind != LR_TYPE_ARRAY)
+    if (!mod || !array_ty ||
+        (array_ty->kind != LR_TYPE_ARRAY && array_ty->kind != LR_TYPE_VECTOR))
         return NULL;
 
     elem_ty = array_ty->array.elem;
     total = lr_type_size(array_ty);
     elem_sz = lr_type_size(elem_ty);
+
+    if (getenv("LIRIC_COMPAT_DEBUG_ARRAY_CONST")) {
+        fprintf(stderr,
+                "[lc_const_array_from_values] count=%llu num_values=%u elem_kind=%d elem_sz=%zu total=%zu\n",
+                (unsigned long long)array_ty->array.count, num_values,
+                elem_ty ? (int)elem_ty->kind : -1, elem_sz, total);
+        for (uint32_t i = 0; i < num_values && i < 8; i++) {
+            lc_value_t *v = values ? values[i] : NULL;
+            fprintf(stderr, "  val[%u]: %s kind=%d ty_kind=%d agg_size=%zu int=%lld\n",
+                    i, v ? "set" : "null", v ? (int)v->kind : -1,
+                    (v && v->type) ? (int)v->type->kind : -1,
+                    (v && v->kind == LC_VAL_CONST_AGGREGATE) ? v->aggregate.size : 0u,
+                    (long long)((v && v->kind == LC_VAL_CONST_INT) ? v->const_int.val : 0));
+        }
+    }
+
+    /* Some producers pass array constructors as a single aggregate value of
+     * the full array type. Preserve that payload instead of treating it as
+     * element[0], which would zero-fill the remaining elements. */
+    if (num_values == 1 && values && values[0] &&
+        values[0]->kind == LC_VAL_CONST_AGGREGATE &&
+        values[0]->type &&
+        (values[0]->type->kind == LR_TYPE_ARRAY ||
+         values[0]->type->kind == LR_TYPE_VECTOR) &&
+        lr_type_size(values[0]->type) == total) {
+        lc_value_t *src_agg = values[0];
+        lc_value_t *dst_agg = lc_value_const_aggregate(
+            mod, array_ty, src_agg->aggregate.data, src_agg->aggregate.size);
+        if (!dst_agg)
+            return NULL;
+        {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, src_agg);
+            if (meta) {
+                for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                    if (!cr->symbol_name)
+                        continue;
+                    if (lc_value_const_aggregate_add_reloc(mod, dst_agg,
+                            cr->offset, cr->symbol_name, cr->addend) != 0)
+                        return NULL;
+                }
+            }
+        }
+        return dst_agg;
+    }
+
     if (total > 0) {
         bytes = (uint8_t *)calloc(1, total);
         if (!bytes)
@@ -1358,6 +1621,16 @@ static lc_value_t *create_func_value(lc_module_compat_t *mod,
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
                             lr_type_t *func_type) {
     if (!mod) return safe_undef(NULL);
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing) {
+            /* Promote an existing declaration to a definition placeholder.
+             * This keeps one canonical symbol and avoids declare/define
+             * duplication under different internal names. */
+            existing->is_decl = false;
+            return create_func_value(mod, existing);
+        }
+    }
     lr_type_t *ret = mod->mod->type_void;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
@@ -1592,6 +1865,8 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
     const char *actual_name = name;
     char auto_name[32];
     char *unique_name = NULL;
+    uint32_t sym_id = UINT32_MAX;
+    lr_global_t *g = NULL;
     if (!mod || !mod->mod)
         return safe_undef(mod);
     if (!name || name[0] == '\0') {
@@ -1599,17 +1874,38 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
                  mod->mod->num_globals);
         actual_name = auto_name;
     }
+    /* If this global was referenced earlier as an unresolved external,
+     * materialize the definition in-place. For already-defined globals
+     * we must create a distinct symbol (LLVM-style auto-rename). */
+    g = lookup_global_cached(mod, actual_name, &sym_id);
+    if (g && g->is_external) {
+        if (type)
+            g->type = type;
+        g->is_const = is_const;
+        g->is_external = false;
+        if (init_data && init_size > 0) {
+            g->init_data = lr_arena_alloc_uninit(mod->mod->arena, init_size, 1);
+            memcpy(g->init_data, init_data, init_size);
+            g->init_size = init_size;
+        }
+        if (sym_id == UINT32_MAX)
+            sym_id = compat_symbol_id(mod, g->name);
+        if (sym_id == UINT32_MAX)
+            return safe_undef(mod);
+        cache_global_by_symbol(mod, sym_id, g);
+        return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+    }
     unique_name = make_unique_symbol_name(mod, actual_name);
     if (!unique_name)
         return safe_undef(mod);
-    lr_global_t *g = lr_global_create(mod->mod, unique_name, type, is_const);
+    g = lr_global_create(mod->mod, unique_name, type, is_const);
     free(unique_name);
     if (init_data && init_size > 0) {
         g->init_data = lr_arena_alloc_uninit(mod->mod->arena, init_size, 1);
         memcpy(g->init_data, init_data, init_size);
         g->init_size = init_size;
     }
-    uint32_t sym_id = compat_symbol_id(mod, g->name);
+    sym_id = compat_symbol_id(mod, g->name);
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
@@ -1793,6 +2089,22 @@ static lc_value_t *compat_cast(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, lr_opcode_t op,
                                  lc_value_t *val, lr_type_t *to_type) {
     if (!mod || !b || !f || !val) return safe_undef(mod);
+
+    /* Keep constant null/pointer casts well-typed in emitted IR. */
+    if (op == LR_OP_PTRTOINT &&
+        to_type && lc_type_is_integer(to_type) &&
+        val->kind == LC_VAL_CONST_NULL) {
+        unsigned width = lc_type_int_width(to_type);
+        if (width == 0) width = 64;
+        return lc_value_const_int(mod, to_type, 0, width);
+    }
+    if (op == LR_OP_INTTOPTR &&
+        to_type && to_type->kind == LR_TYPE_PTR &&
+        val->kind == LC_VAL_CONST_INT &&
+        val->const_int.val == 0) {
+        return lc_value_const_null(mod, to_type);
+    }
+
     uint32_t v = build_cast(mod, b, f, op, to_type, lc_value_to_desc(val));
     return wrap_vreg(mod, v, to_type, f);
 }
@@ -2190,7 +2502,19 @@ void lc_create_store(lc_module_compat_t *mod, lr_block_t *b,
                      lc_value_t *val, lc_value_t *ptr) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[2];
+    lr_func_t *f;
     if (!mod || !b) return;
+    f = b->func;
+    if (val && val->kind == LC_VAL_CONST_AGGREGATE && val->type && f) {
+        size_t nbytes = lr_type_size(val->type);
+        lc_value_t *src = materialize_const_aggregate_global(mod, val);
+        lc_value_t *sz = lc_value_const_int(mod, mod->mod->type_i64,
+                                            (int64_t)nbytes, 64u);
+        if (src && nbytes > 0) {
+            lc_create_memcpy(mod, b, f, ptr, src, sz);
+            return;
+        }
+    }
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(val);
     ops[1] = lc_value_to_desc(ptr);
@@ -2629,9 +2953,16 @@ lc_value_t *lc_create_extractvalue(lc_module_compat_t *mod, lr_block_t *b,
     for (unsigned i = 0; i < num_indices; i++) {
         if (result_ty->kind == LR_TYPE_STRUCT) {
             result_ty = result_ty->struc.fields[indices[i]];
-        } else if (result_ty->kind == LR_TYPE_ARRAY) {
+        } else if (result_ty->kind == LR_TYPE_ARRAY ||
+                   result_ty->kind == LR_TYPE_VECTOR) {
             result_ty = result_ty->array.elem;
         }
+    }
+
+    if (agg->kind == LC_VAL_CONST_AGGREGATE) {
+        lc_value_t *folded = const_extractvalue_fold(mod, agg, indices, num_indices);
+        if (folded)
+            return folded;
     }
 
     memset(&inst, 0, sizeof(inst));
@@ -2691,6 +3022,7 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[4];
+    lc_value_t *size_arg;
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
@@ -2699,12 +3031,16 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!decl || sym_id == UINT32_MAX) return;
 
     (void)decl;
+    size_arg = size;
+    if (size_arg && size_arg->type && size_arg->type != m->type_i64)
+        size_arg = lc_create_zext_or_trunc(mod, b, f, size_arg, m->type_i64,
+                                           "memcpy_size");
 
     memset(&inst, 0, sizeof(inst));
     ops[0] = global_operand_desc(sym_id, m->type_ptr);
     ops[1] = lc_value_to_desc(dst);
     ops[2] = lc_value_to_desc(src);
-    ops[3] = lc_value_to_desc(size);
+    ops[3] = lc_value_to_desc(size_arg);
     inst.op = LR_OP_CALL;
     inst.type = m->type_ptr;
     inst.operands = ops;
@@ -2717,6 +3053,8 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *val, lc_value_t *size) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[4];
+    lc_value_t *val_arg;
+    lc_value_t *size_arg;
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_i32, m->type_i64 };
@@ -2725,12 +3063,20 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!decl || sym_id == UINT32_MAX) return;
 
     (void)decl;
+    val_arg = val;
+    if (val_arg && val_arg->type && val_arg->type != m->type_i32)
+        val_arg = lc_create_zext_or_trunc(mod, b, f, val_arg, m->type_i32,
+                                          "memset_val");
+    size_arg = size;
+    if (size_arg && size_arg->type && size_arg->type != m->type_i64)
+        size_arg = lc_create_zext_or_trunc(mod, b, f, size_arg, m->type_i64,
+                                           "memset_size");
 
     memset(&inst, 0, sizeof(inst));
     ops[0] = global_operand_desc(sym_id, m->type_ptr);
     ops[1] = lc_value_to_desc(dst);
-    ops[2] = lc_value_to_desc(val);
-    ops[3] = lc_value_to_desc(size);
+    ops[2] = lc_value_to_desc(val_arg);
+    ops[3] = lc_value_to_desc(size_arg);
     inst.op = LR_OP_CALL;
     inst.type = m->type_ptr;
     inst.operands = ops;
@@ -2743,6 +3089,7 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                        lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[4];
+    lc_value_t *size_arg;
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
@@ -2750,12 +3097,16 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     uint32_t sym_id = compat_symbol_id(mod, "memmove");
     if (!decl || sym_id == UINT32_MAX) return;
     (void)decl;
+    size_arg = size;
+    if (size_arg && size_arg->type && size_arg->type != m->type_i64)
+        size_arg = lc_create_zext_or_trunc(mod, b, f, size_arg, m->type_i64,
+                                           "memmove_size");
 
     memset(&inst, 0, sizeof(inst));
     ops[0] = global_operand_desc(sym_id, m->type_ptr);
     ops[1] = lc_value_to_desc(dst);
     ops[2] = lc_value_to_desc(src);
-    ops[3] = lc_value_to_desc(size);
+    ops[3] = lc_value_to_desc(size_arg);
     inst.op = LR_OP_CALL;
     inst.type = m->type_ptr;
     inst.operands = ops;

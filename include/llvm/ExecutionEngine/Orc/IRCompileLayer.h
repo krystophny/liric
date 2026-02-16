@@ -8,6 +8,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class Module;
@@ -52,5 +56,9 @@ inline llvm::Error llvm::orc::IRCompileLayer::add(
     if (rc != 0) return make_error("LLVMLiricSessionAddCompatModule failed");
     return Error::success();
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

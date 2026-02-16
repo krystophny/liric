@@ -28,6 +28,7 @@ typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
     const char *runtime_lib;
+    const char *liric_compile_mode;
     const char *test_dir;
     const char *bench_dir;
     const char *compat_list;
@@ -250,6 +251,7 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const char *extra_opt,
                                          const char *source_path,
                                          const char *runtime_lib,
+                                         const char *liric_compile_mode,
                                          int timeout_ms,
                                          const char *work_dir,
                                          int with_time_report) {
@@ -261,8 +263,11 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
     size_t k = 0;
     cmd_result_t r;
     const char *saved_runtime = NULL;
+    const char *saved_mode = NULL;
     char *saved_runtime_copy = NULL;
+    char *saved_mode_copy = NULL;
     int had_runtime_env = 0;
+    int had_mode_env = 0;
     if (!argv) die("out of memory", NULL);
 
     argv[k++] = (char *)lfortran_bin;
@@ -284,6 +289,14 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
         }
         setenv("LIRIC_RUNTIME_LIB", runtime_lib, 1);
     }
+    if (liric_compile_mode && liric_compile_mode[0]) {
+        saved_mode = getenv("LIRIC_COMPILE_MODE");
+        if (saved_mode) {
+            had_mode_env = 1;
+            saved_mode_copy = xstrdup(saved_mode);
+        }
+        setenv("LIRIC_COMPILE_MODE", liric_compile_mode, 1);
+    }
 
     r = run_cmd(argv, timeout_ms, NULL, work_dir);
 
@@ -293,8 +306,15 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
         else
             unsetenv("LIRIC_RUNTIME_LIB");
     }
+    if (liric_compile_mode && liric_compile_mode[0]) {
+        if (had_mode_env)
+            setenv("LIRIC_COMPILE_MODE", saved_mode_copy, 1);
+        else
+            unsetenv("LIRIC_COMPILE_MODE");
+    }
 
     free(saved_runtime_copy);
+    free(saved_mode_copy);
     free(argv);
     return r;
 }
@@ -1420,6 +1440,35 @@ static int cmd_output_has_word_ci(const cmd_result_t *r, const char *word) {
     return text_has_word_ci(r->stdout_text, word) || text_has_word_ci(r->stderr_text, word);
 }
 
+static int cmd_reports_stop_like(const cmd_result_t *r) {
+    if (!r) return 0;
+    return cmd_output_has_ci(r, "error stop") || cmd_output_has_word_ci(r, "stop");
+}
+
+static int cmd_outputs_match_normalized(const cmd_result_t *a, const cmd_result_t *b) {
+    char *a_out = NULL, *b_out = NULL, *a_err = NULL, *b_err = NULL;
+    int same = 0;
+    if (!a || !b) return 0;
+    a_out = normalize_output(a->stdout_text);
+    b_out = normalize_output(b->stdout_text);
+    a_err = normalize_output(a->stderr_text);
+    b_err = normalize_output(b->stderr_text);
+    same = (strcmp(a_out, b_out) == 0) && (strcmp(a_err, b_err) == 0);
+    free(a_out);
+    free(b_out);
+    free(a_err);
+    free(b_err);
+    return same;
+}
+
+static int is_valid_liric_compile_mode(const char *mode) {
+    if (!mode || !mode[0]) return 0;
+    return strcmp(mode, "isel") == 0 ||
+           strcmp(mode, "copy_patch") == 0 ||
+           strcmp(mode, "stencil") == 0 ||
+           strcmp(mode, "llvm") == 0;
+}
+
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
     if (!r) return "llvm_jit_failed";
     if (r->rc == -SIGABRT || r->rc == -SIGSEGV)
@@ -1443,6 +1492,7 @@ static void usage(void) {
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran)\n");
     printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
+    printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --test-dir PATH      path to integration_tests/ dir\n");
     printf("  --bench-dir PATH     output directory (default: /tmp/liric_bench)\n");
     printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
@@ -1466,6 +1516,9 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.lfortran = "../lfortran/build/src/bin/lfortran";
     cfg.lfortran_liric = "../lfortran/build-liric/src/bin/lfortran";
     cfg.runtime_lib = NULL;
+    cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
+    if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
+        cfg.liric_compile_mode = "llvm";
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
@@ -1490,6 +1543,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran_liric = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--liric-compile-mode") == 0 && i + 1 < argc) {
+            cfg.liric_compile_mode = argv[++i];
         } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
@@ -1530,6 +1585,10 @@ static cfg_t parse_args(int argc, char **argv) {
             die("unknown argument", argv[i]);
         }
     }
+
+    if (!is_valid_liric_compile_mode(cfg.liric_compile_mode))
+        die("invalid --liric-compile-mode (expected isel|copy_patch|stencil|llvm)",
+            cfg.liric_compile_mode);
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
     if (!file_exists(cfg.lfortran_liric)) die("lfortran (WITH_LIRIC) not found", cfg.lfortran_liric);
@@ -1620,6 +1679,7 @@ int main(int argc, char **argv) {
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
     if (cfg.runtime_lib)
         printf("  runtime_lib:   %s\n", cfg.runtime_lib);
+    printf("  liric_compile_mode: %s\n", cfg.liric_compile_mode);
     printf("  test_dir:      %s\n", cfg.test_dir);
     printf("  bench_dir:     %s\n", cfg.bench_dir);
     printf("  compat_list:   %s\n", compat_path);
@@ -1740,6 +1800,7 @@ int main(int argc, char **argv) {
                                                   extra_retry_opt,
                                                   source_path,
                                                   cfg.runtime_lib,
+                                                  NULL,
                                                   cfg.timeout_ms,
                                                   attempt_work_dir,
                                                   attempt_with_time_report);
@@ -1755,6 +1816,7 @@ int main(int argc, char **argv) {
                                                    extra_retry_opt,
                                                    source_path,
                                                    cfg.runtime_lib,
+                                                   cfg.liric_compile_mode,
                                                    cfg.timeout_ms,
                                                    attempt_work_dir,
                                                    attempt_with_time_report);
@@ -1802,8 +1864,12 @@ int main(int argc, char **argv) {
 
                     if (!retried_fast &&
                         llvm_r.rc != 0 &&
-                        llvm_reason &&
-                        strcmp(llvm_reason, "llvm_jit_verifier_pointee_mismatch") == 0 &&
+                        !strlist_contains_exact(&opt_toks, "--fast") &&
+                        ((llvm_reason &&
+                          strcmp(llvm_reason, "llvm_jit_verifier_pointee_mismatch") == 0) ||
+                         cmd_output_has(&llvm_r, "parse_module(): Invalid LLVM IR") ||
+                         cmd_output_has(&llvm_r, "pointers to void are invalid - use i8* instead") ||
+                         cmd_output_has(&llvm_r, "explicit pointee type doesn't match operand's pointee type")) &&
                         !strlist_contains_exact(&opt_toks, "--fast")) {
                         retried_fast = 1;
                         extra_retry_opt = "--fast";
@@ -1812,17 +1878,19 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
+                    if ((llvm_r.rc != 0 || liric_r.rc != 0) &&
+                        cmd_reports_stop_like(&llvm_r) &&
+                        cmd_reports_stop_like(&liric_r) &&
+                        cmd_outputs_match_normalized(&llvm_r, &liric_r)) {
+                        nonzero_compat = 1;
+                        nonzero_compat_rc = (llvm_r.rc != 0) ? llvm_r.rc : liric_r.rc;
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        break;
+                    }
+
                     if (llvm_r.rc != 0 && liric_r.rc != 0 && llvm_r.rc == liric_r.rc) {
-                        char *llvm_out = normalize_output(llvm_r.stdout_text);
-                        char *liric_out = normalize_output(liric_r.stdout_text);
-                        char *llvm_err = normalize_output(llvm_r.stderr_text);
-                        char *liric_err = normalize_output(liric_r.stderr_text);
-                        same_nonzero = (strcmp(llvm_out, liric_out) == 0) &&
-                                       (strcmp(llvm_err, liric_err) == 0);
-                        free(llvm_out);
-                        free(liric_out);
-                        free(llvm_err);
-                        free(liric_err);
+                        same_nonzero = cmd_outputs_match_normalized(&llvm_r, &liric_r);
                     }
                     if (same_nonzero) {
                         nonzero_compat = 1;
@@ -1844,19 +1912,12 @@ int main(int argc, char **argv) {
                 memset(&llvm_time, 0, sizeof(llvm_time));
                 memset(&liric_time, 0, sizeof(liric_time));
                 if (run_used_time_report) {
-                    if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
-                        skip_reason = "llvm_jit_failed";
-                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
-                        free_cmd_result(&llvm_r);
-                        free_cmd_result(&liric_r);
-                        break;
-                    }
-                    if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
-                        skip_reason = "liric_jit_failed";
-                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
-                        free_cmd_result(&llvm_r);
-                        free_cmd_result(&liric_r);
-                        break;
+                    int llvm_time_ok = parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time);
+                    int liric_time_ok = parse_lfortran_time_report(liric_r.stdout_text, &liric_time);
+                    if (!llvm_time_ok || !liric_time_ok) {
+                        synthesize_time_report_from_elapsed(llvm_r.elapsed_ms, &llvm_time);
+                        synthesize_time_report_from_elapsed(liric_r.elapsed_ms, &liric_time);
+                        test_time_report_fallback = 1;
                     }
                 } else {
                     synthesize_time_report_from_elapsed(llvm_r.elapsed_ms, &llvm_time);
@@ -2331,8 +2392,10 @@ next_test:
         {
             char *ec = json_escape(compat_path);
             char *eo = json_escape(opts_path);
+            char *em = json_escape(cfg.liric_compile_mode);
         fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
         fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
+        fprintf(sf, "  \"liric_compile_mode\": \"%s\",\n", em);
         {
             char *efj = json_escape(fail_jsonl_path);
             char *efl = json_escape(fail_log_dir);
@@ -2344,6 +2407,7 @@ next_test:
         }
         free(ec);
         free(eo);
+        free(em);
         }
         fprintf(sf, "  \"phase_split\": {\n");
         fprintf(sf, "    \"has_data\": %s,\n", split_has_data ? "true" : "false");

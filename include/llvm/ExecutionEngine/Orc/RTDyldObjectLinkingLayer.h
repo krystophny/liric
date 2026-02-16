@@ -8,6 +8,10 @@
 #include <memory>
 #include <type_traits>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class SectionMemoryManager;
@@ -41,5 +45,9 @@ public:
 
 } // namespace orc
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

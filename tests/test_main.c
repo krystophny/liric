@@ -70,6 +70,7 @@ int test_parser_dynamic_func_map_growth(void);
 int test_parser_cast_expr_in_aggregate_init(void);
 int test_parser_streaming_callback_order(void);
 int test_parser_streaming_callback_error_propagates(void);
+int test_parser_vector_type_roundtrip(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
 int test_codegen_skip_redundant_immediate_reload(void);
@@ -338,6 +339,7 @@ int main(void) {
     RUN_TEST(test_parser_cast_expr_in_aggregate_init);
     RUN_TEST(test_parser_streaming_callback_order);
     RUN_TEST(test_parser_streaming_callback_error_propagates);
+    RUN_TEST(test_parser_vector_type_roundtrip);
 
     fprintf(stderr, "\nCodegen tests:\n");
     RUN_TEST(test_codegen_ret_42);

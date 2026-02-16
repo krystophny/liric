@@ -63,6 +63,7 @@ set -euo pipefail
 iters=''
 timeout_ms=''
 bench_dir=''
+compile_mode=''
 require_zero='0'
 lfortran=''
 lfortran_liric=''
@@ -72,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --iters) iters=\"$2\"; shift 2 ;;
         --timeout-ms) timeout_ms=\"$2\"; shift 2 ;;
         --bench-dir) bench_dir=\"$2\"; shift 2 ;;
+        --liric-compile-mode) compile_mode=\"$2\"; shift 2 ;;
         --require-zero-skips) require_zero='1'; shift 1 ;;
         --lfortran) lfortran=\"$2\"; shift 2 ;;
         --lfortran-liric) lfortran_liric=\"$2\"; shift 2 ;;
@@ -82,6 +84,7 @@ done
 [[ \"$iters\" == \"2\" ]] || { echo \"bad iters: $iters\" >&2; exit 111; }
 [[ \"$timeout_ms\" == \"4321\" ]] || { echo \"bad timeout_ms: $timeout_ms\" >&2; exit 112; }
 [[ \"$bench_dir\" == \"${bench_dir}\" ]] || { echo \"bad bench_dir: $bench_dir\" >&2; exit 113; }
+[[ \"$compile_mode\" == \"llvm\" ]] || { echo \"bad compile_mode: $compile_mode\" >&2; exit 118; }
 [[ \"$require_zero\" == \"1\" ]] || { echo \"missing --require-zero-skips\" >&2; exit 114; }
 [[ \"$lfortran\" == \"/opt/lfortran-llvm/bin/lfortran\" ]] || { echo \"bad lfortran: $lfortran\" >&2; exit 115; }
 [[ \"$lfortran_liric\" == \"/opt/lfortran-liric/bin/lfortran\" ]] || { echo \"bad lfortran_liric: $lfortran_liric\" >&2; exit 116; }

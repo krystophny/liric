@@ -1,4 +1,5 @@
 #include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -190,6 +191,7 @@ int main(int argc, char **argv) {
     const char *func_name = "main";
     const char *sig = "i32";
     const char *input_file = NULL;
+    const char *policy_arg = NULL;
     int ignore_retcode = 0;
     int timing = 0;
     int no_exec = 0;
@@ -217,6 +219,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --load-lib options\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            policy_arg = argv[++i];
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         } else {
@@ -227,6 +231,13 @@ int main(int argc, char **argv) {
 
     if (!input_file) {
         fprintf(stderr, "missing input file\n");
+        return 1;
+    }
+
+    if (policy_arg && strcmp(policy_arg, "direct") != 0 &&
+        strcmp(policy_arg, "ir") != 0) {
+        fprintf(stderr, "invalid --policy value: %s (expected direct|ir)\n",
+                policy_arg);
         return 1;
     }
 
@@ -254,6 +265,42 @@ int main(int argc, char **argv) {
     }
     if (timing) t_read_end = now_us();
 
+    if (parse_only) {
+        char parse_err[256] = {0};
+        lr_module_t *parsed = NULL;
+        if (timing) t_parse_start = now_us();
+        parsed = lr_parse_auto((const uint8_t *)src.data, src.len,
+                               parse_err, sizeof(parse_err));
+        if (timing) t_parse_end = now_us();
+        if (!parsed) {
+            print_timing_line(timing, t_read_start, t_read_end,
+                              t_parse_start, t_parse_end,
+                              t_jit_create_start, t_jit_create_end,
+                              t_load_lib_start, t_load_lib_end,
+                              t_compile_start, t_compile_end,
+                              t_lookup_start, t_lookup_end,
+                              t_exec_start, t_exec_end);
+            fprintf(stderr, "parse failed: %s\n",
+                    parse_err[0] ? parse_err : "unknown error");
+            free_file(&src);
+            return 1;
+        }
+        if (timing) {
+            t_compile_start = t_parse_end;
+            t_compile_end = t_parse_end;
+        }
+        lr_module_free(parsed);
+        print_timing_line(timing, t_read_start, t_read_end,
+                          t_parse_start, t_parse_end,
+                          t_jit_create_start, t_jit_create_end,
+                          t_load_lib_start, t_load_lib_end,
+                          t_compile_start, t_compile_end,
+                          t_lookup_start, t_lookup_end,
+                          t_exec_start, t_exec_end);
+        free_file(&src);
+        return 0;
+    }
+
     lr_backend_t backend = LR_BACKEND_ISEL;
     lr_policy_t policy = LR_POLICY_DIRECT;
     lr_compiler_config_t cfg = {0};
@@ -274,6 +321,10 @@ int main(int argc, char **argv) {
 
     if (backend == LR_BACKEND_LLVM)
         policy = LR_POLICY_IR;
+    if (policy_arg) {
+        policy = (strcmp(policy_arg, "ir") == 0) ? LR_POLICY_IR
+                                                  : LR_POLICY_DIRECT;
+    }
 
     cfg.policy = policy;
     cfg.backend = backend;
@@ -337,19 +388,6 @@ int main(int argc, char **argv) {
     if (timing) {
         t_compile_start = t_parse_end;
         t_compile_end = t_parse_end;
-    }
-
-    if (parse_only) {
-        print_timing_line(timing, t_read_start, t_read_end,
-                          t_parse_start, t_parse_end,
-                          t_jit_create_start, t_jit_create_end,
-                          t_load_lib_start, t_load_lib_end,
-                          t_compile_start, t_compile_end,
-                          t_lookup_start, t_lookup_end,
-                          t_exec_start, t_exec_end);
-        lr_compiler_destroy(compiler);
-        free_file(&src);
-        return 0;
     }
 
     if (timing) t_lookup_start = now_us();

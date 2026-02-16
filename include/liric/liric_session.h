@@ -97,6 +97,7 @@ lr_type_t *lr_type_f32_s(lr_session_t *s);
 lr_type_t *lr_type_f64_s(lr_session_t *s);
 lr_type_t *lr_type_ptr_s(lr_session_t *s);
 lr_type_t *lr_type_array_s(lr_session_t *s, lr_type_t *elem, uint64_t count);
+lr_type_t *lr_type_vector_s(lr_session_t *s, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_struct_s(lr_session_t *s, lr_type_t **fields, uint32_t n,
                             bool packed);
 lr_type_t *lr_type_function_s(lr_session_t *s, lr_type_t *ret,

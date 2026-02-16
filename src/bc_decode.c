@@ -852,7 +852,7 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
                     free(struct_name);
                     return false;
                 }
-                bc_type_table_push(&d->types, lr_type_array(d->arena, elem, count));
+                bc_type_table_push(&d->types, lr_type_vector(d->arena, elem, count));
                 break;
             }
             case TYPE_CODE_STRUCT_ANON: {
@@ -2773,6 +2773,10 @@ static lr_type_t *bc_map_type_to_session(lr_session_t *session,
         return lr_type_array_s(session,
                                bc_map_type_to_session(session, src_type->array.elem),
                                src_type->array.count);
+    case LR_TYPE_VECTOR:
+        return lr_type_vector_s(session,
+                                bc_map_type_to_session(session, src_type->array.elem),
+                                src_type->array.count);
     case LR_TYPE_STRUCT: {
         lr_type_t **fields = NULL;
         uint32_t i;

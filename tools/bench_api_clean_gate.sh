@@ -11,6 +11,7 @@ usage: bench_api_clean_gate.sh [options]
   --test-dir PATH         path to integration_tests dir (forwarded to bench_api)
   --probe-runner PATH     path to liric_probe_runner (forwarded to bench_compat_check)
   --runtime-lib PATH      path to liblfortran_runtime for lli (forwarded to bench_compat_check)
+  --liric-compile-mode M  compile mode for liric backend in bench_api (default: llvm)
   --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
   --workers N             worker count hint (forwarded to bench_compat_check)
   --iters N               bench_api iterations (default: 1)
@@ -59,6 +60,7 @@ lfortran_liric_path=""
 test_dir=""
 probe_runner=""
 runtime_lib=""
+liric_compile_mode="llvm"
 cmake_path=""
 workers=""
 iters="1"
@@ -101,6 +103,11 @@ while [[ $# -gt 0 ]]; do
         --runtime-lib)
             [[ $# -ge 2 ]] || die "missing value for $1"
             runtime_lib="$2"
+            shift 2
+            ;;
+        --liric-compile-mode)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            liric_compile_mode="$2"
             shift 2
             ;;
         --cmake)
@@ -151,6 +158,7 @@ if [[ "$no_run" == "0" ]]; then
         --iters "$iters"
         --timeout-ms "$timeout_ms"
         --bench-dir "$bench_dir"
+        --liric-compile-mode "$liric_compile_mode"
         --require-zero-skips
     )
 

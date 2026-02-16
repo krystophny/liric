@@ -327,10 +327,18 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
+    const char *default_runtime_dylib =
+        "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+    const char *default_runtime_so =
+        "../lfortran/build/src/runtime/liblfortran_runtime.so";
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";
-    cfg.runtime_lib = NULL;
+    cfg.runtime_lib = file_exists(default_runtime_dylib)
+                          ? default_runtime_dylib
+                          : (file_exists(default_runtime_so)
+                                 ? default_runtime_so
+                                 : NULL);
     cfg.corpus_tsv = "tools/corpus_100.tsv";
     cfg.cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg.bench_dir = "/tmp/liric_bench";
@@ -374,7 +382,8 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
     if (cfg.runtime_lib && cfg.runtime_lib[0]) {
-        if (!file_exists(cfg.runtime_lib)) die("runtime library not found", cfg.runtime_lib);
+        if (!file_exists(cfg.runtime_lib))
+            die("runtime library not found", cfg.runtime_lib);
         cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     }
     cfg.corpus_tsv = to_abs_path(cfg.corpus_tsv);
@@ -526,6 +535,8 @@ static int run_suite(const cfg_t *cfg,
             probe_argv[pk++] = (char *)cfg->probe_runner;
             probe_argv[pk++] = "--timing";
             probe_argv[pk++] = "--no-exec";
+            probe_argv[pk++] = "--policy";
+            probe_argv[pk++] = "ir";
             if (parse_only) {
                 probe_argv[pk++] = "--parse-only";
             } else {
@@ -727,6 +738,9 @@ int main(int argc, char **argv) {
         testlist_free(&tests);
         return cfg.allow_empty ? 0 : 1;
     }
+
+    if (!cfg.runtime_lib || !cfg.runtime_lib[0])
+        die("runtime library not found", "(null)");
 
     jsonl_path = path_join2(cfg.bench_dir, "bench_corpus_compare.jsonl");
     summary_path = path_join2(cfg.bench_dir, "bench_corpus_compare_summary.json");
