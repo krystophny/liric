@@ -34,8 +34,6 @@ bench_dir=''
 lfortran=''
 probe=''
 runtime=''
-runtime_bc=''
-lfortran_src=''
 cmake_path=''
 workers=''
 while [[ $# -gt 0 ]]; do
@@ -45,8 +43,6 @@ while [[ $# -gt 0 ]]; do
         --lfortran) lfortran=\"$2\"; shift 2 ;;
         --probe-runner) probe=\"$2\"; shift 2 ;;
         --runtime-lib) runtime=\"$2\"; shift 2 ;;
-        --runtime-bc) runtime_bc=\"$2\"; shift 2 ;;
-        --lfortran-src) lfortran_src=\"$2\"; shift 2 ;;
         --cmake) cmake_path=\"$2\"; shift 2 ;;
         --workers) workers=\"$2\"; shift 2 ;;
         *) echo \"unexpected arg in fake bench_compat_check: $1\" >&2; exit 90 ;;
@@ -57,8 +53,6 @@ done
 [[ \"$lfortran\" == \"/opt/lfortran-llvm/bin/lfortran\" ]] || { echo \"bad lfortran: $lfortran\" >&2; exit 93; }
 [[ \"$probe\" == \"/opt/liric/bin/liric_probe_runner\" ]] || { echo \"bad probe: $probe\" >&2; exit 94; }
 [[ \"$runtime\" == \"/opt/lfortran/lib/liblfortran_runtime.so\" ]] || { echo \"bad runtime: $runtime\" >&2; exit 95; }
-[[ \"$runtime_bc\" == \"/opt/lfortran/runtime/lfortran_intrinsics.bc\" ]] || { echo \"bad runtime_bc: $runtime_bc\" >&2; exit 96; }
-[[ \"$lfortran_src\" == \"/opt/lfortran\" ]] || { echo \"bad lfortran_src: $lfortran_src\" >&2; exit 97; }
 [[ \"$cmake_path\" == \"/opt/lfortran/integration_tests/CMakeLists.txt\" ]] || { echo \"bad cmake: $cmake_path\" >&2; exit 99; }
 [[ \"$workers\" == \"11\" ]] || { echo \"bad workers: $workers\" >&2; exit 98; }
 echo \"ok\" > \"${compat_log}\"
@@ -69,6 +63,7 @@ set -euo pipefail
 iters=''
 timeout_ms=''
 bench_dir=''
+compile_mode=''
 require_zero='0'
 lfortran=''
 lfortran_liric=''
@@ -78,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --iters) iters=\"$2\"; shift 2 ;;
         --timeout-ms) timeout_ms=\"$2\"; shift 2 ;;
         --bench-dir) bench_dir=\"$2\"; shift 2 ;;
+        --liric-compile-mode) compile_mode=\"$2\"; shift 2 ;;
         --require-zero-skips) require_zero='1'; shift 1 ;;
         --lfortran) lfortran=\"$2\"; shift 2 ;;
         --lfortran-liric) lfortran_liric=\"$2\"; shift 2 ;;
@@ -88,6 +84,7 @@ done
 [[ \"$iters\" == \"2\" ]] || { echo \"bad iters: $iters\" >&2; exit 111; }
 [[ \"$timeout_ms\" == \"4321\" ]] || { echo \"bad timeout_ms: $timeout_ms\" >&2; exit 112; }
 [[ \"$bench_dir\" == \"${bench_dir}\" ]] || { echo \"bad bench_dir: $bench_dir\" >&2; exit 113; }
+[[ \"$compile_mode\" == \"llvm\" ]] || { echo \"bad compile_mode: $compile_mode\" >&2; exit 118; }
 [[ \"$require_zero\" == \"1\" ]] || { echo \"missing --require-zero-skips\" >&2; exit 114; }
 [[ \"$lfortran\" == \"/opt/lfortran-llvm/bin/lfortran\" ]] || { echo \"bad lfortran: $lfortran\" >&2; exit 115; }
 [[ \"$lfortran_liric\" == \"/opt/lfortran-liric/bin/lfortran\" ]] || { echo \"bad lfortran_liric: $lfortran_liric\" >&2; exit 116; }
@@ -131,8 +128,6 @@ execute_process(
         --test-dir /opt/lfortran/integration_tests
         --probe-runner /opt/liric/bin/liric_probe_runner
         --runtime-lib /opt/lfortran/lib/liblfortran_runtime.so
-        --runtime-bc /opt/lfortran/runtime/lfortran_intrinsics.bc
-        --lfortran-src /opt/lfortran
         --cmake /opt/lfortran/integration_tests/CMakeLists.txt
         --workers 11
     RESULT_VARIABLE rc

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tools/bench_shell_common.sh
+source "${script_dir}/bench_shell_common.sh"
+BENCH_SCRIPT_NAME="bench_api_clean_gate"
+
 usage() {
     cat <<'EOF'
 usage: bench_api_clean_gate.sh [options]
@@ -11,8 +16,7 @@ usage: bench_api_clean_gate.sh [options]
   --test-dir PATH         path to integration_tests dir (forwarded to bench_api)
   --probe-runner PATH     path to liric_probe_runner (forwarded to bench_compat_check)
   --runtime-lib PATH      path to liblfortran_runtime for lli (forwarded to bench_compat_check)
-  --runtime-bc PATH       path to runtime bitcode for liric (forwarded to bench_compat_check)
-  --lfortran-src PATH     lfortran source root used to build runtime bitcode (forwarded to bench_compat_check)
+  --liric-compile-mode M  compile mode for liric backend in bench_api (default: llvm)
   --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
   --workers N             worker count hint (forwarded to bench_compat_check)
   --iters N               bench_api iterations (default: 1)
@@ -31,29 +35,6 @@ Gate conditions (must all be true):
 EOF
 }
 
-die() {
-    echo "bench_api_clean_gate: $*" >&2
-    exit 1
-}
-
-json_int_field() {
-    local file="$1"
-    local key="$2"
-    local line
-    line="$(grep -E "\"${key}\"[[:space:]]*:" "$file" | head -n 1 || true)"
-    [[ -n "$line" ]] || die "missing integer field '${key}' in ${file}"
-    echo "$line" | sed -E 's/.*:[[:space:]]*([0-9]+).*/\1/'
-}
-
-json_bool_field() {
-    local file="$1"
-    local key="$2"
-    local line
-    line="$(grep -E "\"${key}\"[[:space:]]*:" "$file" | head -n 1 || true)"
-    [[ -n "$line" ]] || die "missing boolean field '${key}' in ${file}"
-    echo "$line" | sed -E 's/.*:[[:space:]]*(true|false).*/\1/'
-}
-
 build_dir="./build"
 bench_dir="/tmp/liric_bench"
 lfortran_path=""
@@ -61,8 +42,7 @@ lfortran_liric_path=""
 test_dir=""
 probe_runner=""
 runtime_lib=""
-runtime_bc=""
-lfortran_src=""
+liric_compile_mode="llvm"
 cmake_path=""
 workers=""
 iters="1"
@@ -73,72 +53,67 @@ no_run="0"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --build-dir)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             build_dir="$2"
             shift 2
             ;;
         --bench-dir)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             bench_dir="$2"
             shift 2
             ;;
         --lfortran)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             lfortran_path="$2"
             shift 2
             ;;
         --lfortran-liric)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             lfortran_liric_path="$2"
             shift 2
             ;;
         --test-dir)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             test_dir="$2"
             shift 2
             ;;
         --probe-runner)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             probe_runner="$2"
             shift 2
             ;;
         --runtime-lib)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             runtime_lib="$2"
             shift 2
             ;;
-        --runtime-bc)
-            [[ $# -ge 2 ]] || die "missing value for $1"
-            runtime_bc="$2"
-            shift 2
-            ;;
-        --lfortran-src)
-            [[ $# -ge 2 ]] || die "missing value for $1"
-            lfortran_src="$2"
+        --liric-compile-mode)
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
+            liric_compile_mode="$2"
             shift 2
             ;;
         --cmake)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             cmake_path="$2"
             shift 2
             ;;
         --workers)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             workers="$2"
             shift 2
             ;;
         --iters)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             iters="$2"
             shift 2
             ;;
         --timeout-ms)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             timeout_ms="$2"
             shift 2
             ;;
         --compat-timeout)
-            [[ $# -ge 2 ]] || die "missing value for $1"
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
             compat_timeout="$2"
             shift 2
             ;;
@@ -151,7 +126,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            die "unknown argument: $1"
+            bench_die "unknown argument: $1"
             ;;
     esac
 done
@@ -165,6 +140,7 @@ if [[ "$no_run" == "0" ]]; then
         --iters "$iters"
         --timeout-ms "$timeout_ms"
         --bench-dir "$bench_dir"
+        --liric-compile-mode "$liric_compile_mode"
         --require-zero-skips
     )
 
@@ -184,12 +160,6 @@ if [[ "$no_run" == "0" ]]; then
     if [[ -n "$runtime_lib" ]]; then
         compat_args+=(--runtime-lib "$runtime_lib")
     fi
-    if [[ -n "$runtime_bc" ]]; then
-        compat_args+=(--runtime-bc "$runtime_bc")
-    fi
-    if [[ -n "$lfortran_src" ]]; then
-        compat_args+=(--lfortran-src "$lfortran_src")
-    fi
     if [[ -n "$cmake_path" ]]; then
         compat_args+=(--cmake "$cmake_path")
     fi
@@ -197,8 +167,8 @@ if [[ "$no_run" == "0" ]]; then
         compat_args+=(--workers "$workers")
     fi
 
-    [[ -x "${build_dir}/bench_compat_check" ]] || die "missing executable: ${build_dir}/bench_compat_check"
-    [[ -x "${build_dir}/bench_api" ]] || die "missing executable: ${build_dir}/bench_api"
+    bench_require_executable "${build_dir}/bench_compat_check"
+    bench_require_executable "${build_dir}/bench_api"
 
     "${build_dir}/bench_compat_check" "${compat_args[@]}"
     "${build_dir}/bench_api" "${api_args[@]}"
@@ -207,16 +177,16 @@ fi
 summary_path="${bench_dir}/bench_api_summary.json"
 fail_summary_path="${bench_dir}/bench_api_fail_summary.json"
 
-[[ -s "$summary_path" ]] || die "missing summary artifact: ${summary_path}"
-[[ -s "$fail_summary_path" ]] || die "missing failure summary artifact: ${fail_summary_path}"
+bench_require_nonempty_file "$summary_path"
+bench_require_nonempty_file "$fail_summary_path"
 
-attempted="$(json_int_field "$summary_path" "attempted")"
-completed="$(json_int_field "$summary_path" "completed")"
-skipped="$(json_int_field "$summary_path" "skipped")"
-timeout_ms_used="$(json_int_field "$summary_path" "timeout_ms")"
-liric_jit_timeout="$(json_int_field "$summary_path" "liric_jit_timeout")"
-zero_skip_gate_met="$(json_bool_field "$summary_path" "zero_skip_gate_met")"
-failed="$(json_int_field "$fail_summary_path" "failed")"
+attempted="$(bench_json_int_field "$summary_path" "attempted")"
+completed="$(bench_json_int_field "$summary_path" "completed")"
+skipped="$(bench_json_int_field "$summary_path" "skipped")"
+timeout_ms_used="$(bench_json_int_field "$summary_path" "timeout_ms")"
+liric_jit_timeout="$(bench_json_int_field "$summary_path" "liric_jit_timeout")"
+zero_skip_gate_met="$(bench_json_bool_field "$summary_path" "zero_skip_gate_met")"
+failed="$(bench_json_int_field "$fail_summary_path" "failed")"
 
 errors=()
 if [[ "$skipped" != "0" ]]; then

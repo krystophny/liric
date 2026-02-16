@@ -7,6 +7,10 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class Module;
@@ -36,5 +40,9 @@ public:
 
 } // namespace orc
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

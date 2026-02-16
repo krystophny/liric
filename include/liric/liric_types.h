@@ -1,7 +1,7 @@
 #ifndef LIRIC_TYPES_H
 #define LIRIC_TYPES_H
 
-#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -19,6 +19,7 @@ enum lr_type_kind_public {
     LR_TYPE_DOUBLE,
     LR_TYPE_PTR,
     LR_TYPE_ARRAY,
+    LR_TYPE_VECTOR,
     LR_TYPE_STRUCT,
     LR_TYPE_FUNC,
 };

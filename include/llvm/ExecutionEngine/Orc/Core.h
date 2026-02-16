@@ -1,7 +1,7 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_CORE_H
 #define LLVM_EXECUTIONENGINE_ORC_CORE_H
 
-#include <liric/liric.h>
+#include <llvm-c/LiricSession.h>
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/ExecutionEngine/Orc/CoreContainers.h"
@@ -9,10 +9,13 @@
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorAddress.h"
 #include "llvm/ExecutionEngine/Orc/Shared/ExecutorSymbolDef.h"
 #include "llvm/ExecutionEngine/Orc/SymbolStringPool.h"
-#include <dlfcn.h>
 #include <memory>
 #include <string>
 #include <vector>
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
 
 namespace llvm {
 namespace orc {
@@ -37,23 +40,32 @@ public:
 };
 
 class ExecutionSession {
-    lr_jit_t *jit_;
+    LLVMLiricSessionStateRef session_;
     std::unique_ptr<ExecutorProcessControl> EPC;
     JITDylib MainJD;
     SymbolStringPool SSP;
 
 public:
     ExecutionSession(std::unique_ptr<ExecutorProcessControl> epc)
-        : jit_(lr_jit_create()), EPC(std::move(epc)) {}
+        : session_(LLVMLiricSessionCreate()), EPC(std::move(epc)) {}
 
     ~ExecutionSession() {
-        if (jit_) lr_jit_destroy(jit_);
+        if (session_) LLVMLiricSessionDispose(session_);
     }
 
     ExecutionSession(const ExecutionSession &) = delete;
     ExecutionSession &operator=(const ExecutionSession &) = delete;
 
-    lr_jit_t *getJIT() const { return jit_; }
+    LLVMLiricSessionStateRef getLiricSession() const { return session_; }
+
+    int addCompatModule(lc_module_compat_t *mod) {
+        return LLVMLiricSessionAddCompatModule(session_, mod);
+    }
+
+    void addSymbol(StringRef Name, void *Addr) {
+        std::string symbol_name = Name.str();
+        LLVMLiricSessionAddSymbol(session_, symbol_name.c_str(), Addr);
+    }
 
     Expected<JITDylib &> createJITDylib(StringRef Name) {
         (void)Name;
@@ -67,10 +79,7 @@ public:
         SymbolStringPtr Name) {
         (void)SearchOrder;
         const std::string &name = *Name;
-        void *addr = lr_jit_get_function(jit_, name.c_str());
-        if (!addr) {
-            addr = dlsym(RTLD_DEFAULT, name.c_str());
-        }
+        void *addr = LLVMLiricSessionLookup(session_, name.c_str());
         if (!addr) {
             return make_error("Symbol not found: " + name);
         }
@@ -93,5 +102,9 @@ public:
 
 } // namespace orc
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

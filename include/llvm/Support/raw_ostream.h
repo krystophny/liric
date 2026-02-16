@@ -3,7 +3,7 @@
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallVector.h"
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include <cstdio>
 #include <cstring>
 #include <string>

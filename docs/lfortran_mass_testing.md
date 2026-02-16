@@ -100,12 +100,31 @@ All artifacts are written under `/tmp/liric_lfortran_mass/`:
 
 ## Benchmarking
 
-Standalone C tools compare liric JIT performance against LLVM on integration tests.
-These do NOT depend on mass run results; they discover tests directly from CMakeLists.txt.
+`bench_matrix` is the canonical benchmark entrypoint. It runs all modes and lanes
+with strict accounting and one output schema.
 
 ### Workflow
 
-1. **Compatibility check** (required first):
+1. **Unified matrix run (canonical)**:
+   ```bash
+   ./build/bench_matrix \
+     --manifest tools/bench_manifest.json \
+     --bench-dir /tmp/liric_bench \
+     --modes all \
+     --lanes all \
+     --iters 1
+   ```
+   Lanes:
+   - `ir_file`: LIRIC vs real LLVM baseline (`bench_corpus_compare`/`bench_lli_phases`)
+   - `api_e2e`: lfortran LLVM backend vs lfortran WITH_LIRIC (`bench_api`)
+   - `micro_c`: TinyCC baseline (`bench_tcc`)
+
+   Canonical outputs:
+   - `/tmp/liric_bench/matrix_rows.jsonl`
+   - `/tmp/liric_bench/matrix_failures.jsonl`
+   - `/tmp/liric_bench/matrix_summary.json`
+
+2. **Compatibility check (lane artifact generator; invoked by matrix for API lane by default):**
    ```bash
    ./build/bench_compat_check --timeout 15
    ```
@@ -115,18 +134,17 @@ These do NOT depend on mass run results; they discover tests directly from CMake
    so benchmark runs do not leave generated files in the repo root.
    Outputs: `/tmp/liric_bench/compat_api.txt`, `/tmp/liric_bench/compat_ll.txt`
 
-2. **LL-file benchmark** (liric JIT vs LLVM lli):
+3. **LL-file benchmark** (legacy lane tool, now wrapped by matrix):
    ```bash
    ./build/bench_ll --iters 3
    ```
    Reports two metrics:
    - WALL-CLOCK: subprocess `liric_probe_runner` vs subprocess `lli -O0`
    - JIT-INTERNAL (fair): in-process `liric` parse+compile+lookup vs in-process LLVM ORC parse+jit+lookup
-   Also writes split summary (`parse`, `compile/jit`, `lookup`) plus legacy
-   parse+compile-vs-parse+jit speedup to
+   Also writes split summary (`parse`, `compile/jit`, `lookup`) to
    `/tmp/liric_bench/bench_ll_summary.json`.
 
-3. **API benchmark (primary direct JIT path)**:
+4. **API benchmark (legacy lane tool, now wrapped by matrix):**
    ```bash
    ./build/bench_api --iters 3 --timeout-ms 3000 --min-completed 1
    ```
@@ -143,12 +161,12 @@ These do NOT depend on mass run results; they discover tests directly from CMake
      --fail-log-dir /tmp/liric_bench/fail_logs
    ```
 
-4. **Optional per-file LLVM in-process phase timing**:
+5. **Optional per-file LLVM in-process phase timing**:
    ```bash
    ./build/bench_lli_phases --json --iters 1 --sig i32_argc_argv /tmp/liric_bench/ll/<test>.ll
    ```
 
-5. **API clean-pass gate** (required before closing API clean-pass tasks):
+6. **API clean-pass gate** (required before closing API clean-pass tasks):
    ```bash
    ./tools/bench_api_clean_gate.sh
    ```

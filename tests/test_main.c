@@ -70,6 +70,7 @@ int test_parser_dynamic_func_map_growth(void);
 int test_parser_cast_expr_in_aggregate_init(void);
 int test_parser_streaming_callback_order(void);
 int test_parser_streaming_callback_error_propagates(void);
+int test_parser_vector_type_roundtrip(void);
 int test_codegen_ret_42(void);
 int test_codegen_add(void);
 int test_codegen_skip_redundant_immediate_reload(void);
@@ -216,7 +217,8 @@ int test_session_add_args(void);
 int test_session_arithmetic_chain(void);
 int test_session_stream_stencil_fast_path(void);
 int test_session_stream_isel_fast_path(void);
-int test_session_direct_llvm_mode_ir_fallback_contract(void);
+int test_session_direct_llvm_mode_hard_fail_contract(void);
+int test_session_explicit_backend_overrides_env(void);
 int test_session_stream_stencil_unsupported_fallback(void);
 int test_session_add_phi_copy_api(void);
 int test_session_icmp_branch(void);
@@ -242,6 +244,7 @@ int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
 int test_builder_compat_emit_object_to_file(void);
 int test_builder_compat_emit_object_llvm_mode_contract(void);
 int test_builder_compat_emit_executable_llvm_mode_contract(void);
+int test_llvm_c_shim_add_and_lookup(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -336,6 +339,7 @@ int main(void) {
     RUN_TEST(test_parser_cast_expr_in_aggregate_init);
     RUN_TEST(test_parser_streaming_callback_order);
     RUN_TEST(test_parser_streaming_callback_error_propagates);
+    RUN_TEST(test_parser_vector_type_roundtrip);
 
     fprintf(stderr, "\nCodegen tests:\n");
     RUN_TEST(test_codegen_ret_42);
@@ -502,7 +506,8 @@ int main(void) {
     RUN_TEST(test_session_arithmetic_chain);
     RUN_TEST(test_session_stream_stencil_fast_path);
     RUN_TEST(test_session_stream_isel_fast_path);
-    RUN_TEST(test_session_direct_llvm_mode_ir_fallback_contract);
+    RUN_TEST(test_session_direct_llvm_mode_hard_fail_contract);
+    RUN_TEST(test_session_explicit_backend_overrides_env);
     RUN_TEST(test_session_stream_stencil_unsupported_fallback);
     RUN_TEST(test_session_add_phi_copy_api);
     RUN_TEST(test_session_icmp_branch);
@@ -546,6 +551,7 @@ int main(void) {
     RUN_TEST(test_builder_compat_emit_object_to_file);
     RUN_TEST(test_builder_compat_emit_object_llvm_mode_contract);
     RUN_TEST(test_builder_compat_emit_executable_llvm_mode_contract);
+    RUN_TEST(test_llvm_c_shim_add_and_lookup);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)

@@ -5,9 +5,10 @@
  *   - WALL-CLOCK: fork/exec `tcc -o exe file.c` vs `liric -o exe file.ll`
  *   - IN-PROCESS: liric lr_parse_ll() + lr_jit_add_module() with parse/compile split
  *
- * Usage: ./build/bench_tcc [--iters N]
+ * Usage: ./build/bench_tcc [--iters N] [--bench-dir PATH] [--work-dir PATH]
  */
 #define _POSIX_C_SOURCE 200809L
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,10 +18,9 @@
 #include <sys/wait.h>
 #include <spawn.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <libtcc.h>
-#include <liric/liric.h>
-
-#define BENCH_DIR "/tmp/bench_tcc"
+#include <liric/liric_legacy.h>
 
 static double now_us(void) {
     struct timespec ts;
@@ -164,6 +164,28 @@ static int write_file(const char *path, const char *data) {
 
 extern char **environ;
 
+static int mkdir_p(const char *path) {
+    char tmp[PATH_MAX];
+    size_t n;
+    if (!path || !path[0]) return -1;
+    n = strlen(path);
+    if (n >= sizeof(tmp)) return -1;
+    memcpy(tmp, path, n + 1);
+    if (tmp[n - 1] == '/')
+        tmp[n - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+                return -1;
+            *p = '/';
+        }
+    }
+    if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+        return -1;
+    return 0;
+}
+
 static double run_exec_timed(char *const argv[]) {
     pid_t pid;
     int devnull = open("/dev/null", O_WRONLY);
@@ -204,13 +226,27 @@ static int verify_exe(const char *path, int expected_rc) {
 
 int main(int argc, char **argv) {
     int iters = 5;
+    const char *bench_dir = "/tmp/liric_bench";
+    const char *work_dir = "/tmp/bench_tcc";
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             iters = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
+            bench_dir = argv[++i];
+        } else if (strcmp(argv[i], "--work-dir") == 0 && i + 1 < argc) {
+            work_dir = argv[++i];
+        }
     }
     if (iters < 1) iters = 1;
 
-    mkdir(BENCH_DIR, 0755);
+    if (mkdir_p(work_dir) != 0) {
+        fprintf(stderr, "error: failed to create work dir: %s\n", work_dir);
+        return 1;
+    }
+    if (mkdir_p(bench_dir) != 0) {
+        fprintf(stderr, "error: failed to create bench dir: %s\n", bench_dir);
+        return 1;
+    }
 
     char liric_bin[512] = {0};
     const char *dir = getenv("LIRIC_BUILD_DIR");
@@ -237,19 +273,20 @@ int main(int argc, char **argv) {
     printf("%-16s %10s %10s %8s %s\n", "----", "-------", "--------", "-----", "------");
 
     double total_tcc = 0, total_liric = 0;
+    int wall_passed = 0;
 
     for (size_t ci = 0; ci < NUM_CASES; ci++) {
         const bench_case_t *tc = &g_cases[ci];
 
         char c_path[256], ll_path[256];
-        snprintf(c_path, sizeof(c_path), BENCH_DIR "/%s.c", tc->name);
-        snprintf(ll_path, sizeof(ll_path), BENCH_DIR "/%s.ll", tc->name);
+        snprintf(c_path, sizeof(c_path), "%s/%s.c", work_dir, tc->name);
+        snprintf(ll_path, sizeof(ll_path), "%s/%s.ll", work_dir, tc->name);
         write_file(c_path, tc->c_src);
         write_file(ll_path, tc->ll_src);
 
         char out_tcc[256], out_liric[256];
-        snprintf(out_tcc, sizeof(out_tcc), BENCH_DIR "/out_tcc_%s", tc->name);
-        snprintf(out_liric, sizeof(out_liric), BENCH_DIR "/out_liric_%s", tc->name);
+        snprintf(out_tcc, sizeof(out_tcc), "%s/out_tcc_%s", work_dir, tc->name);
+        snprintf(out_liric, sizeof(out_liric), "%s/out_liric_%s", work_dir, tc->name);
 
         char *tcc_argv[] = { tcc_bin, "-o", out_tcc, c_path, NULL };
         char *liric_argv[] = { liric_bin, "-o", out_liric, ll_path, NULL };
@@ -272,7 +309,10 @@ int main(int argc, char **argv) {
         if (tcc_ok != 0 && liric_ok != 0) status = "BOTH FAIL";
         else if (tcc_ok != 0) status = "tcc FAIL";
         else if (liric_ok != 0) status = "liric FAIL";
-        else status = "OK";
+        else {
+            status = "OK";
+            wall_passed++;
+        }
 
         double ratio = (best_liric > 0 && best_tcc > 0) ? best_tcc / best_liric : 0;
         printf("%-16s %10.0f %10.0f %7.2fx  %s\n",
@@ -297,6 +337,7 @@ int main(int argc, char **argv) {
 
     double ip_tcc_total = 0;
     double ip_lr_parse_total = 0, ip_lr_compile_total = 0;
+    int inproc_passed = 0;
 
     for (size_t ci = 0; ci < NUM_CASES; ci++) {
         const bench_case_t *tc = &g_cases[ci];
@@ -362,6 +403,10 @@ int main(int argc, char **argv) {
         if (tcc_tot < 1e17) ip_tcc_total += tcc_tot;
         if (best_lr_parse < 1e17) ip_lr_parse_total += best_lr_parse;
         if (best_lr_compile < 1e17) ip_lr_compile_total += best_lr_compile;
+        if (best_tcc_comp < 1e17 && best_tcc_reloc < 1e17 &&
+            best_lr_parse < 1e17 && best_lr_compile < 1e17) {
+            inproc_passed++;
+        }
     }
 
     double lr_tot_all = ip_lr_parse_total + ip_lr_compile_total;
@@ -376,6 +421,38 @@ int main(int argc, char **argv) {
     printf("\nAll times in microseconds (us). ratio > 1 = liric faster.\n");
     printf("tcc:comp = tcc_compile_string(), tcc:reloc = tcc_relocate()\n");
     printf("lr:parse = lr_parse_ll(), lr:compile = lr_jit_add_module()\n");
+
+    {
+        char summary_path[PATH_MAX];
+        FILE *sf;
+        const char *mode = getenv("LIRIC_COMPILE_MODE");
+        const char *status = (wall_passed == (int)NUM_CASES && inproc_passed == (int)NUM_CASES)
+                                ? "OK" : "FAILED";
+        snprintf(summary_path, sizeof(summary_path), "%s/bench_tcc_summary.json", bench_dir);
+        sf = fopen(summary_path, "w");
+        if (!sf) {
+            fprintf(stderr, "error: failed to write summary: %s\n", summary_path);
+            return 1;
+        }
+        fprintf(sf, "{\n");
+        fprintf(sf, "  \"status\": \"%s\",\n", status);
+        fprintf(sf, "  \"mode\": \"%s\",\n", mode ? mode : "isel");
+        fprintf(sf, "  \"iters\": %d,\n", iters);
+        fprintf(sf, "  \"total_cases\": %d,\n", (int)NUM_CASES);
+        fprintf(sf, "  \"wall_passed\": %d,\n", wall_passed);
+        fprintf(sf, "  \"inproc_passed\": %d,\n", inproc_passed);
+        fprintf(sf, "  \"wall_tcc_total_us\": %.6f,\n", total_tcc);
+        fprintf(sf, "  \"wall_liric_total_us\": %.6f,\n", total_liric);
+        fprintf(sf, "  \"wall_speedup_ratio\": %.6f,\n", ratio);
+        fprintf(sf, "  \"inproc_tcc_total_us\": %.6f,\n", ip_tcc_total);
+        fprintf(sf, "  \"inproc_liric_parse_total_us\": %.6f,\n", ip_lr_parse_total);
+        fprintf(sf, "  \"inproc_liric_compile_total_us\": %.6f,\n", ip_lr_compile_total);
+        fprintf(sf, "  \"inproc_liric_total_us\": %.6f,\n", lr_tot_all);
+        fprintf(sf, "  \"inproc_speedup_ratio\": %.6f\n", r_all);
+        fprintf(sf, "}\n");
+        fclose(sf);
+        printf("Summary: %s\n", summary_path);
+    }
 
     return 0;
 }

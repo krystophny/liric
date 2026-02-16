@@ -99,6 +99,10 @@ lr_type_t *lr_type_array_new(lr_module_t *m, lr_type_t *elem, uint64_t count) {
     return lr_type_array(m->arena, elem, count);
 }
 
+lr_type_t *lr_type_vector_new(lr_module_t *m, lr_type_t *elem, uint64_t count) {
+    return lr_type_vector(m->arena, elem, count);
+}
+
 lr_type_t *lr_type_struct_new(lr_module_t *m, lr_type_t **fields,
                                uint32_t num_fields, bool packed) {
     return lr_type_struct(m->arena, fields, num_fields, packed, NULL);

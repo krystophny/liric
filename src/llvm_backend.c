@@ -67,6 +67,25 @@ static void set_err(char *err, size_t err_cap, const char *fmt, ...) {
     va_end(ap);
 }
 
+static void maybe_dump_ll_text(const char *ll, size_t ll_len) {
+    const char *path = getenv("LIRIC_LLVM_DUMP_PATH");
+    const char *out_path = path;
+    char path_buf[4096];
+    static unsigned dump_seq = 0;
+    FILE *f;
+    if (!path || !path[0] || !ll || ll_len == 0)
+        return;
+    if (strstr(path, "%d")) {
+        (void)snprintf(path_buf, sizeof(path_buf), path, dump_seq++);
+        out_path = path_buf;
+    }
+    f = fopen(out_path, "wb");
+    if (!f)
+        return;
+    (void)fwrite(ll, 1, ll_len, f);
+    (void)fclose(f);
+}
+
 static char *read_file_to_buf(FILE *f, size_t *out_len) {
     long end_pos;
     size_t nread;
@@ -280,11 +299,14 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
     }
 
     if (LLVMParseIRInContext(ctx, mem, &mod, &msg) != 0 || !mod) {
+        /* LLVMParseIRInContext consumes the buffer even on parse failure. */
+        mem = NULL;
+        maybe_dump_ll_text(ll, ll_len);
         set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
                 msg ? msg : "unknown parse error");
         goto done;
     }
-    /* Ownership transfers to the module on parse success. */
+    /* Ownership transfers to LLVM parser/module on parse success. */
     mem = NULL;
 
     LLVMSetTarget(mod, triple);
@@ -405,6 +427,7 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     LLVMOrcThreadSafeContextRef ts_ctx = NULL;
     LLVMOrcThreadSafeModuleRef ts_mod = NULL;
     char *parse_msg = NULL;
+    char *verify_msg = NULL;
     char *ll = NULL;
     size_t ll_len = 0;
     int rc = -1;
@@ -440,6 +463,7 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
         set_err(err, err_cap, "failed to materialize module text");
         goto done;
     }
+    maybe_dump_ll_text(ll, ll_len);
 
 #if LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT
     parse_ctx = LLVMContextCreate();
@@ -468,11 +492,30 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     }
 
     if (LLVMParseIRInContext(parse_ctx, mem, &mod, &parse_msg) != 0 || !mod) {
+        /* LLVMParseIRInContext consumes the buffer even on parse failure. */
+        mem = NULL;
+        maybe_dump_ll_text(ll, ll_len);
         set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
                 parse_msg ? parse_msg : "unknown parse error");
         goto done;
     }
     mem = NULL;
+
+    {
+        const char *jit_triple = LLVMOrcLLJITGetTripleString(lljit);
+        const char *jit_dl = LLVMOrcLLJITGetDataLayoutStr(lljit);
+        if (jit_triple && jit_triple[0])
+            LLVMSetTarget(mod, jit_triple);
+        if (jit_dl && jit_dl[0])
+            LLVMSetDataLayout(mod, jit_dl);
+    }
+
+    if (LLVMVerifyModule(mod, LLVMReturnStatusAction, &verify_msg) != 0) {
+        maybe_dump_ll_text(ll, ll_len);
+        set_err(err, err_cap, "LLVMVerifyModule failed: %s",
+                verify_msg ? verify_msg : "verify failure");
+        goto done;
+    }
 
 #if LIRIC_HAVE_LLVM_ORC_TSCTX_FROM_LLVMCONTEXT
     ts_ctx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(parse_ctx);
@@ -490,8 +533,7 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
         goto done;
     }
     mod = NULL;
-
-    LLVMOrcDisposeThreadSafeContext(ts_ctx);
+    /* Ownership of ts_ctx transfers to ts_mod on success. */
     ts_ctx = NULL;
 
     dylib = LLVMOrcLLJITGetMainJITDylib(lljit);
@@ -520,6 +562,8 @@ done:
     free(ll);
     if (parse_msg)
         LLVMDisposeMessage(parse_msg);
+    if (verify_msg)
+        LLVMDisposeMessage(verify_msg);
     if (ts_mod)
         LLVMOrcDisposeThreadSafeModule(ts_mod);
     if (ts_ctx)

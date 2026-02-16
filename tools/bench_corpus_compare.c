@@ -1,21 +1,17 @@
 // Corpus benchmark comparator: liric_probe_runner vs bench_lli_phases on corpus_100.
-// Publishes per-track jsonl and a summary JSON suitable for README snapshot generation.
+// Publishes one canonical JSONL and one summary JSON.
 
-#include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+
+#include "bench_common.h"
 
 typedef struct {
     char *name;
@@ -28,13 +24,7 @@ typedef struct {
     size_t cap;
 } testlist_t;
 
-typedef struct {
-    int rc;
-    char *stdout_text;
-    char *stderr_text;
-    double elapsed_ms;
-    int timed_out;
-} cmd_result_t;
+typedef bench_cmd_result_t cmd_result_t;
 
 typedef struct {
     char *name;
@@ -46,8 +36,6 @@ typedef struct {
 
     double llvm_parse_ms;
     double llvm_parse_input_ms;
-    double llvm_parse_runtime_bc_ms;
-    double llvm_merge_runtime_ms;
     double llvm_add_module_ms;
     double llvm_lookup_ms;
     double llvm_compile_materialized_ms;
@@ -66,9 +54,7 @@ typedef struct {
 typedef struct {
     const char *probe_runner;
     const char *lli_phases;
-    const char *runtime_bc;
     const char *runtime_lib;
-    const char *lfortran_src;
     const char *corpus_tsv;
     const char *cache_dir;
     const char *bench_dir;
@@ -76,11 +62,6 @@ typedef struct {
     int timeout_sec;
     int allow_empty;
 } cfg_t;
-
-typedef struct {
-    const char *track_name;
-    int use_runtime_bc;
-} track_cfg_t;
 
 typedef struct {
     size_t attempted;
@@ -94,8 +75,6 @@ typedef struct {
 
     double llvm_parse_median_ms;
     double llvm_parse_input_median_ms;
-    double llvm_parse_runtime_bc_median_ms;
-    double llvm_merge_runtime_median_ms;
     double llvm_add_module_median_ms;
     double llvm_lookup_median_ms;
     double llvm_compile_materialized_median_ms;
@@ -108,13 +87,7 @@ typedef struct {
 
     double liric_total_materialized_aggregate_ms;
     double llvm_total_materialized_aggregate_ms;
-} track_summary_t;
-
-static double now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
+} summary_t;
 
 static void die(const char *msg, const char *path) {
     if (path) fprintf(stderr, "%s: %s\n", msg, path);
@@ -150,202 +123,42 @@ static int mkdir_p(const char *path) {
 }
 
 static char *xstrdup(const char *s) {
-    size_t n;
     char *p;
-    if (!s) return NULL;
-    n = strlen(s);
-    p = (char *)malloc(n + 1);
-    if (!p) die("out of memory", NULL);
-    memcpy(p, s, n + 1);
+    p = bench_xstrdup(s);
+    if (!p && s) die("out of memory", NULL);
     return p;
 }
 
 static char *to_abs_path(const char *path) {
-    char cwd[PATH_MAX];
-    size_t nc, np;
     char *out;
-    if (!path) return NULL;
-    if (path[0] == '/') return xstrdup(path);
-    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed", NULL);
-    nc = strlen(cwd);
-    np = strlen(path);
-    out = (char *)malloc(nc + 1 + np + 1);
-    if (!out) die("out of memory", NULL);
-    memcpy(out, cwd, nc);
-    out[nc] = '/';
-    memcpy(out + nc + 1, path, np + 1);
+    out = bench_to_abs_path(path);
+    if (!out && path) die("failed to resolve absolute path", path);
     return out;
 }
 
 static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + nb + (need ? 2 : 1));
+    char *out = bench_path_join2(a, b);
     if (!out) die("out of memory", NULL);
-    memcpy(out, a, na);
-    if (need) out[na++] = '/';
-    memcpy(out + na, b, nb);
-    out[na + nb] = '\0';
     return out;
-}
-
-static char *dirname_dup(const char *path) {
-    const char *slash = strrchr(path, '/');
-    size_t n;
-    char *out;
-    if (!slash) return xstrdup(".");
-    n = (size_t)(slash - path);
-    if (n == 0) n = 1;
-    out = (char *)malloc(n + 1);
-    if (!out) die("out of memory", NULL);
-    memcpy(out, path, n);
-    out[n] = '\0';
-    return out;
-}
-
-static char *read_all_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    long len;
-    size_t nread;
-    char *buf;
-    if (!f) return xstrdup("");
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    len = ftell(f);
-    if (len < 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    buf = (char *)malloc((size_t)len + 1);
-    if (!buf) die("out of memory", NULL);
-    nread = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[nread] = '\0';
-    return buf;
-}
-
-static int wait_with_timeout(pid_t pid, int timeout_sec, int *status_out) {
-    double start = now_ms();
-    int status;
-    while (1) {
-        pid_t r = waitpid(pid, &status, WNOHANG);
-        if (r == pid) {
-            *status_out = status;
-            return 0;
-        }
-        if (r < 0) {
-            *status_out = 0;
-            return -1;
-        }
-        if ((now_ms() - start) > timeout_sec * 1000.0) {
-            kill(pid, SIGKILL);
-            waitpid(pid, &status, 0);
-            *status_out = status;
-            return 1;
-        }
-        usleep(10000);
-    }
 }
 
 static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *work_dir) {
+    bench_run_cmd_opts_t opts;
     cmd_result_t r;
-    char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
-    char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
-    int out_fd, err_fd;
-    int status = 0;
-    pid_t pid;
-    double t0;
-
-    r.rc = -1;
-    r.stdout_text = xstrdup("");
-    r.stderr_text = xstrdup("");
-    r.elapsed_ms = 0.0;
-    r.timed_out = 0;
-
-    out_fd = mkstemp(out_tpl);
-    if (out_fd < 0) die("mkstemp failed", NULL);
-    err_fd = mkstemp(err_tpl);
-    if (err_fd < 0) die("mkstemp failed", NULL);
-
-    pid = fork();
-    if (pid < 0) die("fork failed", NULL);
-
-    if (pid == 0) {
-        if (work_dir && chdir(work_dir) != 0) _exit(127);
-        {
-            int devnull = open("/dev/null", O_RDONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                close(devnull);
-            }
-        }
-        if (dup2(out_fd, STDOUT_FILENO) < 0) _exit(127);
-        if (dup2(err_fd, STDERR_FILENO) < 0) _exit(127);
-        close(out_fd);
-        close(err_fd);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-
-    t0 = now_ms();
-    close(out_fd);
-    close(err_fd);
-
-    if (wait_with_timeout(pid, timeout_sec, &status) == 1) {
-        r.timed_out = 1;
-        r.rc = -99;
-    } else if (WIFEXITED(status)) {
-        r.rc = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        r.rc = -WTERMSIG(status);
-    } else {
-        r.rc = -1;
-    }
-    r.elapsed_ms = now_ms() - t0;
-
-    free(r.stdout_text);
-    free(r.stderr_text);
-    r.stdout_text = read_all_file(out_tpl);
-    r.stderr_text = read_all_file(err_tpl);
-    unlink(out_tpl);
-    unlink(err_tpl);
-
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    opts.timeout_ms = timeout_sec > 0 ? timeout_sec * 1000 : 0;
+    opts.work_dir = work_dir;
+    if (bench_run_cmd(&opts, &r) != 0) die("failed to run command", argv[0]);
     return r;
 }
 
 static void free_cmd_result(cmd_result_t *r) {
-    free(r->stdout_text);
-    free(r->stderr_text);
-    r->stdout_text = NULL;
-    r->stderr_text = NULL;
-}
-
-static int cmp_double(const void *a, const void *b) {
-    const double *da = (const double *)a;
-    const double *db = (const double *)b;
-    if (*da < *db) return -1;
-    if (*da > *db) return 1;
-    return 0;
+    bench_free_cmd_result(r);
 }
 
 static double median(const double *vals, size_t n) {
-    double *tmp;
-    double out;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    if (n % 2 == 0) out = 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
-    else out = tmp[n / 2];
-    free(tmp);
-    return out;
+    return bench_median(vals, n);
 }
 
 static int parse_probe_timing(const char *stderr_text,
@@ -371,14 +184,31 @@ static int parse_probe_timing(const char *stderr_text,
     return 0;
 }
 
+static int ll_has_defined_main(const char *ll_path) {
+    FILE *f;
+    char line[4096];
+    int has_main = 0;
+    f = fopen(ll_path, "r");
+    if (!f)
+        return 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (strncmp(p, "define", 6) != 0 ||
+            !(p[6] == ' ' || p[6] == '\t'))
+            continue;
+        if (strstr(p, "@main(") || strstr(p, "@\"main\"(")) {
+            has_main = 1;
+            break;
+        }
+    }
+    fclose(f);
+    return has_main;
+}
+
 static int json_get_number(const char *json, const char *key, double *out_val) {
-    const char *p = strstr(json, key);
-    if (!p) return 0;
-    p += strlen(key);
-    while (*p && (*p == ' ' || *p == '\t' || *p == ':')) p++;
-    if (!*p) return 0;
-    *out_val = strtod(p, NULL);
-    return 1;
+    return bench_json_get_number(json, key, out_val);
 }
 
 static void testlist_init(testlist_t *l) {
@@ -481,86 +311,13 @@ static int load_corpus_tests(const cfg_t *cfg, testlist_t *tests) {
     return (int)tests->n;
 }
 
-static int run_exec(char *const argv[]) {
-    int status = 0;
-    pid_t pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    if (waitpid(pid, &status, 0) < 0)
-        return -1;
-    if (WIFEXITED(status))
-        return WEXITSTATUS(status);
-    if (WIFSIGNALED(status))
-        return 128 + WTERMSIG(status);
-    return -1;
-}
-
-static int ensure_runtime_bc(const cfg_t *cfg) {
-    char *runtime_c = NULL;
-    char *include_dir = NULL;
-    char *out_dir = NULL;
-    int rc = -1;
-
-    if (file_exists(cfg->runtime_bc))
-        return 1;
-
-    runtime_c = path_join2(cfg->lfortran_src, "src/libasr/runtime/lfortran_intrinsics.c");
-    include_dir = path_join2(cfg->lfortran_src, "src");
-    if (!runtime_c || !include_dir) goto cleanup;
-    if (!file_exists(runtime_c)) {
-        fprintf(stderr, "runtime source not found: %s\n", runtime_c);
-        goto cleanup;
-    }
-
-    out_dir = dirname_dup(cfg->runtime_bc);
-    if (!out_dir || mkdir_p(out_dir) != 0) {
-        fprintf(stderr, "failed to create runtime bc directory: %s\n", out_dir ? out_dir : "(null)");
-        goto cleanup;
-    }
-
-    {
-        char include_flag[PATH_MAX + 3];
-        char *cc_argv[11];
-        snprintf(include_flag, sizeof(include_flag), "-I%s", include_dir);
-        cc_argv[0] = "clang";
-        cc_argv[1] = "-c";
-        cc_argv[2] = "-emit-llvm";
-        cc_argv[3] = "-O2";
-        cc_argv[4] = "-fno-exceptions";
-        cc_argv[5] = "-fno-unwind-tables";
-        cc_argv[6] = include_flag;
-        cc_argv[7] = "-o";
-        cc_argv[8] = (char *)cfg->runtime_bc;
-        cc_argv[9] = runtime_c;
-        cc_argv[10] = NULL;
-        fprintf(stderr, "Generating runtime bc: %s\n", cfg->runtime_bc);
-        rc = run_exec(cc_argv);
-        if (rc != 0)
-            fprintf(stderr, "failed to compile runtime bc (clang rc=%d)\n", rc);
-    }
-
-    rc = file_exists(cfg->runtime_bc) ? 1 : 0;
-
-cleanup:
-    free(runtime_c);
-    free(include_dir);
-    free(out_dir);
-    return rc;
-}
-
 static void usage(void) {
     printf("usage: bench_corpus_compare [options]\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           command timeout in seconds (default: 30)\n");
     printf("  --probe-runner PATH   path to liric_probe_runner\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
-    printf("  --runtime-bc PATH     path to runtime bitcode (auto-built if missing)\n");
-    printf("  --runtime-lib PATH    runtime shared library for core track (optional)\n");
-    printf("  --lfortran-src PATH   lfortran source root used to auto-build runtime bc\n");
+    printf("  --runtime-lib PATH    runtime shared library (required for runtime-dependent cases)\n");
     printf("  --corpus PATH         corpus TSV (default: tools/corpus_100.tsv)\n");
     printf("  --cache-dir PATH      corpus cache dir (default: /tmp/liric_lfortran_mass/cache)\n");
     printf("  --bench-dir PATH      benchmark output dir (default: /tmp/liric_bench)\n");
@@ -570,12 +327,18 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
+    const char *default_runtime_dylib =
+        "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+    const char *default_runtime_so =
+        "../lfortran/build/src/runtime/liblfortran_runtime.so";
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";
-    cfg.runtime_bc = "/tmp/liric_bench/runtime/lfortran_intrinsics.bc";
-    cfg.runtime_lib = NULL;
-    cfg.lfortran_src = "../lfortran";
+    cfg.runtime_lib = file_exists(default_runtime_dylib)
+                          ? default_runtime_dylib
+                          : (file_exists(default_runtime_so)
+                                 ? default_runtime_so
+                                 : NULL);
     cfg.corpus_tsv = "tools/corpus_100.tsv";
     cfg.cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg.bench_dir = "/tmp/liric_bench";
@@ -597,12 +360,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--lli-phases") == 0 && i + 1 < argc) {
             cfg.lli_phases = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-src") == 0 && i + 1 < argc) {
-            cfg.lfortran_src = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
             cfg.corpus_tsv = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
@@ -622,12 +381,11 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
-    cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
     if (cfg.runtime_lib && cfg.runtime_lib[0]) {
-        if (!file_exists(cfg.runtime_lib)) die("runtime library not found", cfg.runtime_lib);
+        if (!file_exists(cfg.runtime_lib))
+            die("runtime library not found", cfg.runtime_lib);
         cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     }
-    cfg.lfortran_src = to_abs_path(cfg.lfortran_src);
     cfg.corpus_tsv = to_abs_path(cfg.corpus_tsv);
     cfg.cache_dir = to_abs_path(cfg.cache_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
@@ -635,13 +393,12 @@ static cfg_t parse_args(int argc, char **argv) {
     return cfg;
 }
 
-static track_summary_t summarize_rows(const rowlist_t *rows) {
-    track_summary_t s;
+static void summarize_rows(const rowlist_t *rows, summary_t *s) {
     size_t i;
-    memset(&s, 0, sizeof(s));
-    s.completed = rows->n;
+    memset(s, 0, sizeof(*s));
+    s->completed = rows->n;
     if (rows->n == 0)
-        return s;
+        return;
 
     {
         size_t n = rows->n;
@@ -650,21 +407,17 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
         double *ll = (double *)malloc(n * sizeof(double));
         double *lcm = (double *)malloc(n * sizeof(double));
         double *ltm = (double *)malloc(n * sizeof(double));
-
         double *ep = (double *)malloc(n * sizeof(double));
         double *epi = (double *)malloc(n * sizeof(double));
-        double *epr = (double *)malloc(n * sizeof(double));
-        double *emr = (double *)malloc(n * sizeof(double));
         double *eam = (double *)malloc(n * sizeof(double));
         double *el = (double *)malloc(n * sizeof(double));
         double *ecm = (double *)malloc(n * sizeof(double));
         double *etm = (double *)malloc(n * sizeof(double));
-
         double *spc = (double *)malloc(n * sizeof(double));
         double *spt = (double *)malloc(n * sizeof(double));
 
-        if (!lp || !lc || !ll || !lcm || !ltm || !ep || !epi || !epr || !emr ||
-            !eam || !el || !ecm || !etm || !spc || !spt) {
+        if (!lp || !lc || !ll || !lcm || !ltm || !ep || !epi || !eam ||
+            !el || !ecm || !etm || !spc || !spt) {
             die("out of memory", NULL);
         }
 
@@ -675,44 +428,35 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
             ll[i] = r->liric_lookup_ms;
             lcm[i] = r->liric_compile_materialized_ms;
             ltm[i] = r->liric_total_materialized_ms;
-
             ep[i] = r->llvm_parse_ms;
             epi[i] = r->llvm_parse_input_ms;
-            epr[i] = r->llvm_parse_runtime_bc_ms;
-            emr[i] = r->llvm_merge_runtime_ms;
             eam[i] = r->llvm_add_module_ms;
             el[i] = r->llvm_lookup_ms;
             ecm[i] = r->llvm_compile_materialized_ms;
             etm[i] = r->llvm_total_materialized_ms;
-
             spc[i] = r->compile_materialized_speedup;
             spt[i] = r->total_materialized_speedup;
-
-            s.liric_total_materialized_aggregate_ms += r->liric_total_materialized_ms;
-            s.llvm_total_materialized_aggregate_ms += r->llvm_total_materialized_ms;
+            s->liric_total_materialized_aggregate_ms += r->liric_total_materialized_ms;
+            s->llvm_total_materialized_aggregate_ms += r->llvm_total_materialized_ms;
         }
 
-        s.liric_parse_median_ms = median(lp, n);
-        s.liric_compile_median_ms = median(lc, n);
-        s.liric_lookup_median_ms = median(ll, n);
-        s.liric_compile_materialized_median_ms = median(lcm, n);
-        s.liric_total_materialized_median_ms = median(ltm, n);
+        s->liric_parse_median_ms = median(lp, n);
+        s->liric_compile_median_ms = median(lc, n);
+        s->liric_lookup_median_ms = median(ll, n);
+        s->liric_compile_materialized_median_ms = median(lcm, n);
+        s->liric_total_materialized_median_ms = median(ltm, n);
+        s->llvm_parse_median_ms = median(ep, n);
+        s->llvm_parse_input_median_ms = median(epi, n);
+        s->llvm_add_module_median_ms = median(eam, n);
+        s->llvm_lookup_median_ms = median(el, n);
+        s->llvm_compile_materialized_median_ms = median(ecm, n);
+        s->llvm_total_materialized_median_ms = median(etm, n);
+        s->compile_materialized_speedup_median = median(spc, n);
+        s->total_materialized_speedup_median = median(spt, n);
 
-        s.llvm_parse_median_ms = median(ep, n);
-        s.llvm_parse_input_median_ms = median(epi, n);
-        s.llvm_parse_runtime_bc_median_ms = median(epr, n);
-        s.llvm_merge_runtime_median_ms = median(emr, n);
-        s.llvm_add_module_median_ms = median(eam, n);
-        s.llvm_lookup_median_ms = median(el, n);
-        s.llvm_compile_materialized_median_ms = median(ecm, n);
-        s.llvm_total_materialized_median_ms = median(etm, n);
-
-        s.compile_materialized_speedup_median = median(spc, n);
-        s.total_materialized_speedup_median = median(spt, n);
-
-        if (s.liric_total_materialized_aggregate_ms > 0.0) {
-            s.total_materialized_speedup_aggregate =
-                s.llvm_total_materialized_aggregate_ms / s.liric_total_materialized_aggregate_ms;
+        if (s->liric_total_materialized_aggregate_ms > 0.0) {
+            s->total_materialized_speedup_aggregate =
+                s->llvm_total_materialized_aggregate_ms / s->liric_total_materialized_aggregate_ms;
         }
         {
             double liric_compile_agg = 0.0;
@@ -722,7 +466,7 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
                 llvm_compile_agg += ecm[i];
             }
             if (liric_compile_agg > 0.0)
-                s.compile_materialized_speedup_aggregate = llvm_compile_agg / liric_compile_agg;
+                s->compile_materialized_speedup_aggregate = llvm_compile_agg / liric_compile_agg;
         }
 
         free(lp);
@@ -732,8 +476,6 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
         free(ltm);
         free(ep);
         free(epi);
-        free(epr);
-        free(emr);
         free(eam);
         free(el);
         free(ecm);
@@ -741,15 +483,12 @@ static track_summary_t summarize_rows(const rowlist_t *rows) {
         free(spc);
         free(spt);
     }
-
-    return s;
 }
 
-static int run_track(const cfg_t *cfg,
+static int run_suite(const cfg_t *cfg,
                      const testlist_t *tests,
-                     const track_cfg_t *track,
                      const char *jsonl_path,
-                     track_summary_t *out_summary) {
+                     summary_t *out_summary) {
     FILE *jf;
     size_t i;
     rowlist_t rows;
@@ -761,13 +500,13 @@ static int run_track(const cfg_t *cfg,
     jf = fopen(jsonl_path, "w");
     if (!jf) die("failed to open output", jsonl_path);
 
-    printf("Track %s: %zu tests, %d iterations each\n",
-           track->track_name, tests->n, cfg->iters);
+    printf("Corpus compare: %zu tests, %d iterations each\n", tests->n, cfg->iters);
 
     for (i = 0; i < tests->n; i++) {
         const test_case_t *t = &tests->items[i];
         size_t ok_n = 0;
         int skipped = 0;
+        int parse_only = !ll_has_defined_main(t->ll_path);
         size_t it;
 
         double *liric_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
@@ -776,72 +515,77 @@ static int run_track(const cfg_t *cfg,
 
         double *llvm_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_parse_input = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_parse_runtime = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_merge_runtime = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_add_module = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_lookup = (double *)calloc((size_t)cfg->iters, sizeof(double));
         double *llvm_compile_mat = (double *)calloc((size_t)cfg->iters, sizeof(double));
 
-        if (!liric_parse || !liric_compile || !liric_lookup || !llvm_parse || !llvm_parse_input ||
-            !llvm_parse_runtime || !llvm_merge_runtime || !llvm_add_module || !llvm_lookup || !llvm_compile_mat) {
+        if (!liric_parse || !liric_compile || !liric_lookup || !llvm_parse ||
+            !llvm_parse_input || !llvm_add_module || !llvm_lookup || !llvm_compile_mat) {
             die("out of memory", NULL);
         }
 
         for (it = 0; it < (size_t)cfg->iters; it++) {
             cmd_result_t rp, ri;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
-            double e_parse = 0.0, e_parse_input = 0.0, e_parse_runtime = 0.0;
-            double e_merge = 0.0, e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
+            double e_parse = 0.0, e_parse_input = 0.0;
+            double e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
 
-            char *probe_argv[14];
+            char *probe_argv[20];
             int pk = 0;
             probe_argv[pk++] = (char *)cfg->probe_runner;
             probe_argv[pk++] = "--timing";
             probe_argv[pk++] = "--no-exec";
-            probe_argv[pk++] = "--sig";
-            probe_argv[pk++] = "i32_argc_argv";
-            if (!track->use_runtime_bc && cfg->runtime_lib && cfg->runtime_lib[0]) {
+            probe_argv[pk++] = "--policy";
+            probe_argv[pk++] = "ir";
+            if (parse_only) {
+                probe_argv[pk++] = "--parse-only";
+            } else {
+                probe_argv[pk++] = "--func";
+                probe_argv[pk++] = "main";
+                probe_argv[pk++] = "--sig";
+                probe_argv[pk++] = "i32_argc_argv";
+            }
+            if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                 probe_argv[pk++] = "--load-lib";
                 probe_argv[pk++] = (char *)cfg->runtime_lib;
-            }
-            if (track->use_runtime_bc) {
-                probe_argv[pk++] = "--runtime-bc";
-                probe_argv[pk++] = (char *)cfg->runtime_bc;
             }
             probe_argv[pk++] = (char *)t->ll_path;
             probe_argv[pk] = NULL;
 
             rp = run_cmd(probe_argv, cfg->timeout_sec, NULL);
-            if (rp.rc < 0 || !parse_probe_timing(rp.stderr_text, &l_parse, &l_compile, &l_lookup)) {
+            if (rp.rc != 0 || !parse_probe_timing(rp.stderr_text, &l_parse, &l_compile, &l_lookup)) {
                 skipped = 1;
                 free_cmd_result(&rp);
                 break;
             }
+            if (parse_only) {
+                l_compile = 0.0;
+                l_lookup = 0.0;
+            }
             free_cmd_result(&rp);
 
             {
-                char *llvm_argv[18];
+                char *llvm_argv[20];
                 int ek = 0;
                 llvm_argv[ek++] = (char *)cfg->lli_phases;
                 llvm_argv[ek++] = "--json";
                 llvm_argv[ek++] = "--no-exec";
                 llvm_argv[ek++] = "--iters";
                 llvm_argv[ek++] = "1";
-                llvm_argv[ek++] = "--func";
-                llvm_argv[ek++] = "main";
-                llvm_argv[ek++] = "--sig";
-                llvm_argv[ek++] = "i32_argc_argv";
-                if (!track->use_runtime_bc && cfg->runtime_lib && cfg->runtime_lib[0]) {
+                if (parse_only) {
+                    llvm_argv[ek++] = "--parse-only";
+                } else {
+                    llvm_argv[ek++] = "--func";
+                    llvm_argv[ek++] = "main";
+                    llvm_argv[ek++] = "--sig";
+                    llvm_argv[ek++] = "i32_argc_argv";
+                }
+                if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                     llvm_argv[ek++] = "--load-lib";
                     llvm_argv[ek++] = (char *)cfg->runtime_lib;
                 }
-                if (track->use_runtime_bc) {
-                    llvm_argv[ek++] = "--runtime-bc";
-                    llvm_argv[ek++] = (char *)cfg->runtime_bc;
-                }
                 llvm_argv[ek++] = (char *)t->ll_path;
                 llvm_argv[ek] = NULL;
-
                 ri = run_cmd(llvm_argv, cfg->timeout_sec, NULL);
             }
 
@@ -855,10 +599,6 @@ static int run_track(const cfg_t *cfg,
             }
             if (!json_get_number(ri.stdout_text, "\"parse_input_ms\"", &e_parse_input))
                 e_parse_input = e_parse;
-            if (!json_get_number(ri.stdout_text, "\"parse_runtime_bc_ms\"", &e_parse_runtime))
-                e_parse_runtime = 0.0;
-            if (!json_get_number(ri.stdout_text, "\"merge_runtime_ms\"", &e_merge))
-                e_merge = 0.0;
             if (!json_get_number(ri.stdout_text, "\"compile_materialized_ms\"", &e_compile_mat))
                 e_compile_mat = e_add + e_lookup;
 
@@ -870,8 +610,6 @@ static int run_track(const cfg_t *cfg,
 
             llvm_parse[ok_n] = e_parse;
             llvm_parse_input[ok_n] = e_parse_input;
-            llvm_parse_runtime[ok_n] = e_parse_runtime;
-            llvm_merge_runtime[ok_n] = e_merge;
             llvm_add_module[ok_n] = e_add;
             llvm_lookup[ok_n] = e_lookup;
             llvm_compile_mat[ok_n] = e_compile_mat;
@@ -892,8 +630,6 @@ static int run_track(const cfg_t *cfg,
 
             r.llvm_parse_ms = median(llvm_parse, ok_n);
             r.llvm_parse_input_ms = median(llvm_parse_input, ok_n);
-            r.llvm_parse_runtime_bc_ms = median(llvm_parse_runtime, ok_n);
-            r.llvm_merge_runtime_ms = median(llvm_merge_runtime, ok_n);
             r.llvm_add_module_ms = median(llvm_add_module, ok_n);
             r.llvm_lookup_ms = median(llvm_lookup, ok_n);
             r.llvm_compile_materialized_ms = median(llvm_compile_mat, ok_n);
@@ -916,8 +652,6 @@ static int run_track(const cfg_t *cfg,
                     "\"liric_total_materialized_median_ms\":%.6f,"
                     "\"llvm_parse_median_ms\":%.6f,"
                     "\"llvm_parse_input_median_ms\":%.6f,"
-                    "\"llvm_parse_runtime_bc_median_ms\":%.6f,"
-                    "\"llvm_merge_runtime_median_ms\":%.6f,"
                     "\"llvm_add_module_median_ms\":%.6f,"
                     "\"llvm_lookup_median_ms\":%.6f,"
                     "\"llvm_compile_materialized_median_ms\":%.6f,"
@@ -927,8 +661,7 @@ static int run_track(const cfg_t *cfg,
                     t->name, ok_n,
                     r.liric_parse_ms, r.liric_compile_ms, r.liric_lookup_ms,
                     r.liric_compile_materialized_ms, r.liric_total_materialized_ms,
-                    r.llvm_parse_ms,
-                    r.llvm_parse_input_ms, r.llvm_parse_runtime_bc_ms, r.llvm_merge_runtime_ms,
+                    r.llvm_parse_ms, r.llvm_parse_input_ms,
                     r.llvm_add_module_ms, r.llvm_lookup_ms,
                     r.llvm_compile_materialized_ms, r.llvm_total_materialized_ms,
                     r.compile_materialized_speedup, r.total_materialized_speedup);
@@ -943,8 +676,6 @@ static int run_track(const cfg_t *cfg,
         free(liric_lookup);
         free(llvm_parse);
         free(llvm_parse_input);
-        free(llvm_parse_runtime);
-        free(llvm_merge_runtime);
         free(llvm_add_module);
         free(llvm_lookup);
         free(llvm_compile_mat);
@@ -952,11 +683,10 @@ static int run_track(const cfg_t *cfg,
 
     fclose(jf);
 
-    *out_summary = summarize_rows(&rows);
+    summarize_rows(&rows, out_summary);
     out_summary->attempted = tests->n;
 
-    printf("Track %s complete: %zu/%zu\n",
-           track->track_name,
+    printf("Corpus compare complete: %zu/%zu\n",
            out_summary->completed,
            out_summary->attempted);
 
@@ -967,26 +697,17 @@ static int run_track(const cfg_t *cfg,
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     testlist_t tests;
-    track_cfg_t core = {"core", 0};
-    track_cfg_t runtime_eq = {"runtime_equalized_bc", 1};
+    summary_t summary;
 
-    track_summary_t core_summary;
-    track_summary_t runtime_summary;
-
-    char *core_jsonl;
-    char *runtime_jsonl;
+    char *jsonl_path;
     char *summary_path;
     FILE *sf;
     const char *status;
 
-    memset(&core_summary, 0, sizeof(core_summary));
-    memset(&runtime_summary, 0, sizeof(runtime_summary));
+    memset(&summary, 0, sizeof(summary));
 
     if (mkdir_p(cfg.bench_dir) != 0)
         die("failed to create bench dir", cfg.bench_dir);
-
-    if (!ensure_runtime_bc(&cfg))
-        die("runtime bc unavailable (set --runtime-bc or --lfortran-src)", cfg.runtime_bc);
 
     testlist_init(&tests);
     load_corpus_tests(&cfg, &tests);
@@ -1018,16 +739,17 @@ int main(int argc, char **argv) {
         return cfg.allow_empty ? 0 : 1;
     }
 
-    core_jsonl = path_join2(cfg.bench_dir, "bench_corpus_compare_core.jsonl");
-    runtime_jsonl = path_join2(cfg.bench_dir, "bench_corpus_compare_runtime_equalized_bc.jsonl");
+    if (!cfg.runtime_lib || !cfg.runtime_lib[0])
+        die("runtime library not found", "(null)");
+
+    jsonl_path = path_join2(cfg.bench_dir, "bench_corpus_compare.jsonl");
     summary_path = path_join2(cfg.bench_dir, "bench_corpus_compare_summary.json");
 
-    run_track(&cfg, &tests, &core, core_jsonl, &core_summary);
-    run_track(&cfg, &tests, &runtime_eq, runtime_jsonl, &runtime_summary);
+    run_suite(&cfg, &tests, jsonl_path, &summary);
 
-    if (runtime_summary.completed == 0 || runtime_summary.attempted == 0)
+    if (summary.completed == 0 || summary.attempted == 0)
         status = "EMPTY DATASET";
-    else if (runtime_summary.completed < runtime_summary.attempted)
+    else if (summary.completed < summary.attempted)
         status = "PARTIAL";
     else
         status = "OK";
@@ -1041,102 +763,54 @@ int main(int argc, char **argv) {
             "\"dataset_name\":\"corpus_100\","
             "\"expected_tests\":100,"
             "\"attempted_tests\":%zu,"
+            "\"completed_tests\":%zu,"
             "\"iters\":%d,"
-            "\"core_completed\":%zu,"
-            "\"runtime_equalized_bc_completed\":%zu,"
-            "\"core_liric_parse_median_ms\":%.6f,"
-            "\"core_liric_compile_median_ms\":%.6f,"
-            "\"core_liric_lookup_median_ms\":%.6f,"
-            "\"core_liric_compile_materialized_median_ms\":%.6f,"
-            "\"core_liric_total_materialized_median_ms\":%.6f,"
-            "\"core_llvm_parse_median_ms\":%.6f,"
-            "\"core_llvm_parse_input_median_ms\":%.6f,"
-            "\"core_llvm_parse_runtime_bc_median_ms\":%.6f,"
-            "\"core_llvm_merge_runtime_median_ms\":%.6f,"
-            "\"core_llvm_add_module_median_ms\":%.6f,"
-            "\"core_llvm_lookup_median_ms\":%.6f,"
-            "\"core_llvm_compile_materialized_median_ms\":%.6f,"
-            "\"core_llvm_total_materialized_median_ms\":%.6f,"
-            "\"core_compile_materialized_speedup_median\":%.6f,"
-            "\"core_total_materialized_speedup_median\":%.6f,"
-            "\"core_compile_materialized_speedup_aggregate\":%.6f,"
-            "\"core_total_materialized_speedup_aggregate\":%.6f,"
-            "\"core_liric_total_materialized_aggregate_ms\":%.6f,"
-            "\"core_llvm_total_materialized_aggregate_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_parse_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_compile_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_lookup_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_compile_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_liric_total_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_parse_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_parse_input_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_parse_runtime_bc_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_merge_runtime_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_add_module_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_lookup_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_compile_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_total_materialized_median_ms\":%.6f,"
-            "\"runtime_equalized_bc_compile_materialized_speedup_median\":%.6f,"
-            "\"runtime_equalized_bc_total_materialized_speedup_median\":%.6f,"
-            "\"runtime_equalized_bc_compile_materialized_speedup_aggregate\":%.6f,"
-            "\"runtime_equalized_bc_total_materialized_speedup_aggregate\":%.6f,"
-            "\"runtime_equalized_bc_liric_total_materialized_aggregate_ms\":%.6f,"
-            "\"runtime_equalized_bc_llvm_total_materialized_aggregate_ms\":%.6f"
+            "\"liric_parse_median_ms\":%.6f,"
+            "\"liric_compile_median_ms\":%.6f,"
+            "\"liric_lookup_median_ms\":%.6f,"
+            "\"liric_compile_materialized_median_ms\":%.6f,"
+            "\"liric_total_materialized_median_ms\":%.6f,"
+            "\"llvm_parse_median_ms\":%.6f,"
+            "\"llvm_parse_input_median_ms\":%.6f,"
+            "\"llvm_add_module_median_ms\":%.6f,"
+            "\"llvm_lookup_median_ms\":%.6f,"
+            "\"llvm_compile_materialized_median_ms\":%.6f,"
+            "\"llvm_total_materialized_median_ms\":%.6f,"
+            "\"compile_materialized_speedup_median\":%.6f,"
+            "\"total_materialized_speedup_median\":%.6f,"
+            "\"compile_materialized_speedup_aggregate\":%.6f,"
+            "\"total_materialized_speedup_aggregate\":%.6f,"
+            "\"liric_total_materialized_aggregate_ms\":%.6f,"
+            "\"llvm_total_materialized_aggregate_ms\":%.6f"
             "}\n",
             status,
-            tests.n,
+            summary.attempted,
+            summary.completed,
             cfg.iters,
-            core_summary.completed,
-            runtime_summary.completed,
-            core_summary.liric_parse_median_ms,
-            core_summary.liric_compile_median_ms,
-            core_summary.liric_lookup_median_ms,
-            core_summary.liric_compile_materialized_median_ms,
-            core_summary.liric_total_materialized_median_ms,
-            core_summary.llvm_parse_median_ms,
-            core_summary.llvm_parse_input_median_ms,
-            core_summary.llvm_parse_runtime_bc_median_ms,
-            core_summary.llvm_merge_runtime_median_ms,
-            core_summary.llvm_add_module_median_ms,
-            core_summary.llvm_lookup_median_ms,
-            core_summary.llvm_compile_materialized_median_ms,
-            core_summary.llvm_total_materialized_median_ms,
-            core_summary.compile_materialized_speedup_median,
-            core_summary.total_materialized_speedup_median,
-            core_summary.compile_materialized_speedup_aggregate,
-            core_summary.total_materialized_speedup_aggregate,
-            core_summary.liric_total_materialized_aggregate_ms,
-            core_summary.llvm_total_materialized_aggregate_ms,
-            runtime_summary.liric_parse_median_ms,
-            runtime_summary.liric_compile_median_ms,
-            runtime_summary.liric_lookup_median_ms,
-            runtime_summary.liric_compile_materialized_median_ms,
-            runtime_summary.liric_total_materialized_median_ms,
-            runtime_summary.llvm_parse_median_ms,
-            runtime_summary.llvm_parse_input_median_ms,
-            runtime_summary.llvm_parse_runtime_bc_median_ms,
-            runtime_summary.llvm_merge_runtime_median_ms,
-            runtime_summary.llvm_add_module_median_ms,
-            runtime_summary.llvm_lookup_median_ms,
-            runtime_summary.llvm_compile_materialized_median_ms,
-            runtime_summary.llvm_total_materialized_median_ms,
-            runtime_summary.compile_materialized_speedup_median,
-            runtime_summary.total_materialized_speedup_median,
-            runtime_summary.compile_materialized_speedup_aggregate,
-            runtime_summary.total_materialized_speedup_aggregate,
-            runtime_summary.liric_total_materialized_aggregate_ms,
-            runtime_summary.llvm_total_materialized_aggregate_ms);
+            summary.liric_parse_median_ms,
+            summary.liric_compile_median_ms,
+            summary.liric_lookup_median_ms,
+            summary.liric_compile_materialized_median_ms,
+            summary.liric_total_materialized_median_ms,
+            summary.llvm_parse_median_ms,
+            summary.llvm_parse_input_median_ms,
+            summary.llvm_add_module_median_ms,
+            summary.llvm_lookup_median_ms,
+            summary.llvm_compile_materialized_median_ms,
+            summary.llvm_total_materialized_median_ms,
+            summary.compile_materialized_speedup_median,
+            summary.total_materialized_speedup_median,
+            summary.compile_materialized_speedup_aggregate,
+            summary.total_materialized_speedup_aggregate,
+            summary.liric_total_materialized_aggregate_ms,
+            summary.llvm_total_materialized_aggregate_ms);
 
     fclose(sf);
 
     printf("Summary: %s\n", summary_path);
-    printf("  core: %zu/%zu completed\n", core_summary.completed, core_summary.attempted);
-    printf("  runtime_equalized_bc: %zu/%zu completed\n",
-           runtime_summary.completed,
-           runtime_summary.attempted);
+    printf("  completed: %zu/%zu\n", summary.completed, summary.attempted);
 
-    free(core_jsonl);
-    free(runtime_jsonl);
+    free(jsonl_path);
     free(summary_path);
     testlist_free(&tests);
 

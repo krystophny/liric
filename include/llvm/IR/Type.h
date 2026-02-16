@@ -1,10 +1,14 @@
 #ifndef LLVM_IR_TYPE_H
 #define LLVM_IR_TYPE_H
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/ADT/StringRef.h"
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
 
 namespace llvm {
 
@@ -58,6 +62,8 @@ public:
     TypeID getTypeID() const {
         lr_type_t *t = impl();
         if (!t) return VoidTyID;
+        if (t->kind == LR_TYPE_VECTOR)
+            return FixedVectorTyID;
         if (const auto *vi = detail::lookup_vector_type(t))
             return vi->scalable ? ScalableVectorTyID : FixedVectorTyID;
         switch (t->kind) {
@@ -71,6 +77,7 @@ public:
         case LR_TYPE_DOUBLE: return DoubleTyID;
         case LR_TYPE_PTR:    return PointerTyID;
         case LR_TYPE_ARRAY:  return ArrayTyID;
+        case LR_TYPE_VECTOR: return FixedVectorTyID;
         case LR_TYPE_STRUCT: return StructTyID;
         case LR_TYPE_FUNC:   return FunctionTyID;
         }
@@ -119,7 +126,8 @@ public:
     }
     bool isVectorTy() const {
         lr_type_t *t = impl();
-        return t && detail::lookup_vector_type(t) != nullptr;
+        return t && (t->kind == LR_TYPE_VECTOR ||
+                     detail::lookup_vector_type(t) != nullptr);
     }
 
     unsigned getIntegerBitWidth() const {
@@ -145,6 +153,8 @@ public:
     Type *getScalarType() {
         lr_type_t *t = impl();
         if (!t) return this;
+        if (t->kind == LR_TYPE_VECTOR)
+            return Type::wrap(t->array.elem);
         if (const auto *vi = detail::lookup_vector_type(t))
             return Type::wrap(const_cast<lr_type_t *>(vi->element));
         return this;
@@ -188,5 +198,9 @@ public:
 };
 
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

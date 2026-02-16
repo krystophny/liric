@@ -1,5 +1,6 @@
 #include "ir.h"
 #include "arena.h"
+#include "compile_mode.h"
 #include "jit.h"
 #include "liric.h"
 #include "module_emit.h"
@@ -8,6 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
 
 /* ---- Compat types (must match the public header exactly) ---- */
 
@@ -30,7 +32,7 @@ typedef struct lc_value {
         struct { uint32_t id; lr_func_t *func; void *phi_node; lr_type_t *alloc_type; } vreg;
         struct { int64_t val; unsigned width; } const_int;
         struct { double val; bool is_double; } const_fp;
-        struct { uint32_t id; const char *name; lr_func_t *func; } global;
+        struct { uint32_t id; const char *name; lr_func_t *func; int64_t offset; } global;
         struct { uint32_t param_idx; lr_func_t *func; } argument;
         struct { lr_block_t *block; lr_func_t *func; } block;
         struct { const void *data; size_t size; } aggregate;
@@ -113,6 +115,8 @@ typedef struct lc_alloca_inst {
 
 /* Forward declaration for safe_undef */
 lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);
+void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
+                      lc_value_t *dst, lc_value_t *src, lc_value_t *size);
 
 /* ---- Value pool (slab-based to avoid pointer invalidation) ---- */
 
@@ -411,6 +415,7 @@ lr_operand_desc_t lc_value_to_desc(lc_value_t *val) {
     case LC_VAL_GLOBAL:
         d.kind = LR_OP_KIND_GLOBAL;
         d.global_id = val->global.id;
+        d.global_offset = val->global.offset;
         break;
     case LC_VAL_ARGUMENT:
         if (val->argument.func && val->argument.func->param_vregs
@@ -473,12 +478,17 @@ static lr_operand_t compat_desc_to_operand(const lr_operand_desc_t *d) {
 
 static int compat_finish_active_func(lc_module_compat_t *mod) {
     lr_error_t err;
+    int rc;
     if (!mod || !mod->session)
         return -1;
     if (!lr_session_cur_func(mod->session))
         return 0;
     memset(&err, 0, sizeof(err));
-    return lr_session_func_end(mod->session, NULL, &err);
+    rc = lr_session_func_end(mod->session, NULL, &err);
+    if (rc != 0 && err.msg[0]) {
+        fprintf(stderr, "liric compat finalize failed: %s\n", err.msg);
+    }
+    return rc;
 }
 
 static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
@@ -574,6 +584,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     lc_module_compat_t *cm = (lc_module_compat_t *)calloc(
         1, sizeof(lc_module_compat_t));
     lr_session_config_t cfg;
+    lr_compile_mode_t mode = lr_compile_mode_from_env();
     lr_arena_t *arena;
     if (!cm) return NULL;
 
@@ -583,7 +594,22 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
     memset(&cfg, 0, sizeof(cfg));
-    cfg.mode = LR_MODE_DIRECT;
+    /* LLVM-compatible builder path must preserve full IR semantics.
+     * Use IR mode unconditionally here; session DIRECT mode remains
+     * available via the native session API. */
+    cfg.mode = LR_MODE_IR;
+    switch (mode) {
+    case LR_COMPILE_COPY_PATCH:
+        cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
+        break;
+    case LR_COMPILE_LLVM:
+        cfg.backend = LR_SESSION_BACKEND_LLVM;
+        break;
+    case LR_COMPILE_ISEL:
+    default:
+        cfg.backend = LR_SESSION_BACKEND_ISEL;
+        break;
+    }
     cm->session = lr_session_create(&cfg, NULL);
     if (!cm->session) {
         lr_arena_destroy(arena);
@@ -631,11 +657,9 @@ lr_module_t *lc_module_get_ir(lc_module_compat_t *mod) {
 }
 
 static void compat_dump_module(lr_module_t *m, FILE *out) {
-    lr_func_t *f;
     if (!m || !out)
         return;
-    for (f = m->first_func; f; f = f->next)
-        lr_dump_func(f, m, out);
+    lr_module_dump(m, out);
 }
 
 void lc_module_dump(lc_module_compat_t *mod) {
@@ -721,6 +745,27 @@ lc_value_t *lc_value_global(lc_module_compat_t *mod, uint32_t id,
     v->type = type;
     v->global.id = id;
     v->global.name = name;
+    v->global.func = NULL;
+    v->global.offset = 0;
+    return v;
+}
+
+lc_value_t *lc_value_global_with_addend(lc_module_compat_t *mod,
+                                         lc_value_t *base,
+                                         int64_t addend) {
+    lc_value_t *v;
+    int64_t combined;
+    if (!mod || !base || base->kind != LC_VAL_GLOBAL)
+        return safe_undef(mod);
+    if ((addend > 0 && base->global.offset > INT64_MAX - addend) ||
+        (addend < 0 && base->global.offset < INT64_MIN - addend))
+        return safe_undef(mod);
+    combined = base->global.offset + addend;
+    v = lc_value_global(mod, base->global.id, base->type, base->global.name);
+    if (!v)
+        return safe_undef(mod);
+    v->global.func = base->global.func;
+    v->global.offset = combined;
     return v;
 }
 
@@ -892,6 +937,7 @@ lr_type_t *lc_type_contained(lr_type_t *ty, unsigned idx) {
         if (idx < ty->func.num_params) return ty->func.params[idx];
         return NULL;
     case LR_TYPE_ARRAY:
+    case LR_TYPE_VECTOR:
         return ty->array.elem;
     default:
         return NULL;
@@ -908,11 +954,32 @@ bool lc_type_struct_has_name(lr_type_t *ty) {
     return ty->struc.name != NULL;
 }
 
+static lc_value_t *create_func_value(lc_module_compat_t *mod,
+                                      lr_func_t *func);
+
 lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
                                         const char *name, lr_type_t *type) {
     if (!mod || !name) return safe_undef(mod);
     lr_module_t *m = mod->mod;
     uint32_t sym_id = UINT32_MAX;
+
+    if (type && type->kind == LR_TYPE_FUNC) {
+        lr_func_t *f = lookup_func_cached(mod, name, &sym_id);
+        if (!f) {
+            lr_type_t *ret = type->func.ret ? type->func.ret : m->type_void;
+            f = lr_func_declare(m, name, ret, type->func.params,
+                                type->func.num_params, type->func.vararg);
+            if (!f)
+                return safe_undef(mod);
+            if (sym_id == UINT32_MAX)
+                sym_id = compat_symbol_id(mod, name);
+            if (sym_id == UINT32_MAX)
+                return safe_undef(mod);
+            cache_func_by_symbol(mod, sym_id, f);
+        }
+        return create_func_value(mod, f);
+    }
+
     lr_global_t *g = lookup_global_cached(mod, name, &sym_id);
     if (!g) {
         if (sym_id == UINT32_MAX)
@@ -1089,6 +1156,219 @@ static bool pack_constant_bytes_raw(const lc_value_t *value, const lr_type_t *ty
     }
 }
 
+static uint64_t read_le_u64_partial(const uint8_t *bytes, size_t n) {
+    uint64_t raw = 0;
+    size_t lim = n < sizeof(raw) ? n : sizeof(raw);
+    for (size_t i = 0; i < lim; i++)
+        raw |= ((uint64_t)bytes[i]) << (8u * i);
+    return raw;
+}
+
+static bool aggregate_extract_offset_and_type(lr_type_t *base_type,
+                                              unsigned *indices,
+                                              unsigned num_indices,
+                                              size_t *out_offset,
+                                              lr_type_t **out_type) {
+    lr_type_t *cur = base_type;
+    size_t off = 0;
+    unsigned i;
+    if (!base_type || !out_offset || !out_type)
+        return false;
+    for (i = 0; i < num_indices; i++) {
+        unsigned idx = indices ? indices[i] : 0u;
+        if (!cur)
+            return false;
+        if (cur->kind == LR_TYPE_STRUCT) {
+            if (idx >= cur->struc.num_fields)
+                return false;
+            off += lr_struct_field_offset(cur, idx);
+            cur = cur->struc.fields[idx];
+            continue;
+        }
+        if (cur->kind == LR_TYPE_ARRAY || cur->kind == LR_TYPE_VECTOR) {
+            size_t elem_sz;
+            if ((uint64_t)idx >= cur->array.count)
+                return false;
+            elem_sz = lr_type_size(cur->array.elem);
+            off += (size_t)idx * elem_sz;
+            cur = cur->array.elem;
+            continue;
+        }
+        return false;
+    }
+    *out_offset = off;
+    *out_type = cur;
+    return true;
+}
+
+static lc_value_t *const_extractvalue_fold(lc_module_compat_t *mod,
+                                           lc_value_t *agg,
+                                           unsigned *indices,
+                                           unsigned num_indices) {
+    lr_type_t *result_ty = NULL;
+    size_t off = 0;
+    size_t need = 0;
+    const uint8_t *src = NULL;
+    size_t avail = 0;
+    if (!mod || !agg || agg->kind != LC_VAL_CONST_AGGREGATE || !agg->type)
+        return NULL;
+    if (!aggregate_extract_offset_and_type(agg->type, indices, num_indices,
+                                           &off, &result_ty)) {
+        return NULL;
+    }
+    if (!result_ty)
+        return NULL;
+
+    need = lr_type_size(result_ty);
+    if (agg->aggregate.data && off < agg->aggregate.size) {
+        src = (const uint8_t *)agg->aggregate.data + off;
+        avail = agg->aggregate.size - off;
+    }
+
+    if (lc_type_is_integer(result_ty)) {
+        unsigned width = lc_type_int_width(result_ty);
+        uint64_t raw = read_le_u64_partial(src ? src : (const uint8_t *)"", avail);
+        if (width > 0 && width < 64) {
+            uint64_t mask = (UINT64_C(1) << width) - 1u;
+            raw &= mask;
+            if (raw & (UINT64_C(1) << (width - 1u)))
+                raw |= ~mask;
+        }
+        return lc_value_const_int(mod, result_ty, (int64_t)raw,
+                                  width ? width : 64u);
+    }
+
+    if (result_ty->kind == LR_TYPE_FLOAT) {
+        float f = 0.0f;
+        size_t n = avail < sizeof(f) ? avail : sizeof(f);
+        if (src && n > 0)
+            memcpy(&f, src, n);
+        return lc_value_const_fp(mod, result_ty, (double)f, false);
+    }
+
+    if (result_ty->kind == LR_TYPE_DOUBLE) {
+        double d = 0.0;
+        size_t n = avail < sizeof(d) ? avail : sizeof(d);
+        if (src && n > 0)
+            memcpy(&d, src, n);
+        return lc_value_const_fp(mod, result_ty, d, true);
+    }
+
+    if (result_ty->kind == LR_TYPE_PTR) {
+        lc_const_value_meta_t *meta = lookup_const_value_meta(mod, agg);
+        if (meta) {
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                if (cr->offset == off && cr->symbol_name && cr->symbol_name[0]) {
+                    uint32_t sym_id = compat_symbol_id(mod, cr->symbol_name);
+                    if (sym_id != UINT32_MAX) {
+                        lc_value_t *gv =
+                            lc_value_global(mod, sym_id, result_ty, cr->symbol_name);
+                        if (gv)
+                            gv->global.offset = cr->addend;
+                        return gv;
+                    }
+                }
+            }
+        }
+        if (!src || avail == 0 || read_le_u64_partial(src, avail) == 0)
+            return lc_value_const_null(mod, result_ty);
+        return safe_undef(mod);
+    }
+
+    if (result_ty->kind == LR_TYPE_STRUCT ||
+        result_ty->kind == LR_TYPE_ARRAY ||
+        result_ty->kind == LR_TYPE_VECTOR) {
+        lc_value_t *nested;
+        uint8_t *bytes = NULL;
+        if (need > 0) {
+            size_t n;
+            bytes = (uint8_t *)calloc(1, need);
+            if (!bytes)
+                return safe_undef(mod);
+            n = avail < need ? avail : need;
+            if (src && n > 0)
+                memcpy(bytes, src, n);
+        }
+        nested = lc_value_const_aggregate(mod, result_ty, bytes, need);
+        free(bytes);
+        if (!nested)
+            return safe_undef(mod);
+        if (need > 0) {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, agg);
+            if (meta) {
+                for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                    if (!cr->symbol_name)
+                        continue;
+                    if (cr->offset >= off && cr->offset < off + need) {
+                        (void)lc_value_const_aggregate_add_reloc(
+                            mod, nested, cr->offset - off, cr->symbol_name, cr->addend
+                        );
+                    }
+                }
+            }
+        }
+        return nested;
+    }
+
+    return NULL;
+}
+
+static lc_value_t *materialize_const_aggregate_global(lc_module_compat_t *mod,
+                                                      lc_value_t *agg) {
+    static uint32_t constagg_seq = 0;
+    char name[64];
+    size_t size;
+    lr_global_t *g;
+    uint32_t sym_id;
+    if (!mod || !agg || agg->kind != LC_VAL_CONST_AGGREGATE || !agg->type)
+        return safe_undef(mod);
+
+    size = lr_type_size(agg->type);
+    if (size == 0)
+        return safe_undef(mod);
+
+    (void)snprintf(name, sizeof(name), ".lc.constagg.%u", constagg_seq++);
+    g = lr_global_create(mod->mod, name, agg->type, true);
+    if (!g)
+        return safe_undef(mod);
+
+    g->init_data = (uint8_t *)lr_arena_alloc(mod->mod->arena, size, 1);
+    if (!g->init_data)
+        return safe_undef(mod);
+    memset(g->init_data, 0, size);
+    if (agg->aggregate.data && agg->aggregate.size > 0) {
+        size_t n = agg->aggregate.size < size ? agg->aggregate.size : size;
+        memcpy(g->init_data, agg->aggregate.data, n);
+    }
+    g->init_size = size;
+
+    {
+        lc_const_value_meta_t *meta = lookup_const_value_meta(mod, agg);
+        if (meta) {
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                lr_reloc_t *r;
+                if (!cr->symbol_name || cr->offset >= size)
+                    continue;
+                r = lr_arena_new(mod->mod->arena, lr_reloc_t);
+                if (!r)
+                    return safe_undef(mod);
+                r->offset = cr->offset;
+                r->addend = cr->addend;
+                r->symbol_name = lr_arena_strdup(mod->mod->arena,
+                                                 cr->symbol_name,
+                                                 strlen(cr->symbol_name));
+                r->next = g->relocs;
+                g->relocs = r;
+            }
+        }
+    }
+
+    sym_id = compat_symbol_id(mod, name);
+    if (sym_id != UINT32_MAX)
+        cache_global_by_symbol(mod, sym_id, g);
+    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+}
+
 bool lc_pack_constant_bytes(lc_value_t *value, lr_type_t *ty,
                              uint8_t *out, size_t out_size) {
     return pack_constant_bytes_raw(value, ty, out, out_size);
@@ -1136,13 +1416,29 @@ lc_value_t *lc_const_struct_from_values(lc_module_compat_t *mod,
     for (uint32_t i = 0; i < n; i++) {
         lr_type_t *field_ty = struct_ty->struc.fields[i];
         lc_value_t *elem = values ? values[i] : NULL;
-        if (!elem || !field_ty || field_ty->kind != LR_TYPE_PTR)
+        size_t off = lr_struct_field_offset(struct_ty, i);
+        if (!elem || !field_ty)
             continue;
-        if (elem->kind == LC_VAL_GLOBAL && elem->global.name) {
-            size_t off = lr_struct_field_offset(struct_ty, i);
+
+        if (field_ty->kind == LR_TYPE_PTR &&
+            elem->kind == LC_VAL_GLOBAL && elem->global.name) {
             if (lc_value_const_aggregate_add_reloc(mod, agg, off,
-                                                   elem->global.name, 0) != 0)
+                                                   elem->global.name,
+                                                   elem->global.offset) != 0)
                 return NULL;
+        }
+
+        if (elem->kind == LC_VAL_CONST_AGGREGATE) {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, elem);
+            if (!meta)
+                continue;
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                if (!cr->symbol_name)
+                    continue;
+                if (lc_value_const_aggregate_add_reloc(mod, agg,
+                        off + cr->offset, cr->symbol_name, cr->addend) != 0)
+                    return NULL;
+            }
         }
     }
     return agg;
@@ -1158,12 +1454,58 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
     size_t total = 0;
     size_t elem_sz = 0;
     uint64_t n = 0;
-    if (!mod || !array_ty || array_ty->kind != LR_TYPE_ARRAY)
+    if (!mod || !array_ty ||
+        (array_ty->kind != LR_TYPE_ARRAY && array_ty->kind != LR_TYPE_VECTOR))
         return NULL;
 
     elem_ty = array_ty->array.elem;
     total = lr_type_size(array_ty);
     elem_sz = lr_type_size(elem_ty);
+
+    if (getenv("LIRIC_COMPAT_DEBUG_ARRAY_CONST")) {
+        fprintf(stderr,
+                "[lc_const_array_from_values] count=%llu num_values=%u elem_kind=%d elem_sz=%zu total=%zu\n",
+                (unsigned long long)array_ty->array.count, num_values,
+                elem_ty ? (int)elem_ty->kind : -1, elem_sz, total);
+        for (uint32_t i = 0; i < num_values && i < 8; i++) {
+            lc_value_t *v = values ? values[i] : NULL;
+            fprintf(stderr, "  val[%u]: %s kind=%d ty_kind=%d agg_size=%zu int=%lld\n",
+                    i, v ? "set" : "null", v ? (int)v->kind : -1,
+                    (v && v->type) ? (int)v->type->kind : -1,
+                    (v && v->kind == LC_VAL_CONST_AGGREGATE) ? v->aggregate.size : 0u,
+                    (long long)((v && v->kind == LC_VAL_CONST_INT) ? v->const_int.val : 0));
+        }
+    }
+
+    /* Some producers pass array constructors as a single aggregate value of
+     * the full array type. Preserve that payload instead of treating it as
+     * element[0], which would zero-fill the remaining elements. */
+    if (num_values == 1 && values && values[0] &&
+        values[0]->kind == LC_VAL_CONST_AGGREGATE &&
+        values[0]->type &&
+        (values[0]->type->kind == LR_TYPE_ARRAY ||
+         values[0]->type->kind == LR_TYPE_VECTOR) &&
+        lr_type_size(values[0]->type) == total) {
+        lc_value_t *src_agg = values[0];
+        lc_value_t *dst_agg = lc_value_const_aggregate(
+            mod, array_ty, src_agg->aggregate.data, src_agg->aggregate.size);
+        if (!dst_agg)
+            return NULL;
+        {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, src_agg);
+            if (meta) {
+                for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                    if (!cr->symbol_name)
+                        continue;
+                    if (lc_value_const_aggregate_add_reloc(mod, dst_agg,
+                            cr->offset, cr->symbol_name, cr->addend) != 0)
+                        return NULL;
+                }
+            }
+        }
+        return dst_agg;
+    }
+
     if (total > 0) {
         bytes = (uint8_t *)calloc(1, total);
         if (!bytes)
@@ -1189,6 +1531,25 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
     if (!agg)
         return NULL;
 
+    for (uint64_t i = 0; i < n; i++) {
+        lc_value_t *elem = values ? values[i] : NULL;
+        size_t off = (size_t)i * elem_sz;
+        if (!elem)
+            continue;
+        if (elem->kind == LC_VAL_CONST_AGGREGATE) {
+            lc_const_value_meta_t *meta = lookup_const_value_meta(mod, elem);
+            if (!meta)
+                continue;
+            for (lc_const_reloc_meta_t *cr = meta->relocs; cr; cr = cr->next) {
+                if (!cr->symbol_name)
+                    continue;
+                if (lc_value_const_aggregate_add_reloc(mod, agg,
+                        off + cr->offset, cr->symbol_name, cr->addend) != 0)
+                    return NULL;
+            }
+        }
+    }
+
     if (elem_ty && elem_ty->kind == LR_TYPE_PTR) {
         for (uint64_t i = 0; i < n; i++) {
             lc_value_t *elem = values ? values[i] : NULL;
@@ -1196,12 +1557,50 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
                 continue;
             size_t off = (size_t)i * elem_sz;
             if (lc_value_const_aggregate_add_reloc(mod, agg, off,
-                                                   elem->global.name, 0) != 0)
+                                                   elem->global.name,
+                                                   elem->global.offset) != 0)
                 return NULL;
         }
     }
 
     return agg;
+}
+
+int lc_const_gep_compute_offset(lr_type_t *base_type,
+                                 lc_value_t **indices,
+                                 uint32_t num_indices,
+                                 int64_t *out_offset) {
+    int64_t total = 0;
+    const lr_type_t *cur_ty = base_type;
+    if (!base_type || !out_offset)
+        return -1;
+
+    for (uint32_t i = 0; i < num_indices; i++) {
+        lc_value_t *idx = indices ? indices[i] : NULL;
+        lr_operand_desc_t d = lc_value_to_desc(idx);
+        lr_operand_t op;
+        lr_gep_step_t step;
+
+        if (d.kind != LR_OP_KIND_IMM_I64)
+            return -1;
+        op = compat_desc_to_operand(&d);
+        if (!lr_gep_analyze_step(cur_ty, i == 0, &op, &step))
+            return -1;
+        if (!step.is_const)
+            return -1;
+
+        if ((step.const_byte_offset > 0 &&
+             total > INT64_MAX - step.const_byte_offset) ||
+            (step.const_byte_offset < 0 &&
+             total < INT64_MIN - step.const_byte_offset)) {
+            return -1;
+        }
+        total += step.const_byte_offset;
+        cur_ty = step.next_type;
+    }
+
+    *out_offset = total;
+    return 0;
 }
 
 /* ---- Function ---- */
@@ -1222,6 +1621,16 @@ static lc_value_t *create_func_value(lc_module_compat_t *mod,
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
                             lr_type_t *func_type) {
     if (!mod) return safe_undef(NULL);
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing) {
+            /* Promote an existing declaration to a definition placeholder.
+             * This keeps one canonical symbol and avoids declare/define
+             * duplication under different internal names. */
+            existing->is_decl = false;
+            return create_func_value(mod, existing);
+        }
+    }
     lr_type_t *ret = mod->mod->type_void;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
@@ -1240,6 +1649,11 @@ lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
 lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
                              lr_type_t *func_type) {
     if (!mod) return safe_undef(NULL);
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing)
+            return create_func_value(mod, existing);
+    }
     lr_type_t *ret = mod->mod->type_void;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
@@ -1451,6 +1865,8 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
     const char *actual_name = name;
     char auto_name[32];
     char *unique_name = NULL;
+    uint32_t sym_id = UINT32_MAX;
+    lr_global_t *g = NULL;
     if (!mod || !mod->mod)
         return safe_undef(mod);
     if (!name || name[0] == '\0') {
@@ -1458,17 +1874,38 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
                  mod->mod->num_globals);
         actual_name = auto_name;
     }
+    /* If this global was referenced earlier as an unresolved external,
+     * materialize the definition in-place. For already-defined globals
+     * we must create a distinct symbol (LLVM-style auto-rename). */
+    g = lookup_global_cached(mod, actual_name, &sym_id);
+    if (g && g->is_external) {
+        if (type)
+            g->type = type;
+        g->is_const = is_const;
+        g->is_external = false;
+        if (init_data && init_size > 0) {
+            g->init_data = lr_arena_alloc_uninit(mod->mod->arena, init_size, 1);
+            memcpy(g->init_data, init_data, init_size);
+            g->init_size = init_size;
+        }
+        if (sym_id == UINT32_MAX)
+            sym_id = compat_symbol_id(mod, g->name);
+        if (sym_id == UINT32_MAX)
+            return safe_undef(mod);
+        cache_global_by_symbol(mod, sym_id, g);
+        return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+    }
     unique_name = make_unique_symbol_name(mod, actual_name);
     if (!unique_name)
         return safe_undef(mod);
-    lr_global_t *g = lr_global_create(mod->mod, unique_name, type, is_const);
+    g = lr_global_create(mod->mod, unique_name, type, is_const);
     free(unique_name);
     if (init_data && init_size > 0) {
         g->init_data = lr_arena_alloc_uninit(mod->mod->arena, init_size, 1);
         memcpy(g->init_data, init_data, init_size);
         g->init_size = init_size;
     }
-    uint32_t sym_id = compat_symbol_id(mod, g->name);
+    sym_id = compat_symbol_id(mod, g->name);
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
@@ -1575,7 +2012,8 @@ int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
         break;
     case LC_VAL_GLOBAL:
         if (!init_val->global.name ||
-            global_add_reloc(mod, g, 0, init_val->global.name, 0) != 0)
+            global_add_reloc(mod, g, 0, init_val->global.name,
+                             init_val->global.offset) != 0)
             return -1;
         break;
     default:
@@ -1651,6 +2089,22 @@ static lc_value_t *compat_cast(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, lr_opcode_t op,
                                  lc_value_t *val, lr_type_t *to_type) {
     if (!mod || !b || !f || !val) return safe_undef(mod);
+
+    /* Keep constant null/pointer casts well-typed in emitted IR. */
+    if (op == LR_OP_PTRTOINT &&
+        to_type && lc_type_is_integer(to_type) &&
+        val->kind == LC_VAL_CONST_NULL) {
+        unsigned width = lc_type_int_width(to_type);
+        if (width == 0) width = 64;
+        return lc_value_const_int(mod, to_type, 0, width);
+    }
+    if (op == LR_OP_INTTOPTR &&
+        to_type && to_type->kind == LR_TYPE_PTR &&
+        val->kind == LC_VAL_CONST_INT &&
+        val->const_int.val == 0) {
+        return lc_value_const_null(mod, to_type);
+    }
+
     uint32_t v = build_cast(mod, b, f, op, to_type, lc_value_to_desc(val));
     return wrap_vreg(mod, v, to_type, f);
 }
@@ -1802,9 +2256,14 @@ lc_value_t *lc_create_ashr(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_not(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *val, const char *name) {
     (void)name;
+    int64_t mask = -1;
+    unsigned width;
     if (!val) return safe_undef(mod);
-    lc_value_t *neg1 = lc_value_const_int(mod, val->type, -1,
-                                            lc_type_int_width(val->type));
+    width = lc_type_int_width(val->type);
+    /* Keep i1 canonical as xor with 1 (not -1) to match parser path. */
+    if (width == 1)
+        mask = 1;
+    lc_value_t *neg1 = lc_value_const_int(mod, val->type, mask, width);
     return compat_binop(mod, b, f, LR_OP_XOR, val, neg1);
 }
 
@@ -2048,7 +2507,19 @@ void lc_create_store(lc_module_compat_t *mod, lr_block_t *b,
                      lc_value_t *val, lc_value_t *ptr) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[2];
+    lr_func_t *f;
     if (!mod || !b) return;
+    f = b->func;
+    if (val && val->kind == LC_VAL_CONST_AGGREGATE && val->type && f) {
+        size_t nbytes = lr_type_size(val->type);
+        lc_value_t *src = materialize_const_aggregate_global(mod, val);
+        lc_value_t *sz = lc_value_const_int(mod, mod->mod->type_i64,
+                                            (int64_t)nbytes, 64u);
+        if (src && nbytes > 0) {
+            lc_create_memcpy(mod, b, f, ptr, src, sz);
+            return;
+        }
+    }
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(val);
     ops[1] = lc_value_to_desc(ptr);
@@ -2487,9 +2958,16 @@ lc_value_t *lc_create_extractvalue(lc_module_compat_t *mod, lr_block_t *b,
     for (unsigned i = 0; i < num_indices; i++) {
         if (result_ty->kind == LR_TYPE_STRUCT) {
             result_ty = result_ty->struc.fields[indices[i]];
-        } else if (result_ty->kind == LR_TYPE_ARRAY) {
+        } else if (result_ty->kind == LR_TYPE_ARRAY ||
+                   result_ty->kind == LR_TYPE_VECTOR) {
             result_ty = result_ty->array.elem;
         }
+    }
+
+    if (agg->kind == LC_VAL_CONST_AGGREGATE) {
+        lc_value_t *folded = const_extractvalue_fold(mod, agg, indices, num_indices);
+        if (folded)
+            return folded;
     }
 
     memset(&inst, 0, sizeof(inst));
@@ -2549,6 +3027,7 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[4];
+    lc_value_t *size_arg;
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
@@ -2557,12 +3036,16 @@ void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!decl || sym_id == UINT32_MAX) return;
 
     (void)decl;
+    size_arg = size;
+    if (size_arg && size_arg->type && size_arg->type != m->type_i64)
+        size_arg = lc_create_zext_or_trunc(mod, b, f, size_arg, m->type_i64,
+                                           "memcpy_size");
 
     memset(&inst, 0, sizeof(inst));
     ops[0] = global_operand_desc(sym_id, m->type_ptr);
     ops[1] = lc_value_to_desc(dst);
     ops[2] = lc_value_to_desc(src);
-    ops[3] = lc_value_to_desc(size);
+    ops[3] = lc_value_to_desc(size_arg);
     inst.op = LR_OP_CALL;
     inst.type = m->type_ptr;
     inst.operands = ops;
@@ -2575,6 +3058,8 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *val, lc_value_t *size) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[4];
+    lc_value_t *val_arg;
+    lc_value_t *size_arg;
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_i32, m->type_i64 };
@@ -2583,12 +3068,20 @@ void lc_create_memset(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     if (!decl || sym_id == UINT32_MAX) return;
 
     (void)decl;
+    val_arg = val;
+    if (val_arg && val_arg->type && val_arg->type != m->type_i32)
+        val_arg = lc_create_zext_or_trunc(mod, b, f, val_arg, m->type_i32,
+                                          "memset_val");
+    size_arg = size;
+    if (size_arg && size_arg->type && size_arg->type != m->type_i64)
+        size_arg = lc_create_zext_or_trunc(mod, b, f, size_arg, m->type_i64,
+                                           "memset_size");
 
     memset(&inst, 0, sizeof(inst));
     ops[0] = global_operand_desc(sym_id, m->type_ptr);
     ops[1] = lc_value_to_desc(dst);
-    ops[2] = lc_value_to_desc(val);
-    ops[3] = lc_value_to_desc(size);
+    ops[2] = lc_value_to_desc(val_arg);
+    ops[3] = lc_value_to_desc(size_arg);
     inst.op = LR_OP_CALL;
     inst.type = m->type_ptr;
     inst.operands = ops;
@@ -2601,6 +3094,7 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                        lc_value_t *dst, lc_value_t *src, lc_value_t *size) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[4];
+    lc_value_t *size_arg;
     if (!mod || !b || !f) return;
     lr_module_t *m = mod->mod;
     lr_type_t *params[3] = { m->type_ptr, m->type_ptr, m->type_i64 };
@@ -2608,12 +3102,16 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     uint32_t sym_id = compat_symbol_id(mod, "memmove");
     if (!decl || sym_id == UINT32_MAX) return;
     (void)decl;
+    size_arg = size;
+    if (size_arg && size_arg->type && size_arg->type != m->type_i64)
+        size_arg = lc_create_zext_or_trunc(mod, b, f, size_arg, m->type_i64,
+                                           "memmove_size");
 
     memset(&inst, 0, sizeof(inst));
     ops[0] = global_operand_desc(sym_id, m->type_ptr);
     ops[1] = lc_value_to_desc(dst);
     ops[2] = lc_value_to_desc(src);
-    ops[3] = lc_value_to_desc(size);
+    ops[3] = lc_value_to_desc(size_arg);
     inst.op = LR_OP_CALL;
     inst.type = m->type_ptr;
     inst.operands = ops;
@@ -2671,25 +3169,57 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     return lr_jit_add_module(jit, mod->mod);
 }
 
+int lc_module_finalize_for_execution(lc_module_compat_t *mod) {
+    if (!mod)
+        return -1;
+    return compat_finish_active_func(mod);
+}
+
+void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name) {
+    if (!mod || !name || !name[0])
+        return NULL;
+    if (compat_finish_active_func(mod) != 0)
+        return NULL;
+    return lr_session_lookup(mod->session, name);
+}
+
+void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
+                                   void *addr) {
+    if (!mod || !name || !name[0])
+        return;
+    lr_session_add_symbol(mod->session, name, addr);
+}
+
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
     char emit_err[256] = {0};
     if (!mod || !out) return -1;
+    if (compat_finish_active_func(mod) != 0) return -1;
     return lr_emit_module_object_stream(mod->mod, NULL, out,
                                         emit_err, sizeof(emit_err));
 }
 
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     char emit_err[256] = {0};
+    int rc;
     if (!mod || !filename) return -1;
-    return lr_emit_module_object_path(mod->mod, NULL, filename,
-                                      emit_err, sizeof(emit_err));
+    if (compat_finish_active_func(mod) != 0) return -1;
+    rc = lr_emit_module_object_path(mod->mod, NULL, filename,
+                                    emit_err, sizeof(emit_err));
+    if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+        fprintf(stderr, "lc_module_emit_object: %s\n", emit_err);
+    return rc;
 }
 
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
     char emit_err[256] = {0};
+    int rc;
     if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
-    return lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
-                                          runtime_ll, runtime_len,
-                                          emit_err, sizeof(emit_err));
+    if (compat_finish_active_func(mod) != 0) return -1;
+    rc = lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
+                                        runtime_ll, runtime_len,
+                                        emit_err, sizeof(emit_err));
+    if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+        fprintf(stderr, "lc_module_emit_executable: %s\n", emit_err);
+    return rc;
 }

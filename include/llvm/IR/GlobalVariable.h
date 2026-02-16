@@ -4,6 +4,10 @@
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/ADT/StringRef.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class Constant;
@@ -42,5 +46,9 @@ public:
 };
 
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

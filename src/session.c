@@ -19,10 +19,18 @@ typedef enum session_mode {
     SESSION_MODE_IR = 1,
 } session_mode_t;
 
+typedef enum session_backend {
+    SESSION_BACKEND_DEFAULT = 0,
+    SESSION_BACKEND_ISEL = 1,
+    SESSION_BACKEND_COPY_PATCH = 2,
+    SESSION_BACKEND_LLVM = 3,
+} session_backend_t;
+
 /* Session config mirrors the public lr_session_config_t. */
 typedef struct session_config {
     session_mode_t mode;
     const char *target;
+    session_backend_t backend;
 } session_config_t;
 
 /* Error mirrors the public lr_error_t. */
@@ -92,11 +100,13 @@ struct lr_session {
     /* DIRECT mode blob capture for exe/obj emission */
     lr_objfile_ctx_t direct_obj_ctx;
     bool direct_obj_ctx_active;
-    bool direct_mode_warned;
     uint32_t direct_reloc_base;
+    bool direct_pending_relocs;
+    uint32_t direct_pending_reloc_start;
     lr_func_blob_t *blobs;
     uint32_t blob_count;
     uint32_t blob_cap;
+    bool ir_module_jit_ready;
 };
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
@@ -188,6 +198,20 @@ static size_t align_up_size(size_t value, size_t alignment) {
     return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
+static int ensure_runtime_and_globals_ready(struct lr_session *s,
+                                            session_error_t *err) {
+    if (!s || !s->jit || !s->module)
+        return 0;
+
+    if (s->module->first_global) {
+        if (lr_jit_materialize_globals(s->jit, s->module) != 0) {
+            err_set(err, S_ERR_BACKEND, "global materialization failed");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int ensure_phi_copy_capacity(struct lr_session *s, uint32_t need) {
     session_phi_copy_entry_t *new_entries = NULL;
     uint32_t new_cap = 0;
@@ -270,20 +294,26 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            lr_target_can_compile(s->jit->target, s->jit->mode);
 }
 
-static void maybe_warn_direct_mode_fallback(struct lr_session *s) {
-    const char *mode_name = NULL;
-    if (!s || s->direct_mode_warned)
-        return;
-    if (s->cfg.mode != SESSION_MODE_DIRECT || !s->jit ||
-        s->jit->mode != LR_COMPILE_LLVM) {
-        return;
+static int session_backend_to_mode(session_backend_t backend,
+                                   lr_compile_mode_t *out_mode) {
+    if (!out_mode)
+        return -1;
+    switch (backend) {
+    case SESSION_BACKEND_DEFAULT:
+        *out_mode = lr_compile_mode_from_env();
+        return 0;
+    case SESSION_BACKEND_ISEL:
+        *out_mode = LR_COMPILE_ISEL;
+        return 0;
+    case SESSION_BACKEND_COPY_PATCH:
+        *out_mode = LR_COMPILE_COPY_PATCH;
+        return 0;
+    case SESSION_BACKEND_LLVM:
+        *out_mode = LR_COMPILE_LLVM;
+        return 0;
+    default:
+        return -1;
     }
-    mode_name = lr_compile_mode_name(s->jit->mode);
-    fprintf(stderr,
-            "liric session: LR_MODE_DIRECT fast-path supports "
-            "LIRIC_COMPILE_MODE=isel/copy_patch; got %s, falling back to IR\n",
-            mode_name ? mode_name : "unknown");
-    s->direct_mode_warned = true;
 }
 
 static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
@@ -311,6 +341,65 @@ static int init_direct_obj_ctx(struct lr_session *s) {
     return 0;
 }
 
+static bool module_has_defined_symbol_linear(const lr_module_t *m,
+                                             const char *name) {
+    if (!m || !name || !name[0])
+        return false;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || strcmp(f->name, name) != 0)
+            continue;
+        if (f->first_block || !f->is_decl)
+            return true;
+    }
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!g->name || strcmp(g->name, name) != 0)
+            continue;
+        if (!g->is_external)
+            return true;
+    }
+    return false;
+}
+
+static bool module_has_symbol_linear(const lr_module_t *m,
+                                     const char *name) {
+    if (!m || !name || !name[0])
+        return false;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return true;
+    }
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool session_is_module_defined_symbol(struct lr_session *s,
+                                             const char *name) {
+    if (!s || !s->module || !name || !name[0])
+        return false;
+    if (module_has_defined_symbol_linear(s->module, name))
+        return true;
+    /* Forward references are legal in DIRECT mode: defer relocation
+       patching while a symbol is known to belong to the current module,
+       even if its body is emitted later. */
+    if (module_has_symbol_linear(s->module, name))
+        return true;
+    if (!s->direct_obj_ctx_active)
+        return false;
+    uint32_t sym_id = lr_module_intern_symbol(s->module, name);
+    if (sym_id >= s->direct_obj_ctx.module_sym_count)
+        return false;
+    if (s->direct_obj_ctx.module_sym_defined &&
+        s->direct_obj_ctx.module_sym_defined[sym_id] != 0)
+        return true;
+    if (s->direct_obj_ctx.module_sym_funcs &&
+        s->direct_obj_ctx.module_sym_funcs[sym_id])
+        return true;
+    return false;
+}
+
 static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     lr_compile_func_meta_t meta;
     int rc;
@@ -318,9 +407,18 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     if (!s || !s->cur_func)
         return 0;
 
-    if (!direct_mode_enabled(s)) {
-        maybe_warn_direct_mode_fallback(s);
+    if (s->cfg.mode != SESSION_MODE_DIRECT)
         return 0;
+    if (!direct_mode_enabled(s)) {
+        const char *mode_name = (s && s->jit) ?
+            lr_compile_mode_name(s->jit->mode) : "unknown";
+        const char *target_name = (s && s->jit && s->jit->target &&
+                                   s->jit->target->name) ?
+            s->jit->target->name : "unknown";
+        err_set(err, S_ERR_MODE,
+                "DIRECT policy unsupported for target=%s mode=%s",
+                target_name, mode_name ? mode_name : "unknown");
+        return -1;
     }
 
     /* Initialize the obj_ctx for relocation capture on first function */
@@ -510,13 +608,20 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     s->jit->code_size = s->compile_start + code_len;
     if (s->jit->update_active && code_len > 0)
         s->jit->update_dirty = true;
-    if (lr_jit_patch_relocs_from(s->jit, &s->direct_obj_ctx,
-                                 s->direct_reloc_base) != 0) {
-        err_set(err, S_ERR_BACKEND, "jit relocation patch failed");
-        s->module->obj_ctx = NULL;
-        if (should_close_update && s->jit->update_active)
-            lr_jit_end_update(s->jit);
-        return -1;
+    {
+        const char *missing_symbol = NULL;
+        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                        s->direct_reloc_base,
+                                        &missing_symbol) != 0) {
+            /* In DIRECT mode, unresolved relocations are deferred until
+               lookup/execution time so forward references and late-bound
+               externals do not fail function emission. */
+            if (!s->direct_pending_relocs ||
+                s->direct_reloc_base < s->direct_pending_reloc_start) {
+                s->direct_pending_reloc_start = s->direct_reloc_base;
+            }
+            s->direct_pending_relocs = true;
+        }
     }
 
     lr_jit_add_symbol(s->jit, s->cur_func->name,
@@ -528,6 +633,18 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         uint32_t sym_id = lr_module_intern_symbol(s->module, s->cur_func->name);
         if (sym_id < s->direct_obj_ctx.module_sym_count)
             s->direct_obj_ctx.module_sym_defined[sym_id] = 1;
+    }
+
+    if (s->direct_pending_relocs) {
+        const char *missing_symbol = NULL;
+        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                        s->direct_pending_reloc_start,
+                                        &missing_symbol) == 0) {
+            s->direct_pending_relocs = false;
+            s->direct_pending_reloc_start = 0;
+        } else {
+            (void)missing_symbol;
+        }
     }
 
     s->module->obj_ctx = NULL;
@@ -621,10 +738,33 @@ static int validate_block_termination(struct lr_session *s,
         return -1;
     }
     for (i = 0; i < s->block_count; i++) {
-        if (!s->block_seen[i] || !s->block_terminated[i]) {
-            err_set(err, S_ERR_STATE, "block %u is not terminated", i);
+        lr_block_t *b = (s->blocks && i < s->block_cap) ? s->blocks[i] : NULL;
+        bool terminated = false;
+
+        if (!b) {
+            err_set(err, S_ERR_STATE, "block %u is missing", i);
             return -1;
         }
+
+        terminated = s->block_seen[i] && s->block_terminated[i];
+        if (!terminated && b->last)
+            terminated = is_terminator(b->last->op);
+
+        if (!terminated) {
+            lr_inst_t *term = lr_inst_create(s->module->arena,
+                                             LR_OP_UNREACHABLE,
+                                             NULL, 0, NULL, 0);
+            if (!term) {
+                err_set(err, S_ERR_BACKEND,
+                        "failed to synthesize terminator for block %u", i);
+                return -1;
+            }
+            lr_block_append(b, term);
+            terminated = true;
+        }
+
+        s->block_seen[i] = true;
+        s->block_terminated[i] = terminated;
     }
     return 0;
 }
@@ -789,12 +929,21 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     const session_config_t *cfg = (const session_config_t *)cfg_ptr;
     struct lr_session *s = NULL;
     lr_arena_t *arena = NULL;
+    lr_compile_mode_t mode = LR_COMPILE_ISEL;
     err_clear(err);
 
-    if (cfg && cfg->mode != SESSION_MODE_DIRECT &&
-        cfg->mode != SESSION_MODE_IR) {
-        err_set(err, S_ERR_ARGUMENT, "invalid session mode");
-        return NULL;
+    if (cfg) {
+        if (cfg->mode != SESSION_MODE_DIRECT &&
+            cfg->mode != SESSION_MODE_IR) {
+            err_set(err, S_ERR_ARGUMENT, "invalid session mode");
+            return NULL;
+        }
+        if (session_backend_to_mode(cfg->backend, &mode) != 0) {
+            err_set(err, S_ERR_ARGUMENT, "invalid session backend");
+            return NULL;
+        }
+    } else {
+        mode = lr_compile_mode_from_env();
     }
 
     s = (struct lr_session *)calloc(1, sizeof(*s));
@@ -806,6 +955,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     if (cfg) {
         s->cfg.mode = cfg->mode;
         s->cfg.target = cfg->target;
+        s->cfg.backend = cfg->backend;
     }
 
     arena = lr_arena_create(0);
@@ -834,6 +984,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
         err_set(err, S_ERR_BACKEND, "jit creation failed");
         return NULL;
     }
+    s->jit->mode = mode;
 
     return s;
 }
@@ -876,9 +1027,33 @@ void lr_session_add_symbol(struct lr_session *s, const char *name, void *addr) {
 }
 
 void *lr_session_lookup(struct lr_session *s, const char *name) {
+    void *addr;
     if (!s || !s->jit || !name || !name[0])
         return NULL;
-    return lr_jit_get_function(s->jit, name);
+    if (s->direct_pending_relocs && s->direct_obj_ctx_active) {
+        const char *missing_symbol = NULL;
+        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                        s->direct_pending_reloc_start,
+                                        &missing_symbol) == 0) {
+            s->direct_pending_relocs = false;
+            s->direct_pending_reloc_start = 0;
+        } else if (!session_is_module_defined_symbol(s, missing_symbol)) {
+            return NULL;
+        }
+        if (s->direct_pending_relocs)
+            return NULL;
+    }
+    addr = lr_jit_get_function(s->jit, name);
+    if (addr)
+        return addr;
+
+    if (s->cfg.mode == SESSION_MODE_IR && !s->ir_module_jit_ready) {
+        if (lr_jit_add_module(s->jit, s->module) != 0)
+            return NULL;
+        s->ir_module_jit_ready = true;
+        addr = lr_jit_get_function(s->jit, name);
+    }
+    return addr;
 }
 
 /* ---- Types (session-scoped singletons) --------------------------------- */
@@ -926,6 +1101,13 @@ lr_type_t *lr_type_array_s(struct lr_session *s, lr_type_t *elem,
     return lr_type_array(s->module->arena, elem, count);
 }
 
+lr_type_t *lr_type_vector_s(struct lr_session *s, lr_type_t *elem,
+                             uint64_t count) {
+    if (!s || !s->module || !elem)
+        return NULL;
+    return lr_type_vector(s->module->arena, elem, count);
+}
+
 lr_type_t *lr_type_struct_s(struct lr_session *s, lr_type_t **fields,
                              uint32_t n, bool packed) {
     if (!s || !s->module || (n > 0 && !fields))
@@ -958,6 +1140,7 @@ uint32_t lr_session_global(struct lr_session *s, const char *name,
         memcpy(g->init_data, init, init_size);
         g->init_size = init_size;
     }
+    s->ir_module_jit_ready = false;
     return g->id;
 }
 
@@ -970,6 +1153,7 @@ uint32_t lr_session_global_extern(struct lr_session *s, const char *name,
     if (!g)
         return UINT32_MAX;
     g->is_external = true;
+    s->ir_module_jit_ready = false;
     return g->id;
 }
 
@@ -990,6 +1174,7 @@ void lr_session_global_reloc(struct lr_session *s, uint32_t id, size_t offset,
     r->addend = 0;
     r->next = g->relocs;
     g->relocs = r;
+    s->ir_module_jit_ready = false;
 }
 
 uint32_t lr_session_intern(struct lr_session *s, const char *name) {
@@ -1016,6 +1201,7 @@ int lr_session_declare(struct lr_session *s, const char *name, lr_type_t *ret,
         err_set(err, S_ERR_BACKEND, "function declaration failed");
         return -1;
     }
+    s->ir_module_jit_ready = false;
     return 0;
 }
 
@@ -1047,6 +1233,12 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
     s->compile_start = 0;
     s->compile_active = false;
     s->emitted_count = 0;
+    s->ir_module_jit_ready = false;
+    if (ensure_runtime_and_globals_ready(s, err) != 0) {
+        s->cur_func->is_decl = true;
+        finish_function_state(s);
+        return -1;
+    }
     if (begin_direct_compile(s, err) != 0) {
         s->cur_func->is_decl = true;
         finish_function_state(s);
@@ -1077,9 +1269,12 @@ int lr_session_func_begin_existing(struct lr_session *s, lr_module_t *module,
     s->compile_start = 0;
     s->compile_active = false;
     s->emitted_count = 0;
+    s->ir_module_jit_ready = false;
 
-    if (module->first_global)
-        lr_jit_materialize_globals(s->jit, module);
+    if (ensure_runtime_and_globals_ready(s, err) != 0) {
+        finish_function_state(s);
+        return -1;
+    }
 
     if (begin_direct_compile(s, err) != 0) {
         finish_function_state(s);
@@ -1133,8 +1328,10 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
         rc = finish_direct_compile(s, out_addr, err);
     else
         rc = compile_current_function(s, out_addr, err);
-    if (rc != 0)
+    if (rc != 0) {
+        finish_function_state(s);
         return -1;
+    }
 
     finish_function_state(s);
     return 0;
@@ -1219,6 +1416,7 @@ int lr_session_bind_ir(struct lr_session *s, lr_module_t *module,
     s->cur_block = block;
     s->compile_active = false;
     s->compile_ctx = NULL;
+    s->ir_module_jit_ready = false;
     return 0;
 }
 
@@ -1315,17 +1513,10 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             resolved_call_ops[0].type = s->module->type_ptr;
             resolved_call_ops[0].global_offset = 0;
             normalized.operands = resolved_call_ops;
-        } else if (s->emitted_count == 0) {
-            /* Fall back before streaming emits so unresolved calls can use normal IR/JIT lowering. */
-            if (s->compile_opened_update && s->jit->update_active)
-                lr_jit_end_update(s->jit);
-            s->compile_active = false;
-            s->compile_opened_update = false;
-            s->compile_ctx = NULL;
-            s->module->obj_ctx = NULL;
         } else {
             err_set(err, S_ERR_BACKEND,
-                    "direct call target unresolved after streaming began");
+                    "direct call target unresolved: %s",
+                    callee_name ? callee_name : "(unknown)");
             return 0;
         }
     }

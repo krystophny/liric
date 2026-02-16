@@ -1,5 +1,7 @@
 #include "ir.h"
+#include <inttypes.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 static uint32_t symbol_hash(const char *name) {
@@ -84,6 +86,14 @@ lr_type_t *lr_type_func(lr_arena_t *a, lr_type_t *ret, lr_type_t **params,
 lr_type_t *lr_type_array(lr_arena_t *a, lr_type_t *elem, uint64_t count) {
     lr_type_t *t = lr_arena_new(a, lr_type_t);
     t->kind = LR_TYPE_ARRAY;
+    t->array.elem = elem;
+    t->array.count = count;
+    return t;
+}
+
+lr_type_t *lr_type_vector(lr_arena_t *a, lr_type_t *elem, uint64_t count) {
+    lr_type_t *t = lr_arena_new(a, lr_type_t);
+    t->kind = LR_TYPE_VECTOR;
     t->array.elem = elem;
     t->array.count = count;
     return t;
@@ -954,6 +964,7 @@ size_t lr_type_size(const lr_type_t *t) {
     case LR_TYPE_DOUBLE: return 8;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_size(t->array.elem) * t->array.count;
+    case LR_TYPE_VECTOR: return lr_type_size(t->array.elem) * t->array.count;
     case LR_TYPE_STRUCT: {
         size_t sz = 0;
         for (uint32_t i = 0; i < t->struc.num_fields; i++) {
@@ -988,6 +999,13 @@ size_t lr_type_align(const lr_type_t *t) {
     case LR_TYPE_DOUBLE: return 8;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_align(t->array.elem);
+    case LR_TYPE_VECTOR: {
+        size_t sz = lr_type_size(t->array.elem) * t->array.count;
+        size_t ea = lr_type_align(t->array.elem);
+        if (sz < ea)
+            sz = ea;
+        return sz > 0 ? sz : 1;
+    }
     case LR_TYPE_STRUCT: {
         if (t->struc.packed) return 1;
         size_t max_a = 1;
@@ -1048,7 +1066,7 @@ bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
             continue;
         }
 
-        if (cur->kind == LR_TYPE_ARRAY) {
+        if (cur->kind == LR_TYPE_ARRAY || cur->kind == LR_TYPE_VECTOR) {
             if (idx >= cur->array.count) {
                 return false;
             }
@@ -1178,7 +1196,7 @@ bool lr_gep_analyze_step(const lr_type_t *cur_ty, bool first_index,
         return true;
     }
 
-    if (cur_ty->kind == LR_TYPE_ARRAY) {
+    if (cur_ty->kind == LR_TYPE_ARRAY || cur_ty->kind == LR_TYPE_VECTOR) {
         size_t elem_size = lr_type_size(cur_ty->array.elem);
         out->next_type = cur_ty->array.elem;
         if (idx_op->kind == LR_VAL_IMM_I64) {
@@ -1249,40 +1267,158 @@ static const char *type_name(const lr_type_t *t) {
 }
 
 static void print_type(const lr_type_t *t, FILE *out) {
+    if (!t) {
+        fprintf(out, "void");
+        return;
+    }
     if (t->kind <= LR_TYPE_PTR) {
         fprintf(out, "%s", type_name(t));
     } else if (t->kind == LR_TYPE_ARRAY) {
         fprintf(out, "[%lu x ", (unsigned long)t->array.count);
         print_type(t->array.elem, out);
         fprintf(out, "]");
+    } else if (t->kind == LR_TYPE_VECTOR) {
+        fprintf(out, "<%lu x ", (unsigned long)t->array.count);
+        print_type(t->array.elem, out);
+        fprintf(out, ">");
     } else if (t->kind == LR_TYPE_STRUCT) {
+        if (t->struc.packed)
+            fprintf(out, "<");
         fprintf(out, "{ ");
         for (uint32_t i = 0; i < t->struc.num_fields; i++) {
             if (i > 0) fprintf(out, ", ");
             print_type(t->struc.fields[i], out);
         }
         fprintf(out, " }");
+        if (t->struc.packed)
+            fprintf(out, ">");
+    } else if (t->kind == LR_TYPE_FUNC) {
+        if (t->func.ret)
+            print_type(t->func.ret, out);
+        else
+            fprintf(out, "void");
+        fprintf(out, " (");
+        for (uint32_t i = 0; i < t->func.num_params; i++) {
+            if (i > 0)
+                fprintf(out, ", ");
+            print_type(t->func.params[i], out);
+        }
+        if (t->func.vararg) {
+            if (t->func.num_params > 0)
+                fprintf(out, ", ");
+            fprintf(out, "...");
+        }
+        fprintf(out, ")");
+    }
+}
+
+static bool ir_name_is_plain(const char *name) {
+    if (!name || !name[0])
+        return false;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        unsigned char c = *p;
+        if ((c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') ||
+            c == '_' || c == '.' || c == '$' || c == '-') {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static void print_ir_escaped_name(FILE *out, const char *name) {
+    fputc('"', out);
+    for (const unsigned char *p = (const unsigned char *)name; p && *p; p++) {
+        if (*p == '"' || *p == '\\')
+            fputc('\\', out);
+        fputc((int)*p, out);
+    }
+    fputc('"', out);
+}
+
+static void print_ir_symbol_ref(FILE *out, char prefix, const char *name) {
+    fputc(prefix, out);
+    if (!name || !name[0]) {
+        fputc('?', out);
+        return;
+    }
+    if (ir_name_is_plain(name)) {
+        fputs(name, out);
+    } else {
+        print_ir_escaped_name(out, name);
     }
 }
 
 static void print_operand(const lr_operand_t *op, const lr_module_t *m,
-                          FILE *out) {
+                          const lr_func_t *f, FILE *out) {
+    (void)f;
     switch (op->kind) {
     case LR_VAL_VREG:    fprintf(out, "%%v%u", op->vreg); break;
-    case LR_VAL_IMM_I64: fprintf(out, "%ld", (long)op->imm_i64); break;
-    case LR_VAL_IMM_F64: fprintf(out, "%g", op->imm_f64); break;
-    case LR_VAL_BLOCK:   fprintf(out, "label %%bb%u", op->block_id); break;
-    case LR_VAL_GLOBAL: {
-        const char *name = lr_module_symbol_name(m, op->global_id);
-        if (name) fprintf(out, "@%s", name);
-        else fprintf(out, "@g%u", op->global_id);
-        if (op->global_offset > 0)
-            fprintf(out, "+%ld", (long)op->global_offset);
-        else if (op->global_offset < 0)
-            fprintf(out, "%ld", (long)op->global_offset);
+    case LR_VAL_IMM_I64:
+        if (op->type &&
+            (op->type->kind == LR_TYPE_STRUCT || op->type->kind == LR_TYPE_ARRAY ||
+             op->type->kind == LR_TYPE_VECTOR)) {
+            fprintf(out, "zeroinitializer");
+        } else if (op->type &&
+                   (op->type->kind == LR_TYPE_FLOAT ||
+                    op->type->kind == LR_TYPE_DOUBLE)) {
+            if (op->imm_i64 == 0) {
+                fprintf(out, "0.0");
+            } else {
+                fprintf(out, "%ld.0", (long)op->imm_i64);
+            }
+        } else if (op->type && op->type->kind == LR_TYPE_PTR && op->imm_i64 == 0) {
+            fprintf(out, "null");
+        } else {
+            fprintf(out, "%ld", (long)op->imm_i64);
+        }
+        break;
+    case LR_VAL_IMM_F64: {
+        union {
+            double d;
+            uint64_t u;
+        } bits;
+        if (op->type && op->type->kind == LR_TYPE_FLOAT) {
+            float fv = (float)op->imm_f64;
+            bits.d = (double)fv;
+        } else {
+            bits.d = op->imm_f64;
+        }
+        fprintf(out, "0x%016" PRIX64, bits.u);
         break;
     }
-    case LR_VAL_NULL:    fprintf(out, "null"); break;
+    case LR_VAL_BLOCK: {
+        fprintf(out, "label %%bb%u", op->block_id);
+        break;
+    }
+    case LR_VAL_GLOBAL: {
+        const char *name = lr_module_symbol_name(m, op->global_id);
+        if (op->global_offset != 0) {
+            fprintf(out, "getelementptr (i8, ptr ");
+            if (name)
+                print_ir_symbol_ref(out, '@', name);
+            else
+                fprintf(out, "@g%u", op->global_id);
+            fprintf(out, ", i64 %ld)", (long)op->global_offset);
+        } else {
+            if (name)
+                print_ir_symbol_ref(out, '@', name);
+            else
+                fprintf(out, "@g%u", op->global_id);
+        }
+        break;
+    }
+    case LR_VAL_NULL:
+        if (op->type &&
+            (op->type->kind == LR_TYPE_STRUCT || op->type->kind == LR_TYPE_ARRAY ||
+             op->type->kind == LR_TYPE_VECTOR)) {
+            fprintf(out, "zeroinitializer");
+        } else {
+            fprintf(out, "null");
+        }
+        break;
     case LR_VAL_UNDEF:   fprintf(out, "undef"); break;
     }
 }
@@ -1403,14 +1539,62 @@ static bool inst_has_dest(const lr_inst_t *inst) {
     }
 }
 
-void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
+static const char *noop_cast_opcode(const lr_type_t *t) {
+    if (!t)
+        return "select";
+    switch (t->kind) {
+    case LR_TYPE_I1:
+    case LR_TYPE_I8:
+    case LR_TYPE_I16:
+    case LR_TYPE_I32:
+    case LR_TYPE_I64:
+        return "add";
+    case LR_TYPE_FLOAT:
+    case LR_TYPE_DOUBLE:
+        return "fadd";
+    case LR_TYPE_PTR:
+        return "getelementptr";
+    default:
+        return "select";
+    }
+}
+
+void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
+                  const lr_func_t *f, FILE *out) {
     if (!inst || !out)
         return;
+
+    const lr_type_t *cast_src_ty = NULL;
+    bool no_op_cast = false;
+    bool vector_extract = false;
+    bool vector_insert = false;
+    if (is_cast_op(inst->op) && inst->num_operands > 0) {
+        cast_src_ty = inst->operands[0].type;
+        no_op_cast = (cast_src_ty && inst->type && cast_src_ty == inst->type);
+    }
+    if (inst->op == LR_OP_EXTRACTVALUE && inst->num_operands > 0 &&
+        inst->operands[0].type &&
+        inst->operands[0].type->kind == LR_TYPE_VECTOR) {
+        vector_extract = true;
+    }
+    if (inst->op == LR_OP_INSERTVALUE &&
+        ((inst->type && inst->type->kind == LR_TYPE_VECTOR) ||
+         (inst->num_operands > 0 && inst->operands[0].type &&
+          inst->operands[0].type->kind == LR_TYPE_VECTOR))) {
+        vector_insert = true;
+    }
 
     fprintf(out, "  ");
     if (inst_has_dest(inst))
         fprintf(out, "%%v%u = ", inst->dest);
-    fprintf(out, "%s ", opcode_name(inst->op));
+    if (vector_extract) {
+        fprintf(out, "extractelement ");
+    } else if (vector_insert) {
+        fprintf(out, "insertelement ");
+    } else {
+        fprintf(out, "%s ", no_op_cast ? noop_cast_opcode(inst->type)
+                                       : opcode_name(inst->op));
+    }
 
     switch (inst->op) {
     case LR_OP_RET_VOID:
@@ -1424,22 +1608,22 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
             print_type(inst->type, out);
         fprintf(out, " ");
         if (inst->num_operands > 0)
-            print_operand(&inst->operands[0], m, out);
+            print_operand(&inst->operands[0], m, f, out);
         break;
 
     case LR_OP_BR:
         if (inst->num_operands > 0)
-            print_operand(&inst->operands[0], m, out);
+            print_operand(&inst->operands[0], m, f, out);
         break;
 
     case LR_OP_CONDBR:
         if (inst->num_operands >= 3) {
             fprintf(out, "i1 ");
-            print_operand(&inst->operands[0], m, out);
+            print_operand(&inst->operands[0], m, f, out);
             fprintf(out, ", ");
-            print_operand(&inst->operands[1], m, out);
+            print_operand(&inst->operands[1], m, f, out);
             fprintf(out, ", ");
-            print_operand(&inst->operands[2], m, out);
+            print_operand(&inst->operands[2], m, f, out);
         }
         break;
 
@@ -1448,9 +1632,9 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
             if (inst->operands[0].type)
                 print_type(inst->operands[0].type, out);
             fprintf(out, " ");
-            print_operand(&inst->operands[0], m, out);
+            print_operand(&inst->operands[0], m, f, out);
             fprintf(out, ", ptr ");
-            print_operand(&inst->operands[1], m, out);
+            print_operand(&inst->operands[1], m, f, out);
         }
         break;
 
@@ -1458,7 +1642,21 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
         if (inst->type) print_type(inst->type, out);
         if (inst->num_operands > 0) {
             fprintf(out, ", ptr ");
-            print_operand(&inst->operands[0], m, out);
+            print_operand(&inst->operands[0], m, f, out);
+        }
+        break;
+
+    case LR_OP_ALLOCA:
+        if (inst->type)
+            print_type(inst->type, out);
+        if (inst->num_operands > 0) {
+            fprintf(out, ", ");
+            if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            else
+                fprintf(out, "i64");
+            fprintf(out, " ");
+            print_operand(&inst->operands[0], m, f, out);
         }
         break;
 
@@ -1466,7 +1664,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
         print_type(inst->type, out);
         fprintf(out, " ");
         if (inst->num_operands > 0) {
-            print_operand(&inst->operands[0], m, out);
+            print_operand(&inst->operands[0], m, f, out);
             fprintf(out, "(");
             for (uint32_t i = 1; i < inst->num_operands; i++) {
                 if (i > 1) fprintf(out, ", ");
@@ -1474,7 +1672,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
                     print_type(inst->operands[i].type, out);
                     fprintf(out, " ");
                 }
-                print_operand(&inst->operands[i], m, out);
+                print_operand(&inst->operands[i], m, f, out);
             }
             fprintf(out, ")");
         }
@@ -1487,7 +1685,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
         fprintf(out, " ");
         for (uint32_t i = 0; i < inst->num_operands; i++) {
             if (i > 0) fprintf(out, ", ");
-            print_operand(&inst->operands[i], m, out);
+            print_operand(&inst->operands[i], m, f, out);
         }
         break;
 
@@ -1498,33 +1696,236 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
         fprintf(out, " ");
         for (uint32_t i = 0; i < inst->num_operands; i++) {
             if (i > 0) fprintf(out, ", ");
-            print_operand(&inst->operands[i], m, out);
+            print_operand(&inst->operands[i], m, f, out);
         }
         break;
 
     case LR_OP_GEP:
         if (inst->type) print_type(inst->type, out);
-        for (uint32_t i = 0; i < inst->num_operands; i++) {
-            fprintf(out, ", ");
-            if (i == 0)
-                fprintf(out, "ptr ");
-            else if (inst->operands[i].type) {
-                print_type(inst->operands[i].type, out);
-                fprintf(out, " ");
+        {
+            const lr_type_t *cur_ty = inst->type;
+            for (uint32_t i = 0; i < inst->num_operands; i++) {
+                const lr_type_t *idx_ty = inst->operands[i].type;
+                bool first_index = (i == 1);
+                if (i > 1 && cur_ty && cur_ty->kind == LR_TYPE_STRUCT &&
+                    inst->operands[i].kind == LR_VAL_IMM_I64 &&
+                    m && m->type_i32) {
+                    /* LLVM textual IR requires struct GEP field indices to be i32 constants. */
+                    idx_ty = m->type_i32;
+                }
+                fprintf(out, ", ");
+                if (i == 0) {
+                    fprintf(out, "ptr ");
+                } else if (idx_ty) {
+                    print_type(idx_ty, out);
+                    fprintf(out, " ");
+                }
+                print_operand(&inst->operands[i], m, f, out);
+                if (i > 0) {
+                    lr_gep_step_t step;
+                    if (lr_gep_analyze_step(cur_ty, first_index,
+                                            &inst->operands[i], &step)) {
+                        cur_ty = step.next_type;
+                    }
+                }
             }
-            print_operand(&inst->operands[i], m, out);
+        }
+        break;
+
+    case LR_OP_PHI:
+        if (inst->type)
+            print_type(inst->type, out);
+        for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+            const lr_operand_t *val = &inst->operands[i];
+            const lr_operand_t *blk = &inst->operands[i + 1];
+            if (i == 0) {
+                fprintf(out, " ");
+            } else {
+                fprintf(out, ", ");
+            }
+            fprintf(out, "[ ");
+            print_operand(val, m, f, out);
+            fprintf(out, ", ");
+            if (blk->kind == LR_VAL_BLOCK) {
+                fprintf(out, "%%bb%u", blk->block_id);
+            } else {
+                print_operand(blk, m, f, out);
+            }
+            fprintf(out, " ]");
+        }
+        break;
+
+    case LR_OP_SELECT:
+        if (inst->num_operands >= 3) {
+            fprintf(out, "i1 ");
+            print_operand(&inst->operands[0], m, f, out);
+            fprintf(out, ", ");
+            if (inst->type)
+                print_type(inst->type, out);
+            else
+                fprintf(out, "i64");
+            fprintf(out, " ");
+            print_operand(&inst->operands[1], m, f, out);
+            fprintf(out, ", ");
+            if (inst->type)
+                print_type(inst->type, out);
+            else
+                fprintf(out, "i64");
+            fprintf(out, " ");
+            print_operand(&inst->operands[2], m, f, out);
+        }
+        break;
+
+    case LR_OP_EXTRACTVALUE:
+        if (vector_extract && inst->num_operands > 0) {
+            if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            else
+                fprintf(out, "ptr");
+            fprintf(out, " ");
+            print_operand(&inst->operands[0], m, f, out);
+            if (inst->num_indices > 0 && inst->indices) {
+                fprintf(out, ", i32 %u", inst->indices[0]);
+            } else if (inst->num_operands > 1) {
+                fprintf(out, ", ");
+                if (inst->operands[1].type)
+                    print_type(inst->operands[1].type, out);
+                else
+                    fprintf(out, "i32");
+                fprintf(out, " ");
+                print_operand(&inst->operands[1], m, f, out);
+            } else {
+                fprintf(out, ", i32 0");
+            }
+        } else if (inst->num_operands > 0) {
+            if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            else
+                fprintf(out, "ptr");
+            fprintf(out, " ");
+            print_operand(&inst->operands[0], m, f, out);
+            if (inst->num_indices > 0 && inst->indices) {
+                for (uint32_t i = 0; i < inst->num_indices; i++)
+                    fprintf(out, ", %u", inst->indices[i]);
+            } else {
+                for (uint32_t i = 1; i < inst->num_operands; i++) {
+                    fprintf(out, ", ");
+                    print_operand(&inst->operands[i], m, f, out);
+                }
+            }
+        }
+        break;
+
+    case LR_OP_INSERTVALUE:
+        if (vector_insert && inst->num_operands >= 2) {
+            if (inst->type)
+                print_type(inst->type, out);
+            else if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            else
+                fprintf(out, "ptr");
+            fprintf(out, " ");
+            print_operand(&inst->operands[0], m, f, out);
+            fprintf(out, ", ");
+            if (inst->operands[1].type)
+                print_type(inst->operands[1].type, out);
+            else
+                fprintf(out, "i64");
+            fprintf(out, " ");
+            print_operand(&inst->operands[1], m, f, out);
+            if (inst->num_indices > 0 && inst->indices) {
+                fprintf(out, ", i32 %u", inst->indices[0]);
+            } else if (inst->num_operands > 2) {
+                fprintf(out, ", ");
+                if (inst->operands[2].type)
+                    print_type(inst->operands[2].type, out);
+                else
+                    fprintf(out, "i32");
+                fprintf(out, " ");
+                print_operand(&inst->operands[2], m, f, out);
+            } else {
+                fprintf(out, ", i32 0");
+            }
+        } else if (inst->num_operands >= 2) {
+            if (inst->type)
+                print_type(inst->type, out);
+            else if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            else
+                fprintf(out, "ptr");
+            fprintf(out, " ");
+            print_operand(&inst->operands[0], m, f, out);
+            fprintf(out, ", ");
+            if (inst->operands[1].type)
+                print_type(inst->operands[1].type, out);
+            else
+                fprintf(out, "i64");
+            fprintf(out, " ");
+            print_operand(&inst->operands[1], m, f, out);
+            if (inst->num_indices > 0 && inst->indices) {
+                for (uint32_t i = 0; i < inst->num_indices; i++)
+                    fprintf(out, ", %u", inst->indices[i]);
+            } else {
+                for (uint32_t i = 2; i < inst->num_operands; i++) {
+                    fprintf(out, ", ");
+                    print_operand(&inst->operands[i], m, f, out);
+                }
+            }
         }
         break;
 
     default:
         if (is_cast_op(inst->op)) {
-            if (inst->num_operands > 0 && inst->operands[0].type) {
-                print_type(inst->operands[0].type, out);
-                fprintf(out, " ");
-                print_operand(&inst->operands[0], m, out);
+            const lr_type_t *src_ty = NULL;
+            const lr_type_t *dst_ty = inst->type;
+            if (inst->num_operands > 0)
+                src_ty = inst->operands[0].type;
+
+            /* LLVM textual IR rejects no-op casts (e.g. `sext i64 ... to i64`). */
+            if (no_op_cast && inst->num_operands > 0) {
+                switch (dst_ty->kind) {
+                case LR_TYPE_I1:
+                case LR_TYPE_I8:
+                case LR_TYPE_I16:
+                case LR_TYPE_I32:
+                case LR_TYPE_I64:
+                    print_type(dst_ty, out);
+                    fprintf(out, " ");
+                    print_operand(&inst->operands[0], m, f, out);
+                    fprintf(out, ", 0");
+                    break;
+                case LR_TYPE_FLOAT:
+                case LR_TYPE_DOUBLE:
+                    print_type(dst_ty, out);
+                    fprintf(out, " ");
+                    print_operand(&inst->operands[0], m, f, out);
+                    fprintf(out, ", 0.0");
+                    break;
+                case LR_TYPE_PTR:
+                    fprintf(out, "i8, ptr ");
+                    print_operand(&inst->operands[0], m, f, out);
+                    fprintf(out, ", i64 0");
+                    break;
+                default:
+                    fprintf(out, "i1 true, ");
+                    print_type(dst_ty, out);
+                    fprintf(out, " ");
+                    print_operand(&inst->operands[0], m, f, out);
+                    fprintf(out, ", ");
+                    print_type(dst_ty, out);
+                    fprintf(out, " ");
+                    print_operand(&inst->operands[0], m, f, out);
+                    break;
+                }
+            } else {
+                if (inst->num_operands > 0 && src_ty) {
+                    print_type(src_ty, out);
+                    fprintf(out, " ");
+                    print_operand(&inst->operands[0], m, f, out);
+                }
+                fprintf(out, " to ");
+                if (dst_ty) print_type(dst_ty, out);
             }
-            fprintf(out, " to ");
-            if (inst->type) print_type(inst->type, out);
         } else {
             if (inst->type) {
                 print_type(inst->type, out);
@@ -1532,7 +1933,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m, FILE *out) {
             }
             for (uint32_t i = 0; i < inst->num_operands; i++) {
                 if (i > 0) fprintf(out, ", ");
-                print_operand(&inst->operands[i], m, out);
+                print_operand(&inst->operands[i], m, f, out);
             }
         }
         break;
@@ -1575,6 +1976,10 @@ static lr_type_t *merge_remap_type(lr_module_t *dest, const lr_type_t *t) {
         return lr_type_array(dest->arena,
                              merge_remap_type(dest, t->array.elem),
                              t->array.count);
+    case LR_TYPE_VECTOR:
+        return lr_type_vector(dest->arena,
+                              merge_remap_type(dest, t->array.elem),
+                              t->array.count);
     case LR_TYPE_STRUCT: {
         lr_type_t **fields = NULL;
         char *name = NULL;
@@ -1797,7 +2202,9 @@ void lr_dump_func_signature(const lr_func_t *f, FILE *out) {
     is_decl = f->is_decl || !f->first_block;
     fprintf(out, "%s ", is_decl ? "declare" : "define");
     print_type(f->ret_type, out);
-    fprintf(out, " @%s(", f->name);
+    fprintf(out, " ");
+    print_ir_symbol_ref(out, '@', f->name);
+    fprintf(out, "(");
     for (uint32_t i = 0; i < f->num_params; i++) {
         if (i > 0) fprintf(out, ", ");
         print_type(f->param_types[i], out);
@@ -1813,7 +2220,22 @@ void lr_dump_func_signature(const lr_func_t *f, FILE *out) {
 void lr_dump_block_label(const lr_block_t *b, FILE *out) {
     if (!b || !out)
         return;
-    fprintf(out, "%s:\n", b->name);
+    fprintf(out, "bb%u:\n", b->id);
+}
+
+static bool inst_is_terminator(const lr_inst_t *inst) {
+    if (!inst)
+        return false;
+    switch (inst->op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_UNREACHABLE:
+        return true;
+    default:
+        return false;
+    }
 }
 
 void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
@@ -1828,17 +2250,317 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
         return;
     }
     fprintf(out, " {\n");
+
     for (lr_block_t *b = f->first_block; b; b = b->next) {
+        lr_inst_t **insts = NULL;
+        size_t ninst = 0;
+        size_t cap = 0;
+        size_t term_idx = (size_t)-1;
+
         lr_dump_block_label(b, out);
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next)
-            lr_dump_inst(inst, m, out);
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (ninst == cap) {
+                size_t new_cap = cap ? cap * 2u : 16u;
+                lr_inst_t **tmp = (lr_inst_t **)realloc(insts,
+                    new_cap * sizeof(*tmp));
+                if (!tmp)
+                    break;
+                insts = tmp;
+                cap = new_cap;
+            }
+            insts[ninst++] = inst;
+        }
+
+        for (size_t i = 0; i < ninst; i++) {
+            if (term_idx == (size_t)-1 && inst_is_terminator(insts[i]))
+                term_idx = i;
+        }
+
+        for (size_t i = 0; i < ninst; i++) {
+            if (!inst_is_terminator(insts[i]))
+                lr_dump_inst(insts[i], m, f, out);
+        }
+
+        if (term_idx != (size_t)-1) {
+            lr_dump_inst(insts[term_idx], m, f, out);
+        } else {
+            if (b->next)
+                fprintf(out, "  br label %%bb%u\n", b->next->id);
+            else
+                fprintf(out, "  unreachable\n");
+        }
+        free(insts);
     }
     fprintf(out, "}\n");
+}
+
+static uint8_t global_init_byte(const lr_global_t *g, size_t off) {
+    if (!g || !g->init_data || off >= g->init_size)
+        return 0;
+    return g->init_data[off];
+}
+
+static bool global_has_reloc_in_range(const lr_global_t *g, size_t off, size_t len) {
+    if (!g || len == 0)
+        return false;
+    for (const lr_reloc_t *r = g->relocs; r; r = r->next) {
+        if (r->offset >= off && r->offset < off + len)
+            return true;
+    }
+    return false;
+}
+
+static const lr_reloc_t *global_reloc_at(const lr_global_t *g, size_t off) {
+    if (!g)
+        return NULL;
+    for (const lr_reloc_t *r = g->relocs; r; r = r->next) {
+        if (r->offset == off)
+            return r;
+    }
+    return NULL;
+}
+
+static bool global_range_all_zero(const lr_global_t *g, size_t off, size_t len) {
+    if (!g || len == 0)
+        return true;
+    if (global_has_reloc_in_range(g, off, len))
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        if (global_init_byte(g, off + i) != 0)
+            return false;
+    }
+    return true;
+}
+
+static uint64_t global_read_le_u64(const lr_global_t *g, size_t off, size_t nbytes) {
+    uint64_t v = 0;
+    size_t n = nbytes > 8 ? 8 : nbytes;
+    for (size_t i = 0; i < n; i++)
+        v |= ((uint64_t)global_init_byte(g, off + i)) << (8u * i);
+    return v;
+}
+
+static int64_t sign_extend_u64(uint64_t raw, uint8_t bits) {
+    if (bits == 0 || bits >= 64)
+        return (int64_t)raw;
+    uint64_t mask = (1ull << bits) - 1ull;
+    uint64_t sign = 1ull << (bits - 1);
+    raw &= mask;
+    if (raw & sign)
+        raw |= ~mask;
+    return (int64_t)raw;
+}
+
+static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
+                                   size_t off, bool with_type, FILE *out);
+
+static void dump_global_scalar_expr(const lr_global_t *g, const lr_type_t *ty,
+                                    size_t off, FILE *out) {
+    switch (ty->kind) {
+    case LR_TYPE_I1: {
+        uint64_t v = global_read_le_u64(g, off, 1);
+        fprintf(out, "%u", (unsigned)(v & 1u));
+        break;
+    }
+    case LR_TYPE_I8: {
+        int64_t v = sign_extend_u64(global_read_le_u64(g, off, 1), 8);
+        fprintf(out, "%" PRId64, v);
+        break;
+    }
+    case LR_TYPE_I16: {
+        int64_t v = sign_extend_u64(global_read_le_u64(g, off, 2), 16);
+        fprintf(out, "%" PRId64, v);
+        break;
+    }
+    case LR_TYPE_I32: {
+        int64_t v = sign_extend_u64(global_read_le_u64(g, off, 4), 32);
+        fprintf(out, "%" PRId64, v);
+        break;
+    }
+    case LR_TYPE_I64: {
+        int64_t v = (int64_t)global_read_le_u64(g, off, 8);
+        fprintf(out, "%" PRId64, v);
+        break;
+    }
+    case LR_TYPE_FLOAT: {
+        union {
+            uint32_t u;
+            float f;
+        } bits32;
+        union {
+            double d;
+            uint64_t u;
+        } bits64;
+        bits32.u = (uint32_t)global_read_le_u64(g, off, 4);
+        bits64.d = (double)bits32.f;
+        fprintf(out, "0x%016" PRIX64, bits64.u);
+        break;
+    }
+    case LR_TYPE_DOUBLE: {
+        union {
+            uint64_t u;
+            double d;
+        } bits;
+        bits.u = global_read_le_u64(g, off, 8);
+        fprintf(out, "0x%016" PRIX64, bits.u);
+        break;
+    }
+    case LR_TYPE_PTR: {
+        const lr_reloc_t *r = global_reloc_at(g, off);
+        if (r && r->symbol_name && r->symbol_name[0]) {
+            if (r->addend == 0) {
+                print_ir_symbol_ref(out, '@', r->symbol_name);
+            } else {
+                fprintf(out, "getelementptr (i8, ptr ");
+                print_ir_symbol_ref(out, '@', r->symbol_name);
+                fprintf(out, ", i64 %" PRId64 ")", r->addend);
+            }
+            break;
+        }
+        if (global_range_all_zero(g, off, lr_type_size(ty))) {
+            fprintf(out, "null");
+            break;
+        }
+        fprintf(out, "inttoptr (i64 %" PRIu64 " to ptr)",
+                global_read_le_u64(g, off, lr_type_size(ty)));
+        break;
+    }
+    default:
+        fprintf(out, "zeroinitializer");
+        break;
+    }
+}
+
+static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
+                                   size_t off, bool with_type, FILE *out) {
+    if (!ty) {
+        fprintf(out, "zeroinitializer");
+        return;
+    }
+    if (with_type) {
+        print_type(ty, out);
+        fprintf(out, " ");
+    }
+    switch (ty->kind) {
+    case LR_TYPE_ARRAY: {
+        size_t elem_sz = lr_type_size(ty->array.elem);
+        uint64_t n = ty->array.count;
+        if (global_range_all_zero(g, off, lr_type_size(ty))) {
+            fprintf(out, "zeroinitializer");
+            break;
+        }
+        fprintf(out, "[");
+        for (uint64_t i = 0; i < n; i++) {
+            if (i > 0)
+                fprintf(out, ", ");
+            dump_global_const_expr(g, ty->array.elem, off + (size_t)i * elem_sz, true, out);
+        }
+        fprintf(out, "]");
+        break;
+    }
+    case LR_TYPE_VECTOR: {
+        size_t elem_sz = lr_type_size(ty->array.elem);
+        uint64_t n = ty->array.count;
+        if (global_range_all_zero(g, off, lr_type_size(ty))) {
+            fprintf(out, "zeroinitializer");
+            break;
+        }
+        fprintf(out, "<");
+        for (uint64_t i = 0; i < n; i++) {
+            if (i > 0)
+                fprintf(out, ", ");
+            dump_global_const_expr(g, ty->array.elem, off + (size_t)i * elem_sz, true, out);
+        }
+        fprintf(out, ">");
+        break;
+    }
+    case LR_TYPE_STRUCT: {
+        if (global_range_all_zero(g, off, lr_type_size(ty))) {
+            fprintf(out, "zeroinitializer");
+            break;
+        }
+        if (ty->struc.packed)
+            fprintf(out, "<{ ");
+        else
+            fprintf(out, "{ ");
+        for (uint32_t i = 0; i < ty->struc.num_fields; i++) {
+            if (i > 0)
+                fprintf(out, ", ");
+            size_t field_off = off + lr_struct_field_offset(ty, i);
+            dump_global_const_expr(g, ty->struc.fields[i], field_off, true, out);
+        }
+        if (ty->struc.packed)
+            fprintf(out, " }>");
+        else
+            fprintf(out, " }");
+        break;
+    }
+    case LR_TYPE_VOID:
+    case LR_TYPE_FUNC:
+        fprintf(out, "zeroinitializer");
+        break;
+    default:
+        dump_global_scalar_expr(g, ty, off, out);
+        break;
+    }
+}
+
+static void lr_dump_global(const lr_global_t *g, FILE *out) {
+    static const lr_type_t fallback_ptr_type = { .kind = LR_TYPE_PTR };
+    const lr_type_t *gty;
+    if (!g || !out)
+        return;
+    if (g->type && g->type->kind == LR_TYPE_FUNC) {
+        fprintf(out, "declare ");
+        if (g->type->func.ret)
+            print_type(g->type->func.ret, out);
+        else
+            fprintf(out, "void");
+        fprintf(out, " ");
+        print_ir_symbol_ref(out, '@', g->name);
+        fprintf(out, "(");
+        for (uint32_t i = 0; i < g->type->func.num_params; i++) {
+            if (i > 0)
+                fprintf(out, ", ");
+            if (g->type->func.params && g->type->func.params[i])
+                print_type(g->type->func.params[i], out);
+            else
+                fprintf(out, "ptr");
+        }
+        if (g->type->func.vararg) {
+            if (g->type->func.num_params > 0)
+                fprintf(out, ", ");
+            fprintf(out, "...");
+        }
+        fprintf(out, ")\n");
+        return;
+    }
+    gty = g->type ? g->type : &fallback_ptr_type;
+    print_ir_symbol_ref(out, '@', g->name);
+    fprintf(out, " = ");
+    if (g->is_external) {
+        fprintf(out, "external global ");
+        print_type(gty, out);
+        fprintf(out, "\n");
+        return;
+    }
+    fprintf(out, "private %s ", g->is_const ? "constant" : "global");
+    print_type(gty, out);
+    fprintf(out, " ");
+    if ((g->init_data && g->init_size > 0) || g->relocs)
+        dump_global_const_expr(g, gty, 0, false, out);
+    else
+        fprintf(out, "zeroinitializer");
+    fprintf(out, "\n");
 }
 
 void lr_module_dump(lr_module_t *m, FILE *out) {
     if (!m || !out)
         return;
+    for (lr_global_t *g = m->first_global; g; g = g->next)
+        lr_dump_global(g, out);
+    if (m->first_global && m->first_func)
+        fprintf(out, "\n");
     for (lr_func_t *f = m->first_func; f; f = f->next)
         lr_dump_func(f, m, out);
 }

@@ -106,6 +106,9 @@ if(WITH_REAL_LLVM_BACKEND)
 endif()
 
 option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
+option(LIRIC_INSTALL_COMPAT_HEADERS
+    "Install deprecated liric_compat.h forwarding header"
+    OFF)
 if(WITH_REAL_LLVM_BACKEND AND WITH_LLVM_COMPAT)
     if(LIRIC_BACKEND_LLVM_VERSION_MAJOR LESS LIRIC_LLVM_COMPAT_MIN_MAJOR)
         message(FATAL_ERROR
@@ -139,7 +142,9 @@ add_library(liric STATIC
     src/target_riscv64.c
     src/jit.c
     src/liric.c
+    src/compiler.c
     src/liric_compat.c
+    src/llvm_c_shim.c
     src/stencil_data.c
     src/stencil_runtime.c
     src/session.c
@@ -222,13 +227,13 @@ add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
 
-add_executable(bench_compat_check tools/bench_compat_check.c)
+add_executable(bench_compat_check tools/bench_compat_check.c tools/bench_common.c)
 target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_ll tools/bench_ll.c)
+add_executable(bench_ll tools/bench_ll.c tools/bench_common.c)
 target_link_libraries(bench_ll PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_api tools/bench_api.c)
+add_executable(bench_api tools/bench_api.c tools/bench_common.c)
 target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_api_callgrind_hot tools/bench_api_callgrind_hot.c)
@@ -237,11 +242,14 @@ target_link_libraries(bench_api_callgrind_hot PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_corpus tools/bench_corpus.c)
 target_link_libraries(bench_corpus PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_corpus_compare tools/bench_corpus_compare.c)
+add_executable(bench_corpus_compare tools/bench_corpus_compare.c tools/bench_common.c)
 target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_exe_matrix tools/bench_exe_matrix.c)
 target_link_libraries(bench_exe_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
+
+add_executable(bench_matrix tools/bench_matrix.c)
+target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
 if(WITH_BENCH_TCC)
@@ -328,6 +336,7 @@ add_executable(test_liric
     tests/test_stencil_gen.c
     tests/test_stencil_runtime.c
     tests/test_platform_os.c
+    tests/test_llvm_c_shim.c
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
@@ -523,6 +532,11 @@ add_test(
 )
 
 add_test(
+    NAME bench_matrix_help
+    COMMAND $<TARGET_FILE:bench_matrix> --help
+)
+
+add_test(
     NAME bench_api_nonzero_compat
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
@@ -672,8 +686,21 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(DIRECTORY include/liric DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES
+    include/liric/liric.h
+    include/liric/liric_legacy.h
+    include/liric/liric_ir_shared.h
+    include/liric/liric_types.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
+)
+if(LIRIC_INSTALL_COMPAT_HEADERS)
+    install(FILES
+        include/liric/liric_compat.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
+    )
+endif()
 install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(DIRECTORY include/llvm-c DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(WITH_LLVM_COMPAT)

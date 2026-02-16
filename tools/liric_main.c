@@ -2,13 +2,13 @@
 #include "../src/bc_decode.h"
 #include "../src/ir.h"
 #include "../src/jit.h"
-#include "../src/liric.h"
 #include "../src/ll_parser.h"
 #include "../src/objfile.h"
 #include "../src/target.h"
 #include "../src/wasm_decode.h"
 #include "../src/wasm_to_ir.h"
-#include <liric/liric_session.h>
+#include <liric/liric.h>
+#include <liric/liric_legacy.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +73,25 @@ static bool is_wasm_binary(const uint8_t *data, size_t len) {
            data[1] == 'a' &&
            data[2] == 's' &&
            data[3] == 'm';
+}
+
+static int backend_from_env(lr_backend_t *out_backend) {
+    const char *mode = getenv("LIRIC_COMPILE_MODE");
+    if (!out_backend)
+        return -1;
+    if (!mode || !mode[0] || strcmp(mode, "isel") == 0) {
+        *out_backend = LR_BACKEND_ISEL;
+        return 0;
+    }
+    if (strcmp(mode, "copy_patch") == 0 || strcmp(mode, "stencil") == 0) {
+        *out_backend = LR_BACKEND_COPY_PATCH;
+        return 0;
+    }
+    if (strcmp(mode, "llvm") == 0) {
+        *out_backend = LR_BACKEND_LLVM;
+        return 0;
+    }
+    return -1;
 }
 
 static void dump_module_functions(lr_module_t *m, FILE *out) {
@@ -249,38 +268,73 @@ int main(int argc, char **argv) {
         }
     }
 
-    bool is_ll_text = !is_wasm_binary((const uint8_t *)src, src_len) &&
-                       !lr_bc_is_bitcode((const uint8_t *)src, src_len);
+    if (jit_mode) {
+        lr_backend_t backend = LR_BACKEND_ISEL;
+        lr_compiler_config_t cfg;
+        lr_compiler_error_t cerr = {0};
+        lr_compiler_t *compiler = NULL;
 
-    if (jit_mode && is_ll_text && !runtime_path) {
-        lr_session_config_t cfg = {0};
-        cfg.mode = LR_MODE_DIRECT;
+        if (backend_from_env(&backend) != 0) {
+            fprintf(stderr, "invalid LIRIC_COMPILE_MODE value\n");
+            free(src);
+            return 1;
+        }
+
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.policy = LR_POLICY_DIRECT;
+        cfg.backend = backend;
         cfg.target = target_name;
-        lr_error_t serr;
-        lr_session_t *sess = lr_session_create(&cfg, &serr);
-        if (!sess) {
-            fprintf(stderr, "session creation failed: %s\n", serr.msg);
+
+        compiler = lr_compiler_create(&cfg, &cerr);
+        if (!compiler) {
+            fprintf(stderr, "compiler creation failed: %s\n",
+                    cerr.msg[0] ? cerr.msg : "unknown error");
             free(src);
             return 1;
         }
 
         for (int i = 0; i < num_load_libs; i++) {
-            lr_session_add_symbol(sess, load_libs[i], NULL);
+            if (lr_compiler_load_library(compiler, load_libs[i], &cerr) != 0) {
+                fprintf(stderr, "failed to load library '%s': %s\n", load_libs[i],
+                        cerr.msg[0] ? cerr.msg : "unknown error");
+                lr_compiler_destroy(compiler);
+                free(src);
+                return 1;
+            }
         }
 
-        int parse_rc = lr_parse_ll_to_session(src, src_len, sess,
-                                               err, sizeof(err));
-        if (parse_rc != 0) {
-            fprintf(stderr, "streaming parse error: %s\n", err);
-            lr_session_destroy(sess);
+        if (runtime_path) {
+            size_t rt_len = 0;
+            char *rt_src = read_file(runtime_path, &rt_len);
+            if (!rt_src) {
+                fprintf(stderr, "failed to read runtime: %s\n", runtime_path);
+                lr_compiler_destroy(compiler);
+                free(src);
+                return 1;
+            }
+            if (lr_compiler_feed_ll(compiler, rt_src, rt_len, &cerr) != 0) {
+                fprintf(stderr, "runtime parse error: %s\n",
+                        cerr.msg[0] ? cerr.msg : "unknown error");
+                free(rt_src);
+                lr_compiler_destroy(compiler);
+                free(src);
+                return 1;
+            }
+            free(rt_src);
+        }
+
+        if (lr_compiler_feed_auto(compiler, (const uint8_t *)src, src_len, &cerr) != 0) {
+            fprintf(stderr, "streaming parse error: %s\n",
+                    cerr.msg[0] ? cerr.msg : "unknown error");
+            lr_compiler_destroy(compiler);
             free(src);
             return 1;
         }
 
-        void *fn_addr = lr_session_lookup(sess, func_name);
+        void *fn_addr = lr_compiler_lookup(compiler, func_name);
         if (!fn_addr) {
             fprintf(stderr, "function '%s' not found\n", func_name);
-            lr_session_destroy(sess);
+            lr_compiler_destroy(compiler);
             free(src);
             return 1;
         }
@@ -291,117 +345,7 @@ int main(int argc, char **argv) {
         int result = fn();
         printf("%d\n", result);
 
-        lr_session_destroy(sess);
-        free(src);
-        return 0;
-    }
-
-    bool is_bc = lr_bc_is_bitcode((const uint8_t *)src, src_len);
-    if (jit_mode && is_bc && !runtime_path) {
-        lr_session_config_t cfg = {0};
-        cfg.mode = LR_MODE_DIRECT;
-        cfg.target = target_name;
-        lr_error_t serr;
-        lr_session_t *sess = lr_session_create(&cfg, &serr);
-        if (!sess) {
-            fprintf(stderr, "session creation failed: %s\n", serr.msg);
-            free(src);
-            return 1;
-        }
-
-        for (int i = 0; i < num_load_libs; i++) {
-            lr_session_add_symbol(sess, load_libs[i], NULL);
-        }
-
-        int parse_rc = lr_parse_bc_to_session((const uint8_t *)src, src_len,
-                                               sess, err, sizeof(err));
-        if (parse_rc != 0) {
-            fprintf(stderr, "bc streaming parse error: %s\n", err);
-            lr_session_destroy(sess);
-            free(src);
-            return 1;
-        }
-
-        void *fn_addr = lr_session_lookup(sess, func_name);
-        if (!fn_addr) {
-            fprintf(stderr, "function '%s' not found\n", func_name);
-            lr_session_destroy(sess);
-            free(src);
-            return 1;
-        }
-
-        typedef int (*fn_t)(void);
-        fn_t fn;
-        memcpy(&fn, &fn_addr, sizeof(fn_addr));
-        int result = fn();
-        printf("%d\n", result);
-
-        lr_session_destroy(sess);
-        free(src);
-        return 0;
-    }
-
-    bool is_wasm = is_wasm_binary((const uint8_t *)src, src_len);
-    if (jit_mode && is_wasm && !runtime_path) {
-        lr_session_config_t cfg = {0};
-        cfg.mode = LR_MODE_DIRECT;
-        cfg.target = target_name;
-        lr_error_t serr;
-        lr_session_t *sess = lr_session_create(&cfg, &serr);
-        if (!sess) {
-            fprintf(stderr, "session creation failed: %s\n", serr.msg);
-            free(src);
-            return 1;
-        }
-
-        for (int i = 0; i < num_load_libs; i++) {
-            lr_session_add_symbol(sess, load_libs[i], NULL);
-        }
-
-        lr_arena_t *wasm_arena = lr_arena_create(0);
-        if (!wasm_arena) {
-            fprintf(stderr, "arena allocation failed\n");
-            lr_session_destroy(sess);
-            free(src);
-            return 1;
-        }
-
-        lr_wasm_module_t *wmod = lr_wasm_decode((const uint8_t *)src, src_len,
-                                                 wasm_arena, err, sizeof(err));
-        if (!wmod) {
-            fprintf(stderr, "wasm decode error: %s\n", err);
-            lr_arena_destroy(wasm_arena);
-            lr_session_destroy(sess);
-            free(src);
-            return 1;
-        }
-
-        void *last_addr = NULL;
-        lr_error_t wasm_err = {0};
-        int wasm_rc = lr_wasm_to_session(wmod, sess, &last_addr, &wasm_err);
-        lr_arena_destroy(wasm_arena);
-        if (wasm_rc != 0) {
-            fprintf(stderr, "wasm streaming error: %s\n", wasm_err.msg);
-            lr_session_destroy(sess);
-            free(src);
-            return 1;
-        }
-
-        void *fn_addr = lr_session_lookup(sess, func_name);
-        if (!fn_addr) {
-            fprintf(stderr, "function '%s' not found\n", func_name);
-            lr_session_destroy(sess);
-            free(src);
-            return 1;
-        }
-
-        typedef int (*fn_t)(void);
-        fn_t fn;
-        memcpy(&fn, &fn_addr, sizeof(fn_addr));
-        int result = fn();
-        printf("%d\n", result);
-
-        lr_session_destroy(sess);
+        lr_compiler_destroy(compiler);
         free(src);
         return 0;
     }

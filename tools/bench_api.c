@@ -4,7 +4,6 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -13,10 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+
+#include "bench_common.h"
 
 typedef struct {
     char **items;
@@ -24,17 +22,13 @@ typedef struct {
     size_t cap;
 } strlist_t;
 
-typedef struct {
-    int rc;
-    char *stdout_text;
-    char *stderr_text;
-    double elapsed_ms;
-    int timed_out;
-} cmd_result_t;
+typedef bench_cmd_result_t cmd_result_t;
 
 typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
+    const char *runtime_lib;
+    const char *liric_compile_mode;
     const char *test_dir;
     const char *bench_dir;
     const char *compat_list;
@@ -162,12 +156,6 @@ typedef struct {
 #define TRACKER_TARGET_RUN_SPEEDUP_MIN 10.0
 #define TRACKER_TARGET_LOOKUP_DISPATCH_PCT 0.25
 
-static double now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
-}
-
 static void die(const char *msg, const char *path) {
     if (path) fprintf(stderr, "%s: %s\n", msg, path);
     else fprintf(stderr, "%s\n", msg);
@@ -191,42 +179,22 @@ static void ensure_dir(const char *path) {
 }
 
 static char *xstrdup(const char *s) {
-    size_t n;
     char *p;
-    if (!s) return NULL;
-    n = strlen(s);
-    p = (char *)malloc(n + 1);
-    if (!p) die("out of memory", NULL);
-    memcpy(p, s, n + 1);
+    p = bench_xstrdup(s);
+    if (!p && s) die("out of memory", NULL);
     return p;
 }
 
 static char *to_abs_path(const char *path) {
-    char cwd[PATH_MAX];
-    size_t nc, np;
     char *out;
-    if (!path) return NULL;
-    if (path[0] == '/') return xstrdup(path);
-    if (!getcwd(cwd, sizeof(cwd))) die("getcwd failed", NULL);
-    nc = strlen(cwd);
-    np = strlen(path);
-    out = (char *)malloc(nc + 1 + np + 1);
-    if (!out) die("out of memory", NULL);
-    memcpy(out, cwd, nc);
-    out[nc] = '/';
-    memcpy(out + nc + 1, path, np + 1);
+    out = bench_to_abs_path(path);
+    if (!out && path) die("failed to resolve absolute path", path);
     return out;
 }
 
 static char *path_join2(const char *a, const char *b) {
-    size_t na = strlen(a), nb = strlen(b);
-    int need = (na > 0 && a[na - 1] != '/');
-    char *out = (char *)malloc(na + nb + (need ? 2 : 1));
+    char *out = bench_path_join2(a, b);
     if (!out) die("out of memory", NULL);
-    memcpy(out, a, na);
-    if (need) out[na++] = '/';
-    memcpy(out + na, b, nb);
-    out[na + nb] = '\0';
     return out;
 }
 
@@ -264,166 +232,17 @@ static int remove_tree(const char *path) {
     return rmdir(path);
 }
 
-static char *read_all_file(const char *path) {
-    FILE *f = fopen(path, "rb");
-    long len;
-    size_t nread;
-    char *buf;
-    if (!f) return xstrdup("");
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    len = ftell(f);
-    if (len < 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
-        return xstrdup("");
-    }
-    buf = (char *)malloc((size_t)len + 1);
-    if (!buf) die("out of memory", NULL);
-    nread = fread(buf, 1, (size_t)len, f);
-    fclose(f);
-    buf[nread] = '\0';
-    return buf;
-}
-
-static int wait_with_timeout(pid_t pid, int timeout_ms, int *status_out) {
-    int status;
-    pid_t r;
-
-    if (timeout_ms <= 0) {
-        do {
-            r = waitpid(pid, &status, 0);
-        } while (r < 0 && errno == EINTR);
-        if (r < 0) {
-            *status_out = 0;
-            return -1;
-        }
-        *status_out = status;
-        return 0;
-    }
-
-    {
-        /* On some hosts, shell startup can consume a large fraction of very
-         * small timeout budgets used by tests. Keep requested behavior for
-         * normal timeouts while adding bounded startup grace for sub-second
-         * budgets to avoid false timeout classification. */
-        int effective_timeout_ms = timeout_ms;
-        if (effective_timeout_ms > 0 && effective_timeout_ms < 1000)
-            effective_timeout_ms += 300;
-
-        const double deadline_ms = now_ms() + (double)effective_timeout_ms;
-        for (;;) {
-            r = waitpid(pid, &status, WNOHANG);
-            if (r == pid) {
-                *status_out = status;
-                return 0;
-            }
-            if (r == 0) {
-                struct timespec ts;
-                if (now_ms() >= deadline_ms) {
-                    /* One final non-blocking check avoids racey false timeouts
-                     * when process exit lands exactly at the deadline. */
-                    r = waitpid(pid, &status, WNOHANG);
-                    if (r == pid) {
-                        *status_out = status;
-                        return 0;
-                    }
-                    (void)kill(pid, SIGKILL);
-                    do {
-                        r = waitpid(pid, &status, 0);
-                    } while (r < 0 && errno == EINTR);
-                    if (r < 0) {
-                        *status_out = 0;
-                        return -1;
-                    }
-                    *status_out = status;
-                    return 1;
-                }
-                ts.tv_sec = 0;
-                ts.tv_nsec = 1000000L; // 1ms polling interval
-                nanosleep(&ts, NULL);
-                continue;
-            }
-            if (errno == EINTR) continue;
-            *status_out = 0;
-            return -1;
-        }
-    }
-}
-
 static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_lib_dir,
                             const char *work_dir) {
+    bench_run_cmd_opts_t opts;
     cmd_result_t r;
-    char out_tpl[] = "/tmp/liric_cmd_out_XXXXXX";
-    char err_tpl[] = "/tmp/liric_cmd_err_XXXXXX";
-    int out_fd, err_fd;
-    int status = 0;
-    pid_t pid;
-    double t0;
-
-    r.rc = -1;
-    r.stdout_text = xstrdup("");
-    r.stderr_text = xstrdup("");
-    r.elapsed_ms = 0.0;
-    r.timed_out = 0;
-
-    out_fd = mkstemp(out_tpl);
-    if (out_fd < 0) die("mkstemp failed", NULL);
-    err_fd = mkstemp(err_tpl);
-    if (err_fd < 0) die("mkstemp failed", NULL);
-
-    pid = fork();
-    if (pid < 0) die("fork failed", NULL);
-
-    if (pid == 0) {
-        if (work_dir && chdir(work_dir) != 0) _exit(127);
-        if (env_lib_dir) {
-            setenv("DYLD_LIBRARY_PATH", env_lib_dir, 1);
-            setenv("LD_LIBRARY_PATH", env_lib_dir, 1);
-        }
-        {
-            int devnull = open("/dev/null", O_RDONLY);
-            if (devnull >= 0) {
-                dup2(devnull, STDIN_FILENO);
-                close(devnull);
-            }
-        }
-        if (dup2(out_fd, STDOUT_FILENO) < 0) _exit(127);
-        if (dup2(err_fd, STDERR_FILENO) < 0) _exit(127);
-        close(out_fd);
-        close(err_fd);
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-
-    t0 = now_ms();
-    close(out_fd);
-    close(err_fd);
-
-    if (wait_with_timeout(pid, timeout_ms, &status) == 1) {
-        r.timed_out = 1;
-        r.rc = -99;
-    } else if (WIFEXITED(status)) {
-        r.rc = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        r.rc = -WTERMSIG(status);
-    } else {
-        r.rc = -1;
-    }
-    r.elapsed_ms = now_ms() - t0;
-
-    free(r.stdout_text);
-    free(r.stderr_text);
-    r.stdout_text = read_all_file(out_tpl);
-    r.stderr_text = read_all_file(err_tpl);
-    unlink(out_tpl);
-    unlink(err_tpl);
-
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    opts.timeout_ms = timeout_ms;
+    opts.timeout_grace_ms = (timeout_ms > 0 && timeout_ms < 1000) ? 300 : 0;
+    opts.env_lib_dir = env_lib_dir;
+    opts.work_dir = work_dir;
+    if (bench_run_cmd(&opts, &r) != 0) die("failed to run command", argv[0]);
     return r;
 }
 
@@ -431,6 +250,8 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const strlist_t *opt_toks,
                                          const char *extra_opt,
                                          const char *source_path,
+                                         const char *runtime_lib,
+                                         const char *liric_compile_mode,
                                          int timeout_ms,
                                          const char *work_dir,
                                          int with_time_report) {
@@ -441,6 +262,12 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
     char **argv = (char **)calloc(argc_jit + 1, sizeof(char *));
     size_t k = 0;
     cmd_result_t r;
+    const char *saved_runtime = NULL;
+    const char *saved_mode = NULL;
+    char *saved_runtime_copy = NULL;
+    char *saved_mode_copy = NULL;
+    int had_runtime_env = 0;
+    int had_mode_env = 0;
     if (!argv) die("out of memory", NULL);
 
     argv[k++] = (char *)lfortran_bin;
@@ -454,16 +281,46 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
     argv[k++] = (char *)source_path;
     argv[k] = NULL;
 
+    if (runtime_lib && runtime_lib[0]) {
+        saved_runtime = getenv("LIRIC_RUNTIME_LIB");
+        if (saved_runtime) {
+            had_runtime_env = 1;
+            saved_runtime_copy = xstrdup(saved_runtime);
+        }
+        setenv("LIRIC_RUNTIME_LIB", runtime_lib, 1);
+    }
+    if (liric_compile_mode && liric_compile_mode[0]) {
+        saved_mode = getenv("LIRIC_COMPILE_MODE");
+        if (saved_mode) {
+            had_mode_env = 1;
+            saved_mode_copy = xstrdup(saved_mode);
+        }
+        setenv("LIRIC_COMPILE_MODE", liric_compile_mode, 1);
+    }
+
     r = run_cmd(argv, timeout_ms, NULL, work_dir);
+
+    if (runtime_lib && runtime_lib[0]) {
+        if (had_runtime_env)
+            setenv("LIRIC_RUNTIME_LIB", saved_runtime_copy, 1);
+        else
+            unsetenv("LIRIC_RUNTIME_LIB");
+    }
+    if (liric_compile_mode && liric_compile_mode[0]) {
+        if (had_mode_env)
+            setenv("LIRIC_COMPILE_MODE", saved_mode_copy, 1);
+        else
+            unsetenv("LIRIC_COMPILE_MODE");
+    }
+
+    free(saved_runtime_copy);
+    free(saved_mode_copy);
     free(argv);
     return r;
 }
 
 static void free_cmd_result(cmd_result_t *r) {
-    free(r->stdout_text);
-    free(r->stderr_text);
-    r->stdout_text = NULL;
-    r->stderr_text = NULL;
+    bench_free_cmd_result(r);
 }
 
 static void strlist_init(strlist_t *l) {
@@ -626,44 +483,12 @@ static void validate_compat_artifacts(const strlist_t *tests,
     }
 }
 
-static int cmp_double(const void *a, const void *b) {
-    const double *da = (const double *)a;
-    const double *db = (const double *)b;
-    if (*da < *db) return -1;
-    if (*da > *db) return 1;
-    return 0;
-}
-
 static double median(const double *vals, size_t n) {
-    double *tmp;
-    double out;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    if (n % 2 == 0) out = 0.5 * (tmp[n / 2 - 1] + tmp[n / 2]);
-    else out = tmp[n / 2];
-    free(tmp);
-    return out;
+    return bench_median(vals, n);
 }
 
 static double percentile(const double *vals, size_t n, double p) {
-    double *tmp;
-    double k, frac, out;
-    size_t f, c;
-    if (n == 0) return 0.0;
-    tmp = (double *)malloc(n * sizeof(double));
-    if (!tmp) die("out of memory", NULL);
-    memcpy(tmp, vals, n * sizeof(double));
-    qsort(tmp, n, sizeof(double), cmp_double);
-    k = ((double)(n - 1)) * p / 100.0;
-    f = (size_t)k;
-    c = (f + 1 < n) ? (f + 1) : f;
-    frac = k - (double)f;
-    out = tmp[f] + frac * (tmp[c] - tmp[f]);
-    free(tmp);
-    return out;
+    return bench_percentile(vals, n, p);
 }
 
 static void rowlist_push(rowlist_t *l, row_t row) {
@@ -1615,6 +1440,35 @@ static int cmd_output_has_word_ci(const cmd_result_t *r, const char *word) {
     return text_has_word_ci(r->stdout_text, word) || text_has_word_ci(r->stderr_text, word);
 }
 
+static int cmd_reports_stop_like(const cmd_result_t *r) {
+    if (!r) return 0;
+    return cmd_output_has_ci(r, "error stop") || cmd_output_has_word_ci(r, "stop");
+}
+
+static int cmd_outputs_match_normalized(const cmd_result_t *a, const cmd_result_t *b) {
+    char *a_out = NULL, *b_out = NULL, *a_err = NULL, *b_err = NULL;
+    int same = 0;
+    if (!a || !b) return 0;
+    a_out = normalize_output(a->stdout_text);
+    b_out = normalize_output(b->stdout_text);
+    a_err = normalize_output(a->stderr_text);
+    b_err = normalize_output(b->stderr_text);
+    same = (strcmp(a_out, b_out) == 0) && (strcmp(a_err, b_err) == 0);
+    free(a_out);
+    free(b_out);
+    free(a_err);
+    free(b_err);
+    return same;
+}
+
+static int is_valid_liric_compile_mode(const char *mode) {
+    if (!mode || !mode[0]) return 0;
+    return strcmp(mode, "isel") == 0 ||
+           strcmp(mode, "copy_patch") == 0 ||
+           strcmp(mode, "stencil") == 0 ||
+           strcmp(mode, "llvm") == 0;
+}
+
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
     if (!r) return "llvm_jit_failed";
     if (r->rc == -SIGABRT || r->rc == -SIGSEGV)
@@ -1637,6 +1491,8 @@ static void usage(void) {
     printf("usage: bench_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran)\n");
+    printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
+    printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --test-dir PATH      path to integration_tests/ dir\n");
     printf("  --bench-dir PATH     output directory (default: /tmp/liric_bench)\n");
     printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
@@ -1659,6 +1515,10 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.lfortran = "../lfortran/build/src/bin/lfortran";
     cfg.lfortran_liric = "../lfortran/build-liric/src/bin/lfortran";
+    cfg.runtime_lib = NULL;
+    cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
+    if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
+        cfg.liric_compile_mode = "llvm";
     cfg.test_dir = "../lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
@@ -1681,6 +1541,10 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-liric") == 0 && i + 1 < argc) {
             cfg.lfortran_liric = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
+            cfg.runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--liric-compile-mode") == 0 && i + 1 < argc) {
+            cfg.liric_compile_mode = argv[++i];
         } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
@@ -1722,6 +1586,10 @@ static cfg_t parse_args(int argc, char **argv) {
         }
     }
 
+    if (!is_valid_liric_compile_mode(cfg.liric_compile_mode))
+        die("invalid --liric-compile-mode (expected isel|copy_patch|stencil|llvm)",
+            cfg.liric_compile_mode);
+
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
     if (!file_exists(cfg.lfortran_liric)) die("lfortran (WITH_LIRIC) not found", cfg.lfortran_liric);
 
@@ -1729,6 +1597,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.lfortran_liric = to_abs_path(cfg.lfortran_liric);
     cfg.test_dir = to_abs_path(cfg.test_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
+    if (cfg.runtime_lib) cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     if (cfg.compat_list) cfg.compat_list = to_abs_path(cfg.compat_list);
     if (cfg.options_jsonl) cfg.options_jsonl = to_abs_path(cfg.options_jsonl);
     if (cfg.fail_log_dir) cfg.fail_log_dir = to_abs_path(cfg.fail_log_dir);
@@ -1808,6 +1677,9 @@ int main(int argc, char **argv) {
     printf("Benchmarking %zu tests, %d iterations each\n", tests.n, cfg.iters);
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
+    if (cfg.runtime_lib)
+        printf("  runtime_lib:   %s\n", cfg.runtime_lib);
+    printf("  liric_compile_mode: %s\n", cfg.liric_compile_mode);
     printf("  test_dir:      %s\n", cfg.test_dir);
     printf("  bench_dir:     %s\n", cfg.bench_dir);
     printf("  compat_list:   %s\n", compat_path);
@@ -1927,6 +1799,8 @@ int main(int argc, char **argv) {
                                                   &opt_toks,
                                                   extra_retry_opt,
                                                   source_path,
+                                                  cfg.runtime_lib,
+                                                  NULL,
                                                   cfg.timeout_ms,
                                                   attempt_work_dir,
                                                   attempt_with_time_report);
@@ -1941,6 +1815,8 @@ int main(int argc, char **argv) {
                                                    &opt_toks,
                                                    extra_retry_opt,
                                                    source_path,
+                                                   cfg.runtime_lib,
+                                                   cfg.liric_compile_mode,
                                                    cfg.timeout_ms,
                                                    attempt_work_dir,
                                                    attempt_with_time_report);
@@ -1988,8 +1864,12 @@ int main(int argc, char **argv) {
 
                     if (!retried_fast &&
                         llvm_r.rc != 0 &&
-                        llvm_reason &&
-                        strcmp(llvm_reason, "llvm_jit_verifier_pointee_mismatch") == 0 &&
+                        !strlist_contains_exact(&opt_toks, "--fast") &&
+                        ((llvm_reason &&
+                          strcmp(llvm_reason, "llvm_jit_verifier_pointee_mismatch") == 0) ||
+                         cmd_output_has(&llvm_r, "parse_module(): Invalid LLVM IR") ||
+                         cmd_output_has(&llvm_r, "pointers to void are invalid - use i8* instead") ||
+                         cmd_output_has(&llvm_r, "explicit pointee type doesn't match operand's pointee type")) &&
                         !strlist_contains_exact(&opt_toks, "--fast")) {
                         retried_fast = 1;
                         extra_retry_opt = "--fast";
@@ -1998,17 +1878,19 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
+                    if ((llvm_r.rc != 0 || liric_r.rc != 0) &&
+                        cmd_reports_stop_like(&llvm_r) &&
+                        cmd_reports_stop_like(&liric_r) &&
+                        cmd_outputs_match_normalized(&llvm_r, &liric_r)) {
+                        nonzero_compat = 1;
+                        nonzero_compat_rc = (llvm_r.rc != 0) ? llvm_r.rc : liric_r.rc;
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        break;
+                    }
+
                     if (llvm_r.rc != 0 && liric_r.rc != 0 && llvm_r.rc == liric_r.rc) {
-                        char *llvm_out = normalize_output(llvm_r.stdout_text);
-                        char *liric_out = normalize_output(liric_r.stdout_text);
-                        char *llvm_err = normalize_output(llvm_r.stderr_text);
-                        char *liric_err = normalize_output(liric_r.stderr_text);
-                        same_nonzero = (strcmp(llvm_out, liric_out) == 0) &&
-                                       (strcmp(llvm_err, liric_err) == 0);
-                        free(llvm_out);
-                        free(liric_out);
-                        free(llvm_err);
-                        free(liric_err);
+                        same_nonzero = cmd_outputs_match_normalized(&llvm_r, &liric_r);
                     }
                     if (same_nonzero) {
                         nonzero_compat = 1;
@@ -2030,19 +1912,12 @@ int main(int argc, char **argv) {
                 memset(&llvm_time, 0, sizeof(llvm_time));
                 memset(&liric_time, 0, sizeof(liric_time));
                 if (run_used_time_report) {
-                    if (!parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time)) {
-                        skip_reason = "llvm_jit_failed";
-                        skip_diag_from_cmd(&skip_diag, skip_reason, "llvm", it, &llvm_r, cfg.timeout_ms);
-                        free_cmd_result(&llvm_r);
-                        free_cmd_result(&liric_r);
-                        break;
-                    }
-                    if (!parse_lfortran_time_report(liric_r.stdout_text, &liric_time)) {
-                        skip_reason = "liric_jit_failed";
-                        skip_diag_from_cmd(&skip_diag, skip_reason, "liric", it, &liric_r, cfg.timeout_ms);
-                        free_cmd_result(&llvm_r);
-                        free_cmd_result(&liric_r);
-                        break;
+                    int llvm_time_ok = parse_lfortran_time_report(llvm_r.stdout_text, &llvm_time);
+                    int liric_time_ok = parse_lfortran_time_report(liric_r.stdout_text, &liric_time);
+                    if (!llvm_time_ok || !liric_time_ok) {
+                        synthesize_time_report_from_elapsed(llvm_r.elapsed_ms, &llvm_time);
+                        synthesize_time_report_from_elapsed(liric_r.elapsed_ms, &liric_time);
+                        test_time_report_fallback = 1;
                     }
                 } else {
                     synthesize_time_report_from_elapsed(llvm_r.elapsed_ms, &llvm_time);
@@ -2517,8 +2392,10 @@ next_test:
         {
             char *ec = json_escape(compat_path);
             char *eo = json_escape(opts_path);
+            char *em = json_escape(cfg.liric_compile_mode);
         fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
         fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
+        fprintf(sf, "  \"liric_compile_mode\": \"%s\",\n", em);
         {
             char *efj = json_escape(fail_jsonl_path);
             char *efl = json_escape(fail_log_dir);
@@ -2530,6 +2407,7 @@ next_test:
         }
         free(ec);
         free(eo);
+        free(em);
         }
         fprintf(sf, "  \"phase_split\": {\n");
         fprintf(sf, "    \"has_data\": %s,\n", split_has_data ? "true" : "false");

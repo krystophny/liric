@@ -797,7 +797,7 @@ static lr_type_t *parse_type(lr_parser_t *p) {
             expect(p, LR_TOK_X);
             lr_type_t *elem = parse_type(p);
             expect(p, LR_TOK_RANGLE);
-            ty = lr_type_array(p->arena, elem, count);
+            ty = lr_type_vector(p->arena, elem, count);
         } else {
             /* Packed struct: <{ ... }> */
             expect(p, LR_TOK_LBRACE);
@@ -953,7 +953,7 @@ static lr_operand_t parse_const_gep_operand(lr_parser_t *p, lr_type_t *result_ty
 
         if (idx_pos == 0) {
             byte_offset += idx * (int64_t)lr_type_size(cur_ty);
-        } else if (cur_ty->kind == LR_TYPE_ARRAY) {
+        } else if (cur_ty->kind == LR_TYPE_ARRAY || cur_ty->kind == LR_TYPE_VECTOR) {
             byte_offset += idx * (int64_t)lr_type_size(cur_ty->array.elem);
             cur_ty = cur_ty->array.elem;
         } else if (cur_ty->kind == LR_TYPE_STRUCT) {
@@ -1011,6 +1011,7 @@ static void pack_scalar_bits(uint8_t *buf, size_t offset, lr_type_t *ft,
 static lr_operand_t parse_struct_constant_fields(lr_parser_t *p,
                                                  lr_type_t *type,
                                                  lr_operand_t *field_ops,
+                                                 uint32_t field_cap,
                                                  uint32_t *nfields_out) {
     bool packed = check(p, LR_TOK_LANGLE);
     if (packed)
@@ -1023,7 +1024,7 @@ static lr_operand_t parse_struct_constant_fields(lr_parser_t *p,
 
     while (!check(p, LR_TOK_RBRACE) && !check(p, LR_TOK_EOF)) {
         lr_operand_t fop = parse_typed_operand(p);
-        if (field_ops && nf < max_fields)
+        if (field_ops && nf < field_cap && nf < max_fields)
             field_ops[nf] = fop;
         nf++;
         if (!match(p, LR_TOK_COMMA))
@@ -1061,13 +1062,22 @@ static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *
     if (check(p, LR_TOK_LBRACE) && type && type->kind == LR_TYPE_STRUCT) {
         lr_operand_t fields[AGG_FIELDS_MAX];
         uint32_t nf = 0;
-        return parse_struct_constant_fields(p, type, fields, &nf);
+        return parse_struct_constant_fields(p, type, fields, AGG_FIELDS_MAX, &nf);
     }
     if (check(p, LR_TOK_LANGLE)) {
         next(p);
-        skip_balanced_braces(p);
-        if (check(p, LR_TOK_RANGLE))
-            next(p);
+        if (type && type->kind == LR_TYPE_VECTOR) {
+            while (!check(p, LR_TOK_RANGLE) && !check(p, LR_TOK_EOF)) {
+                (void)parse_typed_operand(p);
+                if (!match(p, LR_TOK_COMMA))
+                    break;
+            }
+            expect(p, LR_TOK_RANGLE);
+        } else {
+            skip_balanced_braces(p);
+            if (check(p, LR_TOK_RANGLE))
+                next(p);
+        }
     } else if (check(p, LR_TOK_LBRACE)) {
         skip_balanced_braces(p);
     } else {
@@ -1151,8 +1161,10 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         if (type && type->kind == LR_TYPE_STRUCT) {
             lr_operand_t fields[AGG_FIELDS_MAX];
             uint32_t nf = 0;
-            return parse_struct_constant_fields(p, type, fields, &nf);
+            return parse_struct_constant_fields(p, type, fields, AGG_FIELDS_MAX, &nf);
         }
+        if (type && type->kind == LR_TYPE_VECTOR)
+            return parse_aggregate_constant_operand(p, type);
         next(p);
         if (!check(p, LR_TOK_LBRACE)) {
             error(p, "expected '{' after '<' in packed struct literal");
@@ -1579,6 +1591,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 uint32_t call_sig_fixed = 0;
                 bool sig_vararg = false;
                 uint32_t sig_fixed = 0;
+                lr_operand_t *args = NULL;
+                lr_operand_t *all_ops = NULL;
+                uint32_t args_cap = 0;
                 lr_type_t *ret_ty = call_result_type(parse_type(p),
                                                      &call_sig_vararg,
                                                      &call_sig_fixed);
@@ -1589,24 +1604,40 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 }
                 lr_operand_t callee = parse_operand(p, p->module->type_ptr);
                 expect(p, LR_TOK_LPAREN);
-                lr_operand_t args[64];
                 uint32_t nargs = 0;
                 if (!check(p, LR_TOK_RPAREN)) {
+                    if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                               nargs + 1u, 8u, sizeof(*args),
+                                               "call arguments")) {
+                        free(args);
+                        return;
+                    }
                     args[nargs++] = parse_typed_operand(p);
                     while (match(p, LR_TOK_COMMA)) {
                         skip_attrs(p);
+                        if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                                   nargs + 1u, 8u, sizeof(*args),
+                                                   "call arguments")) {
+                            free(args);
+                            return;
+                        }
                         args[nargs++] = parse_typed_operand(p);
                     }
                 }
                 expect(p, LR_TOK_RPAREN);
-                /* args[0..nargs-1] are the actual args, callee is separate */
-                lr_operand_t all_ops[65];
+                all_ops = (lr_operand_t *)malloc(sizeof(*all_ops) * (size_t)(nargs + 1u));
+                if (!all_ops) {
+                    free(args);
+                    error(p, "out of memory allocating call operand list");
+                    return;
+                }
                 all_ops[0] = callee;
-                for (uint32_t i = 0; i < nargs; i++)
-                    all_ops[i + 1] = args[i];
+                for (uint32_t i = 0; i < nargs; i++) all_ops[i + 1] = args[i];
                 emit_call(p, block, ret_ty, dest, all_ops, nargs + 1,
                           call_sig_vararg, call_sig_fixed,
                           callee.kind != LR_VAL_GLOBAL);
+                free(all_ops);
+                free(args);
                 /* skip trailing attribute groups */
                 skip_attrs(p);
                 break;
@@ -1663,15 +1694,29 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 skip_attrs(p);
                 lr_type_t *base_ty = parse_type(p);
                 expect(p, LR_TOK_COMMA);
-                lr_operand_t ops[16];
+                lr_operand_t *ops = NULL;
                 uint32_t nops = 0;
+                uint32_t ops_cap = 0;
+                if (!ensure_array_capacity(p, (void **)&ops, &ops_cap,
+                                           nops + 1u, 8u, sizeof(*ops),
+                                           "getelementptr operands")) {
+                    free(ops);
+                    return;
+                }
                 ops[nops++] = parse_typed_operand(p);
                 while (match(p, LR_TOK_COMMA)) {
                     lr_operand_t idx = parse_typed_operand(p);
                     idx = canonicalize_gep_index_operand(p, func, block, &idx);
+                    if (!ensure_array_capacity(p, (void **)&ops, &ops_cap,
+                                               nops + 1u, 8u, sizeof(*ops),
+                                               "getelementptr operands")) {
+                        free(ops);
+                        return;
+                    }
                     ops[nops++] = idx;
                 }
                 emit_inst(p, block, LR_OP_GEP, base_ty, dest, ops, nops);
+                free(ops);
                 break;
             }
 
@@ -1712,10 +1757,17 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
             case LR_TOK_EXTRACTVALUE: {
                 lr_operand_t src = parse_typed_operand(p);
-                uint32_t indices[16];
+                uint32_t *indices = NULL;
                 uint32_t nidx = 0;
+                uint32_t idx_cap = 0;
                 lr_type_t *result_ty = p->module->type_i64;
                 while (match(p, LR_TOK_COMMA)) {
+                    if (!ensure_array_capacity(p, (void **)&indices, &idx_cap,
+                                               nidx + 1u, 4u, sizeof(*indices),
+                                               "extractvalue indices")) {
+                        free(indices);
+                        return;
+                    }
                     indices[nidx++] = (uint32_t)p->cur.int_val;
                     expect(p, LR_TOK_INT_LIT);
                 }
@@ -1729,32 +1781,56 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 lr_operand_t ops[1] = {src};
                 emit_with_indices(p, block, LR_OP_EXTRACTVALUE, result_ty,
                                   dest, ops, 1, indices, nidx);
+                free(indices);
                 break;
             }
 
             case LR_TOK_LOCAL_ID: {
-                if (!token_equals(&p->prev, "extractelement")) {
+                if (!token_equals(&p->prev, "extractelement") &&
+                    !token_equals(&p->prev, "insertelement")) {
                     error(p, "unknown instruction '%.*s'", (int)p->prev.len, p->prev.start);
                     break;
                 }
-                lr_operand_t src = parse_typed_operand(p);
-                uint32_t idx = 0;
-                lr_type_t *result_ty = p->module->type_i64;
-                expect(p, LR_TOK_COMMA);
-                {
-                    lr_operand_t idx_op = parse_typed_operand(p);
-                    if (idx_op.kind == LR_VAL_IMM_I64) {
-                        idx = (uint32_t)idx_op.imm_i64;
-                    } else {
-                        error(p, "extractelement currently requires constant index");
+                if (token_equals(&p->prev, "extractelement")) {
+                    lr_operand_t src = parse_typed_operand(p);
+                    uint32_t idx = 0;
+                    lr_type_t *result_ty = p->module->type_i64;
+                    expect(p, LR_TOK_COMMA);
+                    {
+                        lr_operand_t idx_op = parse_typed_operand(p);
+                        if (idx_op.kind == LR_VAL_IMM_I64) {
+                            idx = (uint32_t)idx_op.imm_i64;
+                        } else {
+                            error(p, "extractelement currently requires constant index");
+                        }
                     }
+                    if (src.type &&
+                        (src.type->kind == LR_TYPE_ARRAY ||
+                         src.type->kind == LR_TYPE_VECTOR))
+                        result_ty = src.type->array.elem;
+                    lr_operand_t ops[1] = {src};
+                    uint32_t idx_arr[1] = {idx};
+                    emit_with_indices(p, block, LR_OP_EXTRACTVALUE, result_ty,
+                                      dest, ops, 1, idx_arr, 1);
+                } else {
+                    lr_operand_t agg = parse_typed_operand(p);
+                    expect(p, LR_TOK_COMMA);
+                    lr_operand_t val = parse_typed_operand(p);
+                    expect(p, LR_TOK_COMMA);
+                    uint32_t idx = 0;
+                    {
+                        lr_operand_t idx_op = parse_typed_operand(p);
+                        if (idx_op.kind == LR_VAL_IMM_I64) {
+                            idx = (uint32_t)idx_op.imm_i64;
+                        } else {
+                            error(p, "insertelement currently requires constant index");
+                        }
+                    }
+                    lr_operand_t ops[2] = {agg, val};
+                    uint32_t idx_arr[1] = {idx};
+                    emit_with_indices(p, block, LR_OP_INSERTVALUE, agg.type,
+                                      dest, ops, 2, idx_arr, 1);
                 }
-                if (src.type && src.type->kind == LR_TYPE_ARRAY)
-                    result_ty = src.type->array.elem;
-                lr_operand_t ops[1] = {src};
-                uint32_t idx_arr[1] = {idx};
-                emit_with_indices(p, block, LR_OP_EXTRACTVALUE, result_ty,
-                                  dest, ops, 1, idx_arr, 1);
                 break;
             }
 
@@ -1762,15 +1838,23 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 lr_operand_t agg = parse_typed_operand(p);
                 expect(p, LR_TOK_COMMA);
                 lr_operand_t val = parse_typed_operand(p);
-                uint32_t indices[16];
+                uint32_t *indices = NULL;
                 uint32_t nidx = 0;
+                uint32_t idx_cap = 0;
                 while (match(p, LR_TOK_COMMA)) {
+                    if (!ensure_array_capacity(p, (void **)&indices, &idx_cap,
+                                               nidx + 1u, 4u, sizeof(*indices),
+                                               "insertvalue indices")) {
+                        free(indices);
+                        return;
+                    }
                     indices[nidx++] = (uint32_t)p->cur.int_val;
                     expect(p, LR_TOK_INT_LIT);
                 }
                 lr_operand_t ops[2] = {agg, val};
                 emit_with_indices(p, block, LR_OP_INSERTVALUE, agg.type,
                                   dest, ops, 2, indices, nidx);
+                free(indices);
                 break;
             }
 
@@ -1812,6 +1896,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 uint32_t call_sig_fixed = 0;
                 bool sig_vararg = false;
                 uint32_t sig_fixed = 0;
+                lr_operand_t *args = NULL;
+                lr_operand_t *all_ops = NULL;
+                uint32_t args_cap = 0;
                 lr_type_t *ret_ty = call_result_type(parse_type(p),
                                                      &call_sig_vararg,
                                                      &call_sig_fixed);
@@ -1822,23 +1909,40 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 }
                 lr_operand_t callee = parse_operand(p, p->module->type_ptr);
                 expect(p, LR_TOK_LPAREN);
-                lr_operand_t args[64];
                 uint32_t nargs = 0;
                 if (!check(p, LR_TOK_RPAREN)) {
+                    if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                               nargs + 1u, 8u, sizeof(*args),
+                                               "invoke arguments")) {
+                        free(args);
+                        return;
+                    }
                     args[nargs++] = parse_typed_operand(p);
                     while (match(p, LR_TOK_COMMA)) {
                         skip_attrs(p);
+                        if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                                   nargs + 1u, 8u, sizeof(*args),
+                                                   "invoke arguments")) {
+                            free(args);
+                            return;
+                        }
                         args[nargs++] = parse_typed_operand(p);
                     }
                 }
                 expect(p, LR_TOK_RPAREN);
-                lr_operand_t all_ops[65];
+                all_ops = (lr_operand_t *)malloc(sizeof(*all_ops) * (size_t)(nargs + 1u));
+                if (!all_ops) {
+                    free(args);
+                    error(p, "out of memory allocating invoke operand list");
+                    return;
+                }
                 all_ops[0] = callee;
-                for (uint32_t i = 0; i < nargs; i++)
-                    all_ops[i + 1] = args[i];
+                for (uint32_t i = 0; i < nargs; i++) all_ops[i + 1] = args[i];
                 emit_call(p, block, ret_ty, dest, all_ops, nargs + 1,
                           call_sig_vararg, call_sig_fixed,
                           callee.kind != LR_VAL_GLOBAL);
+                free(all_ops);
+                free(args);
                 skip_attrs(p);
                 /* to label %normal unwind label %except */
                 expect(p, LR_TOK_TO);
@@ -1942,7 +2046,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         if (is_agg) {
             lr_operand_t fields[AGG_FIELDS_MAX];
             uint32_t nf = 0;
-            parse_struct_constant_fields(p, val_ty, fields, &nf);
+            parse_struct_constant_fields(p, val_ty, fields,
+                                         AGG_FIELDS_MAX, &nf);
             expect(p, LR_TOK_COMMA);
             lr_operand_t dst = parse_typed_operand(p);
             if (match(p, LR_TOK_COMMA)) {
@@ -2072,6 +2177,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         uint32_t call_sig_fixed = 0;
         bool sig_vararg = false;
         uint32_t sig_fixed = 0;
+        lr_operand_t *args = NULL;
+        lr_operand_t *all_ops = NULL;
+        uint32_t args_cap = 0;
         lr_type_t *ret_ty = call_result_type(parse_type(p),
                                              &call_sig_vararg,
                                              &call_sig_fixed);
@@ -2082,23 +2190,40 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         }
         lr_operand_t callee = parse_operand(p, p->module->type_ptr);
         expect(p, LR_TOK_LPAREN);
-        lr_operand_t args[64];
         uint32_t nargs = 0;
         if (!check(p, LR_TOK_RPAREN)) {
+            if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                       nargs + 1u, 8u, sizeof(*args),
+                                       "call arguments")) {
+                free(args);
+                return;
+            }
             args[nargs++] = parse_typed_operand(p);
             while (match(p, LR_TOK_COMMA)) {
                 skip_attrs(p);
+                if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                           nargs + 1u, 8u, sizeof(*args),
+                                           "call arguments")) {
+                    free(args);
+                    return;
+                }
                 args[nargs++] = parse_typed_operand(p);
             }
         }
         expect(p, LR_TOK_RPAREN);
-        lr_operand_t all_ops[65];
+        all_ops = (lr_operand_t *)malloc(sizeof(*all_ops) * (size_t)(nargs + 1u));
+        if (!all_ops) {
+            free(args);
+            error(p, "out of memory allocating call operand list");
+            return;
+        }
         all_ops[0] = callee;
-        for (uint32_t i = 0; i < nargs; i++)
-            all_ops[i + 1] = args[i];
+        for (uint32_t i = 0; i < nargs; i++) all_ops[i + 1] = args[i];
         emit_call(p, block, ret_ty, 0, all_ops, nargs + 1,
                   call_sig_vararg, call_sig_fixed,
                   callee.kind != LR_VAL_GLOBAL);
+        free(all_ops);
+        free(args);
         skip_attrs(p);
         return;
     }
@@ -2110,6 +2235,9 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         uint32_t call_sig_fixed = 0;
         bool sig_vararg = false;
         uint32_t sig_fixed = 0;
+        lr_operand_t *args = NULL;
+        lr_operand_t *all_ops = NULL;
+        uint32_t args_cap = 0;
         lr_type_t *ret_ty = call_result_type(parse_type(p),
                                              &call_sig_vararg,
                                              &call_sig_fixed);
@@ -2120,23 +2248,40 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
         }
         lr_operand_t callee = parse_operand(p, p->module->type_ptr);
         expect(p, LR_TOK_LPAREN);
-        lr_operand_t args[64];
         uint32_t nargs = 0;
         if (!check(p, LR_TOK_RPAREN)) {
+            if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                       nargs + 1u, 8u, sizeof(*args),
+                                       "invoke arguments")) {
+                free(args);
+                return;
+            }
             args[nargs++] = parse_typed_operand(p);
             while (match(p, LR_TOK_COMMA)) {
                 skip_attrs(p);
+                if (!ensure_array_capacity(p, (void **)&args, &args_cap,
+                                           nargs + 1u, 8u, sizeof(*args),
+                                           "invoke arguments")) {
+                    free(args);
+                    return;
+                }
                 args[nargs++] = parse_typed_operand(p);
             }
         }
         expect(p, LR_TOK_RPAREN);
-        lr_operand_t all_ops[65];
+        all_ops = (lr_operand_t *)malloc(sizeof(*all_ops) * (size_t)(nargs + 1u));
+        if (!all_ops) {
+            free(args);
+            error(p, "out of memory allocating invoke operand list");
+            return;
+        }
         all_ops[0] = callee;
-        for (uint32_t i = 0; i < nargs; i++)
-            all_ops[i + 1] = args[i];
+        for (uint32_t i = 0; i < nargs; i++) all_ops[i + 1] = args[i];
         emit_call(p, block, ret_ty, 0, all_ops, nargs + 1,
                   call_sig_vararg, call_sig_fixed,
                   callee.kind != LR_VAL_GLOBAL);
+        free(all_ops);
+        free(args);
         skip_attrs(p);
         expect(p, LR_TOK_TO);
         expect(p, LR_TOK_LABEL);
@@ -2331,8 +2476,7 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
             register_func(p, name, func);
             parse_function_body(p, func, param_names);
             if (!p->had_error) {
-                void *addr = NULL;
-                if (lr_session_func_end(p->session, &addr, &serr) != 0) {
+                if (lr_session_func_end(p->session, NULL, &serr) != 0) {
                     error(p, "session func_end failed for '%s': %s",
                           name, serr.msg);
                 }
@@ -2495,6 +2639,21 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
 
     if (check(p, LR_TOK_LANGLE)) {
         next(p);
+        if (ty && ty->kind == LR_TYPE_VECTOR) {
+            size_t elem_sz = lr_type_size(ty->array.elem);
+            for (uint64_t i = 0; i < ty->array.count; i++) {
+                if (check(p, LR_TOK_RANGLE))
+                    break;
+                (void)parse_type(p);
+                skip_attrs(p);
+                size_t elem_off = base_offset + i * elem_sz;
+                parse_init_field_value(p, g, buf, buf_size, ty->array.elem, elem_off);
+                if (!match(p, LR_TOK_COMMA))
+                    break;
+            }
+            expect(p, LR_TOK_RANGLE);
+            return;
+        }
         expect(p, LR_TOK_LBRACE);
         packed_struct = true;
     } else if (check(p, LR_TOK_LBRACE)) {

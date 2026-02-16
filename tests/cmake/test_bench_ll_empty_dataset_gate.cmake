@@ -3,11 +3,9 @@ if(NOT DEFINED BENCH_LL OR NOT DEFINED WORKDIR)
 endif()
 
 set(root "${WORKDIR}/bench_ll_empty_dataset_gate")
-set(runtime_bc "${root}/runtime.bc")
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${root}")
-file(WRITE "${runtime_bc}" "placeholder")
 
 find_program(TRUE_BIN NAMES true)
 if(NOT TRUE_BIN)
@@ -27,7 +25,6 @@ function(run_case case_name allow_empty expect_rc)
         --bench-dir "${bench_dir}"
         --probe-runner "${TRUE_BIN}"
         --runtime-lib "${TRUE_BIN}"
-        --runtime-bc "${runtime_bc}"
         --lli-phases "${TRUE_BIN}"
         --iters 1
         --timeout 1

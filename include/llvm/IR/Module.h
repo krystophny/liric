@@ -1,8 +1,7 @@
 #ifndef LLVM_IR_MODULE_H
 #define LLVM_IR_MODULE_H
 
-#include <liric/liric_compat.h>
-#include <liric/liric.h>
+#include <llvm-c/LiricCompat.h>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -21,7 +20,13 @@
 
 namespace llvm {
 
-class Module {
+#if defined(__GNUC__) || defined(__clang__)
+#define LIRIC_LLVM_COMPAT_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define LIRIC_LLVM_COMPAT_HIDDEN
+#endif
+
+class LIRIC_LLVM_COMPAT_HIDDEN Module {
     lc_module_compat_t *compat_;
     LLVMContext &ctx_;
     std::string name_;
@@ -89,7 +94,17 @@ public:
                     lr_func_t *irf = of->getIRFunc();
                     if (irf == f) return of.get();
                 }
-                return nullptr;
+                lc_value_t *fv = lc_func_declare(compat_, f->name, f->type);
+                if (!fv)
+                    return nullptr;
+                auto fn = std::make_unique<Function>();
+                fn->setFuncVal(fv);
+                fn->setCompatMod(compat_);
+                Function *ptr = fn.get();
+                detail::register_value_wrapper(ptr, fv);
+                const_cast<Module *>(this)->owned_functions_.push_back(std::move(fn));
+                detail::register_function_wrapper(ptr->getIRFunc(), ptr);
+                return ptr;
             }
         }
         return nullptr;
@@ -201,6 +216,8 @@ public:
         return ptr;
     }
 };
+
+#undef LIRIC_LLVM_COMPAT_HIDDEN
 
 inline lc_module_compat_t *liric_get_current_module() {
     return Module::getCurrentModule();

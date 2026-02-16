@@ -1,13 +1,19 @@
 #ifndef LLVM_IR_LLVMCONTEXT_H
 #define LLVM_IR_LLVMCONTEXT_H
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include <unordered_map>
 
 namespace llvm {
 
 class Function;
 class LLVMContext;
+
+#if defined(__GNUC__) || defined(__clang__)
+#define LIRIC_LLVM_COMPAT_HIDDEN __attribute__((visibility("hidden")))
+#else
+#define LIRIC_LLVM_COMPAT_HIDDEN
+#endif
 
 namespace detail {
     struct vector_type_info {
@@ -110,7 +116,7 @@ namespace detail {
     }
 }
 
-class LLVMContext {
+class LIRIC_LLVM_COMPAT_HIDDEN LLVMContext {
     lc_context_t *ctx_;
     lc_module_compat_t *default_mod_;
 
@@ -151,5 +157,7 @@ public:
 };
 
 } // namespace llvm
+
+#undef LIRIC_LLVM_COMPAT_HIDDEN
 
 #endif

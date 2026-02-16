@@ -7,6 +7,10 @@
 #include <vector>
 #include <cstring>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace llvm {
 
 class Module;
@@ -165,9 +169,8 @@ public:
         if (!mod) return nullptr;
 
         lr_module_t *m = lc_module_get_ir(mod);
-        std::vector<lr_type_t *> fields(NumElts, ElementTy->impl());
-        lr_type_t *vec = lr_type_struct_new(
-            m, fields.data(), static_cast<uint32_t>(NumElts), true);
+        lr_type_t *vec = lr_type_vector_new(
+            m, ElementTy->impl(), static_cast<uint32_t>(NumElts));
         detail::register_type_context(vec, &C);
         detail::register_vector_type(vec, ElementTy->impl(), NumElts, false);
         return VectorType::wrap(vec);
@@ -201,5 +204,9 @@ public:
 };
 
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

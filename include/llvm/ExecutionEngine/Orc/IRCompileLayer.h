@@ -1,13 +1,16 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_IRCOMPILELAYER_H
 #define LLVM_EXECUTIONENGINE_ORC_IRCOMPILELAYER_H
 
-#include <liric/liric.h>
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include "llvm/ExecutionEngine/Orc/Layer.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <memory>
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
 
 namespace llvm {
 
@@ -49,9 +52,13 @@ inline llvm::Error llvm::orc::IRCompileLayer::add(
     (void)JD;
     Module *M = TSM.getModuleUnlocked();
     if (!M) return make_error("Null module");
-    int rc = lc_module_add_to_jit(M->getCompat(), ES.getJIT());
-    if (rc != 0) return make_error("lc_module_add_to_jit failed");
+    int rc = ES.addCompatModule(M->getCompat());
+    if (rc != 0) return make_error("LLVMLiricSessionAddCompatModule failed");
     return Error::success();
 }
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

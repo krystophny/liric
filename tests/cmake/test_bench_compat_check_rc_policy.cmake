@@ -9,7 +9,6 @@ set(fake_lfortran "${root}/fake_lfortran.sh")
 set(fake_probe "${root}/fake_probe_runner.sh")
 set(fake_lli "${root}/fake_lli.sh")
 set(runtime_lib "${root}/libfake_runtime.so")
-set(runtime_bc "${root}/runtime.bc")
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${bench_dir}")
@@ -23,7 +22,6 @@ file(WRITE "${int_dir}/rc_case.f90"
 "end program\n")
 
 file(WRITE "${runtime_lib}" "fake")
-file(WRITE "${runtime_bc}" "fake")
 
 file(WRITE "${fake_lfortran}" "#!/usr/bin/env bash\n"
 "set -euo pipefail\n"
@@ -85,7 +83,6 @@ execute_process(
         --lfortran "${fake_lfortran}"
         --probe-runner "${fake_probe}"
         --runtime-lib "${runtime_lib}"
-        --runtime-bc "${runtime_bc}"
         --lli "${fake_lli}"
         --cmake "${int_dir}/CMakeLists.txt"
         --bench-dir "${bench_dir}"

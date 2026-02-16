@@ -1,7 +1,7 @@
 #ifndef LLVM_IR_IRBUILDER_H
 #define LLVM_IR_IRBUILDER_H
 
-#include <liric/liric_compat.h>
+#include <llvm-c/LiricCompat.h>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
@@ -21,6 +21,10 @@
 #include <vector>
 #include <cstring>
 #include <string>
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
 
 namespace llvm {
 
@@ -42,6 +46,80 @@ class IRBuilder {
     }
     lr_block_t *B() const { return block_; }
     lr_func_t *F() const { return func_; }
+
+    static Type *pickIntrinsicOverloadType(ArrayRef<Type *> Types,
+                                           ArrayRef<Value *> Args) {
+        if (!Types.empty() && Types[0]) return Types[0];
+        if (!Args.empty() && Args[0]) return Args[0]->getType();
+        return nullptr;
+    }
+
+    static std::string intrinsicTypeSuffix(Type *Ty) {
+        if (!Ty) return "";
+        if (Ty->isFloatTy()) return "f32";
+        if (Ty->isDoubleTy()) return "f64";
+        if (Ty->isIntegerTy())
+            return "i" + std::to_string(Ty->getIntegerBitWidth());
+        return "";
+    }
+
+    static std::string intrinsicNameForID(Intrinsic::ID ID,
+                                          ArrayRef<Type *> Types,
+                                          ArrayRef<Value *> Args) {
+        Type *over_ty = pickIntrinsicOverloadType(Types, Args);
+        std::string suffix = intrinsicTypeSuffix(over_ty);
+        auto with_suffix = [&](const char *base) -> std::string {
+            if (suffix.empty()) return "";
+            return std::string(base) + suffix;
+        };
+
+        switch (ID) {
+        case Intrinsic::abs:      return with_suffix("llvm.abs.");
+        case Intrinsic::copysign: return with_suffix("llvm.copysign.");
+        case Intrinsic::cos:      return with_suffix("llvm.cos.");
+        case Intrinsic::ctlz:     return with_suffix("llvm.ctlz.");
+        case Intrinsic::ctpop:    return with_suffix("llvm.ctpop.");
+        case Intrinsic::cttz:     return with_suffix("llvm.cttz.");
+        case Intrinsic::exp:      return with_suffix("llvm.exp.");
+        case Intrinsic::exp2:     return with_suffix("llvm.exp2.");
+        case Intrinsic::fabs:     return with_suffix("llvm.fabs.");
+        case Intrinsic::floor:    return with_suffix("llvm.floor.");
+        case Intrinsic::ceil:     return with_suffix("llvm.ceil.");
+        case Intrinsic::round:    return with_suffix("llvm.round.");
+        case Intrinsic::trunc:    return with_suffix("llvm.trunc.");
+        case Intrinsic::fma:
+        case Intrinsic::fmuladd:  return with_suffix("llvm.fma.");
+        case Intrinsic::log:      return with_suffix("llvm.log.");
+        case Intrinsic::log2:     return with_suffix("llvm.log2.");
+        case Intrinsic::log10:    return with_suffix("llvm.log10.");
+        case Intrinsic::maximum:  return with_suffix("llvm.maximum.");
+        case Intrinsic::maxnum:   return with_suffix("llvm.maxnum.");
+        case Intrinsic::minimum:  return with_suffix("llvm.minimum.");
+        case Intrinsic::minnum:   return with_suffix("llvm.minnum.");
+        case Intrinsic::pow:      return with_suffix("llvm.pow.");
+        case Intrinsic::sin:      return with_suffix("llvm.sin.");
+        case Intrinsic::sqrt:     return with_suffix("llvm.sqrt.");
+        case Intrinsic::powi: {
+            if (suffix.empty()) return "";
+            Type *powi_i_ty = nullptr;
+            if (Args.size() > 1 && Args[1]) powi_i_ty = Args[1]->getType();
+            else if (Types.size() > 1 && Types[1]) powi_i_ty = Types[1];
+            unsigned ibits = 32;
+            if (powi_i_ty && powi_i_ty->isIntegerTy())
+                ibits = powi_i_ty->getIntegerBitWidth();
+            return std::string("llvm.powi.") + suffix + ".i" + std::to_string(ibits);
+        }
+        default:
+            break;
+        }
+
+        {
+            const char *legacy = lc_intrinsic_name(static_cast<unsigned>(ID));
+            if (legacy && legacy[0] != '\0')
+                return std::string(legacy);
+        }
+        return "";
+    }
 
 public:
     explicit IRBuilder(LLVMContext &C)
@@ -882,9 +960,8 @@ public:
     Value *CreateIntrinsic(Intrinsic::ID ID, ArrayRef<Type *> Types,
                            ArrayRef<Value *> Args,
                            const Twine &Name = "") {
-        const char *intrinsic_name = lc_intrinsic_name(
-            static_cast<unsigned>(ID));
-        if (!intrinsic_name) return nullptr;
+        std::string intrinsic_name = intrinsicNameForID(ID, Types, Args);
+        if (intrinsic_name.empty()) return nullptr;
 
         lc_module_compat_t *mod = M();
         lr_module_t *m = lc_module_get_ir(mod);
@@ -908,7 +985,7 @@ public:
             static_cast<uint32_t>(param_types.size()), false);
 
         lc_value_t *callee_val = lc_global_lookup_or_create(
-            mod, intrinsic_name, ft);
+            mod, intrinsic_name.c_str(), ft);
 
         std::vector<lc_value_t *> args(Args.size());
         for (size_t i = 0; i < Args.size(); i++) {
@@ -929,5 +1006,9 @@ public:
 };
 
 } // namespace llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif
