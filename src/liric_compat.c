@@ -1,6 +1,5 @@
 #include "ir.h"
 #include "arena.h"
-#include "compile_mode.h"
 #include "jit.h"
 #include "liric.h"
 #include "module_emit.h"
@@ -24,6 +23,13 @@ typedef enum lc_value_kind {
     LC_VAL_BLOCK,
     LC_VAL_CONST_AGGREGATE,
 } lc_value_kind_t;
+
+enum {
+    LC_BACKEND_DEFAULT = 0,
+    LC_BACKEND_ISEL = 1,
+    LC_BACKEND_COPY_PATCH = 2,
+    LC_BACKEND_LLVM = 3,
+};
 
 typedef struct lc_value {
     lc_value_kind_t kind;
@@ -51,6 +57,7 @@ typedef struct lc_context {
     lr_type_t *type_double;
     lr_type_t *type_ptr;
     lr_arena_t *type_arena;
+    int backend;
 } lc_context_t;
 
 typedef struct lc_phi_node lc_phi_node_t;
@@ -569,6 +576,7 @@ lc_context_t *lc_context_create(void) {
     ctx->type_double->kind = LR_TYPE_DOUBLE;
     ctx->type_ptr    = lr_arena_new(ctx->type_arena, lr_type_t);
     ctx->type_ptr->kind = LR_TYPE_PTR;
+    ctx->backend = LR_SESSION_BACKEND_ISEL;
     return ctx;
 }
 
@@ -578,13 +586,34 @@ void lc_context_destroy(lc_context_t *ctx) {
     free(ctx);
 }
 
+void lc_context_set_backend(lc_context_t *ctx, int backend) {
+    if (!ctx)
+        return;
+    switch (backend) {
+    case LC_BACKEND_DEFAULT:
+    case LC_BACKEND_ISEL:
+    case LC_BACKEND_COPY_PATCH:
+    case LC_BACKEND_LLVM:
+        ctx->backend = backend;
+        break;
+    default:
+        ctx->backend = LC_BACKEND_ISEL;
+        break;
+    }
+}
+
+int lc_context_get_backend(const lc_context_t *ctx) {
+    if (!ctx)
+        return LC_BACKEND_ISEL;
+    return ctx->backend;
+}
+
 /* ---- Module ---- */
 
 lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     lc_module_compat_t *cm = (lc_module_compat_t *)calloc(
         1, sizeof(lc_module_compat_t));
     lr_session_config_t cfg;
-    lr_compile_mode_t mode = lr_compile_mode_from_env();
     lr_arena_t *arena;
     if (!cm) return NULL;
 
@@ -596,14 +625,15 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     memset(&cfg, 0, sizeof(cfg));
     /* Unified policy: DIRECT by default, no hidden IR fallback. */
     cfg.mode = LR_MODE_DIRECT;
-    switch (mode) {
-    case LR_COMPILE_COPY_PATCH:
+    switch (ctx ? ctx->backend : LC_BACKEND_ISEL) {
+    case LC_BACKEND_COPY_PATCH:
         cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
         break;
-    case LR_COMPILE_LLVM:
+    case LC_BACKEND_LLVM:
         cfg.backend = LR_SESSION_BACKEND_LLVM;
         break;
-    case LR_COMPILE_ISEL:
+    case LC_BACKEND_DEFAULT:
+    case LC_BACKEND_ISEL:
     default:
         cfg.backend = LR_SESSION_BACKEND_ISEL;
         break;
@@ -3207,41 +3237,28 @@ int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
 }
 
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
-    char emit_err[256] = {0};
-    int rc;
+    lr_error_t err = {0};
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
-    if (lr_session_is_direct(mod->session)) {
-        lr_error_t err = {0};
-        if (lr_session_emit_object(mod->session, filename, &err) != 0)
-            return -1;
-        return 0;
+    if (lr_session_emit_object(mod->session, filename, &err) != 0) {
+        if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_emit_object: %s\n", err.msg);
+        return -1;
     }
-    rc = lr_emit_module_object_path(mod->mod, NULL, filename,
-                                    emit_err, sizeof(emit_err));
-    if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
-        fprintf(stderr, "lc_module_emit_object: %s\n", emit_err);
-    return rc;
+    return 0;
 }
 
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
-    char emit_err[256] = {0};
-    int rc;
+    lr_error_t err = {0};
     if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
-    if (lr_session_is_direct(mod->session)) {
-        lr_error_t err = {0};
-        if (lr_session_emit_exe_with_runtime(mod->session, filename,
-                                             runtime_ll, runtime_len,
-                                             &err) != 0)
-            return -1;
-        return 0;
+    if (lr_session_emit_exe_with_runtime(mod->session, filename,
+                                         runtime_ll, runtime_len,
+                                         &err) != 0) {
+        if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
+        return -1;
     }
-    rc = lr_emit_module_executable_path(mod->mod, NULL, filename, "main",
-                                        runtime_ll, runtime_len,
-                                        emit_err, sizeof(emit_err));
-    if (rc != 0 && emit_err[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
-        fprintf(stderr, "lc_module_emit_executable: %s\n", emit_err);
-    return rc;
+    return 0;
 }

@@ -32,7 +32,7 @@ typedef enum lr_session_backend {
 typedef struct lr_session_config {
     lr_session_mode_t mode;
     const char *target;
-    lr_session_backend_t backend; /* default: LR_SESSION_BACKEND_DEFAULT */
+    lr_session_backend_t backend; /* default: LR_SESSION_BACKEND_ISEL */
 } lr_session_config_t;
 
 /* ---- Error ------------------------------------------------------------- */

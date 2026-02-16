@@ -50,6 +50,7 @@ typedef struct lc_context {
     lr_type_t *type_double;
     lr_type_t *type_ptr;
     lr_arena_t *type_arena;
+    int backend;
 } lc_context_t;
 
 /* Module wrapper */
@@ -88,6 +89,15 @@ typedef struct lc_alloca_inst {
 /* ---- Context ---- */
 lc_context_t *lc_context_create(void);
 void lc_context_destroy(lc_context_t *ctx);
+void lc_context_set_backend(lc_context_t *ctx, int backend);
+int lc_context_get_backend(const lc_context_t *ctx);
+
+enum {
+    LC_BACKEND_DEFAULT = 0,
+    LC_BACKEND_ISEL = 1,
+    LC_BACKEND_COPY_PATCH = 2,
+    LC_BACKEND_LLVM = 3,
+};
 
 /* ---- Module ---- */
 lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name);

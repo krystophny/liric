@@ -183,8 +183,8 @@ int test_session_stream_stencil_fast_path(void) {
     typedef int (*fn_t)(int, int);
     fn_t fn;
 
-    set_compile_mode_env("stencil");
     cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
     s = lr_session_create(&cfg, &err);
     TEST_ASSERT(s != NULL, "session create");
 
@@ -244,8 +244,8 @@ int test_session_stream_isel_fast_path(void) {
     typedef int (*fn_t)(int, int);
     fn_t fn;
 
-    set_compile_mode_env("isel");
     cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
     s = lr_session_create(&cfg, &err);
     TEST_ASSERT(s != NULL, "session create");
 
@@ -300,8 +300,8 @@ int test_session_direct_llvm_mode_stream_contract(void) {
     if (prev_mode)
         (void)snprintf(prev_mode_buf, sizeof(prev_mode_buf), "%s", prev_mode);
 
-    set_compile_mode_env("llvm");
     cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_LLVM;
     s = lr_session_create(&cfg, &err);
     if (!s) {
         fprintf(stderr, "  FAIL: session create (line %d)\n", __LINE__);
@@ -432,8 +432,8 @@ int test_session_stream_stencil_no_ir_fallback(void) {
     typedef int (*fn_t)(int, int);
     fn_t fn;
 
-    set_compile_mode_env("stencil");
     cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
     s = lr_session_create(&cfg, &err);
     TEST_ASSERT(s != NULL, "session create");
 
@@ -982,13 +982,9 @@ int test_session_emit_object_llvm_mode_contract(void) {
     int rc = -1;
     int result = 1;
     const char *path = "/tmp/liric_test_session_emit_obj_llvm.o";
-    char prev_mode[64] = {0};
-    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
-    if (old_mode) {
-        (void)snprintf(prev_mode, sizeof(prev_mode), "%s", old_mode);
-    }
 
     cfg.mode = LR_MODE_IR;
+    cfg.backend = LR_SESSION_BACKEND_LLVM;
     lr_session_t *s = lr_session_create(&cfg, &err);
     if (!s) {
         fprintf(stderr, "  FAIL: session create (%s)\n", err.msg);
@@ -1019,7 +1015,6 @@ int test_session_emit_object_llvm_mode_contract(void) {
         goto cleanup;
     }
 
-    set_compile_mode_env("llvm");
     rc = lr_session_emit_object(s, path, &err);
 #if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
     if (rc != 0) {
@@ -1036,11 +1031,6 @@ int test_session_emit_object_llvm_mode_contract(void) {
     result = 0;
 
 cleanup:
-    if (old_mode && old_mode[0]) {
-        set_compile_mode_env(prev_mode);
-    } else {
-        set_compile_mode_env(NULL);
-    }
     remove(path);
     if (s)
         lr_session_destroy(s);

@@ -62,7 +62,8 @@ All frontends produce `lr_module_t`, a register-based SSA IR with explicit CFG.
 
 ## Backends
 
-Selected via `LIRIC_COMPILE_MODE` env var (`isel` | `copy_patch` | `llvm`).
+CLI/tool compile mode is selected via `LIRIC_COMPILE_MODE` (`isel` | `copy_patch` | `llvm`).
+Programmatic APIs use explicit backend config and do not read `LIRIC_COMPILE_MODE`.
 
 `LR_MODE_DIRECT` is the default path across programmatic APIs.
 Unsupported operations fail fast with explicit errors (no hidden fallback).
@@ -109,7 +110,7 @@ The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends w
 
 **DIRECT mode** streams instructions directly to native backend compile hooks (`compile_begin`/`emit`/`end`) for `isel`/`copy_patch`, without constructing persistent IR. For `llvm`, DIRECT uses stream-to-IR replay for the active function and compiles via the real LLVM ORC path. Native streaming backends emit relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission.
 
-`lr_compiler_create(NULL, ...)` defaults to DIRECT + ISEL and does not read `LIRIC_COMPILE_MODE`. Backend/policy selection is explicit via `lr_compiler_config_t`.
+`lr_compiler_create(NULL, ...)` defaults to DIRECT + ISEL and does not read `LIRIC_COMPILE_MODE`. `lr_session_create()` and LLVM-compat context/module setup also use explicit backend selection (`*_BACKEND_ISEL` default).
 
 ### LLVM C Symbol Namespace
 

@@ -72,33 +72,6 @@ static std::string make_temp_path(const char *prefix) {
     return std::string("./") + prefix;
 }
 
-static void restore_mode_env(const char *prev) {
-#if defined(_WIN32)
-    if (prev && prev[0]) {
-        (void)_putenv_s("LIRIC_COMPILE_MODE", prev);
-    } else {
-        (void)_putenv_s("LIRIC_COMPILE_MODE", "");
-    }
-#else
-    if (prev && prev[0]) {
-        (void)setenv("LIRIC_COMPILE_MODE", prev, 1);
-    } else {
-        (void)unsetenv("LIRIC_COMPILE_MODE");
-    }
-#endif
-}
-
-static void set_mode_env(const char *value) {
-#if defined(_WIN32)
-    (void)_putenv_s("LIRIC_COMPILE_MODE", value ? value : "");
-#else
-    if (value)
-        (void)setenv("LIRIC_COMPILE_MODE", value, 1);
-    else
-        (void)unsetenv("LIRIC_COMPILE_MODE");
-#endif
-}
-
 static int run_exe_expect(const std::string &path, int expect_rc) {
 #if defined(__unix__) || defined(__APPLE__)
     pid_t pid = fork();
@@ -136,13 +109,8 @@ static void build_main_ret42_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
 }
 
 static int test_wrapper_object_emit_mode_llvm(void) {
-    const char *old_mode = std::getenv("LIRIC_COMPILE_MODE");
-    char old_copy[64] = {0};
-    if (old_mode)
-        std::snprintf(old_copy, sizeof(old_copy), "%s", old_mode);
-    set_mode_env("llvm");
-
     llvm::LLVMContext ctx;
+    lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
     llvm::Module mod("roundtrip_obj", ctx);
     build_main_ret42_module(mod, ctx);
     std::string obj_path = make_temp_path("obj.o");
@@ -167,18 +135,12 @@ static int test_wrapper_object_emit_mode_llvm(void) {
 #endif
 
     std::remove(obj_path.c_str());
-    restore_mode_env(old_copy);
     return 0;
 }
 
 static int test_wrapper_to_api_executable_roundtrip(void) {
-    const char *old_mode = std::getenv("LIRIC_COMPILE_MODE");
-    char old_copy[64] = {0};
-    if (old_mode)
-        std::snprintf(old_copy, sizeof(old_copy), "%s", old_mode);
-    set_mode_env("llvm");
-
     llvm::LLVMContext ctx;
+    lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
     llvm::Module mod("roundtrip_exe", ctx);
     build_main_ret42_module(mod, ctx);
     std::string exe_path = make_temp_path("exe");
@@ -198,25 +160,18 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
 #endif
 
     std::remove(exe_path.c_str());
-    restore_mode_env(old_copy);
     return 0;
 }
 
 static int test_wrapper_jit_mode_llvm(void) {
-    const char *old_mode = std::getenv("LIRIC_COMPILE_MODE");
-    char old_copy[64] = {0};
-    if (old_mode)
-        std::snprintf(old_copy, sizeof(old_copy), "%s", old_mode);
-    set_mode_env("llvm");
-
     llvm::LLVMContext ctx;
+    lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
     llvm::Module mod("roundtrip_jit", ctx);
     build_main_ret42_module(mod, ctx);
 
     lr_jit_t *jit = lr_jit_create();
     if (!jit) {
         std::fprintf(stderr, "  FAIL: jit create\n");
-        restore_mode_env(old_copy);
         return 1;
     }
 
@@ -224,7 +179,6 @@ static int test_wrapper_jit_mode_llvm(void) {
     if (rc != 0) {
         std::fprintf(stderr, "  FAIL: add module to jit\n");
         lr_jit_destroy(jit);
-        restore_mode_env(old_copy);
         return 1;
     }
 
@@ -232,7 +186,6 @@ static int test_wrapper_jit_mode_llvm(void) {
     if (!main_addr) {
         std::fprintf(stderr, "  FAIL: jit lookup main\n");
         lr_jit_destroy(jit);
-        restore_mode_env(old_copy);
         return 1;
     }
 
@@ -240,12 +193,10 @@ static int test_wrapper_jit_mode_llvm(void) {
     if (fn() != 42) {
         std::fprintf(stderr, "  FAIL: jit main returned non-42\n");
         lr_jit_destroy(jit);
-        restore_mode_env(old_copy);
         return 1;
     }
 
     lr_jit_destroy(jit);
-    restore_mode_env(old_copy);
     return 0;
 }
 

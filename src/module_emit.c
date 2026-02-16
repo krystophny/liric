@@ -61,13 +61,13 @@ static int copy_file_to_stream(const char *path, FILE *out) {
 }
 #endif
 
-int lr_emit_module_object_path(lr_module_t *module,
-                               const char *target_name,
-                               const char *path,
-                               char *err,
-                               size_t err_cap) {
+int lr_emit_module_object_path_mode(lr_module_t *module,
+                                    const char *target_name,
+                                    lr_compile_mode_t mode,
+                                    const char *path,
+                                    char *err,
+                                    size_t err_cap) {
     const lr_target_t *target = NULL;
-    lr_compile_mode_t mode;
     int rc = -1;
     FILE *out = NULL;
 
@@ -79,7 +79,6 @@ int lr_emit_module_object_path(lr_module_t *module,
     if (!target)
         return -1;
 
-    mode = lr_compile_mode_from_env();
     if (mode == LR_COMPILE_LLVM) {
         char backend_err[256] = {0};
         rc = lr_llvm_emit_object_path(module, target, path,
@@ -104,6 +103,16 @@ int lr_emit_module_object_path(lr_module_t *module,
         return -1;
     }
     return 0;
+}
+
+int lr_emit_module_object_path(lr_module_t *module,
+                               const char *target_name,
+                               const char *path,
+                               char *err,
+                               size_t err_cap) {
+    return lr_emit_module_object_path_mode(module, target_name,
+                                           lr_compile_mode_from_env(),
+                                           path, err, err_cap);
 }
 
 int lr_emit_module_object_stream(lr_module_t *module,
@@ -158,16 +167,16 @@ int lr_emit_module_object_stream(lr_module_t *module,
     return 0;
 }
 
-int lr_emit_module_executable_path(lr_module_t *module,
-                                   const char *target_name,
-                                   const char *path,
-                                   const char *entry,
-                                   const char *runtime_ll,
-                                   size_t runtime_len,
-                                   char *err,
-                                   size_t err_cap) {
+int lr_emit_module_executable_path_mode(lr_module_t *module,
+                                        const char *target_name,
+                                        lr_compile_mode_t mode,
+                                        const char *path,
+                                        const char *entry,
+                                        const char *runtime_ll,
+                                        size_t runtime_len,
+                                        char *err,
+                                        size_t err_cap) {
     const lr_target_t *target = NULL;
-    lr_compile_mode_t mode;
     int rc = -1;
     FILE *out = NULL;
     bool with_runtime = (runtime_ll && runtime_len > 0);
@@ -180,7 +189,6 @@ int lr_emit_module_executable_path(lr_module_t *module,
     if (!target)
         return -1;
 
-    mode = lr_compile_mode_from_env();
     if (mode == LR_COMPILE_LLVM) {
         char backend_err[256] = {0};
         rc = lr_llvm_emit_executable_path(module,
@@ -215,4 +223,19 @@ int lr_emit_module_executable_path(lr_module_t *module,
         return -1;
     }
     return 0;
+}
+
+int lr_emit_module_executable_path(lr_module_t *module,
+                                   const char *target_name,
+                                   const char *path,
+                                   const char *entry,
+                                   const char *runtime_ll,
+                                   size_t runtime_len,
+                                   char *err,
+                                   size_t err_cap) {
+    return lr_emit_module_executable_path_mode(module, target_name,
+                                               lr_compile_mode_from_env(),
+                                               path, entry,
+                                               runtime_ll, runtime_len,
+                                               err, err_cap);
 }

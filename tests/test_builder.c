@@ -28,22 +28,6 @@ static inline void fn_ptr_cast(void *dst, void *src) {
     do { void *_p = lr_jit_get_function((jit), (name)); \
          fn_ptr_cast(&(fn_var), _p); } while (0)
 
-static void set_compile_mode_env(const char *value) {
-#if defined(_WIN32)
-    if (value) {
-        (void)_putenv_s("LIRIC_COMPILE_MODE", value);
-    } else {
-        (void)_putenv_s("LIRIC_COMPILE_MODE", "");
-    }
-#else
-    if (value) {
-        (void)setenv("LIRIC_COMPILE_MODE", value, 1);
-    } else {
-        (void)unsetenv("LIRIC_COMPILE_MODE");
-    }
-#endif
-}
-
 static int build_compat_ret_module(lc_module_compat_t *mod, const char *name, int rv) {
     lr_module_t *ir = NULL;
     lr_type_t *i32 = NULL;
@@ -320,20 +304,15 @@ int test_builder_compat_emit_object_llvm_mode_contract(void) {
     int rc = -1;
     int result = 1;
     const char *path = "/tmp/liric_test_compat_emit_obj_llvm.o";
-    char prev_mode[64] = {0};
-    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
     lc_context_t *ctx = NULL;
     lc_module_compat_t *mod = NULL;
-
-    if (old_mode)
-        (void)snprintf(prev_mode, sizeof(prev_mode), "%s", old_mode);
-    set_compile_mode_env("llvm");
 
     ctx = lc_context_create();
     if (!ctx) {
         fprintf(stderr, "  FAIL: context create\n");
         goto cleanup;
     }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
     mod = lc_module_create(ctx, "compat_emit_obj_llvm");
     if (!mod) {
         fprintf(stderr, "  FAIL: module create\n");
@@ -352,11 +331,6 @@ int test_builder_compat_emit_object_llvm_mode_contract(void) {
     result = 0;
 
 cleanup:
-    if (old_mode && old_mode[0]) {
-        set_compile_mode_env(prev_mode);
-    } else {
-        set_compile_mode_env(NULL);
-    }
     remove(path);
     if (mod)
         lc_module_destroy(mod);
@@ -369,8 +343,6 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void) {
     int rc = -1;
     int result = 1;
     const char *path = "/tmp/liric_test_compat_emit_exe_llvm";
-    char prev_mode[64] = {0};
-    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
     lc_context_t *ctx = NULL;
     lc_module_compat_t *mod = NULL;
     static const char *runtime_ll =
@@ -379,15 +351,12 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void) {
         "  ret i32 0\n"
         "}\n";
 
-    if (old_mode)
-        (void)snprintf(prev_mode, sizeof(prev_mode), "%s", old_mode);
-    set_compile_mode_env("llvm");
-
     ctx = lc_context_create();
     if (!ctx) {
         fprintf(stderr, "  FAIL: context create\n");
         goto cleanup;
     }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
     mod = lc_module_create(ctx, "compat_emit_exe_llvm");
     if (!mod) {
         fprintf(stderr, "  FAIL: module create\n");
@@ -406,11 +375,6 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void) {
     result = 0;
 
 cleanup:
-    if (old_mode && old_mode[0]) {
-        set_compile_mode_env(prev_mode);
-    } else {
-        set_compile_mode_env(NULL);
-    }
     remove(path);
     if (mod)
         lc_module_destroy(mod);
