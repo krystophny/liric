@@ -302,7 +302,7 @@ static int session_backend_to_mode(session_backend_t backend,
         return -1;
     switch (backend) {
     case SESSION_BACKEND_DEFAULT:
-        *out_mode = lr_compile_mode_from_env();
+        *out_mode = LR_COMPILE_ISEL;
         return 0;
     case SESSION_BACKEND_ISEL:
         *out_mode = LR_COMPILE_ISEL;
@@ -957,7 +957,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
             return NULL;
         }
     } else {
-        mode = lr_compile_mode_from_env();
+        mode = LR_COMPILE_ISEL;
     }
 
     s = (struct lr_session *)calloc(1, sizeof(*s));
@@ -1796,8 +1796,10 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
         return 0;
     }
 
-    if (lr_emit_module_object_path(s->module, s->cfg.target, path,
-                                   backend_err, sizeof(backend_err)) != 0) {
+    if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
+                                        s->jit ? s->jit->mode : LR_COMPILE_ISEL,
+                                        path, backend_err,
+                                        sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "object emission failed");
         return -1;
@@ -1837,9 +1839,11 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         return 0;
     }
 
-    if (lr_emit_module_executable_path(s->module, s->cfg.target, path,
-                                       "_start", NULL, 0,
-                                       backend_err, sizeof(backend_err)) != 0) {
+    if (lr_emit_module_executable_path_mode(
+            s->module, s->cfg.target,
+            s->jit ? s->jit->mode : LR_COMPILE_ISEL,
+            path, "_start", NULL, 0,
+            backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "executable emission failed");
         return -1;
@@ -1881,9 +1885,11 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
         return 0;
     }
 
-    if (lr_emit_module_executable_path(s->module, s->cfg.target, path,
-                                       "main", runtime_ll, runtime_len,
-                                       backend_err, sizeof(backend_err)) != 0) {
+    if (lr_emit_module_executable_path_mode(
+            s->module, s->cfg.target,
+            s->jit ? s->jit->mode : LR_COMPILE_ISEL,
+            path, "main", runtime_ll, runtime_len,
+            backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err :
                 "executable emission with runtime failed");
