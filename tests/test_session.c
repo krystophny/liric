@@ -344,8 +344,8 @@ int test_session_direct_llvm_mode_stream_contract(void) {
     {
         lr_module_t *m = lr_session_module(s);
         lr_func_t *f = find_func_by_name(m, "session_direct_llvm_stream");
-        if (!f || !f->first_block || f->first_block->first != NULL) {
-            fprintf(stderr, "  FAIL: DIRECT+llvm keeps streaming/no-IR fast path (line %d)\n",
+        if (!f || f->is_decl || !f->first_block || !f->first_block->first) {
+            fprintf(stderr, "  FAIL: DIRECT+llvm retains LLVM-replay IR for module emission (line %d)\n",
                     __LINE__);
             goto cleanup;
         }

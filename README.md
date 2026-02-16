@@ -10,10 +10,10 @@ There are two compilation paths. Both produce JIT, object files, or executables.
   .ll / .bc / .wasm  -->  lr_module_t (SSA IR)  -->  ISel / C&P / LLVM  -->  JIT, .o, exe
 ```
 
-**DIRECT path** -- stream instructions from the programmatic API, no IR:
+**DIRECT path** -- stream instructions from the programmatic API:
 
 ```
-  Session API  -->  streaming backend compile hooks  -->  JIT + blob capture  -->  JIT, .o, exe
+  Session API  -->  backend streamer (isel/copy_patch) or LLVM replay  -->  JIT/.o/.exe
 ```
 
 The IR path is used by the CLI and `lr_session_compile_*()`. The DIRECT path is
@@ -65,9 +65,10 @@ All frontends produce `lr_module_t`, a register-based SSA IR with explicit CFG.
 Selected via `LIRIC_COMPILE_MODE` env var (`isel` | `copy_patch` | `llvm`).
 
 `LR_MODE_DIRECT` is the default path across programmatic APIs.
-Unsupported operations fail fast with explicit errors (no fallback/replay path).
-In IR mode, `llvm` uses the real LLVM backend (when enabled). In DIRECT mode,
-streaming compilation uses target compile hooks.
+Unsupported operations fail fast with explicit errors (no hidden fallback).
+In IR mode, `llvm` uses the real LLVM backend (when enabled). In DIRECT mode:
+- `isel` / `copy_patch`: native target compile hooks (`compile_begin`/`emit`/`end`)
+- `llvm`: stream-to-IR replay for the active function, then real LLVM ORC JIT
 
 | Backend | Coverage | Mechanism | Targets |
 |---------|----------|-----------|---------|
@@ -86,7 +87,7 @@ ISel uses stack-based register allocation (every vreg gets a stack slot, computa
 | Object file | `-o` (when `@main` is absent) | ELF64, Mach-O | IR or DIRECT blobs |
 | IR dump | `--dump-ir` | LLVM IR text | IR mode only |
 
-DIRECT mode captures relocatable machine code blobs during streaming compilation. These blobs are used directly for exe/obj emission without constructing IR.
+DIRECT mode captures relocatable machine code blobs during native streaming (`isel`/`copy_patch`). These blobs are used directly for exe/obj emission.
 
 ## Programmatic APIs
 
@@ -106,7 +107,7 @@ C core                ir.h, jit.h                  (lr_module_t, lr_jit_t, arena
 
 The C++ headers allow LLVM-based compilers (e.g., lfortran) to switch backends with zero source changes.
 
-**DIRECT mode** streams instructions directly to backend compile hooks (`compile_begin`/`emit`/`end`) without constructing persistent IR. The backend emits relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission. JIT execution uses the same compiled code with relocations patched in-place.
+**DIRECT mode** streams instructions directly to native backend compile hooks (`compile_begin`/`emit`/`end`) for `isel`/`copy_patch`, without constructing persistent IR. For `llvm`, DIRECT uses stream-to-IR replay for the active function and compiles via the real LLVM ORC path. Native streaming backends emit relocatable code when an `lr_objfile_ctx` is installed, capturing machine code blobs and relocation records for later exe/obj emission.
 
 `lr_compiler_create(NULL, ...)` defaults to DIRECT + ISEL and does not read `LIRIC_COMPILE_MODE`. Backend/policy selection is explicit via `lr_compiler_config_t`.
 

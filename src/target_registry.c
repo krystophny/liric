@@ -57,8 +57,7 @@ bool lr_target_can_compile(const lr_target_t *target, lr_compile_mode_t mode) {
         !target->compile_set_block || !target->compile_end)
         return false;
     if (mode != LR_COMPILE_ISEL &&
-        mode != LR_COMPILE_COPY_PATCH &&
-        mode != LR_COMPILE_LLVM)
+        mode != LR_COMPILE_COPY_PATCH)
         return false;
     return true;
 }
