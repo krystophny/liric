@@ -6,7 +6,6 @@
 #include <system_error>
 
 #include <liric/liric_legacy.h>
-#include "llvm_backend.h"
 #include <llvm-c/LiricCompat.h>
 
 #include <llvm/IR/BasicBlock.h>
@@ -110,6 +109,14 @@ static void build_main_ret42_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     b.CreateRet(llvm::ConstantInt::get(i32, 42));
 }
 
+static int llvm_backend_runtime_available(void) {
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    return 1;
+#else
+    return 0;
+#endif
+}
+
 static int test_wrapper_object_emit_mode_llvm(void) {
     llvm::LLVMContext ctx;
     lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
@@ -141,7 +148,7 @@ static int test_wrapper_object_emit_mode_llvm(void) {
 }
 
 static int test_wrapper_to_api_executable_roundtrip(void) {
-    if (!lr_llvm_jit_is_available())
+    if (!llvm_backend_runtime_available())
         return 0;
 
     llvm::LLVMContext ctx;
@@ -169,7 +176,7 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
 }
 
 static int test_wrapper_jit_mode_llvm(void) {
-    if (!lr_llvm_jit_is_available())
+    if (!llvm_backend_runtime_available())
         return 0;
 
     llvm::LLVMContext ctx;
