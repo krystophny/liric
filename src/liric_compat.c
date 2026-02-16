@@ -1062,20 +1062,31 @@ const char *lc_intrinsic_name(unsigned intrinsic_id) {
 static bool text_contains(const char *haystack, size_t hay_len,
                           const char *needle) {
     size_t needle_len = 0;
+    unsigned char first = 0;
+    const char *p = NULL;
+    const char *end = NULL;
     if (!haystack || !needle)
         return false;
     needle_len = strlen(needle);
     if (needle_len == 0 || hay_len < needle_len)
         return false;
-    for (size_t i = 0; i + needle_len <= hay_len; i++) {
-        if (memcmp(haystack + i, needle, needle_len) == 0)
+    first = (unsigned char)needle[0];
+    p = haystack;
+    end = haystack + hay_len - needle_len + 1;
+    while (p < end) {
+        if ((unsigned char)*p == first &&
+            memcmp(p, needle, needle_len) == 0)
             return true;
+        p++;
     }
     return false;
 }
 
 bool lc_is_lfortran_jit_wrapper_ir(const char *asm_text, size_t len) {
     if (!asm_text || len == 0)
+        return false;
+    /* Wrapper IR is tiny; avoid O(n) scans on full modules. */
+    if (len > 4096)
         return false;
     return text_contains(asm_text, len, "declare i32 @main(i32, i8**)\n") &&
            text_contains(asm_text, len,

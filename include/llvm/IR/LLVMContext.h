@@ -2,6 +2,8 @@
 #define LLVM_IR_LLVMCONTEXT_H
 
 #include <llvm-c/LiricCompat.h>
+#include <cstdlib>
+#include <cstring>
 #include <unordered_map>
 
 namespace llvm {
@@ -122,7 +124,18 @@ class LIRIC_LLVM_COMPAT_HIDDEN LLVMContext {
 
 public:
     LLVMContext() : ctx_(lc_context_create()),
-                    default_mod_(lc_module_create(ctx_, "__liric_ctx__")) {
+                    default_mod_(nullptr) {
+        if (ctx_) {
+            const char *mode = std::getenv("LIRIC_COMPILE_MODE");
+            if (mode && std::strcmp(mode, "copy_patch") == 0) {
+                lc_context_set_backend(ctx_, LC_BACKEND_COPY_PATCH);
+            } else if (mode && std::strcmp(mode, "llvm") == 0) {
+                lc_context_set_backend(ctx_, LC_BACKEND_LLVM);
+            } else {
+                lc_context_set_backend(ctx_, LC_BACKEND_ISEL);
+            }
+        }
+        default_mod_ = lc_module_create(ctx_, "__liric_ctx__");
         if (!detail::fallback_module)
             detail::fallback_module = default_mod_;
         if (default_mod_) {
