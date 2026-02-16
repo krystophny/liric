@@ -27,6 +27,8 @@
 #include <dlfcn.h>
 #endif
 
+extern "C" int lr_llvm_jit_is_available(void);
+
 static int tests_run = 0;
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -109,14 +111,6 @@ static void build_main_ret42_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     b.CreateRet(llvm::ConstantInt::get(i32, 42));
 }
 
-static int llvm_backend_runtime_available(void) {
-#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
-    return 1;
-#else
-    return 0;
-#endif
-}
-
 static int test_wrapper_object_emit_mode_llvm(void) {
     llvm::LLVMContext ctx;
     lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
@@ -148,7 +142,7 @@ static int test_wrapper_object_emit_mode_llvm(void) {
 }
 
 static int test_wrapper_to_api_executable_roundtrip(void) {
-    if (!llvm_backend_runtime_available())
+    if (!lr_llvm_jit_is_available())
         return 0;
 
     llvm::LLVMContext ctx;
@@ -176,7 +170,7 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
 }
 
 static int test_wrapper_jit_mode_llvm(void) {
-    if (!llvm_backend_runtime_available())
+    if (!lr_llvm_jit_is_available())
         return 0;
 
     llvm::LLVMContext ctx;
