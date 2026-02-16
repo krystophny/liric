@@ -453,7 +453,8 @@ static bool fp_abi_two_lane_aggregate(const lr_type_t *type,
     if (type->kind == LR_TYPE_STRUCT && type->struc.num_fields == 2) {
         elem0 = type->struc.fields[0];
         elem1 = type->struc.fields[1];
-    } else if (type->kind == LR_TYPE_ARRAY && type->array.count == 2) {
+    } else if ((type->kind == LR_TYPE_ARRAY || type->kind == LR_TYPE_VECTOR) &&
+               type->array.count == 2) {
         elem0 = type->array.elem;
         elem1 = type->array.elem;
     } else {

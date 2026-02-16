@@ -2256,9 +2256,14 @@ lc_value_t *lc_create_ashr(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_not(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *val, const char *name) {
     (void)name;
+    int64_t mask = -1;
+    unsigned width;
     if (!val) return safe_undef(mod);
-    lc_value_t *neg1 = lc_value_const_int(mod, val->type, -1,
-                                            lc_type_int_width(val->type));
+    width = lc_type_int_width(val->type);
+    /* Keep i1 canonical as xor with 1 (not -1) to match parser path. */
+    if (width == 1)
+        mask = 1;
+    lc_value_t *neg1 = lc_value_const_int(mod, val->type, mask, width);
     return compat_binop(mod, b, f, LR_OP_XOR, val, neg1);
 }
 
