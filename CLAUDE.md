@@ -18,6 +18,10 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+CTest enforces strict test sandboxing:
+- Each test runs in an isolated working directory under `build/ctest_work/`
+- Source-tree generated artifacts (`*.mod`, `*.smod`, `_lfortran_generated_file_*`, etc.) are purged before tests and treated as failures if present after tests
+
 Optional build flags:
 - `-DWITH_LLVM_COMPAT=ON`: C++ compat layer tests
 - `-DWITH_REAL_LLVM_BACKEND=ON`: Real LLVM C API backend (Mode C)

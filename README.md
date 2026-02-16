@@ -15,6 +15,10 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+Testing policy (strict, enforced by CTest):
+- Every test runs in an isolated work directory under `build/ctest_work/`.
+- Source-tree artifact leaks (`*.mod`, `*.smod`, `_lfortran_generated_file_*`, etc.) are purged before tests and fail the run if found after tests.
+
 Optional flags:
 - `-DWITH_LLVM_COMPAT=ON`: build C++ LLVM-compat headers/tests
 - `-DWITH_REAL_LLVM_BACKEND=ON`: enable real LLVM backend mode

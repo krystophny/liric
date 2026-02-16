@@ -316,6 +316,9 @@ else()
 endif()
 
 enable_testing()
+set(LIRIC_CTEST_WORK_ROOT "${CMAKE_CURRENT_BINARY_DIR}/ctest_work")
+file(MAKE_DIRECTORY "${LIRIC_CTEST_WORK_ROOT}")
+
 add_executable(test_liric
     tests/test_main.c
     tests/test_lexer.c
@@ -354,7 +357,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/no_main.ll
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_test.o
+        -DOUT=${LIRIC_CTEST_WORK_ROOT}/liric_cli_emit_obj_test.o
         -DMODE=auto_object
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
@@ -364,7 +367,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_forced.o
+        -DOUT=${LIRIC_CTEST_WORK_ROOT}/liric_cli_emit_obj_forced.o
         -DMODE=force_object_suffix
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
@@ -374,7 +377,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_default_emits_exe
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_default_emits_exe
         -DMODE=default
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_mode.cmake
 )
@@ -384,8 +387,8 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_output_flag_emits_exe
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_output_flag_emits_exe/liric_cli_custom_out
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_output_flag_emits_exe
+        -DOUT=${LIRIC_CTEST_WORK_ROOT}/liric_cli_output_flag_emits_exe/liric_cli_custom_out
         -DMODE=output
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_mode.cmake
 )
@@ -395,7 +398,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_conflict.o
+        -DOUT=${LIRIC_CTEST_WORK_ROOT}/liric_cli_emit_obj_conflict.o
         -DMODE=conflict
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
@@ -405,7 +408,7 @@ add_test(
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
         -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-        -DOUT=${CMAKE_CURRENT_BINARY_DIR}/liric_cli_emit_obj_legacy.o
+        -DOUT=${LIRIC_CTEST_WORK_ROOT}/liric_cli_emit_obj_legacy.o
         -DMODE=legacy_flag_rejected
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_mode.cmake
 )
@@ -416,7 +419,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:liric_bin>
             -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_math.ll
-            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_intrinsic_math
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_intrinsic_math
             -DEXPECT_RC=20
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
     )
@@ -426,7 +429,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:liric_bin>
             -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_mem.ll
-            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_intrinsic_mem
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_intrinsic_mem
             -DEXPECT_RC=130
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
     )
@@ -440,7 +443,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND ${CMAKE_COMMAND}
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
-                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_riscv64im_qemu_ret42
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64im_qemu_ret42
                 -DTARGET=riscv64im
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=42
@@ -452,7 +455,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND ${CMAKE_COMMAND}
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_add_imm_42.ll
-                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_riscv64im_qemu_add_immediates
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64im_qemu_add_immediates
                 -DTARGET=riscv64im
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=42
@@ -464,7 +467,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             COMMAND ${CMAKE_COMMAND}
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_fp_ret_9.ll
-                -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}/ctest_work/liric_cli_exe_riscv64gc_qemu_fp
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64gc_qemu_fp
                 -DTARGET=riscv64gc
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=9
@@ -477,7 +480,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:liric_bin>
             -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_fp_ret_9.ll
-            -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
             -DTARGET=riscv64im
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_emit_fail.cmake
     )
@@ -487,7 +490,7 @@ add_test(
     NAME bench_compat_check_freeze_artifacts
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_COMPAT_CHECK=$<TARGET_FILE:bench_compat_check>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_compat_check_freeze.cmake
 )
 
@@ -495,7 +498,7 @@ add_test(
     NAME bench_compat_check_rc_policy
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_COMPAT_CHECK=$<TARGET_FILE:bench_compat_check>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_compat_check_rc_policy.cmake
 )
 
@@ -503,7 +506,7 @@ add_test(
     NAME bench_ll_empty_dataset_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_LL=$<TARGET_FILE:bench_ll>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_ll_empty_dataset_gate.cmake
 )
 
@@ -511,7 +514,7 @@ add_test(
     NAME bench_corpus_empty_dataset_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_CORPUS=$<TARGET_FILE:bench_corpus>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_corpus_empty_dataset_gate.cmake
 )
 
@@ -519,7 +522,7 @@ add_test(
     NAME bench_corpus_compare_empty_dataset_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_CORPUS_COMPARE=$<TARGET_FILE:bench_corpus_compare>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_corpus_compare_empty_dataset_gate.cmake
 )
 
@@ -527,7 +530,7 @@ add_test(
     NAME bench_exe_matrix_modes
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_EXE_MATRIX=$<TARGET_FILE:bench_exe_matrix>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_exe_matrix_modes.cmake
 )
 
@@ -540,7 +543,7 @@ add_test(
     NAME bench_api_nonzero_compat
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_nonzero_compat.cmake
 )
 
@@ -548,7 +551,7 @@ add_test(
     NAME bench_api_empty_dataset_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_empty_dataset_gate.cmake
 )
 
@@ -556,7 +559,7 @@ add_test(
     NAME bench_api_signal_classification
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_signal_classification.cmake
 )
 
@@ -564,7 +567,7 @@ add_test(
     NAME bench_api_timeout_diagnostics
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_timeout_diagnostics.cmake
 )
 
@@ -572,7 +575,7 @@ add_test(
     NAME bench_api_llvm_retry_paths
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_llvm_retry_paths.cmake
 )
 
@@ -580,7 +583,7 @@ add_test(
     NAME bench_api_time_report_segv_recovery
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_time_report_segv_recovery.cmake
 )
 
@@ -588,7 +591,7 @@ add_test(
     NAME bench_api_alias_source
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_alias_source.cmake
 )
 
@@ -596,7 +599,7 @@ add_test(
     NAME bench_api_expected_stop_classification
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_expected_stop_classification.cmake
 )
 
@@ -604,7 +607,7 @@ add_test(
     NAME bench_api_options_hygiene
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_options_hygiene.cmake
 )
 
@@ -612,7 +615,7 @@ add_test(
     NAME bench_api_strict_mode
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_strict_mode.cmake
 )
 
@@ -620,7 +623,7 @@ add_test(
     NAME bench_api_zero_skip_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_zero_skip_gate.cmake
 )
 
@@ -628,7 +631,7 @@ add_test(
     NAME bench_api_clean_gate_forwarding
     COMMAND ${CMAKE_COMMAND}
         -DGATE_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/bench_api_clean_gate.sh
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_clean_gate_forwarding.cmake
 )
 
@@ -639,7 +642,7 @@ add_test(
         -DREADME_FILE=${CMAKE_CURRENT_SOURCE_DIR}/README.md
         -DSNAPSHOT_FILE=${CMAKE_CURRENT_SOURCE_DIR}/docs/benchmarks/readme_perf_snapshot.json
         -DTABLE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/docs/benchmarks/readme_perf_table.md
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_readme_perf_gate.cmake
 )
 
@@ -654,7 +657,7 @@ add_test(
     NAME nightly_mass_shell_runner
     COMMAND ${CMAKE_COMMAND}
         -DRUNNER=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/nightly_mass.sh
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_nightly_mass_shell_runner.cmake
 )
 
@@ -662,7 +665,7 @@ add_test(
     NAME llvm_backend_compat_policy
     COMMAND ${CMAKE_COMMAND}
         -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
-        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_llvm_backend_compat_policy.cmake
 )
 
@@ -719,3 +722,45 @@ if(WITH_LLVM_COMPAT)
         add_test(NAME llvm_backend_roundtrip_tests COMMAND test_llvm_backend_roundtrip)
     endif()
 endif()
+
+# Strict test sandbox policy:
+# - every test runs in an isolated work directory under ${LIRIC_CTEST_WORK_ROOT}
+# - source tree is purged before test run and verified clean after test run
+get_property(LIRIC_ALL_TESTS DIRECTORY PROPERTY TESTS)
+foreach(LIRIC_TEST_NAME IN LISTS LIRIC_ALL_TESTS)
+    string(MAKE_C_IDENTIFIER "${LIRIC_TEST_NAME}" LIRIC_TEST_DIR_ID)
+    set(LIRIC_TEST_WORK_DIR "${LIRIC_CTEST_WORK_ROOT}/${LIRIC_TEST_DIR_ID}")
+    file(MAKE_DIRECTORY "${LIRIC_TEST_WORK_DIR}")
+    set_tests_properties("${LIRIC_TEST_NAME}" PROPERTIES
+        WORKING_DIRECTORY "${LIRIC_TEST_WORK_DIR}"
+    )
+    set_property(TEST "${LIRIC_TEST_NAME}" APPEND PROPERTY
+        FIXTURES_REQUIRED liric_source_tree_sandbox
+    )
+endforeach()
+
+add_test(
+    NAME source_tree_generated_artifacts_purge_before
+    COMMAND ${CMAKE_COMMAND}
+        -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
+        -DMODE=purge
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_source_tree_generated_artifacts.cmake
+)
+set_tests_properties(source_tree_generated_artifacts_purge_before PROPERTIES
+    FIXTURES_SETUP liric_source_tree_sandbox
+    WORKING_DIRECTORY "${LIRIC_CTEST_WORK_ROOT}/source_tree_generated_artifacts_purge_before"
+)
+file(MAKE_DIRECTORY "${LIRIC_CTEST_WORK_ROOT}/source_tree_generated_artifacts_purge_before")
+
+add_test(
+    NAME source_tree_generated_artifacts_guard
+    COMMAND ${CMAKE_COMMAND}
+        -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
+        -DMODE=verify
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_source_tree_generated_artifacts.cmake
+)
+set_tests_properties(source_tree_generated_artifacts_guard PROPERTIES
+    FIXTURES_CLEANUP liric_source_tree_sandbox
+    WORKING_DIRECTORY "${LIRIC_CTEST_WORK_ROOT}/source_tree_generated_artifacts_guard"
+)
+file(MAKE_DIRECTORY "${LIRIC_CTEST_WORK_ROOT}/source_tree_generated_artifacts_guard")
