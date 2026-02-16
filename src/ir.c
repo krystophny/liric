@@ -2238,50 +2238,8 @@ static bool inst_is_terminator(const lr_inst_t *inst) {
     }
 }
 
-static bool func_is_param_vreg(const lr_func_t *f, uint32_t vreg) {
-    if (!f || !f->param_vregs)
-        return false;
-    for (uint32_t i = 0; i < f->num_params; i++) {
-        if (f->param_vregs[i] == vreg)
-            return true;
-    }
-    return false;
-}
-
-static bool dump_alloca_is_safe_to_hoist(const lr_inst_t *inst,
-                                         const lr_func_t *f) {
-    if (!inst || inst->op != LR_OP_ALLOCA)
-        return false;
-    if (inst->num_operands == 0)
-        return true;
-    if (inst->num_operands > 1)
-        return false;
-    switch (inst->operands[0].kind) {
-    case LR_VAL_IMM_I64:
-        return true;
-    case LR_VAL_VREG:
-        return func_is_param_vreg(f, inst->operands[0].vreg);
-    default:
-        return false;
-    }
-}
-
-static bool is_hoisted_alloca(const lr_inst_t *inst, lr_inst_t **hoisted_allocas,
-                              size_t hoisted_n) {
-    if (!inst || !hoisted_allocas)
-        return false;
-    for (size_t i = 0; i < hoisted_n; i++) {
-        if (hoisted_allocas[i] == inst)
-            return true;
-    }
-    return false;
-}
-
 void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
     bool is_decl;
-    lr_inst_t **hoisted_allocas = NULL;
-    size_t hoisted_n = 0;
-    size_t hoisted_cap = 0;
     if (!f || !out)
         return;
 
@@ -2293,44 +2251,18 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
     }
     fprintf(out, " {\n");
 
-    /* Hoist only allocas whose size is immediate or param-derived.
-     * Hoisting dynamic allocas that depend on local values can break SSA
-     * dominance in textual LLVM IR output. */
-    for (lr_block_t *b = f->first_block ? f->first_block->next : NULL; b; b = b->next) {
-        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-            if (!dump_alloca_is_safe_to_hoist(inst, f))
-                continue;
-            if (hoisted_n == hoisted_cap) {
-                size_t new_cap = hoisted_cap ? hoisted_cap * 2u : 8u;
-                lr_inst_t **tmp = (lr_inst_t **)realloc(hoisted_allocas,
-                    new_cap * sizeof(*tmp));
-                if (!tmp)
-                    break;
-                hoisted_allocas = tmp;
-                hoisted_cap = new_cap;
-            }
-            if (hoisted_n < hoisted_cap)
-                hoisted_allocas[hoisted_n++] = inst;
-        }
-    }
-
     for (lr_block_t *b = f->first_block; b; b = b->next) {
         lr_inst_t **insts = NULL;
         size_t ninst = 0;
         size_t cap = 0;
         size_t term_idx = (size_t)-1;
-        bool is_entry = (b == f->first_block);
 
         lr_dump_block_label(b, out);
-        if (is_entry) {
-            for (size_t i = 0; i < hoisted_n; i++)
-                lr_dump_inst(hoisted_allocas[i], m, f, out);
-        }
-
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
             if (ninst == cap) {
                 size_t new_cap = cap ? cap * 2u : 16u;
-                lr_inst_t **tmp = (lr_inst_t **)realloc(insts, new_cap * sizeof(*tmp));
+                lr_inst_t **tmp = (lr_inst_t **)realloc(insts,
+                    new_cap * sizeof(*tmp));
                 if (!tmp)
                     break;
                 insts = tmp;
@@ -2345,12 +2277,10 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
         }
 
         for (size_t i = 0; i < ninst; i++) {
-            if (!inst_is_terminator(insts[i])) {
-                if (!is_entry && is_hoisted_alloca(insts[i], hoisted_allocas, hoisted_n))
-                    continue;
+            if (!inst_is_terminator(insts[i]))
                 lr_dump_inst(insts[i], m, f, out);
-            }
         }
+
         if (term_idx != (size_t)-1) {
             lr_dump_inst(insts[term_idx], m, f, out);
         } else {
@@ -2361,7 +2291,6 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
         }
         free(insts);
     }
-    free(hoisted_allocas);
     fprintf(out, "}\n");
 }
 
