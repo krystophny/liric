@@ -6,6 +6,7 @@
 #include <system_error>
 
 #include <liric/liric_legacy.h>
+#include "llvm_backend.h"
 #include <llvm-c/LiricCompat.h>
 
 #include <llvm/IR/BasicBlock.h>
@@ -24,6 +25,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <dlfcn.h>
 #endif
 
 static int tests_run = 0;
@@ -139,6 +141,9 @@ static int test_wrapper_object_emit_mode_llvm(void) {
 }
 
 static int test_wrapper_to_api_executable_roundtrip(void) {
+    if (!lr_llvm_jit_is_available())
+        return 0;
+
     llvm::LLVMContext ctx;
     lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
     llvm::Module mod("roundtrip_exe", ctx);
@@ -164,6 +169,9 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
 }
 
 static int test_wrapper_jit_mode_llvm(void) {
+    if (!lr_llvm_jit_is_available())
+        return 0;
+
     llvm::LLVMContext ctx;
     lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
     llvm::Module mod("roundtrip_jit", ctx);
@@ -188,6 +196,14 @@ static int test_wrapper_jit_mode_llvm(void) {
         lr_jit_destroy(jit);
         return 1;
     }
+#if defined(__unix__) || defined(__APPLE__)
+    void *host_main = dlsym(nullptr, "main");
+    if (host_main && main_addr == host_main) {
+        std::fprintf(stderr, "  FAIL: jit lookup resolved host process main\n");
+        lr_jit_destroy(jit);
+        return 1;
+    }
+#endif
 
     int (*fn)(void) = (int (*)(void))main_addr;
     if (fn() != 42) {

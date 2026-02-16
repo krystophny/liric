@@ -23,15 +23,12 @@
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 
-#if defined(__has_include)
-#if __has_include(<llvm-c/LLJIT.h>)
-#include <llvm-c/LLJIT.h>
-#define LIRIC_HAVE_LLVM_C_LLJIT 1
-#else
+#if !defined(LIRIC_HAVE_LLVM_C_LLJIT)
 #define LIRIC_HAVE_LLVM_C_LLJIT 0
 #endif
-#else
-#define LIRIC_HAVE_LLVM_C_LLJIT 0
+
+#if LIRIC_HAVE_LLVM_C_LLJIT
+#include <llvm-c/LLJIT.h>
 #endif
 
 #if LIRIC_HAVE_LLVM_C_LLJIT
@@ -48,13 +45,10 @@ typedef LLVMOrcExecutorAddress lr_llvm_orc_addr_t;
 #else
 typedef LLVMOrcJITTargetAddress lr_llvm_orc_addr_t;
 #endif
-
-#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
-    (LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 13)
-#define LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 1
-#else
-#define LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 0
 #endif
+
+#if !defined(LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR)
+#define LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 0
 #endif
 
 #if defined(__unix__) || defined(__APPLE__)
