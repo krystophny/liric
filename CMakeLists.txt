@@ -712,13 +712,19 @@ if(WITH_LLVM_COMPAT)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     add_executable(test_llvm_compat tests/test_llvm_compat.cpp)
     target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
-    target_compile_options(test_llvm_compat PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    target_compile_options(test_llvm_compat PRIVATE
+        -Wall -Wextra -Wpedantic -Wno-unused-parameter
+        -Wno-error=attributes
+    )
     add_test(NAME llvm_compat_tests COMMAND test_llvm_compat)
 
     if(WITH_REAL_LLVM_BACKEND)
         add_executable(test_llvm_backend_roundtrip tests/test_llvm_backend_roundtrip.cpp)
         target_link_libraries(test_llvm_backend_roundtrip PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
-        target_compile_options(test_llvm_backend_roundtrip PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(test_llvm_backend_roundtrip PRIVATE
+            -Wall -Wextra -Wpedantic
+            -Wno-error=attributes
+        )
         add_test(NAME llvm_backend_roundtrip_tests COMMAND test_llvm_backend_roundtrip)
     endif()
 endif()
