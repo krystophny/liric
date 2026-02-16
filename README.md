@@ -128,7 +128,7 @@ Lane tools:
 ./build/bench_corpus_compare --iters 3
 ```
 
-## Latest Matrix Snapshot (2026-02-16)
+## Latest Matrix Snapshot (2026-02-17)
 
 Command used:
 
@@ -156,12 +156,14 @@ Artifacts:
 
 Cell status:
 - attempted: `18`
-- ok: `14`
-- failed: `4`
+- ok: `11`
+- failed: `7`
 
 Open failing cells:
-- `micro_c` with `policy=ir` fails in all 3 backend modes (`rc=-11`)
-- `ir_file` with `mode=llvm, policy=direct` is partial (`3/100`)
+- `api_e2e + isel/direct` and `api_e2e + copy_patch/direct`: 99/100 (stale external lfortran binary, #417 liric fix merged)
+- `api_e2e + llvm/direct`: 18/100 (#418)
+- `ir_file + llvm/direct`: 3/100 (#415)
+- `micro_c` with `policy=ir` fails in all 3 backend modes, SIGSEGV (#416)
 
 ### Non-Parse Speedup vs LLVM (`ir_file` lane)
 
