@@ -30,6 +30,8 @@ add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 option(WITH_REAL_LLVM_BACKEND "Enable real LLVM C API backend for mode 'llvm'" OFF)
 set(LIRIC_LLVM_CONFIG_EXE "" CACHE FILEPATH "Path to llvm-config for real LLVM backend")
 set(LIRIC_LLVM_COMPAT_MIN_MAJOR "11")
+set(LIRIC_HAVE_LLVM_C_LLJIT 0)
+set(LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 0)
 
 set(LIRIC_REAL_LLVM_INCLUDE_DIR "")
 set(LIRIC_REAL_LLVM_CFLAGS_LIST "")
@@ -97,10 +99,22 @@ if(WITH_REAL_LLVM_BACKEND)
     separate_arguments(LIRIC_REAL_LLVM_LIBS_LIST NATIVE_COMMAND "${LIRIC_REAL_LLVM_LIBS}")
     separate_arguments(LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LIRIC_REAL_LLVM_SYSTEM_LIBS}")
 
+    if(EXISTS "${LIRIC_REAL_LLVM_INCLUDE_DIR}/llvm-c/LLJIT.h")
+        set(LIRIC_HAVE_LLVM_C_LLJIT 1)
+        file(READ "${LIRIC_REAL_LLVM_INCLUDE_DIR}/llvm-c/LLJIT.h"
+            LIRIC_LLJIT_C_HEADER)
+        if(LIRIC_LLJIT_C_HEADER MATCHES "LLVMOrcLLJITGetDataLayoutStr")
+            set(LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 1)
+        endif()
+        unset(LIRIC_LLJIT_C_HEADER)
+    endif()
+
     add_compile_definitions(
         LIRIC_HAVE_REAL_LLVM_BACKEND=1
+        LIRIC_HAVE_LLVM_C_LLJIT=${LIRIC_HAVE_LLVM_C_LLJIT}
         LIRIC_BACKEND_LLVM_VERSION_MAJOR=${LIRIC_BACKEND_LLVM_VERSION_MAJOR}
         LIRIC_BACKEND_LLVM_VERSION_NUM=${LIRIC_BACKEND_LLVM_VERSION_NUM}
+        LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR=${LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR}
     )
     message(STATUS "Real LLVM backend enabled (llvm-config=${LLVM_BACKEND_CONFIG_EXE}, version=${LIRIC_BACKEND_LLVM_VERSION})")
 endif()
@@ -712,13 +726,19 @@ if(WITH_LLVM_COMPAT)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     add_executable(test_llvm_compat tests/test_llvm_compat.cpp)
     target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
-    target_compile_options(test_llvm_compat PRIVATE -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+    target_compile_options(test_llvm_compat PRIVATE
+        -Wall -Wextra -Wpedantic -Wno-unused-parameter
+        -Wno-error=attributes
+    )
     add_test(NAME llvm_compat_tests COMMAND test_llvm_compat)
 
     if(WITH_REAL_LLVM_BACKEND)
         add_executable(test_llvm_backend_roundtrip tests/test_llvm_backend_roundtrip.cpp)
         target_link_libraries(test_llvm_backend_roundtrip PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
-        target_compile_options(test_llvm_backend_roundtrip PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(test_llvm_backend_roundtrip PRIVATE
+            -Wall -Wextra -Wpedantic
+            -Wno-error=attributes
+        )
         add_test(NAME llvm_backend_roundtrip_tests COMMAND test_llvm_backend_roundtrip)
     endif()
 endif()

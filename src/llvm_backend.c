@@ -23,15 +23,12 @@
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
 
-#if defined(__has_include)
-#if __has_include(<llvm-c/LLJIT.h>)
-#include <llvm-c/LLJIT.h>
-#define LIRIC_HAVE_LLVM_C_LLJIT 1
-#else
+#if !defined(LIRIC_HAVE_LLVM_C_LLJIT)
 #define LIRIC_HAVE_LLVM_C_LLJIT 0
 #endif
-#else
-#define LIRIC_HAVE_LLVM_C_LLJIT 0
+
+#if LIRIC_HAVE_LLVM_C_LLJIT
+#include <llvm-c/LLJIT.h>
 #endif
 
 #if LIRIC_HAVE_LLVM_C_LLJIT
@@ -48,6 +45,10 @@ typedef LLVMOrcExecutorAddress lr_llvm_orc_addr_t;
 #else
 typedef LLVMOrcJITTargetAddress lr_llvm_orc_addr_t;
 #endif
+#endif
+
+#if !defined(LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR)
+#define LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 0
 #endif
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -503,7 +504,10 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
 
     {
         const char *jit_triple = LLVMOrcLLJITGetTripleString(lljit);
-        const char *jit_dl = LLVMOrcLLJITGetDataLayoutStr(lljit);
+        const char *jit_dl = NULL;
+#if LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR
+        jit_dl = LLVMOrcLLJITGetDataLayoutStr(lljit);
+#endif
         if (jit_triple && jit_triple[0])
             LLVMSetTarget(mod, jit_triple);
         if (jit_dl && jit_dl[0])

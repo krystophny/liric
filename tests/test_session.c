@@ -315,6 +315,26 @@ int test_session_direct_llvm_mode_stream_contract(void) {
     }
 
     rc = lr_session_func_begin(s, "session_direct_llvm_stream", i32, NULL, 0, false, &err);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (!lr_llvm_jit_is_available()) {
+        if (rc == 0) {
+            fprintf(stderr, "  FAIL: func begin expected failure without LLJIT support (line %d)\n",
+                    __LINE__);
+            goto cleanup;
+        }
+        result = 0;
+        goto cleanup;
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr, "  FAIL: func begin expected failure when backend disabled (line %d)\n",
+                __LINE__);
+        goto cleanup;
+    }
+    result = 0;
+    goto cleanup;
+#endif
+
     if (rc != 0) {
         fprintf(stderr, "  FAIL: func begin succeeds in DIRECT+llvm mode (line %d)\n", __LINE__);
         goto cleanup;

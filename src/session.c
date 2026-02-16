@@ -741,23 +741,30 @@ static int emit_ir_instruction(struct lr_session *s, const session_inst_desc_t *
 
 static int validate_block_termination(struct lr_session *s,
                                       session_error_t *err) {
-    uint32_t i;
+    lr_block_t *b;
+    bool has_blocks = false;
     if (!s || !s->cur_func)
         return -1;
-    if (s->block_count == 0) {
+    if (!s->cur_func->first_block) {
         err_set(err, S_ERR_STATE, "block 0 is not terminated");
         return -1;
     }
-    for (i = 0; i < s->block_count; i++) {
-        lr_block_t *b = (s->blocks && i < s->block_cap) ? s->blocks[i] : NULL;
-        bool terminated = false;
 
-        if (!b) {
-            err_set(err, S_ERR_STATE, "block %u is missing", i);
+    for (b = s->cur_func->first_block; b; b = b->next) {
+        uint32_t id = b->id;
+        bool terminated = false;
+        has_blocks = true;
+
+        if (ensure_block_capacity(s, id + 1u) != 0) {
+            err_set(err, S_ERR_BACKEND, "block table allocation failed");
             return -1;
         }
+        if (!s->blocks[id])
+            s->blocks[id] = b;
+        if (s->block_count <= id)
+            s->block_count = id + 1u;
 
-        terminated = s->block_seen[i] && s->block_terminated[i];
+        terminated = s->block_seen[id] && s->block_terminated[id];
         if (!terminated && b->last)
             terminated = is_terminator(b->last->op);
 
@@ -767,15 +774,19 @@ static int validate_block_termination(struct lr_session *s,
                                              NULL, 0, NULL, 0);
             if (!term) {
                 err_set(err, S_ERR_BACKEND,
-                        "failed to synthesize terminator for block %u", i);
+                        "failed to synthesize terminator for block %u", id);
                 return -1;
             }
             lr_block_append(b, term);
             terminated = true;
         }
 
-        s->block_seen[i] = true;
-        s->block_terminated[i] = terminated;
+        s->block_seen[id] = true;
+        s->block_terminated[id] = terminated;
+    }
+    if (!has_blocks) {
+        err_set(err, S_ERR_STATE, "block 0 is not terminated");
+        return -1;
     }
     return 0;
 }
