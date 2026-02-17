@@ -25,6 +25,8 @@ set(mode_log "${log_dir}/mode.log")
 set(fake_cmake "${root}/fake_cmake.sh")
 set(fake_compat "${root}/fake_bench_compat_check.sh")
 set(fake_api "${root}/fake_bench_api.sh")
+set(fake_lfortran_llvm "${root}/fake_lfortran_llvm.sh")
+set(fake_lfortran_liric "${root}/fake_lfortran_liric.sh")
 set(llvm_build_dir "${root}/lfortran_build_llvm")
 set(liric_build_dir "${root}/lfortran_build_liric")
 set(manifest "${CMAKE_CURRENT_LIST_DIR}/../../tools/bench_manifest.json")
@@ -102,7 +104,19 @@ cat > \"$bench_dir/bench_api_summary.json\" <<'JSON'
 JSON
 ")
 
-execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_cmake}" "${fake_compat}" "${fake_api}")
+file(WRITE "${fake_lfortran_llvm}" "#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+")
+
+file(WRITE "${fake_lfortran_liric}" "#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+")
+
+execute_process(COMMAND "${CHMOD_EXE}" +x
+    "${fake_cmake}" "${fake_compat}" "${fake_api}"
+    "${fake_lfortran_llvm}" "${fake_lfortran_liric}")
 
 execute_process(
     COMMAND "${BENCH_MATRIX}"
@@ -117,8 +131,8 @@ execute_process(
         --cmake "${fake_cmake}"
         --lfortran-build-dir "${llvm_build_dir}"
         --lfortran-liric-build-dir "${liric_build_dir}"
-        --lfortran /opt/lfortran-llvm/bin/lfortran
-        --lfortran-liric /opt/lfortran-liric/bin/lfortran
+        --lfortran "${fake_lfortran_llvm}"
+        --lfortran-liric "${fake_lfortran_liric}"
         --bench-compat-check "${fake_compat}"
         --bench-api "${fake_api}"
     RESULT_VARIABLE rc

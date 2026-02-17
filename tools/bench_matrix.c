@@ -501,7 +501,7 @@ static cfg_t parse_args(int argc, char **argv) {
                              ? default_lfortran_liric_hyphen
                              : (file_exists(default_lfortran_liric_underscore)
                                     ? default_lfortran_liric_underscore
-                                    : cfg.lfortran);
+                                    : NULL);
     cfg.lfortran_build_dir = "../lfortran/build";
     cfg.lfortran_liric_build_dir = dir_exists(default_lfortran_build_liric_hyphen)
                                        ? default_lfortran_build_liric_hyphen
@@ -842,7 +842,32 @@ int main(int argc, char **argv) {
     if (!fails)
         die("failed to open failures output: %s", fails_path);
 
-    if (cfg.lanes[LANE_API_E2E] && cfg.rebuild_lfortran) {
+    if (cfg.lanes[LANE_API_E2E]) {
+        if (!cfg.lfortran || !cfg.lfortran[0] || !file_exists(cfg.lfortran)) {
+            write_failure_row(fails,
+                              "api_e2e",
+                              "all",
+                              "all",
+                              "lfortran_llvm",
+                              "lfortran_binary_missing",
+                              127,
+                              cfg.lfortran ? cfg.lfortran : "");
+            compat_ok = 0;
+        }
+        if (!cfg.lfortran_liric || !cfg.lfortran_liric[0] || !file_exists(cfg.lfortran_liric)) {
+            write_failure_row(fails,
+                              "api_e2e",
+                              "all",
+                              "all",
+                              "lfortran_llvm",
+                              "lfortran_liric_binary_missing",
+                              127,
+                              cfg.lfortran_liric ? cfg.lfortran_liric : "");
+            compat_ok = 0;
+        }
+    }
+
+    if (cfg.lanes[LANE_API_E2E] && cfg.rebuild_lfortran && compat_ok) {
         if (run_lfortran_rebuild_step(&cfg,
                                       fails,
                                       cfg.lfortran_build_dir,
