@@ -1,0 +1,180 @@
+if(NOT DEFINED BENCH_MATRIX OR NOT DEFINED WORKDIR)
+    message(FATAL_ERROR "BENCH_MATRIX and WORKDIR are required")
+endif()
+
+if(NOT EXISTS "${BENCH_MATRIX}")
+    message(FATAL_ERROR "bench_matrix executable not found: ${BENCH_MATRIX}")
+endif()
+
+find_program(BASH_EXE bash)
+if(NOT BASH_EXE)
+    message(STATUS "bash not available; skipping bench_matrix lfortran rebuild test")
+    return()
+endif()
+
+find_program(CHMOD_EXE chmod)
+if(NOT CHMOD_EXE)
+    message(FATAL_ERROR "chmod is required for bench_matrix lfortran rebuild test")
+endif()
+
+set(root "${WORKDIR}/bench_matrix_lfortran_rebuild")
+set(bench_dir "${root}/bench")
+set(log_dir "${root}/logs")
+set(cmake_log "${log_dir}/cmake_args.log")
+set(mode_log "${log_dir}/mode.log")
+set(fake_cmake "${root}/fake_cmake.sh")
+set(fake_compat "${root}/fake_bench_compat_check.sh")
+set(fake_api "${root}/fake_bench_api.sh")
+set(llvm_build_dir "${root}/lfortran_build_llvm")
+set(liric_build_dir "${root}/lfortran_build_liric")
+set(manifest "${CMAKE_CURRENT_LIST_DIR}/../../tools/bench_manifest.json")
+
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${bench_dir}")
+file(MAKE_DIRECTORY "${log_dir}")
+file(MAKE_DIRECTORY "${llvm_build_dir}")
+file(MAKE_DIRECTORY "${liric_build_dir}")
+
+file(WRITE "${fake_cmake}" "#!/usr/bin/env bash
+set -euo pipefail
+echo \"$*\" >> \"${cmake_log}\"
+[[ \"$1\" == \"--build\" ]] || { echo \"missing --build\" >&2; exit 90; }
+[[ \"$3\" == \"-j\" ]] || { echo \"missing -j\" >&2; exit 91; }
+[[ -n \"$2\" ]] || { echo \"missing build dir\" >&2; exit 92; }
+[[ -n \"$4\" ]] || { echo \"missing jobs\" >&2; exit 93; }
+")
+
+file(WRITE "${fake_compat}" "#!/usr/bin/env bash
+set -euo pipefail
+bench_dir=''
+while [[ $# -gt 0 ]]; do
+    case \"$1\" in
+        --bench-dir) bench_dir=\"$2\"; shift 2 ;;
+        --timeout) shift 2 ;;
+        --runtime-lib) shift 2 ;;
+        --lfortran) shift 2 ;;
+        *) echo \"unexpected arg in fake bench_compat_check: $1\" >&2; exit 101 ;;
+    esac
+done
+[[ -n \"$bench_dir\" ]] || { echo \"missing --bench-dir\" >&2; exit 102; }
+cat > \"$bench_dir/compat_api.txt\" <<'TXT'
+api_case_01
+TXT
+cat > \"$bench_dir/compat_ll.txt\" <<'TXT'
+api_case_01
+TXT
+cat > \"$bench_dir/compat_ll_options.jsonl\" <<'JSONL'
+{\"name\":\"api_case_01\",\"options\":\"\"}
+JSONL
+")
+
+file(WRITE "${fake_api}" "#!/usr/bin/env bash
+set -euo pipefail
+bench_dir=''
+policy=''
+compat_list=''
+options_jsonl=''
+while [[ $# -gt 0 ]]; do
+    case \"$1\" in
+        --bench-dir) bench_dir=\"$2\"; shift 2 ;;
+        --iters|--timeout-ms|--min-completed|--fail-sample-limit) shift 2 ;;
+        --require-zero-skips) shift 1 ;;
+        --liric-policy) policy=\"$2\"; shift 2 ;;
+        --compat-list) compat_list=\"$2\"; shift 2 ;;
+        --options-jsonl) options_jsonl=\"$2\"; shift 2 ;;
+        --lfortran|--lfortran-liric|--test-dir|--runtime-lib) shift 2 ;;
+        *) echo \"unexpected arg in fake bench_api: $1\" >&2; exit 111 ;;
+    esac
+done
+[[ -n \"$bench_dir\" ]] || { echo \"missing bench_dir\" >&2; exit 112; }
+[[ \"$policy\" == \"direct\" ]] || { echo \"bad policy: $policy\" >&2; exit 113; }
+[[ -n \"$compat_list\" ]] || { echo \"missing compat list\" >&2; exit 114; }
+[[ -n \"$options_jsonl\" ]] || { echo \"missing options_jsonl\" >&2; exit 115; }
+echo \"\${LIRIC_COMPILE_MODE:-unset}\" > \"${mode_log}\"
+cat > \"$bench_dir/bench_api_summary.json\" <<'JSON'
+{
+  \"status\": \"OK\",
+  \"attempted\": 1,
+  \"completed\": 1,
+  \"skipped\": 0,
+  \"zero_skip_gate_met\": true
+}
+JSON
+")
+
+execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_cmake}" "${fake_compat}" "${fake_api}")
+
+execute_process(
+    COMMAND "${BENCH_MATRIX}"
+        --bench-dir "${bench_dir}"
+        --manifest "${manifest}"
+        --modes isel
+        --policies direct
+        --lanes api_e2e
+        --iters 1
+        --timeout 5
+        --timeout-ms 1000
+        --cmake "${fake_cmake}"
+        --lfortran-build-dir "${llvm_build_dir}"
+        --lfortran-liric-build-dir "${liric_build_dir}"
+        --lfortran /opt/lfortran-llvm/bin/lfortran
+        --lfortran-liric /opt/lfortran-liric/bin/lfortran
+        --bench-compat-check "${fake_compat}"
+        --bench-api "${fake_api}"
+    RESULT_VARIABLE rc
+    OUTPUT_VARIABLE out
+    ERROR_VARIABLE err
+)
+
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR
+        "bench_matrix run failed rc=${rc}\nstdout:\n${out}\nstderr:\n${err}"
+    )
+endif()
+
+if(NOT EXISTS "${cmake_log}")
+    message(FATAL_ERROR "fake cmake was not invoked")
+endif()
+if(NOT EXISTS "${mode_log}")
+    message(FATAL_ERROR "fake bench_api was not invoked")
+endif()
+
+file(READ "${cmake_log}" cmake_text)
+string(REGEX MATCHALL "--build" build_hits "${cmake_text}")
+list(LENGTH build_hits build_count)
+if(NOT build_count EQUAL 2)
+    message(FATAL_ERROR "expected 2 cmake --build invocations, got ${build_count}\nlog:\n${cmake_text}")
+endif()
+
+string(FIND "${cmake_text}" "--build ${llvm_build_dir}" llvm_hit)
+if(llvm_hit EQUAL -1)
+    message(FATAL_ERROR "missing llvm rebuild dir in cmake args:\n${cmake_text}")
+endif()
+string(FIND "${cmake_text}" "--build ${liric_build_dir}" liric_hit)
+if(liric_hit EQUAL -1)
+    message(FATAL_ERROR "missing liric rebuild dir in cmake args:\n${cmake_text}")
+endif()
+
+file(READ "${mode_log}" mode_text)
+if(NOT mode_text MATCHES "^isel")
+    message(FATAL_ERROR "expected fake bench_api to run with mode=isel, got '${mode_text}'")
+endif()
+
+set(summary "${bench_dir}/matrix_summary.json")
+if(NOT EXISTS "${summary}")
+    message(FATAL_ERROR "missing matrix summary artifact: ${summary}")
+endif()
+
+file(READ "${summary}" summary_text)
+if(NOT summary_text MATCHES "\"status\"[ \t]*:[ \t]*\"OK\"")
+    message(FATAL_ERROR "matrix summary status not OK:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"cells_attempted\"[ \t]*:[ \t]*1")
+    message(FATAL_ERROR "matrix summary attempted count mismatch:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"cells_ok\"[ \t]*:[ \t]*1")
+    message(FATAL_ERROR "matrix summary ok count mismatch:\n${summary_text}")
+endif()
+if(NOT summary_text MATCHES "\"cells_failed\"[ \t]*:[ \t]*0")
+    message(FATAL_ERROR "matrix summary failed count mismatch:\n${summary_text}")
+endif()

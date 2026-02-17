@@ -54,6 +54,10 @@ Lane-local artifacts remain in mode/lane subdirectories (for drill-down), for ex
 
 ## Notes
 
+- `api_e2e` lane performs strict LFortran rebuild preflight by default:
+  - `cmake --build ../lfortran/build -j<N>`
+  - `cmake --build ../lfortran/build-liric -j<N>` (fallback: `../lfortran/build_liric`) when a split WITH_LIRIC build is configured
+  Use `--skip-lfortran-rebuild` only for controlled local debugging.
 - `api_e2e` lane regenerates compatibility artifacts via `bench_compat_check` unless `--skip-compat-check` is passed.
 - `bench_compat_check` is a lane preflight producer used by `bench_matrix`; run it standalone only for focused debugging.
 - `bench_lane_micro` emits `bench_tcc_summary.json` so micro lane results can be gated in the unified matrix.

@@ -55,6 +55,9 @@ typedef struct {
 
     const char *lfortran;
     const char *lfortran_liric;
+    const char *lfortran_build_dir;
+    const char *lfortran_liric_build_dir;
+    const char *cmake;
     const char *test_dir;
     const char *runtime_lib;
     const char *corpus;
@@ -67,6 +70,7 @@ typedef struct {
 
     int run_compat_check;
     int allow_partial;
+    int rebuild_lfortran;
 
     int modes[MODE_COUNT];
     int lanes[LANE_COUNT];
@@ -78,6 +82,15 @@ typedef bench_cmd_result_t cmd_result_t;
 static const char *k_mode_name[MODE_COUNT] = {"isel", "copy_patch", "llvm"};
 static const char *k_lane_name[LANE_COUNT] = {"ir_file", "api_e2e", "micro_c"};
 static const char *k_policy_name[POLICY_COUNT] = {"direct", "ir"};
+
+static void write_failure_row(FILE *ff,
+                              const char *lane,
+                              const char *mode,
+                              const char *policy,
+                              const char *baseline,
+                              const char *reason,
+                              int rc,
+                              const char *summary_path);
 
 static void die(const char *fmt, ...) {
     va_list ap;
@@ -95,6 +108,11 @@ static int file_exists(const char *path) {
 
 static int file_executable(const char *path) {
     return path && access(path, X_OK) == 0;
+}
+
+static int dir_exists(const char *path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
 static int mkdir_p(const char *path) {
@@ -292,6 +310,60 @@ static int run_cmd_with_mode(const char *mode, char *const argv[], cmd_result_t 
     return bench_run_cmd_with_mode(mode, &opts, out_res);
 }
 
+static int host_nproc(void) {
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1)
+        return 1;
+    if (n > 1024)
+        return 1024;
+    return (int)n;
+}
+
+static int run_lfortran_rebuild_step(const cfg_t *cfg,
+                                     FILE *fails,
+                                     const char *build_dir,
+                                     const char *missing_reason,
+                                     const char *failed_reason) {
+    cmd_result_t r = {0};
+    char jobs_buf[32];
+    char *cmd[8];
+    int n = 0;
+
+    if (!build_dir || !build_dir[0] || !dir_exists(build_dir)) {
+        write_failure_row(fails,
+                          "api_e2e",
+                          "all",
+                          "all",
+                          "lfortran_llvm",
+                          missing_reason,
+                          2,
+                          build_dir ? build_dir : "");
+        return -1;
+    }
+
+    snprintf(jobs_buf, sizeof(jobs_buf), "%d", host_nproc());
+    cmd[n++] = (char *)cfg->cmake;
+    cmd[n++] = "--build";
+    cmd[n++] = (char *)build_dir;
+    cmd[n++] = "-j";
+    cmd[n++] = jobs_buf;
+    cmd[n++] = NULL;
+
+    printf("[matrix] rebuild: %s\n", build_dir);
+    if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
+        write_failure_row(fails,
+                          "api_e2e",
+                          "all",
+                          "all",
+                          "lfortran_llvm",
+                          failed_reason,
+                          r.rc,
+                          build_dir);
+        return -1;
+    }
+    return 0;
+}
+
 static void usage(void) {
     printf("usage: bench_matrix [options]\n");
     printf("  --bench-dir PATH         output root (default: /tmp/liric_bench)\n");
@@ -311,6 +383,11 @@ static void usage(void) {
     printf("  --cache-dir PATH         corpus cache directory\n");
     printf("  --lfortran PATH          lfortran LLVM binary (bench_api/compat)\n");
     printf("  --lfortran-liric PATH    lfortran WITH_LIRIC binary (bench_api)\n");
+    printf("  --lfortran-build-dir PATH rebuild dir for lfortran LLVM binary (default: ../lfortran/build)\n");
+    printf("  --lfortran-liric-build-dir PATH rebuild dir for lfortran WITH_LIRIC binary (only needed for split builds)\n");
+    printf("  --cmake PATH             cmake executable for lfortran rebuild preflight (default: cmake)\n");
+    printf("  --skip-lfortran-rebuild  disable lfortran rebuild preflight\n");
+    printf("  --rebuild-lfortran       enable lfortran rebuild preflight (default)\n");
     printf("  --test-dir PATH          lfortran integration_tests directory (bench_api)\n");
     printf("  --bench-compat-check PATH\n");
     printf("  --bench-corpus-compare PATH\n");
@@ -384,6 +461,11 @@ static int parse_lanes(cfg_t *cfg, const char *text) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
+    const char *default_lfortran_llvm = "../lfortran/build/src/bin/lfortran";
+    const char *default_lfortran_liric_hyphen = "../lfortran/build-liric/src/bin/lfortran";
+    const char *default_lfortran_liric_underscore = "../lfortran/build_liric/src/bin/lfortran";
+    const char *default_lfortran_build_liric_hyphen = "../lfortran/build-liric";
+    const char *default_lfortran_build_liric_underscore = "../lfortran/build_liric";
     const char *default_runtime_dylib =
         "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
     const char *default_runtime_so =
@@ -405,6 +487,20 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_tcc = NULL;
     cfg.probe_runner = NULL;
     cfg.lli_phases = NULL;
+    cfg.cmake = "cmake";
+    cfg.rebuild_lfortran = 1;
+    cfg.lfortran = file_exists(default_lfortran_llvm) ? default_lfortran_llvm : NULL;
+    cfg.lfortran_liric = file_exists(default_lfortran_liric_hyphen)
+                             ? default_lfortran_liric_hyphen
+                             : (file_exists(default_lfortran_liric_underscore)
+                                    ? default_lfortran_liric_underscore
+                                    : cfg.lfortran);
+    cfg.lfortran_build_dir = "../lfortran/build";
+    cfg.lfortran_liric_build_dir = dir_exists(default_lfortran_build_liric_hyphen)
+                                       ? default_lfortran_build_liric_hyphen
+                                       : (dir_exists(default_lfortran_build_liric_underscore)
+                                              ? default_lfortran_build_liric_underscore
+                                              : NULL);
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so)
@@ -473,6 +569,16 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-liric") == 0 && i + 1 < argc) {
             cfg.lfortran_liric = argv[++i];
+        } else if (strcmp(argv[i], "--lfortran-build-dir") == 0 && i + 1 < argc) {
+            cfg.lfortran_build_dir = argv[++i];
+        } else if (strcmp(argv[i], "--lfortran-liric-build-dir") == 0 && i + 1 < argc) {
+            cfg.lfortran_liric_build_dir = argv[++i];
+        } else if (strcmp(argv[i], "--cmake") == 0 && i + 1 < argc) {
+            cfg.cmake = argv[++i];
+        } else if (strcmp(argv[i], "--skip-lfortran-rebuild") == 0) {
+            cfg.rebuild_lfortran = 0;
+        } else if (strcmp(argv[i], "--rebuild-lfortran") == 0) {
+            cfg.rebuild_lfortran = 1;
         } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
             cfg.test_dir = argv[++i];
         } else if (strcmp(argv[i], "--bench-compat-check") == 0 && i + 1 < argc) {
@@ -729,13 +835,51 @@ int main(int argc, char **argv) {
     if (!fails)
         die("failed to open failures output: %s", fails_path);
 
+    if (cfg.lanes[LANE_API_E2E] && cfg.rebuild_lfortran) {
+        if (run_lfortran_rebuild_step(&cfg,
+                                      fails,
+                                      cfg.lfortran_build_dir,
+                                      "lfortran_build_dir_missing",
+                                      "lfortran_llvm_rebuild_failed") != 0) {
+            compat_ok = 0;
+        }
+        if (cfg.lfortran_liric_build_dir &&
+            cfg.lfortran_liric_build_dir[0] &&
+            (!cfg.lfortran_build_dir ||
+             strcmp(cfg.lfortran_build_dir, cfg.lfortran_liric_build_dir) != 0)) {
+            if (run_lfortran_rebuild_step(&cfg,
+                                          fails,
+                                          cfg.lfortran_liric_build_dir,
+                                          "lfortran_liric_build_dir_missing",
+                                          "lfortran_liric_rebuild_failed") != 0) {
+                compat_ok = 0;
+            }
+        } else if ((!cfg.lfortran_liric_build_dir || !cfg.lfortran_liric_build_dir[0]) &&
+                   cfg.lfortran_liric &&
+                   cfg.lfortran &&
+                   strcmp(cfg.lfortran_liric, cfg.lfortran) != 0) {
+            write_failure_row(fails,
+                              "api_e2e",
+                              "all",
+                              "all",
+                              "lfortran_llvm",
+                              "lfortran_liric_build_dir_missing",
+                              2,
+                              "");
+            compat_ok = 0;
+        }
+    }
+
     if (cfg.lanes[LANE_API_E2E] && cfg.run_compat_check) {
         cmd_result_t r = {0};
         char timeout_buf[32];
         char *cmd[24];
         int n = 0;
 
-        if (!file_executable(cfg.bench_compat_check)) {
+        if (!compat_ok) {
+            write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
+            ran_compat = 1;
+        } else if (!file_executable(cfg.bench_compat_check)) {
             compat_ok = 0;
             write_failure_row(fails,
                               "api_e2e",

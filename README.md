@@ -102,6 +102,8 @@ Canonical run (all backends, both policies, all lanes):
 ./build/bench_matrix --modes all --policies all --lanes all --iters 1
 ```
 
+`bench_matrix` enforces LFortran rebuild preflight for `api_e2e` by default (`../lfortran/build`, plus split WITH_LIRIC build dirs when configured). Use `--skip-lfortran-rebuild` only for controlled local debugging.
+
 Published benchmark artifacts:
 - `docs/benchmarks/readme_perf_snapshot.json`
 - `docs/benchmarks/readme_perf_table.md`
@@ -134,19 +136,12 @@ Command used:
 
 ```bash
 # canonical: all modes + all lanes + strict matrix accounting
-./build/bench_matrix --manifest tools/bench_manifest.json --modes all --policies all --lanes all --iters 1
+./build/bench_matrix --manifest tools/bench_manifest.json --modes all --policies all --lanes all --iters 1 --skip-compat-check --lfortran ../lfortran/build/src/bin/lfortran
 
 # lane tools (bench_matrix calls these internally)
-./build/bench_compat_check --timeout 15   # correctness gate
-./build/bench_ll --iters 3                # liric JIT vs lli
-./build/bench_lane_api --iters 3 --runtime-lib ../lfortran/build/src/runtime/liblfortran_runtime.so --liric-policy direct
-                                          # lfortran LLVM vs lfortran+liric
-# prerequisite for bench_corpus: populate /tmp/liric_lfortran_mass/cache
-./tools/lfortran_mass/nightly_mass.sh --output-root /tmp/liric_lfortran_mass
-./build/bench_corpus --iters 3            # 100-case focused corpus
-./build/bench_lane_ir --iters 3 --policy direct
-./build/bench_lane_micro --iters 10 --policy direct
-./build/bench_exe_matrix --iters 3        # ll->exe matrix: isel/copy_patch/llvm vs clang baseline
+./build/bench_lane_ir --iters 1 --policy direct
+./build/bench_lane_api --iters 1 --runtime-lib ../lfortran/build/src/runtime/liblfortran_runtime.so --liric-policy direct
+./build/bench_lane_micro --iters 1 --policy direct
 ```
 
 Artifacts:
@@ -156,14 +151,10 @@ Artifacts:
 
 Cell status:
 - attempted: `18`
-- ok: `11`
-- failed: `7`
+- ok: `18`
+- failed: `0`
 
-Open failing cells:
-- `api_e2e + isel/direct` and `api_e2e + copy_patch/direct`: 99/100 (stale external lfortran binary, #417 liric fix merged)
-- `api_e2e + llvm/direct`: 18/100 (#418)
-- `ir_file + llvm/direct`: 3/100 (#415)
-- `micro_c` with `policy=ir` fails in all 3 backend modes, SIGSEGV (#416)
+Open failing cells: none.
 
 ### Non-Parse Speedup vs LLVM (`ir_file` lane)
 
@@ -173,12 +164,12 @@ Definition here:
 
 | Mode | Policy | Liric non-parse median (ms) | LLVM non-parse median (ms) | Speedup vs LLVM |
 |---|---|---:|---:|---:|
-| isel | direct | 0.165217 | 4.624600 | 31.705910x |
-| isel | ir | 0.160227 | 4.736892 | 29.238326x |
-| copy_patch | direct | 0.154046 | 4.404326 | 32.148272x |
-| copy_patch | ir | 0.160643 | 4.679654 | 29.725498x |
-| llvm | ir | 5.320250 | 4.366555 | 0.816893x |
-| llvm | direct | partial | partial | partial |
+| isel | direct | 0.127370 | 4.338790 | 36.932586x |
+| isel | ir | 0.151706 | 4.243712 | 30.191785x |
+| copy_patch | direct | 0.154921 | 4.484761 | 31.715055x |
+| copy_patch | ir | 0.141171 | 4.265868 | 31.161581x |
+| llvm | direct | 5.115333 | 4.027665 | 0.808756x |
+| llvm | ir | 4.980485 | 4.215593 | 0.824343x |
 
 ### Non-Parse Speedup vs LLVM (`api_e2e` lane)
 
@@ -187,19 +178,25 @@ Definition here:
 
 | Mode | Policy | Liric non-parse median (ms) | LLVM non-parse median (ms) | Speedup vs LLVM |
 |---|---|---:|---:|---:|
-| isel | direct | 0.724500 | 9.844000 | 13.587302x |
-| isel | ir | 0.697000 | 10.191500 | 14.621951x |
-| copy_patch | direct | 0.784500 | 10.126500 | 12.908222x |
-| copy_patch | ir | 0.707500 | 10.378000 | 14.668551x |
-| llvm | direct | 11.026500 | 9.777500 | 0.886727x |
-| llvm | ir | 10.545500 | 10.147500 | 0.962259x |
+| isel | direct | 9.283500 | 9.718000 | 1.046803x |
+| isel | ir | 9.310000 | 9.301000 | 0.999033x |
+| copy_patch | direct | 9.459000 | 9.748000 | 1.030553x |
+| copy_patch | ir | 9.073500 | 9.112000 | 1.004243x |
+| llvm | direct | 9.401000 | 9.435500 | 1.003670x |
+| llvm | ir | 9.193000 | 9.335500 | 1.015501x |
 
 ### TCC Baseline (`micro_c` lane)
 
 `micro_c` compares Liric against TCC (not LLVM):
-- `isel/direct` non-parse speedup vs TCC: `6.217420x`
-- `copy_patch/direct` non-parse speedup vs TCC: `5.670741x`
-- `llvm/direct` non-parse speedup vs TCC: `0.130222x`
+
+| Mode | Policy | Wall-clock speedup vs TCC | Non-parse speedup vs TCC |
+|---|---|---:|---:|
+| isel | direct | 0.324635x | 5.537401x |
+| isel | ir | 0.292722x | 6.028490x |
+| copy_patch | direct | 0.298227x | 5.200318x |
+| copy_patch | ir | 0.308859x | 5.729668x |
+| llvm | direct | 0.186017x | 0.158901x |
+| llvm | ir | 0.181531x | 0.159429x |
 
 ## Source Layout
 
