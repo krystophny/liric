@@ -51,9 +51,9 @@ ctest --test-dir build --output-on-failure
                               -> MIR   templates to LLVM
                               -> x86   -> x86   ORC JIT
                                 |        |        |
-                              ~6x      ~6x      ~1x
+                              ~47x     ~47x     ~1x
                               faster   faster   (baseline
-                                                validation)
+                              (LL)     (LL)     validation)
 
                               Lanes:
                               api_full_liric
@@ -62,12 +62,12 @@ ctest --test-dir build --output-on-failure
   STANDALONE LANES (no lfortran involved)
 
   LL corpus    100 .ll files (same corpus as API lanes)
-               ll_jit:  liric parses+compiles each .ll   ~0.07ms
-               ll_llvm: lli (LLVM) runs each .ll         ~5.2ms
-               Speedup: 75x (isel/copy_patch)
+               ll_jit:  liric parses+compiles each .ll   ~0.22ms
+               ll_llvm: lli (LLVM) runs each .ll         ~10.4ms
+               Speedup: ~47x (isel/copy_patch)
 
   Micro C      same corpus, lfortran --show-c output, liric vs TCC
-               Speedup: ~8x in-process (isel/copy_patch)
+               Speedup: ~4.5x in-process (isel/copy_patch)
 ```
 
 ### Matrix axes
@@ -130,41 +130,26 @@ Runtime artifacts:
 - `/tmp/liric_bench/matrix_failures.jsonl`
 - `/tmp/liric_bench/matrix_summary.json`
 
-## Speedup Tables (2026-02-17)
+## Speedup Tables (2026-02-18)
 
-42/42 matrix cells OK, unified 100-case corpus (all lanes). All timings are non-parse median ms.
-
-### API Backend (liric vs LLVM, 100 lfortran integration tests)
-
-| Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
-|------|--------|----------:|-----------:|--------:|
-| isel | direct | 9.29 | 1.52 | **6.1x** |
-| isel | ir | 9.79 | 0.62 | **15.7x** |
-| copy_patch | direct | 9.62 | 1.46 | **6.6x** |
-| copy_patch | ir | 9.96 | 0.64 | **15.6x** |
-| llvm | direct | 9.73 | 10.41 | 0.9x |
-| llvm | ir | 9.55 | 10.03 | 1.0x |
+100-case corpus, 3 iterations, non-parse median ms.
 
 ### LL Corpus (compile-only, 100 .ll files)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 5.19 | 0.070 | **75x** |
-| isel | ir | 5.22 | 0.069 | **76x** |
-| copy_patch | direct | 5.27 | 0.070 | **76x** |
-| copy_patch | ir | 5.27 | 0.070 | **75x** |
-| llvm | direct | 5.12 | 6.01 | 0.9x |
-| llvm | ir | 5.09 | 6.01 | 0.8x |
+| isel | direct | 10.41 | 0.220 | **47x** |
+| isel | ir | 10.63 | 0.230 | **47x** |
+| copy_patch | direct | 10.43 | 0.229 | **47x** |
+| copy_patch | ir | 11.42 | 0.237 | **48x** |
 
 ### Micro C (liric vs TCC, corpus-driven in-process compile)
 
 | Mode | Policy | Speedup |
 |------|--------|--------:|
-| isel | direct | **8.4x** |
-| isel | ir | **8.4x** |
-| copy_patch | direct | **7.8x** |
-| copy_patch | ir | **7.8x** |
-| llvm | direct | 0.15x |
-| llvm | ir | 0.16x |
+| isel | direct | **4.3x** |
+| isel | ir | **4.5x** |
+| copy_patch | direct | **4.6x** |
+| copy_patch | ir | **5.2x** |
 
-The `llvm` mode rows use the real LLVM backend passthrough and are expected to be ~1x or slower.
+API Backend lanes require lfortran subprocess; run full matrix for those numbers.
