@@ -25,7 +25,7 @@ ctest --test-dir build --output-on-failure
 Use only `bench_matrix`:
 
 ```bash
-./build/bench_matrix --iters 3 --timeout 15
+./build/bench_matrix --iters 1 --timeout 15
 ```
 
 Lanes:

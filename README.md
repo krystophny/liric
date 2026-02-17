@@ -61,18 +61,19 @@ ctest --test-dir build --output-on-failure
 
   STANDALONE LANES (no lfortran involved)
 
-  LL corpus    2187 .ll files from lfortran integration tests
+  LL corpus    100 .ll files (same corpus as API lanes)
                ll_jit:  liric parses+compiles each .ll   ~0.07ms
                ll_llvm: lli (LLVM) runs each .ll         ~5.2ms
                Speedup: 75x (isel/copy_patch)
 
-  Micro C      5 micro-benchmarks, liric vs TCC
-               Speedup: ~5.8x (isel/copy_patch)
+  Micro C      same corpus, lfortran --show-c output, liric vs TCC
+               Speedup: ~8x in-process (isel/copy_patch)
 ```
 
 ### Matrix axes
 
 The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells**.
+All lanes use the same 100-case corpus (first 100 from `compat_ll.txt`).
 
 - **Mode** (compilation backend): `isel`, `copy_patch`, `llvm`
 - **Policy** (how the compat layer routes IR): `direct`, `ir`
@@ -86,11 +87,11 @@ The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells**.
 | `api_backend_liric` | lfortran `--jit` (liric) | backend-isolated timing only |
 | `ll_jit` | standalone liric | per-file compile time on .ll corpus |
 | `ll_llvm` | standalone lli | per-file compile time on .ll corpus |
-| `micro_c` | standalone liric vs TCC | in-process micro-benchmark |
+| `micro_c` | standalone liric vs TCC | in-process compile speed on C corpus |
 
 API lanes run `lfortran` as a subprocess -- lfortran links against `libliric.a`,
 so rebuilding lfortran is mandatory before API benchmarks.
-LL and micro_c lanes are standalone (no lfortran).
+LL and micro_c lanes are standalone (no lfortran subprocess).
 
 ## Run Matrix
 
@@ -101,7 +102,6 @@ LL and micro_c lanes are standalone (no lfortran).
   --policies all \
   --lanes all \
   --iters 1 \
-  --api-cases 100 \
   --timeout 15 \
   --timeout-ms 5000
 ```
@@ -122,7 +122,7 @@ Lane tools (bench_matrix calls these internally):
 ./build/bench_compat_check --timeout 15
 ./build/bench_corpus_compare --iters 1 --policy direct
 ./build/bench_api --iters 1 --liric-policy direct
-./build/bench_tcc --iters 10 --policy direct
+./build/bench_tcc --iters 1 --policy direct --corpus /tmp/liric_bench/corpus_from_compat.tsv --cache-dir /tmp/liric_bench/cache_from_compat
 ```
 
 Runtime artifacts:
@@ -132,7 +132,7 @@ Runtime artifacts:
 
 ## Speedup Tables (2026-02-17)
 
-42/42 matrix cells OK, 100/100 API cases (0 skips). All timings are non-parse median ms.
+42/42 matrix cells OK, unified 100-case corpus (all lanes). All timings are non-parse median ms.
 
 ### API Backend (liric vs LLVM, 100 lfortran integration tests)
 
@@ -145,7 +145,7 @@ Runtime artifacts:
 | llvm | direct | 9.73 | 10.41 | 0.9x |
 | llvm | ir | 9.55 | 10.03 | 1.0x |
 
-### LL Corpus (compile-only, 2187 .ll files)
+### LL Corpus (compile-only, 100 .ll files)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
@@ -156,14 +156,14 @@ Runtime artifacts:
 | llvm | direct | 5.12 | 6.01 | 0.9x |
 | llvm | ir | 5.09 | 6.01 | 0.8x |
 
-### Micro C (liric vs TCC, 5 micro-benchmarks)
+### Micro C (liric vs TCC, corpus-driven in-process compile)
 
 | Mode | Policy | Speedup |
 |------|--------|--------:|
-| isel | direct | **5.8x** |
-| isel | ir | **5.8x** |
-| copy_patch | direct | **5.2x** |
-| copy_patch | ir | **5.9x** |
+| isel | direct | **8.4x** |
+| isel | ir | **8.4x** |
+| copy_patch | direct | **7.8x** |
+| copy_patch | ir | **7.8x** |
 | llvm | direct | 0.15x |
 | llvm | ir | 0.16x |
 

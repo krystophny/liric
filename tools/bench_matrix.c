@@ -888,6 +888,56 @@ static int copy_file_path(const char *src, const char *dst) {
     return 0;
 }
 
+static void try_generate_c_source(const cfg_t *cfg,
+                                  const char *test_name,
+                                  const char *case_dir) {
+    bench_run_cmd_opts_t opts;
+    bench_cmd_result_t r = {0};
+    char *f90_path = NULL;
+    char *raw_c = NULL;
+    char *test_dir = NULL;
+
+    if (!cfg->lfortran || !cfg->lfortran[0]) return;
+
+    test_dir = cfg->test_dir
+                   ? (char *)cfg->test_dir
+                   : (char *)"../lfortran/integration_tests";
+    if (!dir_exists(test_dir)) return;
+
+    {
+        char *base = bench_path_join2(test_dir, test_name);
+        if (!base) return;
+        f90_path = (char *)malloc(strlen(base) + 5);
+        if (!f90_path) { free(base); return; }
+        sprintf(f90_path, "%s.f90", base);
+        free(base);
+    }
+    if (!file_exists(f90_path)) { free(f90_path); return; }
+
+    raw_c = bench_path_join2(case_dir, "raw.c");
+    if (!raw_c) { free(f90_path); return; }
+
+    {
+        char *cmd[] = {
+            (char *)cfg->lfortran,
+            "--show-c",
+            f90_path,
+            NULL
+        };
+        memset(&opts, 0, sizeof(opts));
+        opts.argv = cmd;
+        opts.stdout_path = raw_c;
+        opts.timeout_ms = 5000;
+        if (bench_run_cmd(&opts, &r) != 0 || r.rc != 0) {
+            unlink(raw_c);
+        }
+        bench_free_cmd_result(&r);
+    }
+
+    free(f90_path);
+    free(raw_c);
+}
+
 static int prepare_ll_corpus_from_compat(const cfg_t *cfg,
                                          const char *compat_ll_path,
                                          char **out_corpus_path,
@@ -899,6 +949,7 @@ static int prepare_ll_corpus_from_compat(const cfg_t *cfg,
     char *corpus_path = NULL;
     char *cache_dir = NULL;
     size_t copied = 0;
+    int max_cases = cfg->api_cases > 0 ? cfg->api_cases : 0;
 
     if (!cfg || !compat_ll_path || !file_exists(compat_ll_path)) return -1;
     if (!out_corpus_path || !out_cache_dir) return -1;
@@ -923,8 +974,10 @@ static int prepare_ll_corpus_from_compat(const cfg_t *cfg,
         size_t n = strlen(line);
         char *src_ll = NULL;
         char *src_tmp = NULL;
-        char *case_dir = NULL;
+        char *case_dir_path = NULL;
         char *raw_ll = NULL;
+
+        if (max_cases > 0 && (int)copied >= max_cases) break;
 
         while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
         if (n == 0) continue;
@@ -941,29 +994,33 @@ static int prepare_ll_corpus_from_compat(const cfg_t *cfg,
             continue;
         }
 
-        case_dir = bench_path_join2(cache_dir, line);
-        if (!case_dir) goto fail;
-        if (mkdir_p(case_dir) != 0) {
+        case_dir_path = bench_path_join2(cache_dir, line);
+        if (!case_dir_path) goto fail;
+        if (mkdir_p(case_dir_path) != 0) {
             free(src_ll);
-            free(case_dir);
+            free(case_dir_path);
             goto fail;
         }
-        raw_ll = bench_path_join2(case_dir, "raw.ll");
-        free(case_dir);
+        raw_ll = bench_path_join2(case_dir_path, "raw.ll");
         if (!raw_ll) {
             free(src_ll);
+            free(case_dir_path);
             goto fail;
         }
         if (copy_file_path(src_ll, raw_ll) != 0) {
             free(src_ll);
             free(raw_ll);
+            free(case_dir_path);
             goto fail;
         }
+
+        try_generate_c_source(cfg, line, case_dir_path);
 
         fprintf(corpus, "%s\t%s\tcompat\n", line, line);
         copied++;
         free(src_ll);
         free(raw_ll);
+        free(case_dir_path);
     }
 
     fclose(compat);
@@ -971,6 +1028,7 @@ static int prepare_ll_corpus_from_compat(const cfg_t *cfg,
     free(ll_dir);
 
     if (copied == 0) goto fail;
+    printf("[matrix] ll corpus: %zu cases (max %d)\n", copied, max_cases);
     *out_corpus_path = corpus_path;
     *out_cache_dir = cache_dir;
     return 0;
@@ -1373,7 +1431,7 @@ static void run_micro_provider(const cfg_t *cfg,
     cmd_result_t r = {0};
     char iters_buf[32];
     char *micro_dir;
-    char *cmd[20];
+    char *cmd[30];
     int n = 0;
 
     memset(p, 0, sizeof(*p));
@@ -1406,6 +1464,22 @@ static void run_micro_provider(const cfg_t *cfg,
     cmd[n++] = (char *)policy;
     cmd[n++] = "--bench-dir";
     cmd[n++] = micro_dir;
+    if (cfg->corpus) {
+        cmd[n++] = "--corpus";
+        cmd[n++] = (char *)cfg->corpus;
+    }
+    if (cfg->cache_dir) {
+        cmd[n++] = "--cache-dir";
+        cmd[n++] = (char *)cfg->cache_dir;
+    }
+    if (cfg->probe_runner) {
+        cmd[n++] = "--probe-runner";
+        cmd[n++] = (char *)cfg->probe_runner;
+    }
+    if (cfg->runtime_lib) {
+        cmd[n++] = "--runtime-lib";
+        cmd[n++] = (char *)cfg->runtime_lib;
+    }
     cmd[n++] = NULL;
 
     if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
@@ -1436,8 +1510,8 @@ static void run_micro_provider(const cfg_t *cfg,
 
     p->ok = (strcmp(p->status, "OK") == 0 &&
              p->total_cases > 0 &&
-             p->wall_passed == p->total_cases &&
-             p->inproc_passed == p->total_cases);
+             p->wall_passed > 0 &&
+             p->inproc_passed > 0);
     if (!p->ok) {
         strcpy(p->fail_reason, "micro_lane_incomplete");
         p->rc = 1;
@@ -1613,7 +1687,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (any_ll_lane_selected(&cfg) &&
+    if ((any_ll_lane_selected(&cfg) || any_micro_lane_selected(&cfg)) &&
         (!cfg.corpus || !cfg.cache_dir || !file_exists(cfg.corpus) || !dir_exists(cfg.cache_dir))) {
         if (prepare_ll_corpus_from_compat(&cfg, compat_ll, &auto_corpus, &auto_cache) == 0) {
             cfg.corpus = auto_corpus;

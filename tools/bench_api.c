@@ -1640,7 +1640,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
     cfg.options_jsonl = NULL;
-    cfg.iters = 3;
+    cfg.iters = 1;
     cfg.timeout_ms = 3000;
     cfg.keep_fail_workdirs = 0;
     cfg.fail_sample_limit = 0;
@@ -1676,7 +1676,7 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.options_jsonl = argv[++i];
         } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             cfg.iters = atoi(argv[++i]);
-            if (cfg.iters <= 0) cfg.iters = 3;
+            if (cfg.iters <= 0) cfg.iters = 1;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             double sec = atof(argv[++i]);
             cfg.timeout_ms = (int)(sec * 1000.0);

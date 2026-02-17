@@ -372,7 +372,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.corpus_tsv = "tools/corpus_100.tsv";
     cfg.cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg.bench_dir = "/tmp/liric_bench";
-    cfg.iters = 3;
+    cfg.iters = 1;
     cfg.timeout_sec = 30;
     cfg.allow_empty = 0;
 
@@ -382,7 +382,7 @@ static cfg_t parse_args(int argc, char **argv) {
             exit(0);
         } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
             cfg.iters = atoi(argv[++i]);
-            if (cfg.iters <= 0) cfg.iters = 3;
+            if (cfg.iters <= 0) cfg.iters = 1;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             cfg.timeout_sec = atoi(argv[++i]);
             if (cfg.timeout_sec <= 0) cfg.timeout_sec = 30;
