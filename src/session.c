@@ -296,6 +296,17 @@ static bool direct_mode_enabled(const struct lr_session *s) {
            lr_target_can_compile(s->jit->target, s->jit->mode);
 }
 
+static bool module_jit_deferred_until_lookup(const struct lr_session *s) {
+    if (!s || !s->jit)
+        return false;
+    if (s->cfg.mode == SESSION_MODE_IR)
+        return true;
+    if (s->cfg.mode == SESSION_MODE_DIRECT &&
+        s->jit->mode == LR_COMPILE_LLVM)
+        return true;
+    return false;
+}
+
 static int session_backend_to_mode(session_backend_t backend,
                                    lr_compile_mode_t *out_mode) {
     if (!out_mode)
@@ -885,10 +896,9 @@ static int compile_current_function(struct lr_session *s, void **out_addr,
         return -1;
     }
 
-    /* IR mode without address request: finalize only, skip JIT compilation.
-       This allows building modules for object file emission without resolving
-       all external symbols at IR construction time. */
-    if (s->cfg.mode == SESSION_MODE_IR && !out_addr)
+    /* IR and DIRECT+llvm without address request: finalize only and defer
+       JIT until lookup() when the full module is available. */
+    if (module_jit_deferred_until_lookup(s) && !out_addr)
         return 0;
 
     if (s->cfg.mode == SESSION_MODE_IR ||
@@ -1055,7 +1065,7 @@ void *lr_session_lookup(struct lr_session *s, const char *name) {
     void *addr;
     if (!s || !s->jit || !name || !name[0])
         return NULL;
-    if (s->cfg.mode == SESSION_MODE_IR && !s->ir_module_jit_ready) {
+    if (module_jit_deferred_until_lookup(s) && !s->ir_module_jit_ready) {
         if (lr_jit_add_module(s->jit, s->module) != 0)
             return NULL;
         s->ir_module_jit_ready = true;

@@ -218,6 +218,7 @@ int test_session_arithmetic_chain(void);
 int test_session_stream_stencil_fast_path(void);
 int test_session_stream_isel_fast_path(void);
 int test_session_direct_llvm_mode_stream_contract(void);
+int test_session_direct_llvm_forward_ref_lookup_contract(void);
 int test_session_explicit_backend_overrides_env(void);
 int test_session_stream_stencil_no_ir_fallback(void);
 int test_session_add_phi_copy_api(void);
@@ -510,6 +511,7 @@ int main(void) {
     RUN_TEST(test_session_stream_stencil_fast_path);
     RUN_TEST(test_session_stream_isel_fast_path);
     RUN_TEST(test_session_direct_llvm_mode_stream_contract);
+    RUN_TEST(test_session_direct_llvm_forward_ref_lookup_contract);
     RUN_TEST(test_session_explicit_backend_overrides_env);
     RUN_TEST(test_session_stream_stencil_no_ir_fallback);
     RUN_TEST(test_session_add_phi_copy_api);

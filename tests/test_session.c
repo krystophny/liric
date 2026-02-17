@@ -384,6 +384,117 @@ cleanup:
     return result;
 }
 
+int test_session_direct_llvm_forward_ref_lookup_contract(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *ptr = NULL;
+    uint32_t callee_sym;
+    uint32_t call_vreg;
+    int rc = -1;
+    int result = 1;
+    void *caller_addr = NULL;
+    typedef int (*fn_t)(void);
+    fn_t fn = NULL;
+
+    cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_LLVM;
+    s = lr_session_create(&cfg, &err);
+    if (!s) {
+        fprintf(stderr, "  FAIL: session create (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    i32 = lr_type_i32_s(s);
+    ptr = lr_type_ptr_s(s);
+    if (!i32 || !ptr) {
+        fprintf(stderr, "  FAIL: primitive types available (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    rc = lr_session_func_begin(s, "session_direct_llvm_forward_caller",
+                               i32, NULL, 0, false, &err);
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (!lr_llvm_jit_is_available()) {
+        if (rc == 0) {
+            fprintf(stderr,
+                    "  FAIL: func begin expected failure without LLJIT support (line %d)\n",
+                    __LINE__);
+            goto cleanup;
+        }
+        result = 0;
+        goto cleanup;
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr,
+                "  FAIL: func begin expected failure when backend disabled (line %d)\n",
+                __LINE__);
+        goto cleanup;
+    }
+    result = 0;
+    goto cleanup;
+#endif
+
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: caller func begin (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: caller set block (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    callee_sym = lr_session_intern(s, "session_direct_llvm_forward_callee");
+    call_vreg = lr_emit_call(s, i32, LR_GLOBAL(callee_sym, ptr), NULL, 0);
+    lr_emit_ret(s, LR_VREG(call_vreg, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: caller func end (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    rc = lr_session_func_begin(s, "session_direct_llvm_forward_callee",
+                               i32, NULL, 0, false, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: callee func begin (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: callee set block (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    lr_emit_ret(s, LR_IMM(42, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: callee func end (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    caller_addr = lr_session_lookup(s, "session_direct_llvm_forward_caller");
+    if (!caller_addr) {
+        fprintf(stderr, "  FAIL: caller lookup (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+    fn_ptr_cast(&fn, caller_addr);
+    if (!fn || fn() != 42) {
+        fprintf(stderr, "  FAIL: caller returns 42 (line %d)\n", __LINE__);
+        goto cleanup;
+    }
+
+    result = 0;
+
+cleanup:
+    if (s)
+        lr_session_destroy(s);
+    return result;
+}
+
 int test_session_explicit_backend_overrides_env(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err = {0};
