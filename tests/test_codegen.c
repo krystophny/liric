@@ -127,12 +127,12 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
     lr_jit_t *jit;
     lr_compile_func_meta_t meta;
     void *compile_ctx = NULL;
-    uint8_t code[4096];
     size_t code_len = 0;
     char err[256] = {0};
     int rc;
     uint32_t abs64_for_g = 0;
     uint32_t disallowed_for_g = 0;
+    const uintptr_t far_addr = (uintptr_t)0x700000000000ULL;
 
     target = lr_target_host();
     TEST_ASSERT(target != NULL, "host target exists");
@@ -155,6 +155,7 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
 
     jit = lr_jit_create();
     TEST_ASSERT(jit != NULL, "jit create");
+    lr_jit_begin_update(jit);
 
     memset(&meta, 0, sizeof(meta));
     meta.func = f;
@@ -167,7 +168,7 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
     meta.mode = LR_COMPILE_ISEL;
     meta.jit = jit;
 
-    rc = target->compile_begin(&compile_ctx, &meta, m, code, sizeof(code), arena);
+    rc = target->compile_begin(&compile_ctx, &meta, m, jit->code_buf, jit->code_cap, arena);
     TEST_ASSERT_EQ(rc, 0, "compile_begin succeeds");
     TEST_ASSERT(compile_ctx != NULL, "compile context allocated");
 
@@ -214,6 +215,7 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
     TEST_ASSERT_EQ(rc, 0, "compile_end succeeds");
     TEST_ASSERT(code_len > 0, "generated code size");
     TEST_ASSERT(obj_ctx.num_relocs > 0, "relocations captured");
+    jit->code_size = code_len;
 
     for (uint32_t i = 0; i < obj_ctx.num_relocs; i++) {
         lr_obj_reloc_t *r = &obj_ctx.relocs[i];
@@ -231,6 +233,10 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
 
     TEST_ASSERT(abs64_for_g >= 2, "global load/store use abs64 relocations");
     TEST_ASSERT_EQ(disallowed_for_g, 0, "no rel32-style global relocations");
+    lr_jit_add_symbol(jit, "g", (void *)far_addr);
+    TEST_ASSERT_EQ(lr_jit_patch_relocs(jit, &obj_ctx), 0,
+                   "patch relocs succeeds with far global address");
+    lr_jit_end_update(jit);
 
     m->obj_ctx = NULL;
     lr_objfile_ctx_destroy(&obj_ctx);
