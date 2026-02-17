@@ -3269,9 +3269,16 @@ void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
 }
 
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
-    char emit_err[256] = {0};
+    lr_error_t err = {0};
     if (!mod || !out) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (mod->session) {
+        int rc = lr_session_emit_object_stream(mod->session, out, &err);
+        if (rc != 0 && err.msg[0])
+            fprintf(stderr, "lc_module_emit_object_to_file: %s\n", err.msg);
+        return rc;
+    }
+    char emit_err[256] = {0};
     return lr_emit_module_object_stream(mod->mod, NULL, out,
                                         emit_err, sizeof(emit_err));
 }

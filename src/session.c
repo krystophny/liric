@@ -1901,12 +1901,52 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
         return 0;
     }
 
+    if (direct_mode_enabled(s)) {
+        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
+        return -1;
+    }
+
     if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
                                         s->jit ? s->jit->mode : LR_COMPILE_ISEL,
                                         path, backend_err,
                                         sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "object emission failed");
+        return -1;
+    }
+    return 0;
+}
+
+int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
+                                  session_error_t *err) {
+    err_clear(err);
+    if (!s || !s->module || !out) {
+        err_set(err, S_ERR_ARGUMENT, "invalid emit_object_stream arguments");
+        return -1;
+    }
+
+    if (s->blob_count > 0) {
+        const lr_target_t *target = session_resolve_target(s);
+        if (!target) {
+            err_set(err, S_ERR_BACKEND, "target not found");
+            return -1;
+        }
+        return lr_emit_object_from_blobs(s->blobs, s->blob_count,
+                                         s->module, target, out);
+    }
+
+    if (direct_mode_enabled(s)) {
+        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
+        return -1;
+    }
+
+    /* IR mode: compile from IR */
+    char backend_err[256] = {0};
+    if (lr_emit_module_object_stream(s->module, s->cfg.target,
+                                     out, backend_err,
+                                     sizeof(backend_err)) != 0) {
+        err_set(err, S_ERR_BACKEND, "%s",
+                backend_err[0] ? backend_err : "object stream emission failed");
         return -1;
     }
     return 0;

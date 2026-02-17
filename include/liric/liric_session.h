@@ -164,6 +164,7 @@ int lr_session_compile_auto(lr_session_t *s, const uint8_t *data, size_t len,
 /* ---- Output ------------------------------------------------------------ */
 
 int lr_session_emit_object(lr_session_t *s, const char *path, lr_error_t *err);
+int lr_session_emit_object_stream(lr_session_t *s, FILE *out, lr_error_t *err);
 int lr_session_emit_exe(lr_session_t *s, const char *path, lr_error_t *err);
 int lr_session_emit_exe_with_runtime(lr_session_t *s, const char *path,
                                       const char *runtime_ll, size_t runtime_len,

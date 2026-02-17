@@ -404,6 +404,148 @@ int test_objfile_elf_executable_aarch64_header(void) {
     return 0;
 }
 
+static built_module_t build_ret42_module_mode(lr_session_mode_t mode) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = mode;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    if (lr_session_func_begin(s, "f", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
+int test_objfile_session_emit_object_stream_direct(void) {
+    built_module_t bm = build_ret42_module_mode(LR_MODE_DIRECT);
+    TEST_ASSERT(bm.session != NULL, "direct session create");
+
+    lr_error_t err = {0};
+    FILE *fp = tmpfile();
+    TEST_ASSERT(fp != NULL, "tmpfile");
+
+    int rc = lr_session_emit_object_stream(bm.session, fp, &err);
+    TEST_ASSERT_EQ(rc, 0, "direct emit object stream");
+
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    TEST_ASSERT(fsize >= 64, "direct .o size >= 64");
+
+    fseek(fp, 0, SEEK_SET);
+    uint8_t hdr[4];
+    size_t rd = fread(hdr, 1, 4, fp);
+    TEST_ASSERT_EQ(rd, 4, "read 4 bytes");
+    TEST_ASSERT_EQ(hdr[0], 0x7F, "ELF magic 0");
+    TEST_ASSERT_EQ(hdr[1], 'E', "ELF magic 1");
+    TEST_ASSERT_EQ(hdr[2], 'L', "ELF magic 2");
+    TEST_ASSERT_EQ(hdr[3], 'F', "ELF magic 3");
+
+    fclose(fp);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+int test_objfile_session_emit_object_stream_ir(void) {
+    built_module_t bm = build_ret42_module_mode(LR_MODE_IR);
+    TEST_ASSERT(bm.session != NULL, "ir session create");
+
+    lr_error_t err = {0};
+    FILE *fp = tmpfile();
+    TEST_ASSERT(fp != NULL, "tmpfile");
+
+    int rc = lr_session_emit_object_stream(bm.session, fp, &err);
+    TEST_ASSERT_EQ(rc, 0, "ir emit object stream");
+
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    TEST_ASSERT(fsize >= 64, "ir .o size >= 64");
+
+    fseek(fp, 0, SEEK_SET);
+    uint8_t hdr[4];
+    size_t rd = fread(hdr, 1, 4, fp);
+    TEST_ASSERT_EQ(rd, 4, "read 4 bytes");
+    TEST_ASSERT_EQ(hdr[0], 0x7F, "ELF magic 0");
+    TEST_ASSERT_EQ(hdr[1], 'E', "ELF magic 1");
+    TEST_ASSERT_EQ(hdr[2], 'L', "ELF magic 2");
+    TEST_ASSERT_EQ(hdr[3], 'F', "ELF magic 3");
+
+    fclose(fp);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+#if defined(__linux__)
+
+static built_module_t build_main_ret42_module_mode(lr_session_mode_t mode) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = mode;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    if (lr_session_func_begin(s, "main", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
+int test_objfile_link_and_run_direct(void) {
+    built_module_t bm = build_main_ret42_module_mode(LR_MODE_DIRECT);
+    TEST_ASSERT(bm.session != NULL, "direct session create");
+
+    lr_error_t err = {0};
+    const char *obj_path = "/tmp/liric_test_direct_link.o";
+    FILE *fp = fopen(obj_path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_session_emit_object_stream(bm.session, fp, &err);
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit direct .o");
+
+    const char *exe_path = "/tmp/liric_test_direct_linked";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "cc -o %s %s 2>/dev/null", exe_path, obj_path);
+    rc = system(cmd);
+    remove(obj_path);
+    TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0, "cc link direct .o");
+
+    chmod(exe_path, 0755);
+    int status = system(exe_path);
+    TEST_ASSERT(WIFEXITED(status), "exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 42, "exit code 42");
+
+    remove(exe_path);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+#endif /* __linux__ link-and-run tests */
+
 #if defined(__linux__)
 
 int test_objfile_elf_exe_runs(void) {

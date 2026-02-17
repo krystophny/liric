@@ -258,9 +258,12 @@ int test_objfile_elf_symbols(void);
 int test_objfile_elf_call_relocation(void);
 int test_objfile_elf_readelf_validates(void);
 int test_objfile_elf_executable_aarch64_header(void);
+int test_objfile_session_emit_object_stream_direct(void);
+int test_objfile_session_emit_object_stream_ir(void);
 #if defined(__linux__)
 int test_objfile_elf_exe_runs(void);
 int test_objfile_link_and_run(void);
+int test_objfile_link_and_run_direct(void);
 int test_dynelf_puts_hello(void);
 int test_dynelf_readelf_dynamic(void);
 int test_dynelf_ldd_check(void);
@@ -574,9 +577,12 @@ int main(void) {
     RUN_TEST(test_objfile_elf_call_relocation);
     RUN_TEST(test_objfile_elf_readelf_validates);
     RUN_TEST(test_objfile_elf_executable_aarch64_header);
+    RUN_TEST(test_objfile_session_emit_object_stream_direct);
+    RUN_TEST(test_objfile_session_emit_object_stream_ir);
 #if defined(__linux__)
     RUN_TEST(test_objfile_elf_exe_runs);
     RUN_TEST(test_objfile_link_and_run);
+    RUN_TEST(test_objfile_link_and_run_direct);
     RUN_TEST(test_dynelf_puts_hello);
     RUN_TEST(test_dynelf_readelf_dynamic);
     RUN_TEST(test_dynelf_ldd_check);
