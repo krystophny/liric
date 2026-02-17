@@ -18,6 +18,9 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 
 #include "bench_common.h"
 
@@ -311,7 +314,20 @@ static int run_cmd_with_mode(const char *mode, char *const argv[], cmd_result_t 
 }
 
 static int host_nproc(void) {
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    long n = -1;
+#if defined(_SC_NPROCESSORS_ONLN)
+    n = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+#if defined(__APPLE__)
+    if (n < 1) {
+        int cpu = 0;
+        size_t len = sizeof(cpu);
+        if (sysctlbyname("hw.logicalcpu", &cpu, &len, NULL, 0) == 0 && cpu > 0)
+            n = cpu;
+        else if (sysctlbyname("hw.ncpu", &cpu, &len, NULL, 0) == 0 && cpu > 0)
+            n = cpu;
+    }
+#endif
     if (n < 1)
         return 1;
     if (n > 1024)
