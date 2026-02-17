@@ -888,6 +888,25 @@ static int copy_file_path(const char *src, const char *dst) {
     return 0;
 }
 
+static int tcc_can_compile(const char *c_path) {
+    bench_run_cmd_opts_t opts;
+    bench_cmd_result_t r = {0};
+    int ok;
+    char *cmd[] = {
+        "tcc", "-c", "-o", "/dev/null",
+        "-D_Complex= ",
+        "-I../lfortran/src/libasr/runtime",
+        (char *)c_path,
+        NULL
+    };
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = cmd;
+    opts.timeout_ms = 5000;
+    ok = (bench_run_cmd(&opts, &r) == 0 && r.rc == 0);
+    bench_free_cmd_result(&r);
+    return ok;
+}
+
 static void try_generate_c_source(const cfg_t *cfg,
                                   const char *test_name,
                                   const char *case_dir) {
@@ -933,6 +952,10 @@ static void try_generate_c_source(const cfg_t *cfg,
         }
         bench_free_cmd_result(&r);
     }
+
+    /* Remove raw.c if TCC cannot compile it */
+    if (file_exists(raw_c) && !tcc_can_compile(raw_c))
+        unlink(raw_c);
 
     free(f90_path);
     free(raw_c);
