@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 /* Session mode mirrors the public lr_session_mode_t. */
 typedef enum session_mode {
@@ -1940,13 +1943,56 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
         return -1;
     }
 
-    /* IR mode: compile from IR */
+    /* IR mode: compile from IR using session's compile mode */
+    lr_compile_mode_t mode = s->jit ? s->jit->mode : LR_COMPILE_ISEL;
     char backend_err[256] = {0};
-    if (lr_emit_module_object_stream(s->module, s->cfg.target,
-                                     out, backend_err,
-                                     sizeof(backend_err)) != 0) {
-        err_set(err, S_ERR_BACKEND, "%s",
-                backend_err[0] ? backend_err : "object stream emission failed");
+    const lr_target_t *target = session_resolve_target(s);
+    if (!target) {
+        err_set(err, S_ERR_BACKEND, "target not found");
+        return -1;
+    }
+
+    if (mode == LR_COMPILE_LLVM) {
+#if defined(__unix__) || defined(__APPLE__)
+        char tmp_tpl[] = "/tmp/liric_emit_obj_XXXXXX";
+        int fd = mkstemp(tmp_tpl);
+        int rc = -1;
+        if (fd < 0) {
+            err_set(err, S_ERR_BACKEND, "temporary file creation failed");
+            return -1;
+        }
+        close(fd);
+        rc = lr_llvm_emit_object_path(s->module, target, tmp_tpl,
+                                      backend_err, sizeof(backend_err));
+        if (rc == 0) {
+            FILE *in = fopen(tmp_tpl, "rb");
+            if (in) {
+                uint8_t buf[8192];
+                size_t n;
+                while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+                    if (fwrite(buf, 1, n, out) != n) { rc = -1; break; }
+                }
+                if (ferror(in)) rc = -1;
+                fclose(in);
+            } else {
+                rc = -1;
+            }
+        }
+        unlink(tmp_tpl);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "llvm object stream emission failed: %s",
+                    backend_err[0] ? backend_err : "copy failed");
+            return -1;
+        }
+        return 0;
+#else
+        err_set(err, S_ERR_BACKEND, "llvm object stream emission unsupported");
+        return -1;
+#endif
+    }
+
+    if (lr_emit_object(s->module, target, out) != 0) {
+        err_set(err, S_ERR_BACKEND, "object emission failed");
         return -1;
     }
     return 0;
@@ -1982,6 +2028,11 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             return -1;
         }
         return 0;
+    }
+
+    if (direct_mode_enabled(s)) {
+        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
+        return -1;
     }
 
     if (lr_emit_module_executable_path_mode(
@@ -2028,6 +2079,11 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
             return -1;
         }
         return 0;
+    }
+
+    if (direct_mode_enabled(s)) {
+        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
+        return -1;
     }
 
     if (lr_emit_module_executable_path_mode(

@@ -2,6 +2,7 @@
 #include "arena.h"
 #include "jit.h"
 #include "liric.h"
+#include "llvm_backend.h"
 #include "module_emit.h"
 #include <liric/liric_session.h>
 #include <stdlib.h>
@@ -3196,18 +3197,22 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
         return -1;
 
-    /* LLVM mode: compile the compat module directly with the state JIT.
-       The session's own module is empty (compat builds into mod->mod), so
-       we bypass lr_session_lookup and use lr_jit_add_module on mod->mod
-       with the state-level JIT (same path as IR mode). */
-    if (session_jit->mode == LR_COMPILE_LLVM)
-        return lr_jit_add_module(jit, mod->mod);
+    /* LLVM mode: compile mod->mod through the session JIT (which has LLVM
+       mode), then register symbols into the user-provided JIT below. */
+    if (session_jit->mode == LR_COMPILE_LLVM) {
+        if (!lr_llvm_jit_is_available())
+            return -1;
+        if (lr_jit_add_module(session_jit, mod->mod) != 0)
+            return -1;
+    }
 
     for (f = mod->mod->first_func; f; f = f->next) {
         void *addr = NULL;
         if (!f->name || !f->name[0])
             continue;
         addr = lr_session_lookup(mod->session, f->name);
+        if (session_jit->mode == LR_COMPILE_LLVM && !addr)
+            addr = lr_jit_get_function(session_jit, f->name);
         if (!f->is_decl && !addr)
             return -1;
         if (addr)
@@ -3219,6 +3224,8 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         if (!g->name || !g->name[0])
             continue;
         addr = lr_session_lookup(mod->session, g->name);
+        if (session_jit->mode == LR_COMPILE_LLVM && !addr)
+            addr = lr_jit_get_function(session_jit, g->name);
         if (!g->is_external && !addr)
             return -1;
         if (addr)
