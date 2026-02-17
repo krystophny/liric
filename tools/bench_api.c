@@ -1515,7 +1515,7 @@ static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
 static void usage(void) {
     printf("usage: bench_lane_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
-    printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran, fallback: ../lfortran/build_liric/src/bin/lfortran, then ../lfortran/build/src/bin/lfortran)\n");
+    printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran, fallback: ../lfortran/build_liric/src/bin/lfortran)\n");
     printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --liric-policy MODE  liric session policy: direct|ir\n");
@@ -1546,7 +1546,7 @@ static cfg_t parse_args(int argc, char **argv) {
                              ? default_lfortran_liric_hyphen
                              : (file_exists(default_lfortran_liric_underscore)
                                     ? default_lfortran_liric_underscore
-                                    : cfg.lfortran);
+                                    : NULL);
     cfg.runtime_lib = NULL;
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
     if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
@@ -1630,6 +1630,9 @@ static cfg_t parse_args(int argc, char **argv) {
         die("invalid --liric-policy (expected direct|ir)", cfg.liric_policy);
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
+    if (!cfg.lfortran_liric || !cfg.lfortran_liric[0]) {
+        die("lfortran (WITH_LIRIC) not found; pass --lfortran-liric PATH", NULL);
+    }
     if (!file_exists(cfg.lfortran_liric)) die("lfortran (WITH_LIRIC) not found", cfg.lfortran_liric);
 
     cfg.lfortran = to_abs_path(cfg.lfortran);
