@@ -2858,8 +2858,10 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                                           &copy, &err);
         }
     }
-    if (!phi->session || !lr_session_is_direct(phi->session))
-        phi_refresh_operands(phi);
+    /* Keep PHI instruction operands in sync whenever an IR PHI exists.
+       DIRECT+llvm builds IR and lowers later through LLVM text, so it also
+       requires concrete incoming operand lists even though policy is DIRECT. */
+    phi_refresh_operands(phi);
 }
 
 void lc_phi_finalize(lc_phi_node_t *phi) {

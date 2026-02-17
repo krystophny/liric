@@ -327,6 +327,136 @@ int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void) {
     return 0;
 }
 
+int test_builder_compat_direct_llvm_phi_incoming_sync(void) {
+    int rc = -1;
+    int result = 1;
+    const char *old_policy = getenv("LIRIC_POLICY");
+    char *old_policy_copy = old_policy ? strdup(old_policy) : NULL;
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    lr_jit_t *jit = NULL;
+
+    if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
+        goto cleanup;
+    }
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
+    mod = lc_module_create(ctx, "compat_phi_direct_llvm");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+
+    lr_module_t *ir = lc_module_get_ir(mod);
+    lr_type_t *i32 = lc_get_int_type(mod, 32);
+    lr_type_t *i1 = lc_get_int_type(mod, 1);
+    if (!ir || !i32 || !i1) {
+        fprintf(stderr, "  FAIL: missing types\n");
+        goto cleanup;
+    }
+
+    lr_type_t *params[1] = { i32 };
+    lr_type_t *fn_ty = lr_type_func_new(ir, i32, params, 1, false);
+    if (!fn_ty) {
+        fprintf(stderr, "  FAIL: function type\n");
+        goto cleanup;
+    }
+
+    lc_value_t *fn_val = lc_func_create(mod, "compat_abs_phi_direct_llvm", fn_ty);
+    lr_func_t *fn = lc_value_get_func(fn_val);
+    lc_value_t *arg = lc_func_get_arg(mod, fn_val, 0);
+    if (!fn_val || !fn || !arg) {
+        fprintf(stderr, "  FAIL: function setup\n");
+        goto cleanup;
+    }
+
+    lr_block_t *entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
+    lr_block_t *then_bb = lc_value_get_block(lc_block_create(mod, fn, "then"));
+    lr_block_t *else_bb = lc_value_get_block(lc_block_create(mod, fn, "else"));
+    lr_block_t *merge_bb = lc_value_get_block(lc_block_create(mod, fn, "merge"));
+    if (!entry || !then_bb || !else_bb || !merge_bb) {
+        fprintf(stderr, "  FAIL: block create\n");
+        goto cleanup;
+    }
+
+    lc_value_t *c0 = lc_value_const_int(mod, i32, 0, 32);
+    lc_value_t *is_neg = lc_create_icmp_slt(mod, entry, fn, arg, c0, "is_neg");
+    lc_value_t *neg = lc_create_sub(mod, then_bb, fn, c0, arg, "neg");
+    if (!c0 || !is_neg || !neg) {
+        fprintf(stderr, "  FAIL: value create\n");
+        goto cleanup;
+    }
+    lc_create_cond_br(mod, entry, is_neg, then_bb, else_bb);
+    lc_create_br(mod, then_bb, merge_bb);
+    lc_create_br(mod, else_bb, merge_bb);
+
+    lc_phi_node_t *phi = lc_create_phi(mod, merge_bb, fn, i32, "result");
+    if (!phi || !phi->result) {
+        fprintf(stderr, "  FAIL: phi create\n");
+        goto cleanup;
+    }
+    lc_phi_add_incoming(phi, neg, then_bb);
+    lc_phi_add_incoming(phi, arg, else_bb);
+    lc_create_ret(mod, merge_bb, phi->result);
+
+    jit = lr_jit_create();
+    if (!jit) {
+        fprintf(stderr, "  FAIL: jit create\n");
+        goto cleanup;
+    }
+    rc = lc_module_add_to_jit(mod, jit);
+
+#if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: lc_module_add_to_jit in direct+llvm mode\n");
+        goto cleanup;
+    }
+
+    {
+        typedef int (*fn_t)(int);
+        fn_t fp;
+        GET_FN(fp, jit, "compat_abs_phi_direct_llvm");
+        if (!fp) {
+            fprintf(stderr, "  FAIL: compat_abs_phi_direct_llvm lookup\n");
+            goto cleanup;
+        }
+        if (fp(5) != 5 || fp(-7) != 7 || fp(0) != 0) {
+            fprintf(stderr, "  FAIL: compat_abs_phi_direct_llvm return values\n");
+            goto cleanup;
+        }
+    }
+#else
+    if (rc == 0) {
+        fprintf(stderr,
+                "  FAIL: direct+llvm compat add should fail when backend disabled\n");
+        goto cleanup;
+    }
+#endif
+
+    result = 0;
+
+cleanup:
+    if (old_policy_copy) {
+        setenv("LIRIC_POLICY", old_policy_copy, 1);
+        free(old_policy_copy);
+    } else {
+        unsetenv("LIRIC_POLICY");
+    }
+    if (jit)
+        lr_jit_destroy(jit);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    return result;
+}
+
 int test_builder_compat_emit_object_to_file(void) {
     lc_context_t *ctx = lc_context_create();
     TEST_ASSERT(ctx != NULL, "context create");
