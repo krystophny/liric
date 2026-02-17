@@ -132,9 +132,20 @@ Runtime artifacts:
 
 ## Speedup Tables (2026-02-18)
 
-100-case corpus, 3 iterations, non-parse median ms.
+100-case corpus, non-parse median ms.
 
-### LL Corpus (compile-only, 100 .ll files)
+### API AOT (lfortran + liric AOT vs lfortran + LLVM, 100 integration tests)
+
+| Mode | Policy | Pass rate | Wall speedup (median) | Note |
+|------|--------|----------:|----------------------:|------|
+| isel | direct | 33/100 | **1.4x** | linker time dominates wall clock |
+| isel | ir | 37/100 | **1.4x** | linker time dominates wall clock |
+| copy_patch | direct | 33/100 | **1.4x** | linker time dominates wall clock |
+| copy_patch | ir | 37/100 | **1.4x** | linker time dominates wall clock |
+
+63 cases SIGSEGV at runtime (codegen bugs in complex Fortran patterns).
+
+### LL Corpus (compile-only, 100 .ll files, 3 iterations)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
@@ -143,7 +154,7 @@ Runtime artifacts:
 | copy_patch | direct | 10.43 | 0.229 | **47x** |
 | copy_patch | ir | 11.42 | 0.237 | **48x** |
 
-### Micro C (liric vs TCC, corpus-driven in-process compile)
+### Micro C (liric vs TCC, corpus-driven in-process compile, 3 iterations)
 
 | Mode | Policy | Speedup |
 |------|--------|--------:|
@@ -151,5 +162,3 @@ Runtime artifacts:
 | isel | ir | **4.5x** |
 | copy_patch | direct | **4.6x** |
 | copy_patch | ir | **5.2x** |
-
-API Backend lanes require lfortran subprocess; run full matrix for those numbers.
