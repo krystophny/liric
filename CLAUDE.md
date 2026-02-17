@@ -28,21 +28,11 @@ Use only `bench_matrix`:
 ./build/bench_matrix --iters 3 --timeout 15
 ```
 
-Primitive lanes:
+Lanes:
 - `api_full_llvm`, `api_full_liric`
 - `api_backend_llvm`, `api_backend_liric`
 - `ll_jit`, `ll_llvm`
-
-Derived lanes:
-- `api_full_e2e` (derived from `api_full_llvm` and `api_full_liric`)
-- `api_backend_e2e` (derived from `api_backend_llvm` and `api_backend_liric`)
-- `ll_e2e` and `ir_file` (derived from `ll_llvm` and `ll_jit`)
-
-Canonical `--lanes all` includes only LLVM-relative lanes:
-- `api_full_llvm`, `api_full_liric`, `api_full_e2e`
-- `api_backend_llvm`, `api_backend_liric`, `api_backend_e2e`
-- `ll_jit`, `ll_llvm`, `ll_e2e`, `ir_file`
-- `micro_c` is legacy and not part of canonical matrix coverage
+- `micro_c` (legacy, excluded from canonical `--lanes all`)
 
 Matrix axes:
 - modes: `isel`, `copy_patch`, `llvm`
@@ -51,7 +41,6 @@ Matrix axes:
 Artifacts:
 - `/tmp/liric_bench/matrix_rows.jsonl`
 - `/tmp/liric_bench/matrix_failures.jsonl`
-- `/tmp/liric_bench/matrix_skips.jsonl`
 - `/tmp/liric_bench/matrix_summary.json`
 
 ## Source Map

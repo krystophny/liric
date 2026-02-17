@@ -18,27 +18,17 @@ Axes:
 - `mode`: `isel`, `copy_patch`, `llvm`
 - `policy`: `direct`, `ir`
 - `lane`:
-  `api_full_llvm`, `api_full_liric`, `api_full_e2e`,
-  `api_backend_llvm`, `api_backend_liric`, `api_backend_e2e`,
-  `ll_jit`, `ll_llvm`, `ll_e2e`, `ir_file`
+  `api_full_llvm`, `api_full_liric`,
+  `api_backend_llvm`, `api_backend_liric`,
+  `ll_jit`, `ll_llvm`
 
 Lane meanings:
 - `api_full_llvm`: full API wall/non-parse timing from lfortran LLVM build
 - `api_full_liric`: full API wall/non-parse timing from lfortran WITH_LIRIC build
-- `api_full_e2e`: full API speedup (`api_full_llvm / api_full_liric`)
 - `api_backend_llvm`: backend-isolated timing from lfortran LLVM build
 - `api_backend_liric`: backend-isolated timing from lfortran WITH_LIRIC build
-- `api_backend_e2e`: backend-isolated speedup (`api_backend_llvm / api_backend_liric`)
 - `ll_jit`: liric LL timing (wall/non-parse ms)
 - `ll_llvm`: LLVM LL timing (wall/non-parse ms)
-- `ll_e2e`: LL speedup (`ll_llvm / ll_jit`)
-- `ir_file`: compatibility alias of `ll_e2e`
-
-Speedup lanes:
-- `api_full_e2e`
-- `api_backend_e2e`
-- `ll_e2e`
-- `ir_file`
 
 Canonical `--lanes all` includes all lanes above except `micro_c` (legacy).
 
@@ -59,5 +49,4 @@ Canonical `--lanes all` includes all lanes above except `micro_c` (legacy).
 Artifacts:
 - `/tmp/liric_bench/matrix_rows.jsonl`
 - `/tmp/liric_bench/matrix_failures.jsonl`
-- `/tmp/liric_bench/matrix_skips.jsonl`
 - `/tmp/liric_bench/matrix_summary.json`

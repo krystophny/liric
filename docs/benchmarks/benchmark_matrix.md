@@ -6,9 +6,9 @@ It runs a strict matrix across:
 - Modes: `isel`, `copy_patch`, `llvm`
 - Policies: `direct`, `ir`
 - Lanes:
-  - `api_full_llvm`, `api_full_liric`, `api_full_e2e`
-  - `api_backend_llvm`, `api_backend_liric`, `api_backend_e2e`
-  - `ll_jit`, `ll_llvm`, `ll_e2e`, `ir_file`
+  - `api_full_llvm`, `api_full_liric`
+  - `api_backend_llvm`, `api_backend_liric`
+  - `ll_jit`, `ll_llvm`
   - `micro_c` (legacy, excluded from canonical `--lanes all`)
 
 ## Hard-Fail Policy
@@ -37,7 +37,6 @@ Use `--allow-partial` only for exploratory local runs.
 `bench_matrix` writes:
 - `matrix_rows.jsonl`
 - `matrix_failures.jsonl`
-- `matrix_skips.jsonl`
 - `matrix_summary.json`
 
 Provider artifacts remain in per-cell bundles:

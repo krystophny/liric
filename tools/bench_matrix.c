@@ -1,18 +1,13 @@
 // Unified benchmark matrix runner.
 //
-// Canonical behavior:
-// - Matrix cells are lane x mode x policy.
-// - Primitive lanes are timed directly:
-//   api_full_llvm, api_full_liric, api_backend_llvm, api_backend_liric,
-//   ll_jit, ll_llvm, micro_c.
-// - Derived lanes are speedup views:
-//   api_full_e2e, api_backend_e2e, ll_e2e, ir_file.
+// Matrix cells are lane x mode x policy.
+// Lanes: api_full_llvm, api_full_liric, api_backend_llvm, api_backend_liric,
+//        ll_jit, ll_llvm, micro_c.
 #define _POSIX_C_SOURCE 200809L
 
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,16 +31,12 @@ typedef enum {
 typedef enum {
     LANE_API_FULL_LLVM = 0,
     LANE_API_FULL_LIRIC = 1,
-    LANE_API_FULL_E2E = 2,
-    LANE_API_BACKEND_LLVM = 3,
-    LANE_API_BACKEND_LIRIC = 4,
-    LANE_API_BACKEND_E2E = 5,
-    LANE_LL_JIT = 6,
-    LANE_LL_LLVM = 7,
-    LANE_LL_E2E = 8,
-    LANE_IR_FILE = 9,
-    LANE_MICRO_C = 10,
-    LANE_COUNT = 11
+    LANE_API_BACKEND_LLVM = 2,
+    LANE_API_BACKEND_LIRIC = 3,
+    LANE_LL_JIT = 4,
+    LANE_LL_LLVM = 5,
+    LANE_MICRO_C = 6,
+    LANE_COUNT = 7
 } lane_id_t;
 
 typedef enum {
@@ -75,9 +66,6 @@ typedef struct {
     const char *runtime_lib;
     const char *corpus;
     const char *cache_dir;
-
-    const char *github_repo;
-    int file_skip_issues;
 
     int iters;
     int timeout_sec;
@@ -182,29 +170,15 @@ typedef struct {
     char *summary_path;
 } micro_provider_t;
 
-typedef struct {
-    int total;
-    int tool_missing;
-    int rebuild_failure;
-    int compat_failure;
-    int dataset_incomplete;
-    int lane_execution_failed;
-    int unknown;
-} skip_counts_t;
-
 static const char *k_mode_name[MODE_COUNT] = {"isel", "copy_patch", "llvm"};
 static const char *k_policy_name[POLICY_COUNT] = {"direct", "ir"};
 static const char *k_lane_name[LANE_COUNT] = {
     "api_full_llvm",
     "api_full_liric",
-    "api_full_e2e",
     "api_backend_llvm",
     "api_backend_liric",
-    "api_backend_e2e",
     "ll_jit",
     "ll_llvm",
-    "ll_e2e",
-    "ir_file",
     "micro_c"
 };
 
@@ -434,14 +408,12 @@ static void dbl_vec_free(dbl_vec_t *v) {
 static int any_api_lane_selected(const cfg_t *cfg) {
     return cfg->lanes[LANE_API_FULL_LLVM] ||
            cfg->lanes[LANE_API_FULL_LIRIC] ||
-           cfg->lanes[LANE_API_FULL_E2E] ||
            cfg->lanes[LANE_API_BACKEND_LLVM] ||
-           cfg->lanes[LANE_API_BACKEND_LIRIC] ||
-           cfg->lanes[LANE_API_BACKEND_E2E];
+           cfg->lanes[LANE_API_BACKEND_LIRIC];
 }
 
 static int any_ll_lane_selected(const cfg_t *cfg) {
-    return cfg->lanes[LANE_LL_JIT] || cfg->lanes[LANE_LL_LLVM] || cfg->lanes[LANE_LL_E2E] || cfg->lanes[LANE_IR_FILE];
+    return cfg->lanes[LANE_LL_JIT] || cfg->lanes[LANE_LL_LLVM];
 }
 
 static int any_micro_lane_selected(const cfg_t *cfg) {
@@ -449,13 +421,11 @@ static int any_micro_lane_selected(const cfg_t *cfg) {
 }
 
 static const char *compat_api_lane_name(const cfg_t *cfg) {
-    if (cfg->lanes[LANE_API_FULL_E2E]) return "api_full_e2e";
-    if (cfg->lanes[LANE_API_BACKEND_E2E]) return "api_backend_e2e";
     if (cfg->lanes[LANE_API_FULL_LIRIC]) return "api_full_liric";
     if (cfg->lanes[LANE_API_FULL_LLVM]) return "api_full_llvm";
     if (cfg->lanes[LANE_API_BACKEND_LIRIC]) return "api_backend_liric";
     if (cfg->lanes[LANE_API_BACKEND_LLVM]) return "api_backend_llvm";
-    return "api_full_e2e";
+    return "api_full_llvm";
 }
 
 static void set_all_modes(cfg_t *cfg, int v) {
@@ -515,14 +485,10 @@ static int parse_lanes(cfg_t *cfg, const char *text) {
     while (tok) {
         if (strcmp(tok, "api_full_llvm") == 0) cfg->lanes[LANE_API_FULL_LLVM] = 1;
         else if (strcmp(tok, "api_full_liric") == 0) cfg->lanes[LANE_API_FULL_LIRIC] = 1;
-        else if (strcmp(tok, "api_full_e2e") == 0) cfg->lanes[LANE_API_FULL_E2E] = 1;
         else if (strcmp(tok, "api_backend_llvm") == 0) cfg->lanes[LANE_API_BACKEND_LLVM] = 1;
         else if (strcmp(tok, "api_backend_liric") == 0) cfg->lanes[LANE_API_BACKEND_LIRIC] = 1;
-        else if (strcmp(tok, "api_backend_e2e") == 0) cfg->lanes[LANE_API_BACKEND_E2E] = 1;
         else if (strcmp(tok, "ll_jit") == 0) cfg->lanes[LANE_LL_JIT] = 1;
         else if (strcmp(tok, "ll_llvm") == 0) cfg->lanes[LANE_LL_LLVM] = 1;
-        else if (strcmp(tok, "ll_e2e") == 0) cfg->lanes[LANE_LL_E2E] = 1;
-        else if (strcmp(tok, "ir_file") == 0) cfg->lanes[LANE_IR_FILE] = 1;
         else if (strcmp(tok, "micro_c") == 0) cfg->lanes[LANE_MICRO_C] = 1;
         else {
             free(tmp);
@@ -542,9 +508,9 @@ static void usage(void) {
     printf("  --modes LIST             comma list or 'all': isel,copy_patch,llvm\n");
     printf("  --policies LIST          comma list or 'all': direct,ir\n");
     printf("  --lanes LIST             comma list or 'all': ");
-    printf("api_full_llvm,api_full_liric,api_full_e2e,");
-    printf("api_backend_llvm,api_backend_liric,api_backend_e2e,");
-    printf("ll_jit,ll_llvm,ll_e2e,ir_file[,micro_c]\n");
+    printf("api_full_llvm,api_full_liric,");
+    printf("api_backend_llvm,api_backend_liric,");
+    printf("ll_jit,ll_llvm[,micro_c]\n");
     printf("  --iters N                iterations forwarded to lane runners (default: 1)\n");
     printf("  --api-cases N            api sample cap per cell (default: 100, 0=all)\n");
     printf("  --timeout N              timeout sec for corpus compare / compat (default: 15)\n");
@@ -568,8 +534,6 @@ static void usage(void) {
     printf("  --bench-tcc PATH\n");
     printf("  --probe-runner PATH\n");
     printf("  --lli-phases PATH\n");
-    printf("  --file-skip-issues       auto-file GitHub issues per skip category\n");
-    printf("  --github-repo OWNER/REPO target repository for issue filing\n");
 }
 
 static cfg_t parse_args(int argc, char **argv) {
@@ -595,8 +559,6 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.allow_partial = 0;
     cfg.rebuild_lfortran = 1;
     cfg.cmake = "cmake";
-    cfg.file_skip_issues = 0;
-    cfg.github_repo = getenv("GITHUB_REPOSITORY");
 
     cfg.lfortran = file_exists(default_lfortran_llvm) ? default_lfortran_llvm : NULL;
     cfg.lfortran_liric = file_exists(default_lfortran_liric_hyphen)
@@ -690,10 +652,6 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--lli-phases") == 0 && i + 1 < argc) {
             cfg.lli_phases = argv[++i];
-        } else if (strcmp(argv[i], "--file-skip-issues") == 0) {
-            cfg.file_skip_issues = 1;
-        } else if (strcmp(argv[i], "--github-repo") == 0 && i + 1 < argc) {
-            cfg.github_repo = argv[++i];
         } else {
             die("unknown argument: %s", argv[i]);
         }
@@ -1489,229 +1447,6 @@ static void run_micro_provider(const cfg_t *cfg,
     free(micro_dir);
 }
 
-static void classify_reason(const char *reason, const char **category, const char **fix_contract) {
-    if (!reason) reason = "unknown";
-
-    if (strstr(reason, "_missing") != NULL || strstr(reason, "binary_missing") != NULL) {
-        *category = "tool_missing";
-        *fix_contract = "Provide/install missing binary or artifact path and re-run the matrix.";
-        return;
-    }
-    if (strstr(reason, "rebuild") != NULL) {
-        *category = "rebuild_failure";
-        *fix_contract = "Fix lfortran build preflight for both LLVM and WITH_LIRIC binaries.";
-        return;
-    }
-    if (strstr(reason, "compat") != NULL) {
-        *category = "compat_failure";
-        *fix_contract = "Restore compat_check generation and ensure compat lists/options artifacts exist.";
-        return;
-    }
-    if (strstr(reason, "incomplete") != NULL || strstr(reason, "EMPTY") != NULL) {
-        *category = "dataset_incomplete";
-        *fix_contract = "Increase completed coverage to attempted==completed with zero skips for strict lanes.";
-        return;
-    }
-    if (strstr(reason, "failed") != NULL) {
-        *category = "lane_execution_failed";
-        *fix_contract = "Fix lane execution error and ensure summary artifacts are emitted with status OK.";
-        return;
-    }
-
-    *category = "unknown";
-    *fix_contract = "Inspect failure reason and define a concrete fix contract for this skip class.";
-}
-
-static int category_index(const char *category) {
-    if (strcmp(category, "tool_missing") == 0) return 0;
-    if (strcmp(category, "rebuild_failure") == 0) return 1;
-    if (strcmp(category, "compat_failure") == 0) return 2;
-    if (strcmp(category, "dataset_incomplete") == 0) return 3;
-    if (strcmp(category, "lane_execution_failed") == 0) return 4;
-    return 5;
-}
-
-static int build_skip_artifacts(const char *fails_path,
-                                const char *skips_path,
-                                skip_counts_t *counts_out) {
-    FILE *in;
-    FILE *out;
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t nread;
-    skip_counts_t c;
-
-    memset(&c, 0, sizeof(c));
-
-    in = fopen(fails_path, "r");
-    if (!in) return -1;
-    out = fopen(skips_path, "w");
-    if (!out) {
-        fclose(in);
-        return -1;
-    }
-
-    while ((nread = getline(&line, &cap, in)) > 0) {
-        char lane[64] = {0};
-        char mode[64] = {0};
-        char policy[64] = {0};
-        char baseline[64] = {0};
-        char reason[256] = {0};
-        char summary[PATH_MAX] = {0};
-        long long rc = 0;
-        const char *category;
-        const char *fix_contract;
-        int idx;
-        char *e_summary;
-        char *e_fix;
-
-        (void)nread;
-        (void)json_get_string(line, "lane", lane, sizeof(lane));
-        (void)json_get_string(line, "mode", mode, sizeof(mode));
-        (void)json_get_string(line, "policy", policy, sizeof(policy));
-        (void)json_get_string(line, "baseline", baseline, sizeof(baseline));
-        (void)json_get_string(line, "reason", reason, sizeof(reason));
-        (void)json_get_string(line, "summary", summary, sizeof(summary));
-        (void)json_get_int64(line, "rc", &rc);
-
-        classify_reason(reason, &category, &fix_contract);
-        idx = category_index(category);
-        c.total++;
-        if (idx == 0) c.tool_missing++;
-        else if (idx == 1) c.rebuild_failure++;
-        else if (idx == 2) c.compat_failure++;
-        else if (idx == 3) c.dataset_incomplete++;
-        else if (idx == 4) c.lane_execution_failed++;
-        else c.unknown++;
-
-        e_summary = json_escape(summary);
-        e_fix = json_escape(fix_contract);
-        fprintf(out,
-                "{\"lane\":\"%s\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"%s\","
-                "\"reason\":\"%s\",\"rc\":%lld,\"category\":\"%s\",\"fix_contract\":\"%s\",\"summary\":\"%s\"}\n",
-                lane,
-                mode,
-                policy,
-                baseline,
-                reason,
-                rc,
-                category,
-                e_fix,
-                e_summary);
-        free(e_summary);
-        free(e_fix);
-    }
-
-    free(line);
-    fclose(in);
-    fclose(out);
-
-    *counts_out = c;
-    return 0;
-}
-
-static int gh_issue_exists(const char *repo, const char *title) {
-    cmd_result_t r = {0};
-    char *cmd[14];
-    int n = 0;
-
-    cmd[n++] = "gh";
-    cmd[n++] = "issue";
-    cmd[n++] = "list";
-    cmd[n++] = "--repo";
-    cmd[n++] = (char *)repo;
-    cmd[n++] = "--state";
-    cmd[n++] = "open";
-    cmd[n++] = "--search";
-    cmd[n++] = (char *)title;
-    cmd[n++] = "--limit";
-    cmd[n++] = "20";
-    cmd[n++] = "--json";
-    cmd[n++] = "title";
-    cmd[n++] = NULL;
-
-    if (run_cmd(cmd, &r) != 0 || r.rc != 0) return 0;
-    if (!r.stdout_text) return 0;
-    return strstr(r.stdout_text, title) != NULL;
-}
-
-static void maybe_file_skip_issues(const cfg_t *cfg, const skip_counts_t *counts) {
-    int gh_ok = 0;
-    cmd_result_t rv = {0};
-    char *probe_cmd[] = {"gh", "--version", NULL};
-
-    const char *cats[] = {
-        "tool_missing",
-        "rebuild_failure",
-        "compat_failure",
-        "dataset_incomplete",
-        "lane_execution_failed",
-        "unknown"
-    };
-    const int vals[] = {
-        counts->tool_missing,
-        counts->rebuild_failure,
-        counts->compat_failure,
-        counts->dataset_incomplete,
-        counts->lane_execution_failed,
-        counts->unknown
-    };
-
-    if (!cfg->file_skip_issues || counts->total == 0) return;
-    if (!cfg->github_repo || !cfg->github_repo[0]) {
-        fprintf(stderr, "[matrix] skip-issue filing requested but no --github-repo provided\n");
-        return;
-    }
-
-    if (run_cmd(probe_cmd, &rv) == 0 && rv.rc == 0) gh_ok = 1;
-    if (!gh_ok) {
-        fprintf(stderr, "[matrix] skip-issue filing requested but gh CLI is unavailable\n");
-        return;
-    }
-
-    for (size_t i = 0; i < sizeof(cats) / sizeof(cats[0]); i++) {
-        char title[256];
-        char body[1024];
-        char *cmd[14];
-        int n = 0;
-
-        if (vals[i] <= 0) continue;
-
-        snprintf(title, sizeof(title), "bench_matrix skip category: %s", cats[i]);
-        if (gh_issue_exists(cfg->github_repo, title)) continue;
-
-        snprintf(body,
-                 sizeof(body),
-                 "Auto-filed from bench_matrix.\\n\\n"
-                 "Category: %s\\n"
-                 "Current skipped cells: %d\\n\\n"
-                 "Expected contract:\\n"
-                 "- eliminate this skip category from strict matrix runs\\n"
-                 "- keep attempted==completed for required lanes\\n",
-                 cats[i],
-                 vals[i]);
-
-        cmd[n++] = "gh";
-        cmd[n++] = "issue";
-        cmd[n++] = "create";
-        cmd[n++] = "--repo";
-        cmd[n++] = (char *)cfg->github_repo;
-        cmd[n++] = "--title";
-        cmd[n++] = title;
-        cmd[n++] = "--body";
-        cmd[n++] = body;
-        cmd[n++] = NULL;
-
-        {
-            cmd_result_t r = {0};
-            if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
-                fprintf(stderr, "[matrix] failed to file issue for category %s\n", cats[i]);
-            } else {
-                printf("[matrix] filed issue: %s\n", title);
-            }
-        }
-    }
-}
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
@@ -1722,7 +1457,6 @@ int main(int argc, char **argv) {
     char *rows_path = NULL;
     char *fails_path = NULL;
     char *summary_path = NULL;
-    char *skips_path = NULL;
 
     char *compat_ll = NULL;
     char *compat_api = NULL;
@@ -1737,8 +1471,6 @@ int main(int argc, char **argv) {
     int compat_ok = 1;
     int ran_compat = 0;
 
-    skip_counts_t skip_counts;
-
     if (!require_any(cfg.lanes, LANE_COUNT)) die("no lanes selected");
     if (!require_any(cfg.modes, MODE_COUNT)) die("no modes selected");
     if (!require_any(cfg.policies, POLICY_COUNT)) die("no policies selected");
@@ -1750,7 +1482,6 @@ int main(int argc, char **argv) {
     rows_path = bench_path_join2(cfg.bench_dir, "matrix_rows.jsonl");
     fails_path = bench_path_join2(cfg.bench_dir, "matrix_failures.jsonl");
     summary_path = bench_path_join2(cfg.bench_dir, "matrix_summary.json");
-    skips_path = bench_path_join2(cfg.bench_dir, "matrix_skips.jsonl");
 
     compat_ll = bench_path_join2(cfg.bench_dir, "compat_ll.txt");
     compat_api = bench_path_join2(cfg.bench_dir, "compat_api.txt");
@@ -2010,39 +1741,6 @@ int main(int argc, char **argv) {
                                      ap.full_liric_non_parse_ms,
                                      ap.summary_path);
                     cells_ok++;
-                } else if (li == LANE_API_FULL_E2E) {
-                    if (!ap.ran || !ap.ok) {
-                        write_failure_row(fails,
-                                          lane,
-                                          mode,
-                                          policy,
-                                          "lfortran_llvm",
-                                          ap.fail_reason[0] ? ap.fail_reason : "api_lane_unavailable",
-                                          ap.rc,
-                                          ap.summary_path ? ap.summary_path : "");
-                        cells_failed++;
-                        continue;
-                    }
-                    {
-                        double wall_speedup =
-                            (ap.full_liric_wall_ms > 0.0) ? ap.full_llvm_wall_ms / ap.full_liric_wall_ms : 0.0;
-                        double np_speedup = (ap.full_liric_non_parse_ms > 0.0)
-                                                ? ap.full_llvm_non_parse_ms / ap.full_liric_non_parse_ms
-                                                : 0.0;
-                        write_row_speedup(rows,
-                                          lane,
-                                          mode,
-                                          policy,
-                                          "lfortran_llvm",
-                                          ap.status,
-                                          ap.attempted,
-                                          ap.completed,
-                                          ap.skipped,
-                                          wall_speedup,
-                                          np_speedup,
-                                          ap.summary_path);
-                    }
-                    cells_ok++;
                 } else if (li == LANE_API_BACKEND_LLVM) {
                     if (!ap.ran || !ap.ok) {
                         write_failure_row(fails,
@@ -2100,39 +1798,6 @@ int main(int argc, char **argv) {
                                      -1.0,
                                      ap.backend_liric_non_parse_ms,
                                      ap.summary_path);
-                    cells_ok++;
-                } else if (li == LANE_API_BACKEND_E2E) {
-                    if (!ap.ran || !ap.ok) {
-                        write_failure_row(fails,
-                                          lane,
-                                          mode,
-                                          policy,
-                                          "lfortran_llvm",
-                                          ap.fail_reason[0] ? ap.fail_reason : "api_lane_unavailable",
-                                          ap.rc,
-                                          ap.summary_path ? ap.summary_path : "");
-                        cells_failed++;
-                        continue;
-                    }
-                    {
-                        double wall_speedup =
-                            (ap.backend_liric_wall_ms > 0.0) ? ap.backend_llvm_wall_ms / ap.backend_liric_wall_ms : 0.0;
-                        double np_speedup = (ap.backend_liric_non_parse_ms > 0.0)
-                                                ? ap.backend_llvm_non_parse_ms / ap.backend_liric_non_parse_ms
-                                                : 0.0;
-                        write_row_speedup(rows,
-                                          lane,
-                                          mode,
-                                          policy,
-                                          "lfortran_llvm",
-                                          ap.status,
-                                          ap.attempted,
-                                          ap.completed,
-                                          ap.skipped,
-                                          wall_speedup,
-                                          np_speedup,
-                                          ap.summary_path);
-                    }
                     cells_ok++;
                 } else if (li == LANE_LL_JIT) {
                     if (!ll.ran || !ll.ok) {
@@ -2192,32 +1857,6 @@ int main(int argc, char **argv) {
                                      ll.llvm_non_parse_ms,
                                      ll.summary_path);
                     cells_ok++;
-                } else if (li == LANE_LL_E2E || li == LANE_IR_FILE) {
-                    if (!ll.ran || !ll.ok) {
-                        write_failure_row(fails,
-                                          lane,
-                                          mode,
-                                          policy,
-                                          "llvm",
-                                          ll.fail_reason[0] ? ll.fail_reason : "ll_lane_unavailable",
-                                          ll.rc,
-                                          ll.summary_path ? ll.summary_path : "");
-                        cells_failed++;
-                        continue;
-                    }
-                    write_row_speedup(rows,
-                                      lane,
-                                      mode,
-                                      policy,
-                                      "llvm",
-                                      ll.status,
-                                      ll.attempted,
-                                      ll.completed,
-                                      0,
-                                      ll.speedup_wall,
-                                      ll.speedup_non_parse,
-                                      ll.summary_path);
-                    cells_ok++;
                 } else if (li == LANE_MICRO_C) {
                     if (!micro.ran || !micro.ok) {
                         write_failure_row(fails,
@@ -2259,12 +1898,6 @@ int main(int argc, char **argv) {
     fclose(rows);
     fclose(fails);
 
-    if (build_skip_artifacts(fails_path, skips_path, &skip_counts) != 0) {
-        memset(&skip_counts, 0, sizeof(skip_counts));
-    }
-
-    maybe_file_skip_issues(&cfg, &skip_counts);
-
     {
         FILE *sf = fopen(summary_path, "w");
         char ts[64] = {0};
@@ -2276,7 +1909,7 @@ int main(int argc, char **argv) {
         strcpy(status, (cells_attempted > 0 && cells_failed == 0) ? "OK" : "FAILED");
 
         fprintf(sf, "{\n");
-        fprintf(sf, "  \"schema_version\": 2,\n");
+        fprintf(sf, "  \"schema_version\": 3,\n");
         fprintf(sf, "  \"generated_at_utc\": \"%s\",\n", ts);
 
         {
@@ -2284,22 +1917,16 @@ int main(int argc, char **argv) {
             char *e_manifest = json_escape(cfg.manifest ? cfg.manifest : "");
             char *e_rows = json_escape(rows_path);
             char *e_fails = json_escape(fails_path);
-            char *e_skips = json_escape(skips_path);
-            char *e_repo = json_escape(cfg.github_repo ? cfg.github_repo : "");
 
             fprintf(sf, "  \"bench_dir\": \"%s\",\n", e_bench_dir);
             fprintf(sf, "  \"manifest\": \"%s\",\n", e_manifest);
             fprintf(sf, "  \"rows_jsonl\": \"%s\",\n", e_rows);
             fprintf(sf, "  \"failures_jsonl\": \"%s\",\n", e_fails);
-            fprintf(sf, "  \"skips_jsonl\": \"%s\",\n", e_skips);
-            fprintf(sf, "  \"github_repo\": \"%s\",\n", e_repo);
 
             free(e_bench_dir);
             free(e_manifest);
             free(e_rows);
             free(e_fails);
-            free(e_skips);
-            free(e_repo);
         }
 
         fprintf(sf, "  \"status\": \"%s\",\n", status);
@@ -2307,18 +1934,7 @@ int main(int argc, char **argv) {
         fprintf(sf, "  \"cells_ok\": %d,\n", cells_ok);
         fprintf(sf, "  \"cells_failed\": %d,\n", cells_failed);
         fprintf(sf, "  \"ran_compat_check\": %s,\n", ran_compat ? "true" : "false");
-        fprintf(sf, "  \"compat_ok\": %s,\n", compat_ok ? "true" : "false");
-        fprintf(sf, "  \"skip_issue_filing_enabled\": %s,\n", cfg.file_skip_issues ? "true" : "false");
-
-        fprintf(sf, "  \"skip_categories\": {\n");
-        fprintf(sf, "    \"total\": %d,\n", skip_counts.total);
-        fprintf(sf, "    \"tool_missing\": %d,\n", skip_counts.tool_missing);
-        fprintf(sf, "    \"rebuild_failure\": %d,\n", skip_counts.rebuild_failure);
-        fprintf(sf, "    \"compat_failure\": %d,\n", skip_counts.compat_failure);
-        fprintf(sf, "    \"dataset_incomplete\": %d,\n", skip_counts.dataset_incomplete);
-        fprintf(sf, "    \"lane_execution_failed\": %d,\n", skip_counts.lane_execution_failed);
-        fprintf(sf, "    \"unknown\": %d\n", skip_counts.unknown);
-        fprintf(sf, "  }\n");
+        fprintf(sf, "  \"compat_ok\": %s\n", compat_ok ? "true" : "false");
 
         fprintf(sf, "}\n");
         fclose(sf);
@@ -2327,13 +1943,11 @@ int main(int argc, char **argv) {
     printf("[matrix] summary: %s\n", summary_path);
     printf("[matrix] rows:    %s\n", rows_path);
     printf("[matrix] fails:   %s\n", fails_path);
-    printf("[matrix] skips:   %s\n", skips_path);
     printf("[matrix] cells: attempted=%d ok=%d failed=%d\n", cells_attempted, cells_ok, cells_failed);
 
     free(rows_path);
     free(fails_path);
     free(summary_path);
-    free(skips_path);
     free(compat_ll);
     free(compat_api);
     free(compat_opts);

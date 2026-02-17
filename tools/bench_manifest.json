@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "description": "Canonical benchmark matrix manifest for bench_matrix.",
   "axes": {
     "modes": ["isel", "copy_patch", "llvm"],
@@ -35,28 +35,6 @@
       "kind": "primitive",
       "baseline": "llvm",
       "source": "bench_corpus_compare"
-    },
-    "api_full_e2e": {
-      "kind": "derived",
-      "from": ["api_full_llvm", "api_full_liric"]
-    },
-    "api_backend_e2e": {
-      "kind": "derived",
-      "from": ["api_backend_llvm", "api_backend_liric"]
-    },
-    "ll_e2e": {
-      "kind": "derived",
-      "from": ["ll_llvm", "ll_jit"]
-    },
-    "ir_file": {
-      "kind": "derived",
-      "from": ["ll_llvm", "ll_jit"],
-      "compat_alias": true
     }
-  },
-  "policy": {
-    "unsupported": "hard_fail",
-    "missing_cell": "hard_fail",
-    "empty_dataset": "hard_fail"
   }
 }
