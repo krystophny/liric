@@ -1055,6 +1055,11 @@ void *lr_session_lookup(struct lr_session *s, const char *name) {
     void *addr;
     if (!s || !s->jit || !name || !name[0])
         return NULL;
+    if (s->cfg.mode == SESSION_MODE_IR && !s->ir_module_jit_ready) {
+        if (lr_jit_add_module(s->jit, s->module) != 0)
+            return NULL;
+        s->ir_module_jit_ready = true;
+    }
     if (s->direct_pending_relocs && s->direct_obj_ctx_active) {
         const char *missing_symbol = NULL;
         if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
@@ -1069,15 +1074,6 @@ void *lr_session_lookup(struct lr_session *s, const char *name) {
             return NULL;
     }
     addr = lr_jit_get_function(s->jit, name);
-    if (addr)
-        return addr;
-
-    if (s->cfg.mode == SESSION_MODE_IR && !s->ir_module_jit_ready) {
-        if (lr_jit_add_module(s->jit, s->module) != 0)
-            return NULL;
-        s->ir_module_jit_ready = true;
-        addr = lr_jit_get_function(s->jit, name);
-    }
     return addr;
 }
 

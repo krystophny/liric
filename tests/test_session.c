@@ -866,6 +866,43 @@ int test_session_ir_print(void) {
     return 0;
 }
 
+int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    lr_type_t *i32;
+    lr_type_t *params[1];
+    int rc;
+    void *addr = NULL;
+    typedef int (*fn_t)(int);
+    fn_t fn;
+
+    cfg.mode = LR_MODE_IR;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i32 = lr_type_i32_s(s);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+    params[0] = i32;
+
+    rc = lr_session_func_begin(s, "abs", i32, params, 1, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+    lr_emit_ret(s, LR_IMM(77, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    addr = lr_session_lookup(s, "abs");
+    TEST_ASSERT(addr != NULL, "lookup abs");
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT_EQ(fn(-5), 77, "lookup resolves module-defined abs");
+    TEST_ASSERT_EQ(fn(123), 77, "module-defined abs result remains stable");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_ll_compile(void) {
     static const char *src =
         "define i32 @session_ll_ret_42() {\n"
