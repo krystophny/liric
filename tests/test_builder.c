@@ -413,6 +413,7 @@ int test_builder_compat_direct_llvm_phi_incoming_sync(void) {
     rc = lc_module_add_to_jit(mod, jit);
 
 #if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
+#if defined(LIRIC_HAVE_LLVM_C_LLJIT) && LIRIC_HAVE_LLVM_C_LLJIT
     if (rc != 0) {
         fprintf(stderr, "  FAIL: lc_module_add_to_jit in direct+llvm mode\n");
         goto cleanup;
@@ -431,6 +432,13 @@ int test_builder_compat_direct_llvm_phi_incoming_sync(void) {
             goto cleanup;
         }
     }
+#else
+    if (rc == 0) {
+        fprintf(stderr,
+                "  FAIL: direct+llvm compat add should fail without LLJIT support\n");
+        goto cleanup;
+    }
+#endif
 #else
     if (rc == 0) {
         fprintf(stderr,
