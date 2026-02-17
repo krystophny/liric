@@ -1,0 +1,8 @@
+llvm has_time_report=1 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_03.f90
+liric has_time_report=1 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_03.f90
+llvm has_time_report=0 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_03.f90
+liric has_time_report=0 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_03.f90
+llvm has_time_report=1 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_08.f90
+liric has_time_report=1 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_08.f90
+llvm has_time_report=0 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_08.f90
+liric has_time_report=0 src=/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_time_report_segv_recovery/integration_tests/file_08.f90

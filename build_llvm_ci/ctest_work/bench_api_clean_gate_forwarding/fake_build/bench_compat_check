@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+timeout_val=''
+bench_dir=''
+lfortran=''
+probe=''
+runtime=''
+cmake_path=''
+workers=''
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timeout) timeout_val="$2"; shift 2 ;;
+        --bench-dir) bench_dir="$2"; shift 2 ;;
+        --lfortran) lfortran="$2"; shift 2 ;;
+        --probe-runner) probe="$2"; shift 2 ;;
+        --runtime-lib) runtime="$2"; shift 2 ;;
+        --cmake) cmake_path="$2"; shift 2 ;;
+        --workers) workers="$2"; shift 2 ;;
+        *) echo "unexpected arg in fake bench_compat_check: $1" >&2; exit 90 ;;
+    esac
+done
+[[ "$timeout_val" == "17" ]] || { echo "bad timeout: $timeout_val" >&2; exit 91; }
+[[ "$bench_dir" == "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_clean_gate_forwarding/bench" ]] || { echo "bad bench_dir: $bench_dir" >&2; exit 92; }
+[[ "$lfortran" == "/opt/lfortran-llvm/bin/lfortran" ]] || { echo "bad lfortran: $lfortran" >&2; exit 93; }
+[[ "$probe" == "/opt/liric/bin/liric_probe_runner" ]] || { echo "bad probe: $probe" >&2; exit 94; }
+[[ "$runtime" == "/opt/lfortran/lib/liblfortran_runtime.so" ]] || { echo "bad runtime: $runtime" >&2; exit 95; }
+[[ "$cmake_path" == "/opt/lfortran/integration_tests/CMakeLists.txt" ]] || { echo "bad cmake: $cmake_path" >&2; exit 99; }
+[[ "$workers" == "11" ]] || { echo "bad workers: $workers" >&2; exit 98; }
+echo "ok" > "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_clean_gate_forwarding/logs/compat_args.log"

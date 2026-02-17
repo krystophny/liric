@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+  --version)
+    echo "11.1.0"
+    ;;
+  --includedir)
+    echo "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/llvm_backend_compat_policy_cases/llvm11_with_compat_on/include"
+    ;;
+  --cflags)
+    echo ""
+    ;;
+  --ldflags)
+    echo ""
+    ;;
+  --libs)
+    echo ""
+    ;;
+  --system-libs)
+    echo ""
+    ;;
+  *)
+    echo "fake llvm-config: unsupported arg $1" >&2
+    exit 91
+    ;;
+esac

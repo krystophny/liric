@@ -1,0 +1,63 @@
+{
+  "manifest_total": 2,
+  "processed_total": 2,
+  "emit_attempted": 2,
+  "emit_ok": 2,
+  "parse_attempted": 2,
+  "parse_ok": 1,
+  "jit_attempted": 2,
+  "jit_ok": 1,
+  "runnable_selected": 2,
+  "runnable_selected_executable": 1,
+  "differential_attempted": 1,
+  "differential_attempted_executable": 1,
+  "differential_ok": 1,
+  "differential_match": 0,
+  "differential_missing_attempts": 0,
+  "differential_parity_ok": true,
+  "classification_counts": {
+    "mismatch": 1,
+    "unsupported_abi": 1
+  },
+  "taxonomy_counts": {
+    "output-format|wrong-stdout|general": 1,
+    "jit-link|unresolved-symbol|runtime-api": 1
+  },
+  "mismatch_taxonomy_counts": {
+    "output-format|wrong-stdout|general": 1
+  },
+  "unsupported_taxonomy_counts": {
+    "jit-link|unresolved-symbol|runtime-api": 1
+  },
+  "unsupported_bucket_issue_coverage": [
+    {
+      "taxonomy_node": "jit-link|unresolved-symbol|runtime-api",
+      "count": 1,
+      "mapped": true,
+      "issues": [
+        "#79"
+      ],
+      "rationale": "Runtime symbol/ABI integration gap tracked in runtime ABI lane."
+    }
+  ],
+  "unsupported_bucket_unmapped": [],
+  "unsupported_total_baseline": 0,
+  "unsupported_total_current": 1,
+  "unsupported_total_delta": 1,
+  "unsupported_total_trend": "regressing",
+  "unsupported_taxonomy_delta": [
+    {
+      "taxonomy_node": "jit-link|unresolved-symbol|runtime-api",
+      "current": 1,
+      "baseline": 0,
+      "delta": 1,
+      "trend": "regressing"
+    }
+  ],
+  "mismatch_count": 1,
+  "new_supported_regressions": 1,
+  "regressed_case_ids": [
+    "case_mismatch"
+  ],
+  "gate_fail": true
+}

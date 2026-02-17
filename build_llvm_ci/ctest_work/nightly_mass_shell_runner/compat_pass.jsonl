@@ -1,0 +1,2 @@
+{"name":"case_ok_1","source":"/tmp/a.f90","options":"","llvm_ok":true,"liric_ok":true,"lli_ok":true,"liric_match":true,"lli_match":true,"llvm_rc":0,"liric_rc":0,"lli_rc":0,"error":""}
+{"name":"case_ok_2","source":"/tmp/b.f90","options":"","llvm_ok":true,"liric_ok":true,"lli_ok":true,"liric_match":true,"lli_match":true,"llvm_rc":0,"liric_rc":0,"lli_rc":0,"error":""}

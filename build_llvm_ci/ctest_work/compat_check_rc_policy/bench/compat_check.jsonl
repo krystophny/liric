@@ -1,0 +1,1 @@
+{"name":"rc_case","source":"/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/compat_check_rc_policy/integration_tests/rc_case.f90","options":"","llvm_ok":true,"liric_ok":true,"lli_ok":true,"liric_match":true,"lli_match":true,"liric_rc_match":false,"lli_rc_match":true,"llvm_rc":0,"liric_rc":1,"lli_rc":0,"error":""}

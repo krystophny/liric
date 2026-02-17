@@ -1,0 +1,2 @@
+{"name":"case_mismatch","source":"/tmp/c.f90","options":"","llvm_ok":true,"liric_ok":true,"lli_ok":true,"liric_match":false,"lli_match":false,"llvm_rc":0,"liric_rc":0,"lli_rc":0,"error":""}
+{"name":"case_unresolved_symbol","source":"/tmp/d.f90","options":"","llvm_ok":true,"liric_ok":false,"lli_ok":false,"liric_match":false,"lli_match":false,"llvm_rc":0,"liric_rc":-1,"lli_rc":-1,"error":"unresolved symbol: _lfortran_printf"}

@@ -1,0 +1,2 @@
+{"case_id":"case_ok_1","filename":"case_ok_1","source_path":"/tmp/a.f90","corpus":"integration_cmake","decision":"selected","reason":"llvm_labeled_integration_test"}
+{"case_id":"case_ok_2","filename":"case_ok_2","source_path":"/tmp/b.f90","corpus":"integration_cmake","decision":"selected","reason":"llvm_labeled_integration_test"}

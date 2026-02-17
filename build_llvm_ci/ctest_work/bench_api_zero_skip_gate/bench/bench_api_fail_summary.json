@@ -1,0 +1,28 @@
+{
+  "attempted": 2,
+  "completed": 1,
+  "failed": 1,
+  "status": "OK",
+  "failure_jsonl": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_zero_skip_gate/bench/bench_api_failures.jsonl",
+  "failure_log_dir": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_zero_skip_gate/bench/fail_logs",
+  "failing_side_counts": {
+    "llvm": 0,
+    "liric": 1,
+    "harness": 0
+  },
+  "skip_reasons": {
+    "workdir_create_failed": 0,
+    "source_missing": 0,
+    "llvm_jit_failed": 0,
+    "llvm_jit_verifier_pointee_mismatch": 0,
+    "llvm_jit_runtime_io_error": 0,
+    "llvm_jit_expected_nonzero_or_stop": 0,
+    "llvm_jit_timeout": 0,
+    "liric_jit_failed": 0,
+    "liric_jit_timeout": 0,
+    "llvm_jit_sigabrt": 0,
+    "llvm_jit_sigsegv": 0,
+    "liric_jit_sigabrt": 0,
+    "liric_jit_sigsegv": 1
+  }
+}

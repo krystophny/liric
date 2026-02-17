@@ -1,0 +1,3 @@
+case_id,filename,source_path,classification,stage,reason
+"case_mismatch","case_mismatch","/tmp/c.f90","mismatch","output-format","differential mismatch"
+"case_unresolved_symbol","case_unresolved_symbol","/tmp/d.f90","unsupported_abi","jit-link","liric jit ABI/link failure: unresolved symbol: _lfortran_printf"
