@@ -78,6 +78,7 @@ int test_codegen_reuse_cached_vreg_across_scratch_regs(void);
 int test_codegen_keep_store_for_next_inst_multiuse_vreg(void);
 int test_codegen_zero_immediate_uses_xor_when_flags_dead(void);
 int test_codegen_select_zero_keeps_mov_for_flags(void);
+int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void);
 int test_host_target_name(void);
 int test_create_host_target(void);
 int test_create_unknown_target_fails(void);
@@ -355,6 +356,7 @@ int main(void) {
     RUN_TEST(test_codegen_keep_store_for_next_inst_multiuse_vreg);
     RUN_TEST(test_codegen_zero_immediate_uses_xor_when_flags_dead);
     RUN_TEST(test_codegen_select_zero_keeps_mov_for_flags);
+    RUN_TEST(test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx);
 
     fprintf(stderr, "\nTarget tests:\n");
     RUN_TEST(test_host_target_name);
