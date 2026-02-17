@@ -12,25 +12,85 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-## Benchmark Matrix Contract
+## Architecture
 
-Axes:
-- `mode`: `isel`, `copy_patch`, `llvm`
-- `policy`: `direct`, `ir`
-- `lane`:
-  `api_full_llvm`, `api_full_liric`,
-  `api_backend_llvm`, `api_backend_liric`,
-  `ll_jit`, `ll_llvm`
+```
+                    Fortran source (.f90)
+                  100 lfortran integration tests
+                             |
+                             v
+              +---------------------------------+
+              |  LFORTRAN FRONTEND              |
+              |  parse -> ASR -> LLVM IR codegen|
+              +--------+---------------+--------+
+                       |               |
+          +------------v---+     +-----v--------------+
+          | lfortran native|     | lfortran + liric   |
+          | LLVM backend   |     | (--jit, compat     |
+          | (--backend llvm|     |  layer)             |
+          +------------+---+     +-----+----------+---+
+                       |               |          |
+                       v               v          v
+              +----------------+   POLICY:     POLICY:
+              | LLVM ORC JIT   |   direct      ir
+              | compile+link   |   |           |
+              | +run           |   session     write .ll
+              +----------------+   API calls   then parse
+                                   func by     full module
+              Lanes:               func        at once
+              api_full_llvm        |           |
+              api_backend_llvm     +-----+-----+
+                                         |
+                                +--------+--------+
+                                |        |        |
+                              MODE:    MODE:    MODE:
+                              isel   copy_patch llvm
+                                |        |        |
+                              custom   copy+    serialize
+                              ISel     patch    IR, pass
+                              -> MIR   templates to LLVM
+                              -> x86   -> x86   ORC JIT
+                                |        |        |
+                              ~6x      ~6x      ~1x
+                              faster   faster   (baseline
+                                                validation)
 
-Lane meanings:
-- `api_full_llvm`: full API wall/non-parse timing from lfortran LLVM build
-- `api_full_liric`: full API wall/non-parse timing from lfortran WITH_LIRIC build
-- `api_backend_llvm`: backend-isolated timing from lfortran LLVM build
-- `api_backend_liric`: backend-isolated timing from lfortran WITH_LIRIC build
-- `ll_jit`: liric LL timing (wall/non-parse ms)
-- `ll_llvm`: LLVM LL timing (wall/non-parse ms)
+                              Lanes:
+                              api_full_liric
+                              api_backend_liric
 
-Canonical `--lanes all` includes all lanes above plus `micro_c`.
+  STANDALONE LANES (no lfortran involved)
+
+  LL corpus    2187 .ll files from lfortran integration tests
+               ll_jit:  liric parses+compiles each .ll   ~0.07ms
+               ll_llvm: lli (LLVM) runs each .ll         ~5.2ms
+               Speedup: 75x (isel/copy_patch)
+
+  Micro C      5 micro-benchmarks, liric vs TCC
+               Speedup: ~5.8x (isel/copy_patch)
+```
+
+### Matrix axes
+
+The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells**.
+
+- **Mode** (compilation backend): `isel`, `copy_patch`, `llvm`
+- **Policy** (how the compat layer routes IR): `direct`, `ir`
+- **Lane** (what is measured):
+
+| Lane | Source | What it measures |
+|------|--------|-----------------|
+| `api_full_llvm` | lfortran `--backend llvm` | full pipeline wall/non-parse timing |
+| `api_full_liric` | lfortran `--jit` (liric) | full pipeline wall/non-parse timing |
+| `api_backend_llvm` | lfortran `--backend llvm` | backend-isolated timing only |
+| `api_backend_liric` | lfortran `--jit` (liric) | backend-isolated timing only |
+| `ll_jit` | standalone liric | per-file compile time on .ll corpus |
+| `ll_llvm` | standalone lli | per-file compile time on .ll corpus |
+| `micro_c` | standalone liric vs TCC | in-process micro-benchmark |
+
+API lanes run `lfortran` as a subprocess -- lfortran links against `libliric.a`,
+so rebuilding lfortran is mandatory before API benchmarks.
+LL and micro_c lanes are standalone (no lfortran).
 
 ## Run Matrix
 
