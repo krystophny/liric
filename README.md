@@ -30,7 +30,7 @@ Lane meanings:
 - `ll_jit`: liric LL timing (wall/non-parse ms)
 - `ll_llvm`: LLVM LL timing (wall/non-parse ms)
 
-Canonical `--lanes all` includes all lanes above except `micro_c` (legacy).
+Canonical `--lanes all` includes all lanes above.
 
 ## Run Matrix
 

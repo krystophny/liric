@@ -9,7 +9,7 @@ It runs a strict matrix across:
   - `api_full_llvm`, `api_full_liric`
   - `api_backend_llvm`, `api_backend_liric`
   - `ll_jit`, `ll_llvm`
-  - `micro_c` (legacy, excluded from canonical `--lanes all`)
+  - `micro_c`
 
 ## Hard-Fail Policy
 

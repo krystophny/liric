@@ -442,7 +442,6 @@ static void set_all_lanes(cfg_t *cfg, int v) {
 
 static void set_all_canonical_lanes(cfg_t *cfg) {
     set_all_lanes(cfg, 1);
-    cfg->lanes[LANE_MICRO_C] = 0;
 }
 
 static void set_default_lanes(cfg_t *cfg) {
