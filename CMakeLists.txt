@@ -22,7 +22,6 @@ add_library(liric STATIC
     src/target_aarch64.c
     src/jit.c
     src/liric.c
-    src/builder.c
     src/liric_compat.c
     src/objfile.c
     src/llvm_stubs.c
@@ -46,7 +45,10 @@ add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
 
-add_executable(bench_matrix tools/bench_matrix.c)
+add_executable(bench_matrix
+    tools/bench_matrix.c
+    tools/bench_common.c
+)
 target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 enable_testing()

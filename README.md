@@ -2,8 +2,7 @@
 
 Liric is a C11 JIT compiler for LLVM IR (`.ll`) and WebAssembly (`.wasm`).
 
-This repository now uses a single C benchmark driver with an explicit lane/mode matrix.
-Old benchmark scripts were removed.
+This repository uses one C benchmark driver with an explicit lane/mode/policy matrix.
 
 ## Build
 
@@ -28,42 +27,39 @@ Defaults:
 - Runtime lib: `../lfortran/build/src/runtime/liblfortran_runtime.(dylib|so)`
 - Output dir: `/tmp/liric_bench`
 
-### Lanes
+### Primitive Lanes
 
-- `api_exe`: `.f90 -> native executable` via lfortran, then run
-- `api_jit`: `.f90 -> .ll` via `--show-llvm`, then liric JIT run
-- `ll_jit`: pre-emitted `.ll`, then liric JIT run
-- `ll_lli`: pre-emitted `.ll`, then `lli -O0` run
+- `api_exe`: API lane baseline side (`lfortran LLVM`) from `bench_api`
+- `api_jit`: API lane liric side (`lfortran WITH_LIRIC`) from `bench_api`
+- `ll_jit`: LL lane liric side from `bench_corpus_compare`
+- `ll_llvm`: LL lane LLVM side from `bench_corpus_compare`
+- `micro_c`: tiny C micro lane from `bench_tcc`
 
-### Modes
+### Derived Lanes (Compatibility Aliases)
 
-- `wall`: end-to-end wall time for the lane
-- `compile_only`: compile/codegen component only (if available)
-- `run_only`: runtime component only (if available)
-- `parse_only`: text parse component only (if available)
-- `non_parse`: compile+run (parse excluded)
+- `api_e2e`: derived speedup view from `api_exe` vs `api_jit`
+- `ll_e2e`: derived speedup view from `ll_llvm` vs `ll_jit`
+- `ir_file`: compatibility alias of `ll_e2e`
 
-`ll_lli` only exposes `wall`.
+`api_e2e` is retained for compatibility with existing automation.
 
-### Derived Comparison Lanes
+### Matrix Axes
 
-Derived only from measured lane primitives, never from mixed formulas:
+- `modes`: `isel`, `copy_patch`, `llvm`
+- `policies`: `direct`, `ir`
+- `lanes`: any subset of primitive and derived lanes above
 
-- `api_e2e`: compare `api_exe` vs `api_jit`
-  - wall speedup: `api_exe.wall / api_jit.wall`
-  - non-parse speedup: `api_exe.non_parse / api_jit.non_parse`
-- `ll_e2e`: compare `ll_lli` vs `ll_jit`
-  - wall speedup: `ll_lli.wall / ll_jit.wall`
+Full matrix = `lane x mode x policy`.
 
 ## Artifacts
 
 `/tmp/liric_bench/`:
-- `bench_matrix_rows.jsonl`: per-test metrics for all lanes/modes
-- `compat_api.txt`: tests where `api_jit` matches `api_exe`
-- `compat_ll.txt`: tests where `ll_jit` and `ll_lli` match `api_exe`
-- `summary.md`: lane matrix + aggregate medians + derived lane speedups
+- `matrix_rows.jsonl`: one row per attempted matrix cell
+- `matrix_failures.jsonl`: failed cells with failure reason
+- `matrix_skips.jsonl`: failed cells with normalized skip category + fix contract
+- `matrix_summary.json`: global matrix accounting and skip category totals
 
 ## Notes
 
-- Comparisons are reported on matched tests only.
-- Benchmarks are `-O0` by design for direct JIT-vs-LLVM pipeline analysis.
+- Benchmarks are `-O0`.
+- `--file-skip-issues --github-repo OWNER/REPO` enables auto filing of one GitHub issue per skip category.

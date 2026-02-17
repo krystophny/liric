@@ -28,28 +28,24 @@ Use only `bench_matrix`:
 ./build/bench_matrix --iters 3 --timeout 15
 ```
 
-Benchmark lanes:
-- `api_exe`
-- `api_jit`
-- `ll_jit`
-- `ll_lli`
+Primitive lanes:
+- `api_exe`, `api_jit`
+- `ll_jit`, `ll_llvm`
+- `micro_c`
 
-Benchmark modes:
-- `wall`
-- `compile_only`
-- `run_only`
-- `parse_only`
-- `non_parse`
+Derived/compat lanes:
+- `api_e2e` (compat alias; derived from `api_exe` and `api_jit`)
+- `ll_e2e` and `ir_file` (derived from `ll_llvm` and `ll_jit`)
 
-Derived comparison lanes:
-- `api_e2e` (derived from `api_exe` and `api_jit`)
-- `ll_e2e` (derived from `ll_lli` and `ll_jit`)
+Matrix axes:
+- modes: `isel`, `copy_patch`, `llvm`
+- policies: `direct`, `ir`
 
 Artifacts:
-- `/tmp/liric_bench/bench_matrix_rows.jsonl`
-- `/tmp/liric_bench/compat_api.txt`
-- `/tmp/liric_bench/compat_ll.txt`
-- `/tmp/liric_bench/summary.md`
+- `/tmp/liric_bench/matrix_rows.jsonl`
+- `/tmp/liric_bench/matrix_failures.jsonl`
+- `/tmp/liric_bench/matrix_skips.jsonl`
+- `/tmp/liric_bench/matrix_summary.json`
 
 ## Source Map
 
