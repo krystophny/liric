@@ -1426,6 +1426,22 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
         err_set(err, S_ERR_STATE, "no active function");
         return -1;
     }
+
+    /* When JIT is deferred (IR mode, DIRECT+llvm) and no address is
+       requested, skip validation and compilation entirely.  The compat
+       layer may switch between functions, so running
+       validate_block_termination here would add spurious "unreachable"
+       terminators to blocks that are still being constructed.  Likewise
+       lr_func_finalize would DCE instructions whose users haven't been
+       emitted yet.  Both steps happen later when the full module is
+       available: LLVM via its own verifier/optimizer after serialization,
+       isel/copy_patch via lr_target_compile. */
+    if (!s->compile_active &&
+        module_jit_deferred_until_lookup(s) && !out_addr) {
+        finish_function_state(s);
+        return 0;
+    }
+
     if (validate_block_termination(s, err) != 0)
         return -1;
 

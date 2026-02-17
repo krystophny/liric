@@ -72,38 +72,38 @@ Runtime artifacts:
 
 ## Speedup Tables (2026-02-17)
 
-42/42 matrix cells OK. All timings are non-parse median milliseconds.
+42/42 matrix cells OK, 100/100 API cases (0 skips). All timings are non-parse median ms.
 
 ### API Backend (liric vs LLVM, 100 lfortran integration tests)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 9.71 | 1.52 | **6.4x** |
-| isel | ir | 9.59 | 0.61 | **15.6x** |
-| copy_patch | direct | 9.75 | 1.51 | **6.5x** |
-| copy_patch | ir | 9.82 | 0.64 | **15.5x** |
-| llvm | direct | 10.37 | 10.97 | 0.9x |
-| llvm | ir | 9.49 | 10.75 | 0.9x |
+| isel | direct | 9.29 | 1.52 | **6.1x** |
+| isel | ir | 9.79 | 0.62 | **15.7x** |
+| copy_patch | direct | 9.62 | 1.46 | **6.6x** |
+| copy_patch | ir | 9.96 | 0.64 | **15.6x** |
+| llvm | direct | 9.73 | 10.41 | 0.9x |
+| llvm | ir | 9.55 | 10.03 | 1.0x |
 
 ### LL Corpus (compile-only, 2187 .ll files)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 5.23 | 0.070 | **75x** |
-| isel | ir | 5.24 | 0.070 | **75x** |
-| copy_patch | direct | 5.29 | 0.070 | **75x** |
-| copy_patch | ir | 5.22 | 0.071 | **74x** |
-| llvm | direct | 5.16 | 6.11 | 0.84x |
-| llvm | ir | 5.15 | 5.97 | 0.86x |
+| isel | direct | 5.19 | 0.070 | **75x** |
+| isel | ir | 5.22 | 0.069 | **76x** |
+| copy_patch | direct | 5.27 | 0.070 | **76x** |
+| copy_patch | ir | 5.27 | 0.070 | **75x** |
+| llvm | direct | 5.12 | 6.01 | 0.9x |
+| llvm | ir | 5.09 | 6.01 | 0.8x |
 
 ### Micro C (liric vs TCC, 5 micro-benchmarks)
 
 | Mode | Policy | Speedup |
 |------|--------|--------:|
-| isel | direct | **5.7x** |
-| isel | ir | **6.0x** |
-| copy_patch | direct | **5.7x** |
-| copy_patch | ir | **6.0x** |
+| isel | direct | **5.8x** |
+| isel | ir | **5.8x** |
+| copy_patch | direct | **5.2x** |
+| copy_patch | ir | **5.9x** |
 | llvm | direct | 0.15x |
 | llvm | ir | 0.16x |
 
