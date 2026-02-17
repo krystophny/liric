@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+iters=''
+timeout_ms=''
+bench_dir=''
+compile_mode=''
+require_zero='0'
+lfortran=''
+lfortran_liric=''
+test_dir=''
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --iters) iters="$2"; shift 2 ;;
+        --timeout-ms) timeout_ms="$2"; shift 2 ;;
+        --bench-dir) bench_dir="$2"; shift 2 ;;
+        --liric-compile-mode) compile_mode="$2"; shift 2 ;;
+        --require-zero-skips) require_zero='1'; shift 1 ;;
+        --lfortran) lfortran="$2"; shift 2 ;;
+        --lfortran-liric) lfortran_liric="$2"; shift 2 ;;
+        --test-dir) test_dir="$2"; shift 2 ;;
+        *) echo "unexpected arg in fake bench_api: $1" >&2; exit 110 ;;
+    esac
+done
+[[ "$iters" == "2" ]] || { echo "bad iters: $iters" >&2; exit 111; }
+[[ "$timeout_ms" == "4321" ]] || { echo "bad timeout_ms: $timeout_ms" >&2; exit 112; }
+[[ "$bench_dir" == "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_clean_gate_forwarding/bench" ]] || { echo "bad bench_dir: $bench_dir" >&2; exit 113; }
+[[ "$compile_mode" == "isel" ]] || { echo "bad compile_mode: $compile_mode" >&2; exit 118; }
+[[ "$require_zero" == "1" ]] || { echo "missing --require-zero-skips" >&2; exit 114; }
+[[ "$lfortran" == "/opt/lfortran-llvm/bin/lfortran" ]] || { echo "bad lfortran: $lfortran" >&2; exit 115; }
+[[ "$lfortran_liric" == "/opt/lfortran-liric/bin/lfortran" ]] || { echo "bad lfortran_liric: $lfortran_liric" >&2; exit 116; }
+[[ "$test_dir" == "/opt/lfortran/integration_tests" ]] || { echo "bad test_dir: $test_dir" >&2; exit 117; }
+mkdir -p "$bench_dir"
+cat > "$bench_dir/bench_api_summary.json" <<'JSON'
+{
+  "attempted": 5,
+  "completed": 5,
+  "skipped": 0,
+  "timeout_ms": 4321,
+  "skip_reasons": {
+    "liric_jit_timeout": 0
+  },
+  "zero_skip_gate_met": true
+}
+JSON
+cat > "$bench_dir/bench_api_fail_summary.json" <<'JSON'
+{
+  "failed": 0
+}
+JSON
+echo "ok" > "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_clean_gate_forwarding/logs/api_args.log"

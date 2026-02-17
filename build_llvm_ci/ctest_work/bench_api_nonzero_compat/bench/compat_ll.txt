@@ -1,0 +1,2 @@
+ok_case
+nonzero_case

@@ -1,0 +1,136 @@
+{
+  "attempted": 0,
+  "completed": 0,
+  "completed_timed": 0,
+  "completed_time_report_fallback": 0,
+  "completed_nonzero_compat": 0,
+  "skipped": 0,
+  "iters": 1,
+  "timeout_ms": 1000,
+  "min_completed": 0,
+  "completion_threshold_met": true,
+  "require_zero_skips": false,
+  "allow_empty": false,
+  "zero_skip_gate_met": true,
+  "status": "EMPTY DATASET",
+  "compat_list": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_empty_dataset_gate/default_fail/compat_ll.txt",
+  "options_jsonl": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_empty_dataset_gate/default_fail/compat_ll_options.jsonl",
+  "liric_compile_mode": "isel",
+  "liric_policy": "direct",
+  "failure_jsonl": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_empty_dataset_gate/default_fail/bench_api_failures.jsonl",
+  "failure_log_dir": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_api_empty_dataset_gate/default_fail/fail_logs",
+  "keep_fail_workdirs": false,
+  "phase_split": {
+    "has_data": false,
+    "lfortran_requires_changes": {
+      "before_asr_to_mod": {
+        "liric_median_ms": 0.000000,
+        "llvm_median_ms": 0.000000,
+        "liric_avg_ms": 0.000000,
+        "llvm_avg_ms": 0.000000
+      },
+      "codegen_llvm_ir_plus_opt": {
+        "liric_median_ms": 0.000000,
+        "llvm_median_ms": 0.000000,
+        "liric_avg_ms": 0.000000,
+        "llvm_avg_ms": 0.000000
+      }
+    },
+    "backend_tunable": {
+      "llvm_to_jit_plus_run": {
+        "liric_median_ms": 0.000000,
+        "llvm_median_ms": 0.000000,
+        "liric_avg_ms": 0.000000,
+        "llvm_avg_ms": 0.000000
+      }
+    },
+    "per_phase": {
+      "liric_median_ms": {
+        "file_read": 0.000000,
+        "src_to_asr": 0.000000,
+        "asr_passes": 0.000000,
+        "asr_to_mod": 0.000000,
+        "llvm_ir_creation": 0.000000,
+        "llvm_opt": 0.000000,
+        "llvm_to_jit": 0.000000,
+        "jit_run": 0.000000,
+        "total": 0.000000
+      },
+      "llvm_median_ms": {
+        "file_read": 0.000000,
+        "src_to_asr": 0.000000,
+        "asr_passes": 0.000000,
+        "asr_to_mod": 0.000000,
+        "llvm_ir_creation": 0.000000,
+        "llvm_opt": 0.000000,
+        "llvm_to_jit": 0.000000,
+        "jit_run": 0.000000,
+        "total": 0.000000
+      },
+      "liric_avg_ms": {
+        "file_read": 0.000000,
+        "src_to_asr": 0.000000,
+        "asr_passes": 0.000000,
+        "asr_to_mod": 0.000000,
+        "llvm_ir_creation": 0.000000,
+        "llvm_opt": 0.000000,
+        "llvm_to_jit": 0.000000,
+        "jit_run": 0.000000,
+        "total": 0.000000
+      },
+      "llvm_avg_ms": {
+        "file_read": 0.000000,
+        "src_to_asr": 0.000000,
+        "asr_passes": 0.000000,
+        "asr_to_mod": 0.000000,
+        "llvm_ir_creation": 0.000000,
+        "llvm_opt": 0.000000,
+        "llvm_to_jit": 0.000000,
+        "jit_run": 0.000000,
+        "total": 0.000000
+      }
+    }
+  },
+  "phase_tracker": {
+    "has_data": false,
+    "targets": {
+      "llvm_ir_creation_target_ms": 0.350000,
+      "llvm_to_jit_target_ms": 0.250000,
+      "run_speedup_avg_target": 15.000000,
+      "run_speedup_each_target": 10.000000,
+      "lookup_dispatch_target_pct": 0.250000
+    },
+    "metrics": {
+      "liric_llvm_ir_avg_median_ms": 0.000000,
+      "llvm_llvm_ir_avg_median_ms": 0.000000,
+      "liric_llvm_to_jit_avg_median_ms": 0.000000,
+      "llvm_llvm_to_jit_avg_median_ms": 0.000000,
+      "run_speedup_avg": 0.000000,
+      "run_speedup_min": 0.000000,
+      "lookup_dispatch_share_pct": null
+    },
+    "criteria": {
+      "llvm_ir_creation_met": false,
+      "llvm_to_jit_met": false,
+      "run_speedup_avg_met": false,
+      "run_speedup_each_met": false,
+      "lookup_dispatch_met": null
+    },
+    "all_targets_met": false
+  },
+  "skip_reasons": {
+    "workdir_create_failed": 0,
+    "source_missing": 0,
+    "llvm_jit_failed": 0,
+    "llvm_jit_verifier_pointee_mismatch": 0,
+    "llvm_jit_runtime_io_error": 0,
+    "llvm_jit_expected_nonzero_or_stop": 0,
+    "llvm_jit_timeout": 0,
+    "liric_jit_failed": 0,
+    "liric_jit_timeout": 0,
+    "llvm_jit_sigabrt": 0,
+    "llvm_jit_sigsegv": 0,
+    "liric_jit_sigabrt": 0,
+    "liric_jit_sigsegv": 0
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "attempted": 5,
+  "completed": 5,
+  "skipped": 0,
+  "timeout_ms": 4321,
+  "skip_reasons": {
+    "liric_jit_timeout": 0
+  },
+  "zero_skip_gate_met": true
+}

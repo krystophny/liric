@@ -1,0 +1,1 @@
+{"name":"fake_api","source":"/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/compat_check_freeze/integration_tests/fake_api.f90","options":"","llvm_ok":true,"liric_ok":true,"lli_ok":true,"liric_match":true,"lli_match":true,"liric_rc_match":true,"lli_rc_match":true,"llvm_rc":0,"liric_rc":0,"lli_rc":0,"error":""}

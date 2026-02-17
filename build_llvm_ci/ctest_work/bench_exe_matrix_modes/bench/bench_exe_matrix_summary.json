@@ -1,0 +1,13 @@
+{
+  "bench": "bench_exe_matrix",
+  "iters": 1,
+  "cases_total": 5,
+  "bench_dir": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_exe_matrix_modes/bench",
+  "liric": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_exe_matrix_modes/fake_liric.sh",
+  "llvm_driver": "/home/ert/code/lfortran-dev/liric/build_llvm_ci/ctest_work/bench_exe_matrix_modes/fake_llvm.sh",
+  "modes": [
+    {"mode":"isel","llvm_total_us":18859,"liric_total_us":19126,"ratio":0.986009,"llvm_failures":0,"liric_failures":0},
+    {"mode":"copy_patch","llvm_total_us":19173,"liric_total_us":19336,"ratio":0.991613,"llvm_failures":0,"liric_failures":0},
+    {"mode":"llvm","llvm_total_us":19055,"liric_total_us":19118,"ratio":0.996673,"llvm_failures":0,"liric_failures":0}
+  ]
+}

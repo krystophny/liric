@@ -1,0 +1,2 @@
+{"case_id":"case_mismatch","filename":"case_mismatch","source_path":"/tmp/c.f90","corpus":"integration_cmake","decision":"selected","reason":"llvm_labeled_integration_test"}
+{"case_id":"case_unresolved_symbol","filename":"case_unresolved_symbol","source_path":"/tmp/d.f90","corpus":"integration_cmake","decision":"selected","reason":"llvm_labeled_integration_test"}
