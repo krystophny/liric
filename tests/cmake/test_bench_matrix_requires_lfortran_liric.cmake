@@ -20,7 +20,7 @@ execute_process(
         --manifest "${manifest}"
         --modes isel
         --policies direct
-        --lanes api_full_e2e
+        --lanes api_full_llvm
         --iters 1
         --timeout 5
         --timeout-ms 500

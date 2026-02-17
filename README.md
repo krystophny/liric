@@ -30,7 +30,7 @@ Lane meanings:
 - `ll_jit`: liric LL timing (wall/non-parse ms)
 - `ll_llvm`: LLVM LL timing (wall/non-parse ms)
 
-Canonical `--lanes all` includes all lanes above.
+Canonical `--lanes all` includes all lanes above plus `micro_c`.
 
 ## Run Matrix
 
@@ -46,7 +46,26 @@ Canonical `--lanes all` includes all lanes above.
   --timeout-ms 5000
 ```
 
-Artifacts:
+Published benchmark artifacts:
+- `docs/benchmarks/readme_perf_snapshot.json`
+- `docs/benchmarks/readme_perf_table.md`
+
+Regenerate published snapshot/table:
+
+```bash
+./tools/bench_readme_perf_snapshot.sh --build-dir ./build --bench-dir /tmp/liric_bench --out-dir docs/benchmarks
+```
+
+Lane tools (bench_matrix calls these internally):
+
+```bash
+./build/bench_compat_check --timeout 15
+./build/bench_corpus_compare --iters 1 --policy direct
+./build/bench_api --iters 1 --liric-policy direct
+./build/bench_tcc --iters 10 --policy direct
+```
+
+Runtime artifacts:
 - `/tmp/liric_bench/matrix_rows.jsonl`
 - `/tmp/liric_bench/matrix_failures.jsonl`
 - `/tmp/liric_bench/matrix_summary.json`

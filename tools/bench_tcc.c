@@ -324,7 +324,7 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
             policy = argv[++i];
         } else {
-            fprintf(stderr, "usage: bench_lane_micro [--iters N] [--bench-dir PATH] [--work-dir PATH] [--policy direct|ir]\n");
+            fprintf(stderr, "usage: bench_tcc [--iters N] [--bench-dir PATH] [--work-dir PATH] [--policy direct|ir]\n");
             return 1;
         }
     }

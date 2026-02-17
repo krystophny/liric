@@ -26,7 +26,7 @@ Outputs:
   <out-dir>/readme_perf_table.md
 
 Default run mode executes:
-  bench_lane_ir (single canonical corpus track)
+  bench_corpus_compare (single canonical corpus track)
 USAGE
 }
 
@@ -109,12 +109,12 @@ if [[ -z "$runtime_lib" ]]; then
 fi
 
 if [[ "$no_run" == "0" ]]; then
-    bench_require_executable "${build_dir}/bench_lane_ir"
+    bench_require_executable "${build_dir}/bench_corpus_compare"
     bench_require_executable "${build_dir}/liric_probe_runner"
     bench_require_executable "${build_dir}/bench_lli_phases"
 
     run_cmd=(
-        "${build_dir}/bench_lane_ir"
+        "${build_dir}/bench_corpus_compare"
         --probe-runner "${build_dir}/liric_probe_runner"
         --lli-phases "${build_dir}/bench_lli_phases"
         --corpus "$corpus_tsv"

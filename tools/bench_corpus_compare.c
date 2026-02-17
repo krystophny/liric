@@ -340,7 +340,7 @@ static int load_corpus_tests(const cfg_t *cfg, testlist_t *tests) {
 }
 
 static void usage(void) {
-    printf("usage: bench_lane_ir [options]\n");
+    printf("usage: bench_corpus_compare [options]\n");
     printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           command timeout in seconds (default: 30)\n");
     printf("  --probe-runner PATH   path to liric_probe_runner\n");

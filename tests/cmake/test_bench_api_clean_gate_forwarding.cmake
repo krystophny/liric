@@ -25,7 +25,7 @@ file(MAKE_DIRECTORY "${bench_dir}")
 file(MAKE_DIRECTORY "${log_dir}")
 
 set(fake_compat "${fake_build}/bench_compat_check")
-set(fake_api "${fake_build}/bench_lane_api")
+set(fake_api "${fake_build}/bench_api")
 
 file(WRITE "${fake_compat}" "#!/usr/bin/env bash
 set -euo pipefail

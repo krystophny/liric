@@ -1593,7 +1593,7 @@ static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
 }
 
 static void usage(void) {
-    printf("usage: bench_lane_api [options]\n");
+    printf("usage: bench_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran, fallback: ../lfortran/build_liric/src/bin/lfortran)\n");
     printf("  --lfortran-exec-mode MODE  lfortran execution mode: auto|jit|run (default: auto)\n");

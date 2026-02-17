@@ -232,7 +232,7 @@ static int64_t body_i64(const uint8_t *body, size_t body_len, size_t *pos) {
 
 /* Emit a binary op: pop 2, compute, push result */
 static void emit_binop(wasm_ctx_t *ctx, lr_opcode_t op) {
-    lr_type_t *t;
+    lr_type_t *t = NULL;
     uint32_t rhs = vpop(ctx, NULL);
     uint32_t lhs = vpop(ctx, &t);
     uint32_t dest = lr_vreg_new(ctx->func);
@@ -243,7 +243,7 @@ static void emit_binop(wasm_ctx_t *ctx, lr_opcode_t op) {
 
 /* Emit a comparison: pop 2, icmp, push i1 result */
 static void emit_cmp(wasm_ctx_t *ctx, lr_icmp_pred_t pred) {
-    lr_type_t *t;
+    lr_type_t *t = NULL;
     uint32_t rhs = vpop(ctx, NULL);
     uint32_t lhs = vpop(ctx, &t);
     uint32_t dest = lr_vreg_new(ctx->func);
@@ -398,7 +398,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
             ctrl_entry_t *ce = &ctx->ctrl[ctx->ctrl_top - 1];
             /* Store block result to result slot before branching */
             if (ce->result_type && ctx->vstack.top > ce->stack_height) {
-                lr_type_t *t;
+                lr_type_t *t = NULL;
                 uint32_t val = vpop(ctx, &t);
                 lr_operand_t sops[2] = {
                     lr_op_vreg(val, t),
@@ -430,7 +430,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
             /* Store block result before branching */
             if (ce->result_type && ce->result_slot &&
                 ctx->vstack.top > ce->stack_height) {
-                lr_type_t *t;
+                lr_type_t *t = NULL;
                 uint32_t val = vpop(ctx, &t);
                 lr_operand_t sops[2] = {
                     lr_op_vreg(val, t),
@@ -497,7 +497,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
                 memset(&dummy, 0, sizeof(dummy));
                 emit_inst(ctx, LR_OP_RET_VOID, m->type_void, 0, &dummy, 0);
             } else {
-                lr_type_t *t;
+                lr_type_t *t = NULL;
                 uint32_t val = vpop(ctx, &t);
                 lr_operand_t ops[1] = { lr_op_vreg(val, t) };
                 emit_inst(ctx, LR_OP_RET, m->type_void, 0, ops, 1);
@@ -555,7 +555,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
 
         case OP_SELECT: {
             uint32_t cond = vpop(ctx, NULL);
-            lr_type_t *t;
+            lr_type_t *t = NULL;
             uint32_t val2 = vpop(ctx, NULL);
             uint32_t val1 = vpop(ctx, &t);
             uint32_t cond_i1 = lr_vreg_new(ctx->func);
@@ -604,7 +604,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
         case OP_LOCAL_SET: {
             uint32_t idx = body_u32(body, body_len, &pos);
             if (idx >= ctx->num_locals) { ctx_err(ctx, "local.set: bad idx"); return; }
-            lr_type_t *t;
+            lr_type_t *t = NULL;
             uint32_t val = vpop(ctx, &t);
             lr_operand_t ops[2] = {
                 lr_op_vreg(val, t),
@@ -617,7 +617,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
         case OP_LOCAL_TEE: {
             uint32_t idx = body_u32(body, body_len, &pos);
             if (idx >= ctx->num_locals) { ctx_err(ctx, "local.tee: bad idx"); return; }
-            lr_type_t *t;
+            lr_type_t *t = NULL;
             uint32_t val = vpop(ctx, &t);
             lr_operand_t ops[2] = {
                 lr_op_vreg(val, t),
@@ -682,7 +682,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
         case OP_I32_GE_U: case OP_I64_GE_U: emit_cmp(ctx, LR_ICMP_UGE); break;
 
         case OP_I32_EQZ: {
-            lr_type_t *t;
+            lr_type_t *t = NULL;
             uint32_t val = vpop(ctx, &t);
             uint32_t dest = lr_vreg_new(ctx->func);
             lr_operand_t ops[2] = {
@@ -763,7 +763,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
         case OP_I32_STORE8: case OP_I32_STORE16: {
             body_u32(body, body_len, &pos); /* align */
             uint32_t offset = body_u32(body, body_len, &pos);
-            lr_type_t *val_type;
+            lr_type_t *val_type = NULL;
             uint32_t val = vpop(ctx, &val_type);
             uint32_t addr = vpop(ctx, NULL);
             uint32_t eff_addr = addr;
@@ -803,7 +803,7 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
     } else {
         /* If there's a value on the stack, return it */
         if (ctx->vstack.top > 0) {
-            lr_type_t *t;
+            lr_type_t *t = NULL;
             uint32_t val = vpop(ctx, &t);
             lr_operand_t ops[1] = { lr_op_vreg(val, t) };
             emit_inst(ctx, LR_OP_RET, m->type_void, 0, ops, 1);
