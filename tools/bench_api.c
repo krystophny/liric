@@ -1,6 +1,6 @@
-// API benchmark: compare lfortran execution between LLVM build and WITH_LIRIC
-// build. Execution mode auto-detects whether --jit is supported; otherwise the
-// runner uses direct compile+run invocation.
+// API benchmark: compare lfortran AOT compilation between LLVM build and
+// WITH_LIRIC build. Default mode is "aot" (compile+link via --backend=llvm).
+// Legacy "jit" mode (--jit flag) is still accepted.
 
 #include <dirent.h>
 #include <ctype.h>
@@ -249,50 +249,17 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_
     return r;
 }
 
-static int lfortran_help_has_jit_flag(const char *lfortran_bin) {
-    cmd_result_t r = {0};
-    char *argv[3];
-    int has_jit = 0;
-
-    argv[0] = (char *)lfortran_bin;
-    argv[1] = "--help";
-    argv[2] = NULL;
-    r = run_cmd(argv, 5000, NULL, NULL);
-    if (r.rc == 0) {
-        if ((r.stdout_text && strstr(r.stdout_text, "--jit")) ||
-            (r.stderr_text && strstr(r.stderr_text, "--jit"))) {
-            has_jit = 1;
-        }
-    }
-    bench_free_cmd_result(&r);
-    return has_jit;
-}
-
 static int resolve_lfortran_exec_mode(const cfg_t *cfg, int *use_jit_flag_out) {
-    int llvm_has_jit;
-    int liric_has_jit;
-
     if (!cfg || !use_jit_flag_out) return -1;
     if (strcmp(cfg->lfortran_exec_mode, "jit") == 0) {
-        llvm_has_jit = lfortran_help_has_jit_flag(cfg->lfortran);
-        liric_has_jit = lfortran_help_has_jit_flag(cfg->lfortran_liric);
-        if (!llvm_has_jit || !liric_has_jit)
-            return -1;
         *use_jit_flag_out = 1;
         return 0;
     }
-    if (strcmp(cfg->lfortran_exec_mode, "run") == 0) {
-        *use_jit_flag_out = 0;
-        return 0;
-    }
-
-    llvm_has_jit = lfortran_help_has_jit_flag(cfg->lfortran);
-    liric_has_jit = lfortran_help_has_jit_flag(cfg->lfortran_liric);
-    *use_jit_flag_out = (llvm_has_jit && liric_has_jit) ? 1 : 0;
+    *use_jit_flag_out = 0;
     return 0;
 }
 
-static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
+static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
                                          const strlist_t *opt_toks,
                                          const char *extra_opt,
                                          const char *source_path,
@@ -1567,9 +1534,8 @@ static int is_valid_liric_policy(const char *policy) {
 
 static int is_valid_lfortran_exec_mode(const char *mode) {
     if (!mode || !mode[0]) return 0;
-    return strcmp(mode, "auto") == 0 ||
-           strcmp(mode, "jit") == 0 ||
-           strcmp(mode, "run") == 0;
+    return strcmp(mode, "aot") == 0 ||
+           strcmp(mode, "jit") == 0;
 }
 
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
@@ -1596,7 +1562,7 @@ static void usage(void) {
     printf("usage: bench_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran, fallback: ../lfortran/build_liric/src/bin/lfortran)\n");
-    printf("  --lfortran-exec-mode MODE  lfortran execution mode: auto|jit|run (default: auto)\n");
+    printf("  --lfortran-exec-mode MODE  lfortran execution mode: aot|jit (default: aot)\n");
     printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --liric-policy MODE  liric session policy: direct|ir\n");
@@ -1628,7 +1594,7 @@ static cfg_t parse_args(int argc, char **argv) {
                              : (file_exists(default_lfortran_liric_underscore)
                                     ? default_lfortran_liric_underscore
                                     : NULL);
-    cfg.lfortran_exec_mode = "auto";
+    cfg.lfortran_exec_mode = "aot";
     cfg.runtime_lib = NULL;
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
     if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
@@ -1713,7 +1679,7 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!is_valid_liric_policy(cfg.liric_policy))
         die("invalid --liric-policy (expected direct|ir)", cfg.liric_policy);
     if (!is_valid_lfortran_exec_mode(cfg.lfortran_exec_mode))
-        die("invalid --lfortran-exec-mode (expected auto|jit|run)", cfg.lfortran_exec_mode);
+        die("invalid --lfortran-exec-mode (expected aot|jit)", cfg.lfortran_exec_mode);
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
     if (!cfg.lfortran_liric || !cfg.lfortran_liric[0]) {
@@ -1736,7 +1702,7 @@ static cfg_t parse_args(int argc, char **argv) {
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     int use_jit_flag = 0;
-    const char *resolved_exec_mode = "run";
+    const char *resolved_exec_mode = "aot";
     char *compat_path = NULL;
     char *opts_path = NULL;
     char *fail_log_dir = NULL;
@@ -1746,7 +1712,7 @@ int main(int argc, char **argv) {
     if (resolve_lfortran_exec_mode(&cfg, &use_jit_flag) != 0) {
         die("requested --lfortran-exec-mode=jit but one or both binaries do not support --jit", NULL);
     }
-    resolved_exec_mode = use_jit_flag ? "jit" : "run";
+    resolved_exec_mode = use_jit_flag ? "jit" : "aot";
 
     if (cfg.compat_list) compat_path = xstrdup(cfg.compat_list);
     if (cfg.options_jsonl) opts_path = xstrdup(cfg.options_jsonl);
@@ -1932,7 +1898,7 @@ int main(int argc, char **argv) {
                     int saw_signal_failure = 0;
                     failure_work_dir = attempt_work_dir;
 
-                    llvm_r = run_lfortran_jit_cmd(cfg.lfortran,
+                    llvm_r = run_lfortran_cmd(cfg.lfortran,
                                                   &opt_toks,
                                                   extra_retry_opt,
                                                   source_path,
@@ -1950,7 +1916,7 @@ int main(int argc, char **argv) {
                         break;
                     }
 
-                    liric_r = run_lfortran_jit_cmd(cfg.lfortran_liric,
+                    liric_r = run_lfortran_cmd(cfg.lfortran_liric,
                                                    &opt_toks,
                                                    extra_retry_opt,
                                                    source_path,

@@ -71,6 +71,9 @@ public:
         return reinterpret_cast<Instruction *>(b);
     }
 
+    BasicBlock *getSinglePredecessor() const { return nullptr; }
+    BasicBlock *getUniquePredecessor() const { return nullptr; }
+
     void eraseFromParent() {}
     void moveAfter(BasicBlock *) {}
     void moveBefore(BasicBlock *) {}
