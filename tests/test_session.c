@@ -495,6 +495,117 @@ cleanup:
     return result;
 }
 
+int test_session_direct_forward_ref_lookup_contract(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *ptr = NULL;
+    uint32_t callee_sym;
+    uint32_t call_vreg;
+    int rc = -1;
+    void *caller_addr = NULL;
+    typedef int (*fn_t)(void);
+    fn_t fn = NULL;
+
+    cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i32 = lr_type_i32_s(s);
+    ptr = lr_type_ptr_s(s);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+    TEST_ASSERT(ptr != NULL, "ptr type");
+
+    rc = lr_session_func_begin(s, "session_direct_forward_caller",
+                               i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "caller func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "caller set block");
+    callee_sym = lr_session_intern(s, "session_direct_forward_callee");
+    call_vreg = lr_emit_call(s, i32, LR_GLOBAL(callee_sym, ptr), NULL, 0);
+    lr_emit_ret(s, LR_VREG(call_vreg, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "caller func end");
+    TEST_ASSERT(lr_session_lookup(s, "session_direct_forward_caller") == NULL,
+                "caller lookup deferred while forward callee unresolved");
+
+    rc = lr_session_func_begin(s, "session_direct_forward_callee",
+                               i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "callee func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "callee set block");
+    lr_emit_ret(s, LR_IMM(42, i32));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "callee func end");
+
+    caller_addr = lr_session_lookup(s, "session_direct_forward_caller");
+    TEST_ASSERT(caller_addr != NULL, "caller lookup after callee definition");
+    fn_ptr_cast(&fn, caller_addr);
+    TEST_ASSERT(fn != NULL, "cast caller");
+    TEST_ASSERT_EQ(fn(), 42, "caller returns 42");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_direct_forward_global_lookup_contract(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i64 = NULL;
+    lr_type_t *ptr = NULL;
+    uint32_t global_sym;
+    uint32_t addr_vreg;
+    uint32_t global_id;
+    int64_t init_value = 123;
+    int rc = -1;
+    void *user_addr = NULL;
+    void *global_addr = NULL;
+    typedef uint64_t (*fn_t)(void);
+    fn_t fn = NULL;
+
+    cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i64 = lr_type_i64_s(s);
+    ptr = lr_type_ptr_s(s);
+    TEST_ASSERT(i64 != NULL, "i64 type");
+    TEST_ASSERT(ptr != NULL, "ptr type");
+
+    rc = lr_session_func_begin(s, "session_direct_forward_global_user",
+                               i64, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "user func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "user set block");
+    global_sym = lr_session_intern(s, "session_direct_forward_global_anchor");
+    addr_vreg = lr_emit_ptrtoint(s, i64, LR_GLOBAL(global_sym, ptr));
+    lr_emit_ret(s, LR_VREG(addr_vreg, i64));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "user func end");
+    TEST_ASSERT(lr_session_lookup(s, "session_direct_forward_global_user") == NULL,
+                "user lookup deferred while forward global unresolved");
+
+    global_id = lr_session_global(s, "session_direct_forward_global_anchor", i64,
+                                  false, &init_value, sizeof(init_value));
+    TEST_ASSERT(global_id != UINT32_MAX, "global definition succeeds");
+
+    user_addr = lr_session_lookup(s, "session_direct_forward_global_user");
+    TEST_ASSERT(user_addr != NULL, "user lookup after global definition");
+    global_addr = lr_session_lookup(s, "session_direct_forward_global_anchor");
+    TEST_ASSERT(global_addr != NULL, "global symbol lookup after definition");
+    fn_ptr_cast(&fn, user_addr);
+    TEST_ASSERT(fn != NULL, "cast user");
+    TEST_ASSERT_EQ(fn(), (uint64_t)(uintptr_t)global_addr,
+                   "user returns resolved global address");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_explicit_backend_overrides_env(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err = {0};

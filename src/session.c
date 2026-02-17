@@ -413,6 +413,51 @@ static bool session_is_module_defined_symbol(struct lr_session *s,
     return false;
 }
 
+/* Returns 0 when patched, 1 when unresolved symbol remains, -1 on hard error. */
+static int patch_direct_relocs(struct lr_session *s, uint32_t reloc_start,
+                               const char **missing_symbol) {
+    const char *missing = NULL;
+    bool opened_update = false;
+    if (missing_symbol)
+        *missing_symbol = NULL;
+    if (!s || !s->jit || !s->direct_obj_ctx_active)
+        return 0;
+    if (!s->jit->update_active) {
+        lr_jit_begin_update(s->jit);
+        opened_update = s->jit->update_active;
+        if (!opened_update)
+            return -1;
+    }
+    if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
+                                    reloc_start, &missing) == 0) {
+        if (opened_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return 0;
+    }
+    if (opened_update && s->jit->update_active)
+        lr_jit_end_update(s->jit);
+    if (missing_symbol)
+        *missing_symbol = missing;
+    if (missing && missing[0])
+        return 1;
+    return -1;
+}
+
+static void try_patch_pending_direct_relocs(struct lr_session *s) {
+    const char *missing_symbol = NULL;
+    int patch_rc;
+    if (!s || !s->direct_pending_relocs || !s->direct_obj_ctx_active)
+        return;
+    patch_rc = patch_direct_relocs(s, s->direct_pending_reloc_start,
+                                   &missing_symbol);
+    if (patch_rc == 0) {
+        s->direct_pending_relocs = false;
+        s->direct_pending_reloc_start = 0;
+    } else {
+        (void)missing_symbol;
+    }
+}
+
 static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     lr_compile_func_meta_t meta;
     int rc;
@@ -632,9 +677,16 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         s->jit->update_dirty = true;
     {
         const char *missing_symbol = NULL;
-        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
-                                        s->direct_reloc_base,
-                                        &missing_symbol) != 0) {
+        int patch_rc = patch_direct_relocs(s, s->direct_reloc_base,
+                                           &missing_symbol);
+        if (patch_rc < 0) {
+            err_set(err, S_ERR_BACKEND, "direct relocation patching failed");
+            s->module->obj_ctx = NULL;
+            if (should_close_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
+            return -1;
+        }
+        if (patch_rc > 0) {
             /* In DIRECT mode, unresolved relocations are deferred until
                lookup/execution time so forward references and late-bound
                externals do not fail function emission. */
@@ -643,6 +695,7 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
                 s->direct_pending_reloc_start = s->direct_reloc_base;
             }
             s->direct_pending_relocs = true;
+            (void)missing_symbol;
         }
     }
 
@@ -659,11 +712,17 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
 
     if (s->direct_pending_relocs) {
         const char *missing_symbol = NULL;
-        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
-                                        s->direct_pending_reloc_start,
-                                        &missing_symbol) == 0) {
+        int patch_rc = patch_direct_relocs(s, s->direct_pending_reloc_start,
+                                           &missing_symbol);
+        if (patch_rc == 0) {
             s->direct_pending_relocs = false;
             s->direct_pending_reloc_start = 0;
+        } else if (patch_rc < 0) {
+            err_set(err, S_ERR_BACKEND, "direct relocation patching failed");
+            s->module->obj_ctx = NULL;
+            if (should_close_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
+            return -1;
         } else {
             (void)missing_symbol;
         }
@@ -1059,6 +1118,7 @@ void lr_session_add_symbol(struct lr_session *s, const char *name, void *addr) {
     if (!s || !s->jit || !name || !name[0])
         return;
     lr_jit_add_symbol(s->jit, name, addr);
+    try_patch_pending_direct_relocs(s);
 }
 
 void *lr_session_lookup(struct lr_session *s, const char *name) {
@@ -1070,13 +1130,19 @@ void *lr_session_lookup(struct lr_session *s, const char *name) {
             return NULL;
         s->ir_module_jit_ready = true;
     }
+    if (s->module && s->module->first_global) {
+        if (lr_jit_materialize_globals(s->jit, s->module) != 0)
+            return NULL;
+    }
     if (s->direct_pending_relocs && s->direct_obj_ctx_active) {
         const char *missing_symbol = NULL;
-        if (lr_jit_patch_relocs_from_ex(s->jit, &s->direct_obj_ctx,
-                                        s->direct_pending_reloc_start,
-                                        &missing_symbol) == 0) {
+        int patch_rc = patch_direct_relocs(s, s->direct_pending_reloc_start,
+                                           &missing_symbol);
+        if (patch_rc == 0) {
             s->direct_pending_relocs = false;
             s->direct_pending_reloc_start = 0;
+        } else if (patch_rc < 0) {
+            return NULL;
         } else if (!session_is_module_defined_symbol(s, missing_symbol)) {
             return NULL;
         }
@@ -1172,6 +1238,8 @@ uint32_t lr_session_global(struct lr_session *s, const char *name,
         g->init_size = init_size;
     }
     s->ir_module_jit_ready = false;
+    if (s->jit && lr_jit_materialize_globals(s->jit, s->module) == 0)
+        try_patch_pending_direct_relocs(s);
     return g->id;
 }
 
@@ -1185,6 +1253,8 @@ uint32_t lr_session_global_extern(struct lr_session *s, const char *name,
         return UINT32_MAX;
     g->is_external = true;
     s->ir_module_jit_ready = false;
+    if (s->jit && lr_jit_materialize_globals(s->jit, s->module) == 0)
+        try_patch_pending_direct_relocs(s);
     return g->id;
 }
 
@@ -1206,6 +1276,8 @@ void lr_session_global_reloc(struct lr_session *s, uint32_t id, size_t offset,
     r->next = g->relocs;
     g->relocs = r;
     s->ir_module_jit_ready = false;
+    if (s->jit && lr_jit_materialize_globals(s->jit, s->module) == 0)
+        try_patch_pending_direct_relocs(s);
 }
 
 uint32_t lr_session_intern(struct lr_session *s, const char *name) {
