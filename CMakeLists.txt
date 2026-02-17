@@ -557,6 +557,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_matrix_lfortran_rebuild
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_MATRIX=$<TARGET_FILE:bench_matrix>
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_matrix_lfortran_rebuild.cmake
+)
+
+add_test(
     NAME bench_api_nonzero_compat
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
