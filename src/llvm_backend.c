@@ -410,16 +410,36 @@ int lr_llvm_jit_is_available(void) {
 #endif
 }
 
-int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
-                           char *err, size_t err_cap) {
-#if !LIRIC_HAVE_LLVM_C_LLJIT
-    (void)j;
-    (void)m;
-    set_err(err, err_cap, "llvm mode JIT requires llvm-c/LLJIT.h");
-    return -1;
-#else
+/* Ensure ORC LLJIT instance is created and initialized. */
+#if LIRIC_HAVE_LLVM_C_LLJIT
+static int ensure_orc_jit(struct lr_jit *j, char *err, size_t err_cap) {
+    if (!j) {
+        set_err(err, err_cap, "invalid llvm jit inputs");
+        return -1;
+    }
     const lr_target_t *host = lr_target_host();
-    LLVMOrcLLJITRef lljit = NULL;
+    if (!host || !j->target || strcmp(host->name, j->target->name) != 0) {
+        set_err(err, err_cap, "llvm jit currently supports host target only");
+        return -1;
+    }
+    if (ensure_llvm_target_init(err, err_cap) != 0)
+        return -1;
+    if (!j->llvm_orc_jit) {
+        LLVMOrcLLJITRef lljit = NULL;
+        LLVMErrorRef create_err = LLVMOrcCreateLLJIT(&lljit, NULL);
+        if (set_err_from_llvm_error(err, err_cap, "LLVMOrcCreateLLJIT failed",
+                                    create_err) != 0)
+            return -1;
+        j->llvm_orc_jit = lljit;
+    }
+    return 0;
+}
+
+/* Serialize module to LL text, parse with LLVM, verify, and add to ORC dylib.
+   Does NOT trigger materialization (lookup). */
+static int llvm_jit_add_ir_text_impl(struct lr_jit *j, lr_module_t *m,
+                                      char *err, size_t err_cap) {
+    LLVMOrcLLJITRef lljit = (LLVMOrcLLJITRef)j->llvm_orc_jit;
     LLVMOrcJITDylibRef dylib;
     LLVMContextRef parse_ctx = NULL;
     int parse_ctx_owned = 0;
@@ -432,32 +452,6 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     char *ll = NULL;
     size_t ll_len = 0;
     int rc = -1;
-
-    if (!err_cap)
-        err_cap = LR_LLVM_ERRBUF_DEFAULT;
-    if (err && err_cap)
-        err[0] = '\0';
-
-    if (!j || !m) {
-        set_err(err, err_cap, "invalid llvm jit inputs");
-        return -1;
-    }
-    if (!host || !j->target || strcmp(host->name, j->target->name) != 0) {
-        set_err(err, err_cap, "llvm jit currently supports host target only");
-        return -1;
-    }
-    if (ensure_llvm_target_init(err, err_cap) != 0)
-        return -1;
-
-    lljit = (LLVMOrcLLJITRef)j->llvm_orc_jit;
-    if (!lljit) {
-        LLVMErrorRef create_err = LLVMOrcCreateLLJIT(&lljit, NULL);
-        if (set_err_from_llvm_error(err, err_cap, "LLVMOrcCreateLLJIT failed",
-                                    create_err) != 0) {
-            return -1;
-        }
-        j->llvm_orc_jit = lljit;
-    }
 
     ll = module_to_ll_text(m, &ll_len);
     if (!ll) {
@@ -493,7 +487,6 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
     }
 
     if (LLVMParseIRInContext(parse_ctx, mem, &mod, &parse_msg) != 0 || !mod) {
-        /* LLVMParseIRInContext consumes the buffer even on parse failure. */
         mem = NULL;
         maybe_dump_ll_text(ll, ll_len);
         set_err(err, err_cap, "LLVMParseIRInContext failed: %s",
@@ -537,29 +530,14 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
         goto done;
     }
     mod = NULL;
-    /* Ownership of ts_ctx transfers to ts_mod on success. */
     ts_ctx = NULL;
 
     dylib = LLVMOrcLLJITGetMainJITDylib(lljit);
     LLVMErrorRef add_err = LLVMOrcLLJITAddLLVMIRModule(lljit, dylib, ts_mod);
     if (set_err_from_llvm_error(err, err_cap, "LLVMOrcLLJITAddLLVMIRModule failed",
-                                add_err) != 0) {
+                                add_err) != 0)
         goto done;
-    }
     ts_mod = NULL;
-
-    for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (f->is_decl || !f->name || !f->name[0] || !f->first_block)
-            continue;
-        lr_llvm_orc_addr_t addr = 0;
-        LLVMErrorRef lookup_err = LLVMOrcLLJITLookup(lljit, &addr, f->name);
-        if (set_err_from_llvm_error(err, err_cap, "LLVMOrcLLJITLookup failed",
-                                    lookup_err) != 0) {
-            goto done;
-        }
-        lr_jit_add_symbol(j, f->name, (void *)(uintptr_t)addr);
-    }
-
     rc = 0;
 
 done:
@@ -579,6 +557,55 @@ done:
     if (parse_ctx_owned && parse_ctx)
         LLVMContextDispose(parse_ctx);
     return rc;
+}
+
+/* Look up a single symbol in the ORC JIT and register it in the liric
+   symbol table. */
+static int llvm_jit_lookup_symbol_impl(struct lr_jit *j, const char *name,
+                                        void **out_addr, char *err,
+                                        size_t err_cap) {
+    LLVMOrcLLJITRef lljit = (LLVMOrcLLJITRef)j->llvm_orc_jit;
+    lr_llvm_orc_addr_t addr = 0;
+    LLVMErrorRef lookup_err = LLVMOrcLLJITLookup(lljit, &addr, name);
+    if (set_err_from_llvm_error(err, err_cap, "LLVMOrcLLJITLookup failed",
+                                lookup_err) != 0)
+        return -1;
+    lr_jit_add_symbol(j, name, (void *)(uintptr_t)addr);
+    if (out_addr)
+        *out_addr = (void *)(uintptr_t)addr;
+    return 0;
+}
+#endif
+
+int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
+                           char *err, size_t err_cap) {
+#if !LIRIC_HAVE_LLVM_C_LLJIT
+    (void)j;
+    (void)m;
+    set_err(err, err_cap, "llvm mode JIT requires llvm-c/LLJIT.h");
+    return -1;
+#else
+    if (!err_cap)
+        err_cap = LR_LLVM_ERRBUF_DEFAULT;
+    if (err && err_cap)
+        err[0] = '\0';
+    if (!j || !m) {
+        set_err(err, err_cap, "invalid llvm jit inputs");
+        return -1;
+    }
+    if (ensure_orc_jit(j, err, err_cap) != 0)
+        return -1;
+
+    if (llvm_jit_add_ir_text_impl(j, m, err, err_cap) != 0)
+        return -1;
+
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->is_decl || !f->name || !f->name[0] || !f->first_block)
+            continue;
+        if (llvm_jit_lookup_symbol_impl(j, f->name, NULL, err, err_cap) != 0)
+            return -1;
+    }
+    return 0;
 #endif
 }
 

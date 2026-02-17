@@ -3196,6 +3196,13 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
         return -1;
 
+    /* LLVM mode: compile the compat module directly with the state JIT.
+       The session's own module is empty (compat builds into mod->mod), so
+       we bypass lr_session_lookup and use lr_jit_add_module on mod->mod
+       with the state-level JIT (same path as IR mode). */
+    if (session_jit->mode == LR_COMPILE_LLVM)
+        return lr_jit_add_module(jit, mod->mod);
+
     for (f = mod->mod->first_func; f; f = f->next) {
         void *addr = NULL;
         if (!f->name || !f->name[0])

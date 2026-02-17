@@ -1395,6 +1395,11 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
     }
     case LR_VAL_GLOBAL: {
         const char *name = lr_module_symbol_name(m, op->global_id);
+        bool need_ptrtoint = op->type &&
+            op->type->kind >= LR_TYPE_I1 &&
+            op->type->kind <= LR_TYPE_I64;
+        if (need_ptrtoint)
+            fprintf(out, "ptrtoint (ptr ");
         if (op->global_offset != 0) {
             fprintf(out, "getelementptr (i8, ptr ");
             if (name)
@@ -1407,6 +1412,11 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
                 print_ir_symbol_ref(out, '@', name);
             else
                 fprintf(out, "@g%u", op->global_id);
+        }
+        if (need_ptrtoint) {
+            fprintf(out, " to ");
+            print_type(op->type, out);
+            fprintf(out, ")");
         }
         break;
     }

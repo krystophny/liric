@@ -78,33 +78,33 @@ Runtime artifacts:
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 9.79 | 1.49 | **6.6x** |
-| isel | ir | 9.67 | 0.65 | **14.9x** |
-| copy_patch | direct | 9.71 | 1.63 | **5.9x** |
-| copy_patch | ir | 9.29 | 0.64 | **14.6x** |
-| llvm | direct | 5.74 | 1.93 | **3.0x** |
-| llvm | ir | 9.54 | 10.64 | 0.9x |
+| isel | direct | 9.71 | 1.52 | **6.4x** |
+| isel | ir | 9.59 | 0.61 | **15.6x** |
+| copy_patch | direct | 9.75 | 1.51 | **6.5x** |
+| copy_patch | ir | 9.82 | 0.64 | **15.5x** |
+| llvm | direct | 10.37 | 10.97 | 0.9x |
+| llvm | ir | 9.49 | 10.75 | 0.9x |
 
 ### LL Corpus (compile-only, 2187 .ll files)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 5.24 | 0.071 | **74x** |
-| isel | ir | 5.29 | 0.072 | **74x** |
-| copy_patch | direct | 5.29 | 0.073 | **73x** |
-| copy_patch | ir | 5.24 | 0.071 | **74x** |
-| llvm | direct | 5.13 | 6.12 | 0.84x |
-| llvm | ir | 5.16 | 6.06 | 0.85x |
+| isel | direct | 5.23 | 0.070 | **75x** |
+| isel | ir | 5.24 | 0.070 | **75x** |
+| copy_patch | direct | 5.29 | 0.070 | **75x** |
+| copy_patch | ir | 5.22 | 0.071 | **74x** |
+| llvm | direct | 5.16 | 6.11 | 0.84x |
+| llvm | ir | 5.15 | 5.97 | 0.86x |
 
 ### Micro C (liric vs TCC, 5 micro-benchmarks)
 
 | Mode | Policy | Speedup |
 |------|--------|--------:|
-| isel | direct | **5.5x** |
-| isel | ir | **5.6x** |
-| copy_patch | direct | **5.4x** |
-| copy_patch | ir | **5.3x** |
-| llvm | direct | 0.16x |
+| isel | direct | **5.7x** |
+| isel | ir | **6.0x** |
+| copy_patch | direct | **5.7x** |
+| copy_patch | ir | **6.0x** |
+| llvm | direct | 0.15x |
 | llvm | ir | 0.16x |
 
 The `llvm` mode rows use the real LLVM backend passthrough and are expected to be ~1x or slower.
