@@ -1,1379 +1,1711 @@
-// Unified benchmark matrix runner.
-//
-// Executes benchmark lanes across compile modes and emits one consolidated result
-// schema with strict hard-fail accounting.
-#define _POSIX_C_SOURCE 200809L
-
 #include <ctype.h>
 #include <errno.h>
-#include <limits.h>
+#include <fcntl.h>
+#include <stdbool.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "bench_common.h"
+#define PATH_MAX_LOCAL 4096
 
-typedef enum {
-    MODE_ISEL = 0,
-    MODE_COPY_PATCH = 1,
-    MODE_LLVM = 2,
-    MODE_COUNT = 3
-} mode_id_t;
+#define SKIP_LABEL_1 "llvm_omp"
+#define SKIP_LABEL_2 "llvm2"
+#define SKIP_LABEL_3 "llvm_rtlib"
 
-typedef enum {
-    LANE_IR_FILE = 0,
-    LANE_API_E2E = 1,
-    LANE_MICRO_C = 2,
-    LANE_COUNT = 3
-} lane_id_t;
+typedef struct {
+    char **items;
+    size_t count;
+    size_t cap;
+} str_vec_t;
 
-typedef enum {
-    POLICY_DIRECT = 0,
-    POLICY_IR = 1,
-    POLICY_COUNT = 2
-} policy_id_t;
+typedef struct {
+    double *items;
+    size_t count;
+    size_t cap;
+} dbl_vec_t;
+
+typedef struct {
+    char *name;
+    char *source_path;
+    str_vec_t options;
+} bench_test_t;
+
+typedef struct {
+    bench_test_t *items;
+    size_t count;
+    size_t cap;
+} test_vec_t;
+
+typedef struct {
+    int rc;
+    double wall_ms;
+    char *out;
+    char *err;
+} cmd_result_t;
+
+typedef struct {
+    bool have;
+    double read_us;
+    double parse_us;
+    double jit_create_us;
+    double load_lib_us;
+    double compile_us;
+    double run_us;
+    double total_us;
+} probe_timing_t;
+
+typedef struct {
+    char *name;
+    bool api_exe_ok;
+    bool api_jit_ok;
+    bool ll_jit_ok;
+    bool ll_lli_ok;
+    bool api_jit_match;
+    bool ll_jit_match;
+    bool ll_lli_match;
+
+    double api_exe_compile_ms;
+    double api_exe_run_ms;
+    double api_exe_wall_ms;
+    double api_exe_non_parse_ms;
+
+    double api_jit_emit_ms;
+    double api_jit_wall_ms;
+    double api_jit_parse_ms;
+    double api_jit_compile_ms;
+    double api_jit_run_ms;
+    double api_jit_non_parse_ms;
+
+    double ll_jit_wall_ms;
+    double ll_jit_parse_ms;
+    double ll_jit_compile_ms;
+    double ll_jit_run_ms;
+    double ll_jit_non_parse_ms;
+
+    double ll_lli_wall_ms;
+} bench_row_t;
+
+typedef struct {
+    bench_row_t *items;
+    size_t count;
+    size_t cap;
+} row_vec_t;
 
 typedef struct {
     const char *bench_dir;
-    const char *build_dir;
-    const char *manifest;
-
-    const char *bench_compat_check;
-    const char *bench_corpus_compare;
-    const char *bench_api;
-    const char *bench_tcc;
-    const char *probe_runner;
-    const char *lli_phases;
-
+    const char *integration_cmake;
+    const char *integration_dir;
     const char *lfortran;
-    const char *lfortran_liric;
-    const char *lfortran_build_dir;
-    const char *lfortran_liric_build_dir;
-    const char *cmake;
-    const char *test_dir;
+    const char *probe_runner;
     const char *runtime_lib;
-    const char *corpus;
-    const char *cache_dir;
-
+    const char *lli;
     int iters;
     int timeout_sec;
-    int timeout_ms;
-    int api_cases;
-
-    int run_compat_check;
-    int allow_partial;
-    int rebuild_lfortran;
-
-    int modes[MODE_COUNT];
-    int lanes[LANE_COUNT];
-    int policies[POLICY_COUNT];
+    int limit;
 } cfg_t;
 
-typedef bench_cmd_result_t cmd_result_t;
-
-static const char *k_mode_name[MODE_COUNT] = {"isel", "copy_patch", "llvm"};
-static const char *k_lane_name[LANE_COUNT] = {"ir_file", "api_e2e", "micro_c"};
-static const char *k_policy_name[POLICY_COUNT] = {"direct", "ir"};
-
-static void write_failure_row(FILE *ff,
-                              const char *lane,
-                              const char *mode,
-                              const char *policy,
-                              const char *baseline,
-                              const char *reason,
-                              int rc,
-                              const char *summary_path);
+static double now_ms(void) {
+#if defined(__APPLE__)
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
 
 static void die(const char *fmt, ...) {
     va_list ap;
+    fprintf(stderr, "ERROR: ");
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+    fprintf(stderr, "\n");
     exit(1);
 }
 
-static int file_exists(const char *path) {
-    struct stat st;
-    return path && stat(path, &st) == 0;
-}
-
-static int file_executable(const char *path) {
-    return path && access(path, X_OK) == 0;
-}
-
-static int dir_exists(const char *path) {
-    struct stat st;
-    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-static int mkdir_p(const char *path) {
-    char tmp[PATH_MAX];
-    size_t n;
-
-    if (!path || !path[0])
-        return -1;
-
-    n = strlen(path);
-    if (n >= sizeof(tmp))
-        return -1;
-
-    memcpy(tmp, path, n + 1);
-    if (tmp[n - 1] == '/')
-        tmp[n - 1] = '\0';
-
-    for (char *p = tmp + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
-            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-                return -1;
-            *p = '/';
-        }
-    }
-    if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
-        return -1;
-    return 0;
-}
-
 static char *xstrdup(const char *s) {
-    size_t n;
-    char *p;
-    if (!s)
-        return NULL;
-    n = strlen(s);
-    p = (char *)malloc(n + 1);
-    if (!p)
-        die("out of memory");
+    size_t n = strlen(s);
+    char *p = (char *)malloc(n + 1);
+    if (!p) die("out of memory");
     memcpy(p, s, n + 1);
     return p;
 }
 
-static int json_find_value_start(const char *json, const char *key, const char **out) {
-    char pat[256];
-    const char *p;
-
-    if (snprintf(pat, sizeof(pat), "\"%s\"", key) >= (int)sizeof(pat))
-        return 0;
-
-    p = strstr(json, pat);
-    if (!p)
-        return 0;
-    p += strlen(pat);
-    while (*p && *p != ':')
-        p++;
-    if (*p != ':')
-        return 0;
-    p++;
-    while (*p && isspace((unsigned char)*p))
-        p++;
-    *out = p;
-    return 1;
-}
-
-static int json_get_int64(const char *json, const char *key, long long *out) {
-    const char *p;
-    char *endp;
-    long long v;
-
-    if (!json_find_value_start(json, key, &p))
-        return 0;
-    errno = 0;
-    v = strtoll(p, &endp, 10);
-    if (p == endp || errno != 0)
-        return 0;
-    *out = v;
-    return 1;
-}
-
-static int json_get_double(const char *json, const char *key, double *out) {
-    const char *p;
-    char *endp;
-    double v;
-
-    if (!json_find_value_start(json, key, &p))
-        return 0;
-    errno = 0;
-    v = strtod(p, &endp);
-    if (p == endp || errno != 0)
-        return 0;
-    *out = v;
-    return 1;
-}
-
-static int json_get_bool(const char *json, const char *key, int *out) {
-    const char *p;
-    if (!json_find_value_start(json, key, &p))
-        return 0;
-    if (strncmp(p, "true", 4) == 0) {
-        *out = 1;
-        return 1;
+static void str_vec_push(str_vec_t *v, const char *s) {
+    if (v->count == v->cap) {
+        size_t ncap = v->cap ? v->cap * 2 : 8;
+        char **tmp = (char **)realloc(v->items, ncap * sizeof(char *));
+        if (!tmp) die("out of memory");
+        v->items = tmp;
+        v->cap = ncap;
     }
-    if (strncmp(p, "false", 5) == 0) {
-        *out = 0;
-        return 1;
-    }
-    return 0;
+    v->items[v->count++] = xstrdup(s);
 }
 
-static int json_get_string(const char *json, const char *key, char *out, size_t out_sz) {
-    const char *p;
-    size_t n = 0;
-
-    if (!json_find_value_start(json, key, &p))
-        return 0;
-    if (*p != '"')
-        return 0;
-    p++;
-    while (*p && *p != '"') {
-        if (*p == '\\' && p[1])
-            p++;
-        if (n + 1 < out_sz)
-            out[n++] = *p;
-        p++;
+static void str_vec_free(str_vec_t *v) {
+    size_t i;
+    for (i = 0; i < v->count; i++) {
+        free(v->items[i]);
     }
-    if (*p != '"')
-        return 0;
-    if (out_sz > 0)
-        out[n < out_sz ? n : out_sz - 1] = '\0';
-    return 1;
+    free(v->items);
+    v->items = NULL;
+    v->count = 0;
+    v->cap = 0;
 }
 
-static char *json_escape(const char *s) {
-    size_t n = 0;
-    const char *p;
-    char *out;
-    char *w;
+static bool str_vec_contains(const str_vec_t *v, const char *needle) {
+    size_t i;
+    for (i = 0; i < v->count; i++) {
+        if (strcmp(v->items[i], needle) == 0) return true;
+    }
+    return false;
+}
 
-    if (!s)
-        return xstrdup("");
+static void dbl_vec_push(dbl_vec_t *v, double x) {
+    if (v->count == v->cap) {
+        size_t ncap = v->cap ? v->cap * 2 : 16;
+        double *tmp = (double *)realloc(v->items, ncap * sizeof(double));
+        if (!tmp) die("out of memory");
+        v->items = tmp;
+        v->cap = ncap;
+    }
+    v->items[v->count++] = x;
+}
 
-    for (p = s; *p; p++) {
-        switch (*p) {
-        case '"':
-        case '\\':
-        case '\n':
-        case '\r':
-        case '\t':
-            n += 2;
-            break;
-        default:
-            n += 1;
-            break;
+static void dbl_vec_free(dbl_vec_t *v) {
+    free(v->items);
+    v->items = NULL;
+    v->count = 0;
+    v->cap = 0;
+}
+
+static void test_vec_push(test_vec_t *v, const bench_test_t *t) {
+    if (v->count == v->cap) {
+        size_t ncap = v->cap ? v->cap * 2 : 64;
+        bench_test_t *tmp = (bench_test_t *)realloc(v->items, ncap * sizeof(bench_test_t));
+        if (!tmp) die("out of memory");
+        v->items = tmp;
+        v->cap = ncap;
+    }
+    v->items[v->count++] = *t;
+}
+
+static void test_vec_free(test_vec_t *v) {
+    size_t i;
+    for (i = 0; i < v->count; i++) {
+        free(v->items[i].name);
+        free(v->items[i].source_path);
+        str_vec_free(&v->items[i].options);
+    }
+    free(v->items);
+    v->items = NULL;
+    v->count = 0;
+    v->cap = 0;
+}
+
+static void row_vec_push(row_vec_t *v, const bench_row_t *r) {
+    if (v->count == v->cap) {
+        size_t ncap = v->cap ? v->cap * 2 : 64;
+        bench_row_t *tmp = (bench_row_t *)realloc(v->items, ncap * sizeof(bench_row_t));
+        if (!tmp) die("out of memory");
+        v->items = tmp;
+        v->cap = ncap;
+    }
+    v->items[v->count++] = *r;
+}
+
+static void row_vec_free(row_vec_t *v) {
+    size_t i;
+    for (i = 0; i < v->count; i++) {
+        free(v->items[i].name);
+    }
+    free(v->items);
+    v->items = NULL;
+    v->count = 0;
+    v->cap = 0;
+}
+
+static bool file_exists(const char *path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+static bool dir_exists(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    return S_ISDIR(st.st_mode);
+}
+
+static void mkdir_p(const char *path) {
+    char buf[PATH_MAX_LOCAL];
+    size_t n = strlen(path);
+    size_t i;
+    if (n == 0 || n >= sizeof(buf)) die("bad path: %s", path);
+    memcpy(buf, path, n + 1);
+
+    for (i = 1; i < n; i++) {
+        if (buf[i] == '/') {
+            buf[i] = '\0';
+            if (buf[0] != '\0' && !dir_exists(buf)) {
+                if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+                    die("mkdir failed: %s", buf);
+                }
+            }
+            buf[i] = '/';
         }
     }
-
-    out = (char *)malloc(n + 1);
-    if (!out)
-        die("out of memory");
-
-    w = out;
-    for (p = s; *p; p++) {
-        switch (*p) {
-        case '"': *w++ = '\\'; *w++ = '"'; break;
-        case '\\': *w++ = '\\'; *w++ = '\\'; break;
-        case '\n': *w++ = '\\'; *w++ = 'n'; break;
-        case '\r': *w++ = '\\'; *w++ = 'r'; break;
-        case '\t': *w++ = '\\'; *w++ = 't'; break;
-        default: *w++ = *p; break;
+    if (!dir_exists(buf)) {
+        if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
+            die("mkdir failed: %s", buf);
         }
     }
-    *w = '\0';
+}
+
+static char *read_text_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    long len;
+    size_t nread;
+    char *buf;
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    len = ftell(f);
+    if (len < 0) {
+        fclose(f);
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return NULL;
+    }
+    buf = (char *)malloc((size_t)len + 1);
+    if (!buf) die("out of memory");
+    nread = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[nread] = '\0';
+    return buf;
+}
+
+static void build_path(char *dst, size_t cap, const char *a, const char *b) {
+    if (snprintf(dst, cap, "%s/%s", a, b) >= (int)cap) {
+        die("path too long");
+    }
+}
+
+static char *dirname_copy(const char *path) {
+    const char *slash = strrchr(path, '/');
+    if (!slash) return xstrdup(".");
+    if (slash == path) return xstrdup("/");
+    {
+        size_t n = (size_t)(slash - path);
+        char *out = (char *)malloc(n + 1);
+        if (!out) die("out of memory");
+        memcpy(out, path, n);
+        out[n] = '\0';
+        return out;
+    }
+}
+
+static char *strip_comments(const char *src) {
+    size_t n = strlen(src);
+    char *out = (char *)malloc(n + 1);
+    size_t i = 0, w = 0;
+    bool in_quote = false;
+    if (!out) die("out of memory");
+
+    while (i < n) {
+        char c = src[i];
+        if (c == '"') {
+            in_quote = !in_quote;
+            out[w++] = c;
+            i++;
+            continue;
+        }
+        if (c == '#' && !in_quote) {
+            while (i < n && src[i] != '\n') i++;
+            continue;
+        }
+        out[w++] = c;
+        i++;
+    }
+    out[w] = '\0';
     return out;
 }
 
-static void format_iso8601_utc(char *out, size_t out_sz) {
-    time_t t = time(NULL);
-    struct tm tm_utc;
-    gmtime_r(&t, &tm_utc);
-    strftime(out, out_sz, "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+static char *substr_dup(const char *s, size_t start, size_t end) {
+    size_t n;
+    char *out;
+    if (end < start) end = start;
+    n = end - start;
+    out = (char *)malloc(n + 1);
+    if (!out) die("out of memory");
+    memcpy(out, s + start, n);
+    out[n] = '\0';
+    return out;
 }
 
-static int run_cmd(char *const argv[], cmd_result_t *out_res) {
-    bench_run_cmd_opts_t opts;
-    memset(&opts, 0, sizeof(opts));
-    opts.argv = argv;
-    return bench_run_cmd(&opts, out_res);
+static void tokenize_block(const char *block, str_vec_t *tokens) {
+    size_t i = 0;
+    size_t n = strlen(block);
+    while (i < n) {
+        while (i < n && isspace((unsigned char)block[i])) i++;
+        if (i >= n) break;
+        if (block[i] == '"') {
+            size_t j = i + 1;
+            while (j < n && block[j] != '"') {
+                if (block[j] == '\\' && j + 1 < n) j += 2;
+                else j++;
+            }
+            if (j >= n) {
+                str_vec_push(tokens, block + i + 1);
+                break;
+            }
+            {
+                char *tmp = substr_dup(block, i + 1, j);
+                str_vec_push(tokens, tmp);
+                free(tmp);
+            }
+            i = j + 1;
+        } else {
+            size_t j = i;
+            while (j < n && !isspace((unsigned char)block[j])) j++;
+            {
+                char *tmp = substr_dup(block, i, j);
+                str_vec_push(tokens, tmp);
+                free(tmp);
+            }
+            i = j;
+        }
+    }
 }
 
-static int run_cmd_with_mode(const char *mode, char *const argv[], cmd_result_t *out_res) {
-    bench_run_cmd_opts_t opts;
-    memset(&opts, 0, sizeof(opts));
-    opts.argv = argv;
-    return bench_run_cmd_with_mode(mode, &opts, out_res);
+typedef struct {
+    char *name;
+    char *file;
+    char *include_path;
+    bool fail;
+    str_vec_t labels;
+    str_vec_t extrafiles;
+    str_vec_t extra_args;
+} run_entry_t;
+
+static void run_entry_free(run_entry_t *e) {
+    free(e->name);
+    free(e->file);
+    free(e->include_path);
+    str_vec_free(&e->labels);
+    str_vec_free(&e->extrafiles);
+    str_vec_free(&e->extra_args);
 }
 
-static int host_nproc(void) {
-    long n = -1;
-#if defined(_SC_NPROCESSORS_ONLN)
-    n = sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-#if defined(_SC_NPROCESSORS_CONF)
-    if (n < 1)
-        n = sysconf(_SC_NPROCESSORS_CONF);
-#endif
-    if (n < 1)
-        return 1;
-    if (n > 1024)
-        return 1024;
-    return (int)n;
+static bool is_one_value_key(const char *tok) {
+    return strcmp(tok, "NAME") == 0 || strcmp(tok, "FILE") == 0 ||
+           strcmp(tok, "INCLUDE_PATH") == 0 || strcmp(tok, "COPY_TO_BIN") == 0;
 }
 
-static int run_lfortran_rebuild_step(const cfg_t *cfg,
-                                     FILE *fails,
-                                     const char *build_dir,
-                                     const char *missing_reason,
-                                     const char *failed_reason) {
-    cmd_result_t r = {0};
-    char jobs_buf[32];
-    char *cmd[8];
-    int n = 0;
+static bool is_multi_key(const char *tok) {
+    return strcmp(tok, "LABELS") == 0 || strcmp(tok, "EXTRAFILES") == 0 ||
+           strcmp(tok, "EXTRA_ARGS") == 0 || strcmp(tok, "GFORTRAN_ARGS") == 0;
+}
 
-    if (!build_dir || !build_dir[0] || !dir_exists(build_dir)) {
-        write_failure_row(fails,
-                          "api_e2e",
-                          "all",
-                          "all",
-                          "lfortran_llvm",
-                          missing_reason,
-                          2,
-                          build_dir ? build_dir : "");
+static bool is_flag_key(const char *tok) {
+    return strcmp(tok, "FAIL") == 0 || strcmp(tok, "NOFAST_TILL_LLVM16") == 0 ||
+           strcmp(tok, "NO_FAST") == 0 || strcmp(tok, "NO_STD_F23") == 0 ||
+           strcmp(tok, "OLD_CLASSES") == 0 || strcmp(tok, "NO_LLVM_GOC") == 0;
+}
+
+static run_entry_t parse_run_block(const char *block) {
+    run_entry_t e;
+    str_vec_t toks = {0};
+    size_t i = 0;
+    enum { M_NONE, M_LABELS, M_EXTRAFILES, M_EXTRA_ARGS } mode = M_NONE;
+
+    memset(&e, 0, sizeof(e));
+    tokenize_block(block, &toks);
+
+    while (i < toks.count) {
+        const char *tok = toks.items[i];
+        if (is_flag_key(tok)) {
+            if (strcmp(tok, "FAIL") == 0) e.fail = true;
+            mode = M_NONE;
+            i++;
+            continue;
+        }
+        if (is_one_value_key(tok)) {
+            if (i + 1 < toks.count) {
+                const char *val = toks.items[i + 1];
+                if (strcmp(tok, "NAME") == 0) {
+                    free(e.name);
+                    e.name = xstrdup(val);
+                } else if (strcmp(tok, "FILE") == 0) {
+                    free(e.file);
+                    e.file = xstrdup(val);
+                } else if (strcmp(tok, "INCLUDE_PATH") == 0) {
+                    free(e.include_path);
+                    e.include_path = xstrdup(val);
+                }
+                i += 2;
+            } else {
+                i++;
+            }
+            mode = M_NONE;
+            continue;
+        }
+        if (is_multi_key(tok)) {
+            if (strcmp(tok, "LABELS") == 0) mode = M_LABELS;
+            else if (strcmp(tok, "EXTRAFILES") == 0) mode = M_EXTRAFILES;
+            else if (strcmp(tok, "EXTRA_ARGS") == 0) mode = M_EXTRA_ARGS;
+            else mode = M_NONE;
+            i++;
+            continue;
+        }
+
+        if (mode == M_LABELS) str_vec_push(&e.labels, tok);
+        else if (mode == M_EXTRAFILES) str_vec_push(&e.extrafiles, tok);
+        else if (mode == M_EXTRA_ARGS) str_vec_push(&e.extra_args, tok);
+
+        i++;
+    }
+
+    str_vec_free(&toks);
+    return e;
+}
+
+static void append_unique(str_vec_t *v, const char *s) {
+    if (!str_vec_contains(v, s)) str_vec_push(v, s);
+}
+
+static void apply_label_options(const str_vec_t *labels, str_vec_t *options) {
+    if (str_vec_contains(labels, "llvmImplicit")) {
+        append_unique(options, "--implicit-typing");
+        append_unique(options, "--implicit-interface");
+    }
+    if (str_vec_contains(labels, "llvmStackArray")) {
+        append_unique(options, "--stack-arrays=true");
+    }
+    if (str_vec_contains(labels, "llvm_integer_8")) {
+        append_unique(options, "-fdefault-integer-8");
+    }
+    if (str_vec_contains(labels, "llvm_nopragma")) {
+        append_unique(options, "--ignore-pragma");
+    }
+}
+
+static bool has_suffix(const char *s, const char *suffix) {
+    size_t ns = strlen(s), nx = strlen(suffix);
+    if (ns < nx) return false;
+    return strcmp(s + ns - nx, suffix) == 0;
+}
+
+static bool file_token_has_ext(const char *s) {
+    const char *base = strrchr(s, '/');
+    if (!base) base = s;
+    else base++;
+    return strchr(base, '.') != NULL;
+}
+
+static void add_test_from_entry(const run_entry_t *e, const char *integration_dir, test_vec_t *out) {
+    char src_rel[PATH_MAX_LOCAL];
+    char src_path[PATH_MAX_LOCAL];
+    bench_test_t t;
+
+    if (!e->name || e->name[0] == '\0') return;
+    if (e->fail) return;
+    if (!str_vec_contains(&e->labels, "llvm")) return;
+    if (str_vec_contains(&e->labels, SKIP_LABEL_1)) return;
+    if (str_vec_contains(&e->labels, SKIP_LABEL_2)) return;
+    if (str_vec_contains(&e->labels, SKIP_LABEL_3)) return;
+    if (e->extrafiles.count > 0) return;
+
+    if (e->file && e->file[0] != '\0') {
+        if (file_token_has_ext(e->file)) {
+            if (snprintf(src_rel, sizeof(src_rel), "%s", e->file) >= (int)sizeof(src_rel)) return;
+        } else {
+            if (snprintf(src_rel, sizeof(src_rel), "%s.f90", e->file) >= (int)sizeof(src_rel)) return;
+        }
+    } else {
+        if (snprintf(src_rel, sizeof(src_rel), "%s.f90", e->name) >= (int)sizeof(src_rel)) return;
+    }
+
+    if (snprintf(src_path, sizeof(src_path), "%s/%s", integration_dir, src_rel) >= (int)sizeof(src_path)) return;
+    if (!file_exists(src_path)) return;
+
+    memset(&t, 0, sizeof(t));
+    t.name = xstrdup(e->name);
+    t.source_path = xstrdup(src_path);
+
+    {
+        size_t i;
+        for (i = 0; i < e->extra_args.count; i++) {
+            str_vec_push(&t.options, e->extra_args.items[i]);
+        }
+    }
+    apply_label_options(&e->labels, &t.options);
+    if (e->include_path && e->include_path[0] != '\0') {
+        char inc[PATH_MAX_LOCAL];
+        if (snprintf(inc, sizeof(inc), "-I%s/%s", integration_dir, e->include_path) < (int)sizeof(inc)) {
+            str_vec_push(&t.options, inc);
+        }
+    }
+
+    test_vec_push(out, &t);
+}
+
+static void collect_tests_from_cmake(const char *cmake_path, const char *integration_dir, test_vec_t *out) {
+    char *text = read_text_file(cmake_path);
+    char *clean;
+    size_t i = 0;
+    size_t n;
+
+    if (!text) die("failed to read %s", cmake_path);
+    clean = strip_comments(text);
+    free(text);
+    n = strlen(clean);
+
+    while (i + 3 < n) {
+        if (clean[i] == 'R' && clean[i + 1] == 'U' && clean[i + 2] == 'N') {
+            size_t j = i + 3;
+            while (j < n && isspace((unsigned char)clean[j])) j++;
+            if (j < n && clean[j] == '(') {
+                size_t start = j + 1;
+                size_t k = start;
+                int depth = 1;
+                while (k < n && depth > 0) {
+                    if (clean[k] == '(') depth++;
+                    else if (clean[k] == ')') depth--;
+                    k++;
+                }
+                if (depth == 0) {
+                    run_entry_t e;
+                    char *block = substr_dup(clean, start, k - 1);
+                    e = parse_run_block(block);
+                    add_test_from_entry(&e, integration_dir, out);
+                    run_entry_free(&e);
+                    free(block);
+                    i = k;
+                    continue;
+                }
+            }
+        }
+        i++;
+    }
+
+    free(clean);
+}
+
+static int write_all(int fd, const void *buf, size_t len) {
+    const uint8_t *p = (const uint8_t *)buf;
+    size_t w = 0;
+    while (w < len) {
+        ssize_t n = write(fd, p + w, len - w);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        w += (size_t)n;
+    }
+    return 0;
+}
+
+static char *read_fd_all(int fd) {
+    char buf[4096];
+    char *out = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    for (;;) {
+        ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        if (len + (size_t)n + 1 > cap) {
+            size_t ncap = cap ? cap * 2 : 8192;
+            while (ncap < len + (size_t)n + 1) ncap *= 2;
+            out = (char *)realloc(out, ncap);
+            if (!out) die("out of memory");
+            cap = ncap;
+        }
+        memcpy(out + len, buf, (size_t)n);
+        len += (size_t)n;
+    }
+    if (!out) {
+        out = (char *)malloc(1);
+        if (!out) die("out of memory");
+        out[0] = '\0';
+        return out;
+    }
+    out[len] = '\0';
+    return out;
+}
+
+static int make_temp_file(char *path_out, size_t cap, const char *prefix) {
+    int fd;
+    if (snprintf(path_out, cap, "%s_XXXXXX", prefix) >= (int)cap) return -1;
+    fd = mkstemp(path_out);
+    return fd;
+}
+
+static int run_cmd_capture(const char *const *argv,
+                           int timeout_sec,
+                           const char *stdout_file,
+                           const char *runtime_dir,
+                           cmd_result_t *out) {
+    char out_tmp[PATH_MAX_LOCAL];
+    char err_tmp[PATH_MAX_LOCAL];
+    int out_fd = -1;
+    int err_fd = -1;
+    pid_t pid;
+    int status = 0;
+    bool timed_out = false;
+    double t0 = now_ms();
+
+    memset(out, 0, sizeof(*out));
+    out->rc = -1;
+
+    if (stdout_file) {
+        out_fd = open(stdout_file, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        if (out_fd < 0) return -1;
+        out_tmp[0] = '\0';
+    } else {
+        if (make_temp_file(out_tmp, sizeof(out_tmp), "/tmp/liric_cmd_out") < 0) return -1;
+        out_fd = open(out_tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        if (out_fd < 0) return -1;
+    }
+
+    if (make_temp_file(err_tmp, sizeof(err_tmp), "/tmp/liric_cmd_err") < 0) {
+        close(out_fd);
+        return -1;
+    }
+    err_fd = open(err_tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    if (err_fd < 0) {
+        close(out_fd);
         return -1;
     }
 
-    snprintf(jobs_buf, sizeof(jobs_buf), "%d", host_nproc());
-    cmd[n++] = (char *)cfg->cmake;
-    cmd[n++] = "--build";
-    cmd[n++] = (char *)build_dir;
-    cmd[n++] = "-j";
-    cmd[n++] = jobs_buf;
-    cmd[n++] = NULL;
-
-    printf("[matrix] rebuild: %s\n", build_dir);
-    if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
-        write_failure_row(fails,
-                          "api_e2e",
-                          "all",
-                          "all",
-                          "lfortran_llvm",
-                          failed_reason,
-                          r.rc,
-                          build_dir);
+    pid = fork();
+    if (pid < 0) {
+        close(out_fd);
+        close(err_fd);
         return -1;
     }
-    return 0;
-}
 
-static void usage(void) {
-    printf("usage: bench_matrix [options]\n");
-    printf("  --bench-dir PATH         output root (default: /tmp/liric_bench)\n");
-    printf("  --build-dir PATH         build dir for benchmark binaries (default: build)\n");
-    printf("  --manifest PATH          manifest path recorded in summary (default: tools/bench_manifest.json)\n");
-    printf("  --modes LIST             comma list or 'all': isel,copy_patch,llvm\n");
-    printf("  --policies LIST          comma list or 'all': direct,ir\n");
-    printf("  --lanes LIST             comma list or 'all': ir_file,api_e2e,micro_c\n");
-    printf("  --iters N                iterations forwarded to lane runners (default: 1)\n");
-    printf("  --api-cases N            api_e2e cases per cell (default: 100, 0=all)\n");
-    printf("  --timeout N              timeout sec for corpus compare / compat (default: 15)\n");
-    printf("  --timeout-ms N           timeout ms for bench_api (default: 3000)\n");
-    printf("  --skip-compat-check      do not regenerate compat artifacts\n");
-    printf("  --allow-partial          report failures but return 0\n");
-    printf("  --runtime-lib PATH       runtime shared library\n");
-    printf("  --corpus PATH            corpus TSV\n");
-    printf("  --cache-dir PATH         corpus cache directory\n");
-    printf("  --lfortran PATH          lfortran LLVM binary (bench_api/compat)\n");
-    printf("  --lfortran-liric PATH    lfortran WITH_LIRIC binary (bench_api)\n");
-    printf("  --lfortran-build-dir PATH rebuild dir for lfortran LLVM binary (default: ../lfortran/build)\n");
-    printf("  --lfortran-liric-build-dir PATH rebuild dir for lfortran WITH_LIRIC binary (only needed for split builds)\n");
-    printf("  --cmake PATH             cmake executable for lfortran rebuild preflight (default: cmake)\n");
-    printf("  --skip-lfortran-rebuild  disable lfortran rebuild preflight\n");
-    printf("  --rebuild-lfortran       enable lfortran rebuild preflight (default)\n");
-    printf("  --test-dir PATH          lfortran integration_tests directory (bench_api)\n");
-    printf("  --bench-compat-check PATH\n");
-    printf("  --bench-corpus-compare PATH\n");
-    printf("  --bench-api PATH\n");
-    printf("  --bench-tcc PATH\n");
-    printf("  --probe-runner PATH\n");
-    printf("  --lli-phases PATH\n");
-}
-
-static void set_all_modes(cfg_t *cfg, int v) {
-    for (int i = 0; i < MODE_COUNT; i++)
-        cfg->modes[i] = v;
-}
-
-static void set_all_policies(cfg_t *cfg, int v) {
-    for (int i = 0; i < POLICY_COUNT; i++)
-        cfg->policies[i] = v;
-}
-
-static void set_all_lanes(cfg_t *cfg, int v) {
-    for (int i = 0; i < LANE_COUNT; i++)
-        cfg->lanes[i] = v;
-}
-
-static int parse_policies(cfg_t *cfg, const char *text) {
-    char *tmp = xstrdup(text);
-    char *save = NULL;
-    char *tok;
-
-    set_all_policies(cfg, 0);
-    tok = strtok_r(tmp, ",", &save);
-    while (tok) {
-        if (strcmp(tok, "direct") == 0)
-            cfg->policies[POLICY_DIRECT] = 1;
-        else if (strcmp(tok, "ir") == 0)
-            cfg->policies[POLICY_IR] = 1;
-        else {
-            free(tmp);
-            return -1;
+    if (pid == 0) {
+        if (runtime_dir && runtime_dir[0] != '\0') {
+            setenv("DYLD_LIBRARY_PATH", runtime_dir, 1);
+            setenv("LD_LIBRARY_PATH", runtime_dir, 1);
         }
-        tok = strtok_r(NULL, ",", &save);
-    }
-    free(tmp);
-    return 0;
-}
-
-static int parse_lanes(cfg_t *cfg, const char *text) {
-    char *tmp = xstrdup(text);
-    char *save = NULL;
-    char *tok;
-
-    set_all_lanes(cfg, 0);
-    tok = strtok_r(tmp, ",", &save);
-    while (tok) {
-        if (strcmp(tok, "ir_file") == 0)
-            cfg->lanes[LANE_IR_FILE] = 1;
-        else if (strcmp(tok, "api_e2e") == 0)
-            cfg->lanes[LANE_API_E2E] = 1;
-        else if (strcmp(tok, "micro_c") == 0)
-            cfg->lanes[LANE_MICRO_C] = 1;
-        else {
-            free(tmp);
-            return -1;
+        dup2(out_fd, STDOUT_FILENO);
+        dup2(err_fd, STDERR_FILENO);
+        close(out_fd);
+        close(err_fd);
+        execvp(argv[0], (char *const *)argv);
+        {
+            const char *msg = "execvp failed\n";
+            write_all(STDERR_FILENO, msg, strlen(msg));
         }
-        tok = strtok_r(NULL, ",", &save);
+        _exit(127);
     }
-    free(tmp);
+
+    close(out_fd);
+    close(err_fd);
+
+    for (;;) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) break;
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if ((now_ms() - t0) > (double)(timeout_sec * 1000)) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            timed_out = true;
+            break;
+        }
+        usleep(10000);
+    }
+
+    out->wall_ms = now_ms() - t0;
+    if (timed_out) {
+        out->rc = -99;
+    } else if (WIFEXITED(status)) {
+        out->rc = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        out->rc = -WTERMSIG(status);
+    } else {
+        out->rc = -1;
+    }
+
+    if (stdout_file) {
+        out->out = xstrdup("");
+    } else {
+        int fd = open(out_tmp, O_RDONLY);
+        if (fd >= 0) {
+            out->out = read_fd_all(fd);
+            close(fd);
+        } else {
+            out->out = xstrdup("");
+        }
+        unlink(out_tmp);
+    }
+
+    {
+        int fd = open(err_tmp, O_RDONLY);
+        if (fd >= 0) {
+            out->err = read_fd_all(fd);
+            close(fd);
+        } else {
+            out->err = xstrdup("");
+        }
+        unlink(err_tmp);
+    }
+
     return 0;
 }
 
-static cfg_t parse_args(int argc, char **argv) {
-    cfg_t cfg;
+static void cmd_result_free(cmd_result_t *r) {
+    free(r->out);
+    free(r->err);
+    r->out = NULL;
+    r->err = NULL;
+}
+
+static int cmp_double(const void *a, const void *b) {
+    double x = *(const double *)a;
+    double y = *(const double *)b;
+    if (x < y) return -1;
+    if (x > y) return 1;
+    return 0;
+}
+
+static double pct_of_vec(const dbl_vec_t *v, double p) {
+    double *tmp;
+    double k;
+    size_t f, c;
+    double frac;
+    if (v->count == 0) return 0.0;
+    tmp = (double *)malloc(v->count * sizeof(double));
+    if (!tmp) die("out of memory");
+    memcpy(tmp, v->items, v->count * sizeof(double));
+    qsort(tmp, v->count, sizeof(double), cmp_double);
+
+    if (v->count == 1) {
+        double only = tmp[0];
+        free(tmp);
+        return only;
+    }
+
+    k = ((double)(v->count - 1) * p) / 100.0;
+    f = (size_t)k;
+    c = f + 1;
+    if (c >= v->count) c = v->count - 1;
+    frac = k - (double)f;
+
+    {
+        double out = tmp[f] + frac * (tmp[c] - tmp[f]);
+        free(tmp);
+        return out;
+    }
+}
+
+static double median_of_vec(const dbl_vec_t *v) {
+    return pct_of_vec(v, 50.0);
+}
+
+static char *normalize_output(const char *s) {
+    size_t n = strlen(s);
+    char *out = (char *)malloc(n + 1);
+    size_t i = 0;
+    size_t w = 0;
+    if (!out) die("out of memory");
+
+    while (i < n) {
+        size_t line_start = i;
+        size_t line_end = i;
+        while (line_end < n && s[line_end] != '\n') line_end++;
+        while (line_end > line_start && (s[line_end - 1] == ' ' || s[line_end - 1] == '\t' || s[line_end - 1] == '\r')) {
+            line_end--;
+        }
+        if (line_end > line_start) {
+            memcpy(out + w, s + line_start, line_end - line_start);
+            w += line_end - line_start;
+        }
+        if (line_end < n || (line_start < n && s[line_start] == '\n')) {
+            out[w++] = '\n';
+        }
+        if (line_end < n && s[line_end] == '\n') i = line_end + 1;
+        else i = (line_end == line_start) ? i + 1 : line_end;
+    }
+
+    while (w > 0 && out[w - 1] == '\n') w--;
+    out[w] = '\0';
+    return out;
+}
+
+static bool parse_timing(const char *stderr_text, probe_timing_t *t) {
+    const char *p = strstr(stderr_text, "TIMING ");
+    char *line;
+    char *tok;
+    memset(t, 0, sizeof(*t));
+    if (!p) return false;
+
+    {
+        const char *eol = strchr(p, '\n');
+        if (!eol) eol = p + strlen(p);
+        line = substr_dup(p, 0, (size_t)(eol - p));
+    }
+
+    tok = strtok(line, " ");
+    while (tok) {
+        char *eq = strchr(tok, '=');
+        if (eq) {
+            double val;
+            *eq = '\0';
+            val = strtod(eq + 1, NULL);
+            if (strcmp(tok, "read_us") == 0) t->read_us = val;
+            else if (strcmp(tok, "parse_us") == 0) t->parse_us = val;
+            else if (strcmp(tok, "jit_create_us") == 0) t->jit_create_us = val;
+            else if (strcmp(tok, "load_lib_us") == 0) t->load_lib_us = val;
+            else if (strcmp(tok, "compile_us") == 0) t->compile_us = val;
+            else if (strcmp(tok, "run_us") == 0) t->run_us = val;
+            else if (strcmp(tok, "total_us") == 0) t->total_us = val;
+        }
+        tok = strtok(NULL, " ");
+    }
+
+    t->have = true;
+    free(line);
+    return true;
+}
+
+static char **build_argv_lfortran_compile(const bench_test_t *t,
+                                          const char *lfortran,
+                                          const char *bin_path) {
+    size_t n = 0;
+    char **argv;
+    size_t i;
+
+    n = 1 + 1 + t->options.count + 1 + 1 + 1 + 1;
+    argv = (char **)calloc(n, sizeof(char *));
+    if (!argv) die("out of memory");
+
+    n = 0;
+    argv[n++] = (char *)lfortran;
+    argv[n++] = (char *)"--no-color";
+    for (i = 0; i < t->options.count; i++) argv[n++] = t->options.items[i];
+    argv[n++] = t->source_path;
+    argv[n++] = (char *)"-o";
+    argv[n++] = (char *)bin_path;
+    argv[n++] = NULL;
+    return argv;
+}
+
+static char **build_argv_lfortran_emit(const bench_test_t *t,
+                                       const char *lfortran) {
+    size_t n = 0;
+    char **argv;
+    size_t i;
+
+    n = 1 + 1 + 1 + t->options.count + 1 + 1;
+    argv = (char **)calloc(n, sizeof(char *));
+    if (!argv) die("out of memory");
+
+    n = 0;
+    argv[n++] = (char *)lfortran;
+    argv[n++] = (char *)"--no-color";
+    argv[n++] = (char *)"--show-llvm";
+    for (i = 0; i < t->options.count; i++) argv[n++] = t->options.items[i];
+    argv[n++] = t->source_path;
+    argv[n++] = NULL;
+    return argv;
+}
+
+static char **build_argv_probe(const char *probe,
+                               const char *runtime,
+                               const char *ll_path) {
+    char **argv = (char **)calloc(8, sizeof(char *));
+    if (!argv) die("out of memory");
+    argv[0] = (char *)probe;
+    argv[1] = (char *)"--timing";
+    argv[2] = (char *)"--sig";
+    argv[3] = (char *)"i32_argc_argv";
+    argv[4] = (char *)"--load-lib";
+    argv[5] = (char *)runtime;
+    argv[6] = (char *)ll_path;
+    argv[7] = NULL;
+    return argv;
+}
+
+static char **build_argv_lli(const char *lli,
+                             const char *runtime,
+                             const char *ll_path) {
+    char **argv = (char **)calloc(6, sizeof(char *));
+    if (!argv) die("out of memory");
+    argv[0] = (char *)lli;
+    argv[1] = (char *)"-O0";
+    argv[2] = (char *)"--dlopen";
+    argv[3] = (char *)runtime;
+    argv[4] = (char *)ll_path;
+    argv[5] = NULL;
+    return argv;
+}
+
+static bool run_one_test(const cfg_t *cfg,
+                         const bench_test_t *t,
+                         const char *ll_dir,
+                         const char *bin_dir,
+                         bench_row_t *row) {
+    char ll_path[PATH_MAX_LOCAL];
+    char bin_path[PATH_MAX_LOCAL];
+    dbl_vec_t exe_compile = {0}, exe_run = {0}, exe_wall = {0}, exe_non_parse = {0};
+    dbl_vec_t api_emit = {0}, api_wall = {0}, api_parse = {0}, api_compile = {0}, api_run = {0}, api_non_parse = {0};
+    dbl_vec_t llj_wall = {0}, llj_parse = {0}, llj_compile = {0}, llj_run = {0}, llj_non_parse = {0};
+    dbl_vec_t lli_wall = {0};
+    bool api_jit_match = true;
+    bool ll_jit_match = true;
+    bool ll_lli_match = true;
+    int it;
+    char *ref_norm = NULL;
+    bool ok = true;
+
+    memset(row, 0, sizeof(*row));
+    row->name = xstrdup(t->name);
+
+    if (snprintf(ll_path, sizeof(ll_path), "%s/%s.ll", ll_dir, t->name) >= (int)sizeof(ll_path)) {
+        die("path too long for ll file");
+    }
+    if (snprintf(bin_path, sizeof(bin_path), "%s/%s", bin_dir, t->name) >= (int)sizeof(bin_path)) {
+        die("path too long for bin file");
+    }
+
+    row->api_exe_ok = true;
+    row->api_jit_ok = true;
+    row->ll_jit_ok = true;
+    row->ll_lli_ok = true;
+
+    for (it = 0; it < cfg->iters; it++) {
+        cmd_result_t c_compile, c_run, c_emit, c_api_jit, c_ll_jit, c_lli;
+        probe_timing_t tim_api, tim_llj;
+        char **argv_compile = NULL;
+        char **argv_run = NULL;
+        char **argv_emit = NULL;
+        char **argv_probe_api = NULL;
+        char **argv_probe_llj = NULL;
+        char **argv_lli = NULL;
+        char *run_norm = NULL;
+        char *jit_norm = NULL;
+        char *llj_norm = NULL;
+        char *lli_norm = NULL;
+        char *runtime_dir;
+
+        memset(&c_compile, 0, sizeof(c_compile));
+        memset(&c_run, 0, sizeof(c_run));
+        memset(&c_emit, 0, sizeof(c_emit));
+        memset(&c_api_jit, 0, sizeof(c_api_jit));
+        memset(&c_ll_jit, 0, sizeof(c_ll_jit));
+        memset(&c_lli, 0, sizeof(c_lli));
+
+        argv_compile = build_argv_lfortran_compile(t, cfg->lfortran, bin_path);
+        if (run_cmd_capture((const char *const *)argv_compile, cfg->timeout_sec, NULL, NULL, &c_compile) != 0) {
+            ok = false;
+            free(argv_compile);
+            break;
+        }
+        free(argv_compile);
+
+        if (c_compile.rc != 0) {
+            row->api_exe_ok = false;
+            row->api_jit_ok = false;
+            row->ll_jit_ok = false;
+            row->ll_lli_ok = false;
+            cmd_result_free(&c_compile);
+            ok = false;
+            break;
+        }
+
+        argv_run = (char **)calloc(2, sizeof(char *));
+        if (!argv_run) die("out of memory");
+        argv_run[0] = bin_path;
+        argv_run[1] = NULL;
+        if (run_cmd_capture((const char *const *)argv_run, cfg->timeout_sec, NULL, NULL, &c_run) != 0) {
+            ok = false;
+            free(argv_run);
+            cmd_result_free(&c_compile);
+            break;
+        }
+        free(argv_run);
+
+        if (c_run.rc < 0) {
+            row->api_exe_ok = false;
+            row->api_jit_ok = false;
+            row->ll_jit_ok = false;
+            row->ll_lli_ok = false;
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            ok = false;
+            break;
+        }
+
+        run_norm = normalize_output(c_run.out);
+        if (it == 0) {
+            ref_norm = xstrdup(run_norm);
+        }
+
+        dbl_vec_push(&exe_compile, c_compile.wall_ms);
+        dbl_vec_push(&exe_run, c_run.wall_ms);
+        dbl_vec_push(&exe_wall, c_compile.wall_ms + c_run.wall_ms);
+        dbl_vec_push(&exe_non_parse, c_compile.wall_ms + c_run.wall_ms);
+
+        argv_emit = build_argv_lfortran_emit(t, cfg->lfortran);
+        if (run_cmd_capture((const char *const *)argv_emit, cfg->timeout_sec, ll_path, NULL, &c_emit) != 0) {
+            ok = false;
+            free(argv_emit);
+            free(run_norm);
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            break;
+        }
+        free(argv_emit);
+        if (c_emit.rc != 0) {
+            row->api_jit_ok = false;
+            row->ll_jit_ok = false;
+            row->ll_lli_ok = false;
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            free(run_norm);
+            ok = false;
+            break;
+        }
+
+        argv_probe_api = build_argv_probe(cfg->probe_runner, cfg->runtime_lib, ll_path);
+        if (run_cmd_capture((const char *const *)argv_probe_api, cfg->timeout_sec, NULL, NULL, &c_api_jit) != 0) {
+            ok = false;
+            free(argv_probe_api);
+            free(run_norm);
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            break;
+        }
+        free(argv_probe_api);
+
+        if (c_api_jit.rc < 0) {
+            row->api_jit_ok = false;
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            cmd_result_free(&c_api_jit);
+            free(run_norm);
+            ok = false;
+            break;
+        }
+        parse_timing(c_api_jit.err, &tim_api);
+        jit_norm = normalize_output(c_api_jit.out);
+        if (strcmp(jit_norm, run_norm) != 0 || c_api_jit.rc != c_run.rc) {
+            api_jit_match = false;
+        }
+
+        dbl_vec_push(&api_emit, c_emit.wall_ms);
+        dbl_vec_push(&api_wall, c_emit.wall_ms + c_api_jit.wall_ms);
+        if (tim_api.have) {
+            dbl_vec_push(&api_parse, tim_api.parse_us / 1000.0);
+            dbl_vec_push(&api_compile, tim_api.compile_us / 1000.0);
+            dbl_vec_push(&api_run, tim_api.run_us / 1000.0);
+            dbl_vec_push(&api_non_parse, (tim_api.compile_us + tim_api.run_us) / 1000.0);
+        }
+
+        argv_probe_llj = build_argv_probe(cfg->probe_runner, cfg->runtime_lib, ll_path);
+        if (run_cmd_capture((const char *const *)argv_probe_llj, cfg->timeout_sec, NULL, NULL, &c_ll_jit) != 0) {
+            ok = false;
+            free(argv_probe_llj);
+            free(run_norm);
+            free(jit_norm);
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            cmd_result_free(&c_api_jit);
+            break;
+        }
+        free(argv_probe_llj);
+
+        if (c_ll_jit.rc < 0) {
+            row->ll_jit_ok = false;
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            cmd_result_free(&c_api_jit);
+            cmd_result_free(&c_ll_jit);
+            free(run_norm);
+            free(jit_norm);
+            ok = false;
+            break;
+        }
+
+        parse_timing(c_ll_jit.err, &tim_llj);
+        llj_norm = normalize_output(c_ll_jit.out);
+        if (strcmp(llj_norm, run_norm) != 0 || c_ll_jit.rc != c_run.rc) {
+            ll_jit_match = false;
+        }
+
+        dbl_vec_push(&llj_wall, c_ll_jit.wall_ms);
+        if (tim_llj.have) {
+            dbl_vec_push(&llj_parse, tim_llj.parse_us / 1000.0);
+            dbl_vec_push(&llj_compile, tim_llj.compile_us / 1000.0);
+            dbl_vec_push(&llj_run, tim_llj.run_us / 1000.0);
+            dbl_vec_push(&llj_non_parse, (tim_llj.compile_us + tim_llj.run_us) / 1000.0);
+        }
+
+        argv_lli = build_argv_lli(cfg->lli, cfg->runtime_lib, ll_path);
+        runtime_dir = dirname_copy(cfg->runtime_lib);
+        if (run_cmd_capture((const char *const *)argv_lli, cfg->timeout_sec, NULL, runtime_dir, &c_lli) != 0) {
+            ok = false;
+            free(runtime_dir);
+            free(argv_lli);
+            free(run_norm);
+            free(jit_norm);
+            free(llj_norm);
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            cmd_result_free(&c_api_jit);
+            cmd_result_free(&c_ll_jit);
+            break;
+        }
+        free(runtime_dir);
+        free(argv_lli);
+
+        if (c_lli.rc < 0) {
+            row->ll_lli_ok = false;
+            cmd_result_free(&c_compile);
+            cmd_result_free(&c_run);
+            cmd_result_free(&c_emit);
+            cmd_result_free(&c_api_jit);
+            cmd_result_free(&c_ll_jit);
+            cmd_result_free(&c_lli);
+            free(run_norm);
+            free(jit_norm);
+            free(llj_norm);
+            ok = false;
+            break;
+        }
+
+        lli_norm = normalize_output(c_lli.out);
+        if (strcmp(lli_norm, run_norm) != 0 || c_lli.rc != c_run.rc) {
+            ll_lli_match = false;
+        }
+        dbl_vec_push(&lli_wall, c_lli.wall_ms);
+
+        cmd_result_free(&c_compile);
+        cmd_result_free(&c_run);
+        cmd_result_free(&c_emit);
+        cmd_result_free(&c_api_jit);
+        cmd_result_free(&c_ll_jit);
+        cmd_result_free(&c_lli);
+
+        free(run_norm);
+        free(jit_norm);
+        free(llj_norm);
+        free(lli_norm);
+    }
+
+    if (!ok) {
+        free(ref_norm);
+        dbl_vec_free(&exe_compile);
+        dbl_vec_free(&exe_run);
+        dbl_vec_free(&exe_wall);
+        dbl_vec_free(&exe_non_parse);
+        dbl_vec_free(&api_emit);
+        dbl_vec_free(&api_wall);
+        dbl_vec_free(&api_parse);
+        dbl_vec_free(&api_compile);
+        dbl_vec_free(&api_run);
+        dbl_vec_free(&api_non_parse);
+        dbl_vec_free(&llj_wall);
+        dbl_vec_free(&llj_parse);
+        dbl_vec_free(&llj_compile);
+        dbl_vec_free(&llj_run);
+        dbl_vec_free(&llj_non_parse);
+        dbl_vec_free(&lli_wall);
+        row->api_jit_match = false;
+        row->ll_jit_match = false;
+        row->ll_lli_match = false;
+        return false;
+    }
+
+    row->api_jit_match = row->api_jit_ok && api_jit_match;
+    row->ll_jit_match = row->ll_jit_ok && ll_jit_match;
+    row->ll_lli_match = row->ll_lli_ok && ll_lli_match;
+
+    row->api_exe_compile_ms = median_of_vec(&exe_compile);
+    row->api_exe_run_ms = median_of_vec(&exe_run);
+    row->api_exe_wall_ms = median_of_vec(&exe_wall);
+    row->api_exe_non_parse_ms = median_of_vec(&exe_non_parse);
+
+    row->api_jit_emit_ms = median_of_vec(&api_emit);
+    row->api_jit_wall_ms = median_of_vec(&api_wall);
+    row->api_jit_parse_ms = median_of_vec(&api_parse);
+    row->api_jit_compile_ms = median_of_vec(&api_compile);
+    row->api_jit_run_ms = median_of_vec(&api_run);
+    row->api_jit_non_parse_ms = median_of_vec(&api_non_parse);
+
+    row->ll_jit_wall_ms = median_of_vec(&llj_wall);
+    row->ll_jit_parse_ms = median_of_vec(&llj_parse);
+    row->ll_jit_compile_ms = median_of_vec(&llj_compile);
+    row->ll_jit_run_ms = median_of_vec(&llj_run);
+    row->ll_jit_non_parse_ms = median_of_vec(&llj_non_parse);
+
+    row->ll_lli_wall_ms = median_of_vec(&lli_wall);
+
+    free(ref_norm);
+    dbl_vec_free(&exe_compile);
+    dbl_vec_free(&exe_run);
+    dbl_vec_free(&exe_wall);
+    dbl_vec_free(&exe_non_parse);
+    dbl_vec_free(&api_emit);
+    dbl_vec_free(&api_wall);
+    dbl_vec_free(&api_parse);
+    dbl_vec_free(&api_compile);
+    dbl_vec_free(&api_run);
+    dbl_vec_free(&api_non_parse);
+    dbl_vec_free(&llj_wall);
+    dbl_vec_free(&llj_parse);
+    dbl_vec_free(&llj_compile);
+    dbl_vec_free(&llj_run);
+    dbl_vec_free(&llj_non_parse);
+    dbl_vec_free(&lli_wall);
+
+    return true;
+}
+
+static void json_escape(FILE *f, const char *s) {
+    while (*s) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '"' || c == '\\') {
+            fputc('\\', f);
+            fputc(c, f);
+        } else if (c == '\n') {
+            fputs("\\n", f);
+        } else if (c == '\r') {
+            fputs("\\r", f);
+        } else if (c == '\t') {
+            fputs("\\t", f);
+        } else if (c < 0x20) {
+            fprintf(f, "\\u%04x", (unsigned)c);
+        } else {
+            fputc(c, f);
+        }
+        s++;
+    }
+}
+
+static void write_row_json(FILE *f, const bench_row_t *r) {
+    fprintf(f, "{\"name\":\"");
+    json_escape(f, r->name);
+    fprintf(f, "\"");
+
+    fprintf(f, ",\"api_exe_ok\":%s", r->api_exe_ok ? "true" : "false");
+    fprintf(f, ",\"api_jit_ok\":%s", r->api_jit_ok ? "true" : "false");
+    fprintf(f, ",\"ll_jit_ok\":%s", r->ll_jit_ok ? "true" : "false");
+    fprintf(f, ",\"ll_lli_ok\":%s", r->ll_lli_ok ? "true" : "false");
+    fprintf(f, ",\"api_jit_match\":%s", r->api_jit_match ? "true" : "false");
+    fprintf(f, ",\"ll_jit_match\":%s", r->ll_jit_match ? "true" : "false");
+    fprintf(f, ",\"ll_lli_match\":%s", r->ll_lli_match ? "true" : "false");
+
+    fprintf(f, ",\"api_exe_compile_ms\":%.6f", r->api_exe_compile_ms);
+    fprintf(f, ",\"api_exe_run_ms\":%.6f", r->api_exe_run_ms);
+    fprintf(f, ",\"api_exe_wall_ms\":%.6f", r->api_exe_wall_ms);
+    fprintf(f, ",\"api_exe_non_parse_ms\":%.6f", r->api_exe_non_parse_ms);
+
+    fprintf(f, ",\"api_jit_emit_ms\":%.6f", r->api_jit_emit_ms);
+    fprintf(f, ",\"api_jit_wall_ms\":%.6f", r->api_jit_wall_ms);
+    fprintf(f, ",\"api_jit_parse_ms\":%.6f", r->api_jit_parse_ms);
+    fprintf(f, ",\"api_jit_compile_ms\":%.6f", r->api_jit_compile_ms);
+    fprintf(f, ",\"api_jit_run_ms\":%.6f", r->api_jit_run_ms);
+    fprintf(f, ",\"api_jit_non_parse_ms\":%.6f", r->api_jit_non_parse_ms);
+
+    fprintf(f, ",\"ll_jit_wall_ms\":%.6f", r->ll_jit_wall_ms);
+    fprintf(f, ",\"ll_jit_parse_ms\":%.6f", r->ll_jit_parse_ms);
+    fprintf(f, ",\"ll_jit_compile_ms\":%.6f", r->ll_jit_compile_ms);
+    fprintf(f, ",\"ll_jit_run_ms\":%.6f", r->ll_jit_run_ms);
+    fprintf(f, ",\"ll_jit_non_parse_ms\":%.6f", r->ll_jit_non_parse_ms);
+
+    fprintf(f, ",\"ll_lli_wall_ms\":%.6f", r->ll_lli_wall_ms);
+    fprintf(f, "}\n");
+}
+
+static void parse_args(int argc, char **argv, cfg_t *cfg) {
     int i;
-    const char *default_lfortran_llvm = "../lfortran/build/src/bin/lfortran";
-    const char *default_lfortran_liric_hyphen = "../lfortran/build-liric/src/bin/lfortran";
-    const char *default_lfortran_liric_underscore = "../lfortran/build_liric/src/bin/lfortran";
-    const char *default_lfortran_build_liric_hyphen = "../lfortran/build-liric";
-    const char *default_lfortran_build_liric_underscore = "../lfortran/build_liric";
-    const char *default_runtime_dylib =
-        "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
-    const char *default_runtime_so =
-        "../lfortran/build/src/runtime/liblfortran_runtime.so";
-
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.bench_dir = "/tmp/liric_bench";
-    cfg.build_dir = "build";
-    cfg.manifest = "tools/bench_manifest.json";
-    cfg.iters = 1;
-    cfg.api_cases = 100;
-    cfg.timeout_sec = 15;
-    cfg.timeout_ms = 3000;
-    cfg.run_compat_check = 1;
-    cfg.allow_partial = 0;
-    cfg.bench_compat_check = NULL;
-    cfg.bench_corpus_compare = NULL;
-    cfg.bench_api = NULL;
-    cfg.bench_tcc = NULL;
-    cfg.probe_runner = NULL;
-    cfg.lli_phases = NULL;
-    cfg.cmake = "cmake";
-    cfg.rebuild_lfortran = 1;
-    cfg.lfortran = file_exists(default_lfortran_llvm) ? default_lfortran_llvm : NULL;
-    cfg.lfortran_liric = file_exists(default_lfortran_liric_hyphen)
-                             ? default_lfortran_liric_hyphen
-                             : (file_exists(default_lfortran_liric_underscore)
-                                    ? default_lfortran_liric_underscore
-                                    : NULL);
-    cfg.lfortran_build_dir = "../lfortran/build";
-    cfg.lfortran_liric_build_dir = dir_exists(default_lfortran_build_liric_hyphen)
-                                       ? default_lfortran_build_liric_hyphen
-                                       : (dir_exists(default_lfortran_build_liric_underscore)
-                                              ? default_lfortran_build_liric_underscore
-                                              : NULL);
-    cfg.runtime_lib = file_exists(default_runtime_dylib)
-                          ? default_runtime_dylib
-                          : (file_exists(default_runtime_so)
-                                 ? default_runtime_so
-                                 : NULL);
-
-    set_all_modes(&cfg, 1);
-    set_all_policies(&cfg, 1);
-    set_all_lanes(&cfg, 1);
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->iters = 3;
+    cfg->timeout_sec = 15;
+    cfg->limit = 0;
+    cfg->bench_dir = "/tmp/liric_bench";
+    cfg->integration_cmake = "../lfortran/integration_tests/CMakeLists.txt";
+    cfg->integration_dir = NULL;
+    cfg->lfortran = "../lfortran/build/src/bin/lfortran";
+    cfg->probe_runner = "build/liric_probe_runner";
+    cfg->runtime_lib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+    cfg->lli = "/opt/homebrew/opt/llvm/bin/lli";
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            usage();
-            exit(0);
-        } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
-            cfg.bench_dir = argv[++i];
-        } else if (strcmp(argv[i], "--build-dir") == 0 && i + 1 < argc) {
-            cfg.build_dir = argv[++i];
-        } else if (strcmp(argv[i], "--manifest") == 0 && i + 1 < argc) {
-            cfg.manifest = argv[++i];
-        } else if (strcmp(argv[i], "--modes") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            if (strcmp(v, "all") == 0)
-                set_all_modes(&cfg, 1);
-            else if (bench_parse_modes_csv(v, cfg.modes, MODE_COUNT) != 0)
-                die("invalid --modes value: %s", v);
-        } else if (strcmp(argv[i], "--policies") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            if (strcmp(v, "all") == 0)
-                set_all_policies(&cfg, 1);
-            else if (parse_policies(&cfg, v) != 0)
-                die("invalid --policies value: %s", v);
-        } else if (strcmp(argv[i], "--lanes") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            if (strcmp(v, "all") == 0)
-                set_all_lanes(&cfg, 1);
-            else if (parse_lanes(&cfg, v) != 0)
-                die("invalid --lanes value: %s", v);
-        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            cfg.iters = atoi(argv[++i]);
-            if (cfg.iters <= 0)
-                cfg.iters = 1;
-        } else if (strcmp(argv[i], "--api-cases") == 0 && i + 1 < argc) {
-            cfg.api_cases = atoi(argv[++i]);
-            if (cfg.api_cases < 0)
-                cfg.api_cases = 0;
+        if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
+            cfg->iters = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
-            cfg.timeout_sec = atoi(argv[++i]);
-            if (cfg.timeout_sec <= 0)
-                cfg.timeout_sec = 15;
-        } else if (strcmp(argv[i], "--timeout-ms") == 0 && i + 1 < argc) {
-            cfg.timeout_ms = atoi(argv[++i]);
-            if (cfg.timeout_ms <= 0)
-                cfg.timeout_ms = 3000;
-        } else if (strcmp(argv[i], "--skip-compat-check") == 0) {
-            cfg.run_compat_check = 0;
-        } else if (strcmp(argv[i], "--allow-partial") == 0) {
-            cfg.allow_partial = 1;
-        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
-            cfg.runtime_lib = argv[++i];
-        } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
-            cfg.corpus = argv[++i];
-        } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
-            cfg.cache_dir = argv[++i];
+            cfg->timeout_sec = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--limit") == 0 && i + 1 < argc) {
+            cfg->limit = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
+            cfg->bench_dir = argv[++i];
+        } else if (strcmp(argv[i], "--integration-cmake") == 0 && i + 1 < argc) {
+            cfg->integration_cmake = argv[++i];
+        } else if (strcmp(argv[i], "--integration-dir") == 0 && i + 1 < argc) {
+            cfg->integration_dir = argv[++i];
         } else if (strcmp(argv[i], "--lfortran") == 0 && i + 1 < argc) {
-            cfg.lfortran = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-liric") == 0 && i + 1 < argc) {
-            cfg.lfortran_liric = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-build-dir") == 0 && i + 1 < argc) {
-            cfg.lfortran_build_dir = argv[++i];
-        } else if (strcmp(argv[i], "--lfortran-liric-build-dir") == 0 && i + 1 < argc) {
-            cfg.lfortran_liric_build_dir = argv[++i];
-        } else if (strcmp(argv[i], "--cmake") == 0 && i + 1 < argc) {
-            cfg.cmake = argv[++i];
-        } else if (strcmp(argv[i], "--skip-lfortran-rebuild") == 0) {
-            cfg.rebuild_lfortran = 0;
-        } else if (strcmp(argv[i], "--rebuild-lfortran") == 0) {
-            cfg.rebuild_lfortran = 1;
-        } else if (strcmp(argv[i], "--test-dir") == 0 && i + 1 < argc) {
-            cfg.test_dir = argv[++i];
-        } else if (strcmp(argv[i], "--bench-compat-check") == 0 && i + 1 < argc) {
-            cfg.bench_compat_check = argv[++i];
-        } else if (strcmp(argv[i], "--bench-corpus-compare") == 0 && i + 1 < argc) {
-            cfg.bench_corpus_compare = argv[++i];
-        } else if (strcmp(argv[i], "--bench-api") == 0 && i + 1 < argc) {
-            cfg.bench_api = argv[++i];
-        } else if (strcmp(argv[i], "--bench-tcc") == 0 && i + 1 < argc) {
-            cfg.bench_tcc = argv[++i];
+            cfg->lfortran = argv[++i];
         } else if (strcmp(argv[i], "--probe-runner") == 0 && i + 1 < argc) {
-            cfg.probe_runner = argv[++i];
-        } else if (strcmp(argv[i], "--lli-phases") == 0 && i + 1 < argc) {
-            cfg.lli_phases = argv[++i];
+            cfg->probe_runner = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
+            cfg->runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--lli") == 0 && i + 1 < argc) {
+            cfg->lli = argv[++i];
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: bench_matrix [options]\n");
+            printf("  --iters N\n");
+            printf("  --timeout SEC\n");
+            printf("  --limit N\n");
+            printf("  --bench-dir PATH\n");
+            printf("  --integration-cmake PATH\n");
+            printf("  --integration-dir PATH\n");
+            printf("  --lfortran PATH\n");
+            printf("  --probe-runner PATH\n");
+            printf("  --runtime-lib PATH\n");
+            printf("  --lli PATH\n");
+            exit(0);
         } else {
-            die("unknown argument: %s", argv[i]);
+            die("unknown arg: %s", argv[i]);
         }
     }
 
-    if (!cfg.bench_compat_check)
-        cfg.bench_compat_check = bench_path_join2(cfg.build_dir, "bench_compat_check");
-    if (!cfg.bench_corpus_compare)
-        cfg.bench_corpus_compare = bench_path_join2(cfg.build_dir, "bench_lane_ir");
-    if (!cfg.bench_api)
-        cfg.bench_api = bench_path_join2(cfg.build_dir, "bench_lane_api");
-    if (!cfg.bench_tcc)
-        cfg.bench_tcc = bench_path_join2(cfg.build_dir, "bench_lane_micro");
-    if (!cfg.probe_runner)
-        cfg.probe_runner = bench_path_join2(cfg.build_dir, "liric_probe_runner");
-    if (!cfg.lli_phases)
-        cfg.lli_phases = bench_path_join2(cfg.build_dir, "bench_lli_phases");
+    if (cfg->iters <= 0) die("--iters must be > 0");
+    if (cfg->timeout_sec <= 0) die("--timeout must be > 0");
 
-    return cfg;
-}
-
-static int require_lane_selected(const cfg_t *cfg) {
-    for (int i = 0; i < LANE_COUNT; i++) {
-        if (cfg->lanes[i])
-            return 1;
+    if (!cfg->integration_dir) {
+        static char *auto_dir = NULL;
+        auto_dir = dirname_copy(cfg->integration_cmake);
+        cfg->integration_dir = auto_dir;
     }
-    return 0;
-}
 
-static int require_mode_selected(const cfg_t *cfg) {
-    for (int i = 0; i < MODE_COUNT; i++) {
-        if (cfg->modes[i])
-            return 1;
-    }
-    return 0;
-}
-
-static int require_policy_selected(const cfg_t *cfg) {
-    for (int i = 0; i < POLICY_COUNT; i++) {
-        if (cfg->policies[i])
-            return 1;
-    }
-    return 0;
-}
-
-static void write_failure_row(FILE *ff,
-                              const char *lane,
-                              const char *mode,
-                              const char *policy,
-                              const char *baseline,
-                              const char *reason,
-                              int rc,
-                              const char *summary_path) {
-    char *e_lane = json_escape(lane);
-    char *e_mode = json_escape(mode);
-    char *e_policy = json_escape(policy);
-    char *e_base = json_escape(baseline);
-    char *e_reason = json_escape(reason ? reason : "unknown");
-    char *e_summary = json_escape(summary_path ? summary_path : "");
-
-    fprintf(ff,
-            "{\"lane\":\"%s\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"%s\","
-            "\"reason\":\"%s\",\"rc\":%d,\"summary\":\"%s\"}\n",
-            e_lane,
-            e_mode,
-            e_policy,
-            e_base,
-            e_reason,
-            rc,
-            e_summary);
-
-    free(e_lane);
-    free(e_mode);
-    free(e_policy);
-    free(e_base);
-    free(e_reason);
-    free(e_summary);
-}
-
-static void write_row_ir(FILE *rf,
-                         const char *mode,
-                         const char *policy,
-                         const char *summary_path,
-                         const char *status,
-                         long long attempted,
-                         long long completed,
-                         double sp_nonparse,
-                         double sp_total) {
-    char *e_summary = json_escape(summary_path);
-    fprintf(rf,
-            "{\"lane\":\"ir_file\",\"track\":\"corpus_canonical\","
-            "\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"llvm\",\"status\":\"%s\","
-            "\"attempted\":%lld,\"completed\":%lld,"
-            "\"speedup_nonparse_median\":%.6f,\"speedup_total_median\":%.6f,"
-            "\"summary\":\"%s\"}\n",
-            mode,
-            policy,
-            status,
-            attempted,
-            completed,
-            sp_nonparse,
-            sp_total,
-            e_summary);
-    free(e_summary);
-}
-
-static void write_row_api(FILE *rf,
-                          const char *mode,
-                          const char *policy,
-                          const char *summary_path,
-                          const char *status,
-                          long long attempted,
-                          long long completed,
-                          long long skipped,
-                          int zero_skip_met) {
-    char *e_summary = json_escape(summary_path);
-    fprintf(rf,
-            "{\"lane\":\"api_e2e\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"lfortran_llvm\","
-            "\"status\":\"%s\",\"attempted\":%lld,\"completed\":%lld,\"skipped\":%lld,"
-            "\"zero_skip_gate_met\":%s,\"summary\":\"%s\"}\n",
-            mode,
-            policy,
-            status,
-            attempted,
-            completed,
-            skipped,
-            zero_skip_met ? "true" : "false",
-            e_summary);
-    free(e_summary);
-}
-
-static void write_row_tcc(FILE *rf,
-                          const char *mode,
-                          const char *policy,
-                          const char *summary_path,
-                          const char *status,
-                          long long total_cases,
-                          long long wall_passed,
-                          long long inproc_passed,
-                          double wall_ratio,
-                          double inproc_ratio) {
-    char *e_summary = json_escape(summary_path);
-    fprintf(rf,
-            "{\"lane\":\"micro_c\",\"mode\":\"%s\",\"policy\":\"%s\",\"baseline\":\"tcc\","
-            "\"status\":\"%s\",\"total_cases\":%lld,\"wall_passed\":%lld,"
-            "\"inproc_passed\":%lld,\"speedup_wall_total\":%.6f,"
-            "\"speedup_nonparse_total\":%.6f,\"summary\":\"%s\"}\n",
-            mode,
-            policy,
-            status,
-            total_cases,
-            wall_passed,
-            inproc_passed,
-            wall_ratio,
-            inproc_ratio,
-            e_summary);
-    free(e_summary);
-}
-
-static long long count_lines_file(const char *path) {
-    FILE *f;
-    int c;
-    long long lines = 0;
-    int saw_data = 0;
-
-    if (!path) return 0;
-    f = fopen(path, "rb");
-    if (!f) return 0;
-    while ((c = fgetc(f)) != EOF) {
-        if (c == '\n') {
-            if (saw_data) lines++;
-            saw_data = 0;
-        } else if (!isspace((unsigned char)c)) {
-            saw_data = 1;
+    if (!file_exists(cfg->runtime_lib)) {
+        if (has_suffix(cfg->runtime_lib, ".dylib")) {
+            static char alt_runtime[PATH_MAX_LOCAL];
+            size_t n = strlen(cfg->runtime_lib);
+            if (n >= 6 && n + 1 < sizeof(alt_runtime)) {
+                snprintf(alt_runtime, sizeof(alt_runtime), "%.*s.so", (int)(n - 6), cfg->runtime_lib);
+                if (file_exists(alt_runtime)) cfg->runtime_lib = alt_runtime;
+            }
         }
     }
-    if (saw_data) lines++;
+
+    if (!file_exists(cfg->lli)) {
+        cfg->lli = "lli";
+    }
+
+    if (!file_exists(cfg->lfortran)) die("lfortran not found: %s", cfg->lfortran);
+    if (!file_exists(cfg->probe_runner)) die("probe runner not found: %s", cfg->probe_runner);
+    if (!file_exists(cfg->runtime_lib)) die("runtime lib not found: %s", cfg->runtime_lib);
+    if (!file_exists(cfg->integration_cmake)) die("integration CMakeLists not found: %s", cfg->integration_cmake);
+}
+
+static void print_lane_summary(const char *name,
+                               const dbl_vec_t *wall,
+                               const dbl_vec_t *compile,
+                               const dbl_vec_t *run,
+                               const dbl_vec_t *parse,
+                               const dbl_vec_t *non_parse) {
+    printf("  %-10s wall=%8.3fms", name, median_of_vec(wall));
+    if (compile && compile->count) printf(" compile=%8.3fms", median_of_vec(compile));
+    else printf(" compile=%8s", "n/a");
+    if (run && run->count) printf(" run=%8.3fms", median_of_vec(run));
+    else printf(" run=%8s", "n/a");
+    if (parse && parse->count) printf(" parse=%8.3fms", median_of_vec(parse));
+    else printf(" parse=%8s", "n/a");
+    if (non_parse && non_parse->count) printf(" non_parse=%8.3fms", median_of_vec(non_parse));
+    else printf(" non_parse=%8s", "n/a");
+    printf("\n");
+}
+
+static void write_summary_md(const char *path,
+                             const cfg_t *cfg,
+                             const row_vec_t *rows,
+                             const dbl_vec_t *api_exe_wall,
+                             const dbl_vec_t *api_exe_compile,
+                             const dbl_vec_t *api_exe_run,
+                             const dbl_vec_t *api_exe_non_parse,
+                             const dbl_vec_t *api_jit_wall,
+                             const dbl_vec_t *api_jit_compile,
+                             const dbl_vec_t *api_jit_run,
+                             const dbl_vec_t *api_jit_parse,
+                             const dbl_vec_t *api_jit_non_parse,
+                             const dbl_vec_t *ll_jit_wall,
+                             const dbl_vec_t *ll_jit_compile,
+                             const dbl_vec_t *ll_jit_run,
+                             const dbl_vec_t *ll_jit_parse,
+                             const dbl_vec_t *ll_jit_non_parse,
+                             const dbl_vec_t *ll_lli_wall,
+                             const dbl_vec_t *api_cmp_exe_wall,
+                             const dbl_vec_t *api_cmp_jit_wall,
+                             const dbl_vec_t *api_cmp_exe_non_parse,
+                             const dbl_vec_t *api_cmp_jit_non_parse,
+                             const dbl_vec_t *ll_cmp_lli_wall,
+                             const dbl_vec_t *ll_cmp_jit_wall) {
+    FILE *f = fopen(path, "wb");
+    if (!f) die("failed to write summary: %s", path);
+
+    fprintf(f, "# Benchmark Matrix\n\n");
+    fprintf(f, "- Iterations: %d\n", cfg->iters);
+    fprintf(f, "- Timeout: %d sec\n", cfg->timeout_sec);
+    fprintf(f, "- Tests processed: %zu\n\n", rows->count);
+
+    fprintf(f, "## Lane/Mode Matrix\n\n");
+    fprintf(f, "| Lane | Source | Engine | wall | compile_only | run_only | parse_only | non_parse |\n");
+    fprintf(f, "|------|--------|--------|------|--------------|----------|------------|-----------|\n");
+    fprintf(f, "| api_exe | .f90 | lfortran native exe | yes | yes | yes | no | yes (=compile+run) |\n");
+    fprintf(f, "| api_jit | .f90 -> .ll | liric JIT | yes | yes | yes | yes | yes (=compile+run) |\n");
+    fprintf(f, "| ll_jit | .ll | liric JIT | yes | yes | yes | yes | yes (=compile+run) |\n");
+    fprintf(f, "| ll_lli | .ll | lli -O0 | yes | no | no | no | no |\n\n");
+
+    fprintf(f, "## Lane Medians (ms)\n\n");
+    fprintf(f, "| Lane | wall | compile_only | run_only | parse_only | non_parse |\n");
+    fprintf(f, "|------|-----:|-------------:|---------:|-----------:|----------:|\n");
+    fprintf(f, "| api_exe | %.3f | %.3f | %.3f | n/a | %.3f |\n",
+            median_of_vec(api_exe_wall), median_of_vec(api_exe_compile),
+            median_of_vec(api_exe_run), median_of_vec(api_exe_non_parse));
+    fprintf(f, "| api_jit | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+            median_of_vec(api_jit_wall), median_of_vec(api_jit_compile),
+            median_of_vec(api_jit_run), median_of_vec(api_jit_parse),
+            median_of_vec(api_jit_non_parse));
+    fprintf(f, "| ll_jit | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+            median_of_vec(ll_jit_wall), median_of_vec(ll_jit_compile),
+            median_of_vec(ll_jit_run), median_of_vec(ll_jit_parse),
+            median_of_vec(ll_jit_non_parse));
+    fprintf(f, "| ll_lli | %.3f | n/a | n/a | n/a | n/a |\n\n",
+            median_of_vec(ll_lli_wall));
+
+    fprintf(f, "## Comparison Lanes\n\n");
+    if (api_cmp_exe_wall->count && api_cmp_jit_wall->count) {
+        double s_wall = median_of_vec(api_cmp_exe_wall) / median_of_vec(api_cmp_jit_wall);
+        double s_np = median_of_vec(api_cmp_exe_non_parse) / median_of_vec(api_cmp_jit_non_parse);
+        fprintf(f, "- api_e2e wall speedup (exe/jit): %.3fx\n", s_wall);
+        fprintf(f, "- api_non_parse speedup (exe non_parse / jit non_parse): %.3fx\n", s_np);
+    } else {
+        fprintf(f, "- api_e2e: n/a (no matched tests)\n");
+    }
+
+    if (ll_cmp_lli_wall->count && ll_cmp_jit_wall->count) {
+        double s_ll = median_of_vec(ll_cmp_lli_wall) / median_of_vec(ll_cmp_jit_wall);
+        fprintf(f, "- ll_e2e wall speedup (lli/jit): %.3fx\n", s_ll);
+    } else {
+        fprintf(f, "- ll_e2e: n/a (no matched tests)\n");
+    }
+
+    fprintf(f, "\n## Compatibility Counts\n\n");
+    {
+        size_t i;
+        size_t api_match = 0, ll_match = 0;
+        for (i = 0; i < rows->count; i++) {
+            const bench_row_t *r = &rows->items[i];
+            if (r->api_exe_ok && r->api_jit_ok && r->api_jit_match) api_match++;
+            if (r->api_exe_ok && r->ll_jit_ok && r->ll_jit_match && r->ll_lli_ok && r->ll_lli_match) ll_match++;
+        }
+        fprintf(f, "- api matched tests: %zu\n", api_match);
+        fprintf(f, "- ll matched tests: %zu\n", ll_match);
+    }
+
     fclose(f);
-    return lines;
-}
-
-static void write_row_compat(FILE *rf,
-                             const char *status,
-                             long long compat_api_n,
-                             long long compat_ll_n,
-                             const char *bench_dir) {
-    char *e_bench_dir = json_escape(bench_dir ? bench_dir : "");
-    fprintf(rf,
-            "{\"lane\":\"compat_check\",\"mode\":\"all\",\"policy\":\"all\",\"baseline\":\"lfortran_llvm\","
-            "\"status\":\"%s\",\"compat_api_count\":%lld,\"compat_ll_count\":%lld,"
-            "\"summary\":\"%s\"}\n",
-            status,
-            compat_api_n,
-            compat_ll_n,
-            e_bench_dir);
-    free(e_bench_dir);
 }
 
 int main(int argc, char **argv) {
-    cfg_t cfg = parse_args(argc, argv);
-    FILE *rows = NULL;
-    FILE *fails = NULL;
-    char *rows_path = NULL;
-    char *fails_path = NULL;
-    char *summary_path = NULL;
-    char *compat_ll = NULL;
-    char *compat_api = NULL;
-    char *compat_opts = NULL;
+    cfg_t cfg;
+    test_vec_t tests = {0};
+    row_vec_t rows = {0};
+    char ll_dir[PATH_MAX_LOCAL];
+    char bin_dir[PATH_MAX_LOCAL];
+    char rows_jsonl[PATH_MAX_LOCAL];
+    char compat_api[PATH_MAX_LOCAL];
+    char compat_ll[PATH_MAX_LOCAL];
+    char summary_md[PATH_MAX_LOCAL];
+    FILE *jf;
+    FILE *fa;
+    FILE *fl;
+    size_t i;
 
-    int cells_attempted = 0;
-    int cells_ok = 0;
-    int cells_failed = 0;
-    int compat_ok = 1;
-    int ran_compat = 0;
+    dbl_vec_t api_exe_wall = {0}, api_exe_compile = {0}, api_exe_run = {0}, api_exe_non_parse = {0};
+    dbl_vec_t api_jit_wall = {0}, api_jit_compile = {0}, api_jit_run = {0}, api_jit_parse = {0}, api_jit_non_parse = {0};
+    dbl_vec_t ll_jit_wall = {0}, ll_jit_compile = {0}, ll_jit_run = {0}, ll_jit_parse = {0}, ll_jit_non_parse = {0};
+    dbl_vec_t ll_lli_wall = {0};
 
-    if (!require_lane_selected(&cfg))
-        die("no lanes selected");
-    if (!require_mode_selected(&cfg))
-        die("no modes selected");
-    if (!require_policy_selected(&cfg))
-        die("no policies selected");
+    dbl_vec_t api_cmp_exe_wall = {0}, api_cmp_jit_wall = {0};
+    dbl_vec_t api_cmp_exe_non_parse = {0}, api_cmp_jit_non_parse = {0};
+    dbl_vec_t ll_cmp_lli_wall = {0}, ll_cmp_jit_wall = {0};
 
-    if (cfg.manifest && !file_exists(cfg.manifest))
-        die("manifest missing: %s", cfg.manifest);
+    parse_args(argc, argv, &cfg);
 
-    if (mkdir_p(cfg.bench_dir) != 0)
-        die("failed to create bench dir: %s", cfg.bench_dir);
+    mkdir_p(cfg.bench_dir);
+    build_path(ll_dir, sizeof(ll_dir), cfg.bench_dir, "ll");
+    build_path(bin_dir, sizeof(bin_dir), cfg.bench_dir, "bin");
+    mkdir_p(ll_dir);
+    mkdir_p(bin_dir);
 
-    rows_path = bench_path_join2(cfg.bench_dir, "matrix_rows.jsonl");
-    fails_path = bench_path_join2(cfg.bench_dir, "matrix_failures.jsonl");
-    summary_path = bench_path_join2(cfg.bench_dir, "matrix_summary.json");
-    compat_ll = bench_path_join2(cfg.bench_dir, "compat_ll.txt");
-    compat_api = bench_path_join2(cfg.bench_dir, "compat_api.txt");
-    compat_opts = bench_path_join2(cfg.bench_dir, "compat_ll_options.jsonl");
+    collect_tests_from_cmake(cfg.integration_cmake, cfg.integration_dir, &tests);
+    if (cfg.limit > 0 && (size_t)cfg.limit < tests.count) {
+        tests.count = (size_t)cfg.limit;
+    }
 
-    rows = fopen(rows_path, "w");
-    if (!rows)
-        die("failed to open rows output: %s", rows_path);
-    fails = fopen(fails_path, "w");
-    if (!fails)
-        die("failed to open failures output: %s", fails_path);
+    if (tests.count == 0) {
+        die("no eligible tests found in %s", cfg.integration_cmake);
+    }
 
-    if (cfg.lanes[LANE_API_E2E]) {
-        if (!cfg.lfortran || !cfg.lfortran[0] || !file_exists(cfg.lfortran)) {
-            write_failure_row(fails,
-                              "api_e2e",
-                              "all",
-                              "all",
-                              "lfortran_llvm",
-                              "lfortran_binary_missing",
-                              127,
-                              cfg.lfortran ? cfg.lfortran : "");
-            compat_ok = 0;
+    printf("Benchmarking %zu tests, %d iterations each\n", tests.count, cfg.iters);
+
+    build_path(rows_jsonl, sizeof(rows_jsonl), cfg.bench_dir, "bench_matrix_rows.jsonl");
+    build_path(compat_api, sizeof(compat_api), cfg.bench_dir, "compat_api.txt");
+    build_path(compat_ll, sizeof(compat_ll), cfg.bench_dir, "compat_ll.txt");
+    build_path(summary_md, sizeof(summary_md), cfg.bench_dir, "summary.md");
+
+    jf = fopen(rows_jsonl, "wb");
+    if (!jf) die("failed to open rows jsonl");
+    fa = fopen(compat_api, "wb");
+    if (!fa) die("failed to open compat_api");
+    fl = fopen(compat_ll, "wb");
+    if (!fl) die("failed to open compat_ll");
+
+    for (i = 0; i < tests.count; i++) {
+        bench_row_t row;
+        bool ok = run_one_test(&cfg, &tests.items[i], ll_dir, bin_dir, &row);
+        row_vec_push(&rows, &row);
+        write_row_json(jf, &row);
+
+        if (ok && row.api_exe_ok) {
+            dbl_vec_push(&api_exe_wall, row.api_exe_wall_ms);
+            dbl_vec_push(&api_exe_compile, row.api_exe_compile_ms);
+            dbl_vec_push(&api_exe_run, row.api_exe_run_ms);
+            dbl_vec_push(&api_exe_non_parse, row.api_exe_non_parse_ms);
         }
-        if (!cfg.lfortran_liric || !cfg.lfortran_liric[0] || !file_exists(cfg.lfortran_liric)) {
-            write_failure_row(fails,
-                              "api_e2e",
-                              "all",
-                              "all",
-                              "lfortran_llvm",
-                              "lfortran_liric_binary_missing",
-                              127,
-                              cfg.lfortran_liric ? cfg.lfortran_liric : "");
-            compat_ok = 0;
+        if (ok && row.api_jit_ok) {
+            dbl_vec_push(&api_jit_wall, row.api_jit_wall_ms);
+            dbl_vec_push(&api_jit_compile, row.api_jit_compile_ms);
+            dbl_vec_push(&api_jit_run, row.api_jit_run_ms);
+            dbl_vec_push(&api_jit_parse, row.api_jit_parse_ms);
+            dbl_vec_push(&api_jit_non_parse, row.api_jit_non_parse_ms);
+        }
+        if (ok && row.ll_jit_ok) {
+            dbl_vec_push(&ll_jit_wall, row.ll_jit_wall_ms);
+            dbl_vec_push(&ll_jit_compile, row.ll_jit_compile_ms);
+            dbl_vec_push(&ll_jit_run, row.ll_jit_run_ms);
+            dbl_vec_push(&ll_jit_parse, row.ll_jit_parse_ms);
+            dbl_vec_push(&ll_jit_non_parse, row.ll_jit_non_parse_ms);
+        }
+        if (ok && row.ll_lli_ok) {
+            dbl_vec_push(&ll_lli_wall, row.ll_lli_wall_ms);
+        }
+
+        if (ok && row.api_exe_ok && row.api_jit_ok && row.api_jit_match) {
+            dbl_vec_push(&api_cmp_exe_wall, row.api_exe_wall_ms);
+            dbl_vec_push(&api_cmp_jit_wall, row.api_jit_wall_ms);
+            dbl_vec_push(&api_cmp_exe_non_parse, row.api_exe_non_parse_ms);
+            dbl_vec_push(&api_cmp_jit_non_parse, row.api_jit_non_parse_ms);
+            fprintf(fa, "%s\n", row.name);
+        }
+
+        if (ok && row.api_exe_ok && row.ll_jit_ok && row.ll_jit_match && row.ll_lli_ok && row.ll_lli_match) {
+            dbl_vec_push(&ll_cmp_lli_wall, row.ll_lli_wall_ms);
+            dbl_vec_push(&ll_cmp_jit_wall, row.ll_jit_wall_ms);
+            fprintf(fl, "%s\n", row.name);
+        }
+
+        if ((i + 1) % 25 == 0 || i + 1 == tests.count) {
+            printf("  %zu/%zu\n", i + 1, tests.count);
         }
     }
 
-    if (cfg.lanes[LANE_API_E2E] && cfg.rebuild_lfortran && compat_ok) {
-        if (run_lfortran_rebuild_step(&cfg,
-                                      fails,
-                                      cfg.lfortran_build_dir,
-                                      "lfortran_build_dir_missing",
-                                      "lfortran_llvm_rebuild_failed") != 0) {
-            compat_ok = 0;
-        }
-        if (cfg.lfortran_liric_build_dir &&
-            cfg.lfortran_liric_build_dir[0] &&
-            (!cfg.lfortran_build_dir ||
-             strcmp(cfg.lfortran_build_dir, cfg.lfortran_liric_build_dir) != 0)) {
-            if (run_lfortran_rebuild_step(&cfg,
-                                          fails,
-                                          cfg.lfortran_liric_build_dir,
-                                          "lfortran_liric_build_dir_missing",
-                                          "lfortran_liric_rebuild_failed") != 0) {
-                compat_ok = 0;
-            }
-        } else if ((!cfg.lfortran_liric_build_dir || !cfg.lfortran_liric_build_dir[0]) &&
-                   cfg.lfortran_liric &&
-                   cfg.lfortran &&
-                   strcmp(cfg.lfortran_liric, cfg.lfortran) != 0) {
-            write_failure_row(fails,
-                              "api_e2e",
-                              "all",
-                              "all",
-                              "lfortran_llvm",
-                              "lfortran_liric_build_dir_missing",
-                              2,
-                              "");
-            compat_ok = 0;
-        }
+    fclose(jf);
+    fclose(fa);
+    fclose(fl);
+
+    printf("\nLane medians:\n");
+    print_lane_summary("api_exe", &api_exe_wall, &api_exe_compile, &api_exe_run, NULL, &api_exe_non_parse);
+    print_lane_summary("api_jit", &api_jit_wall, &api_jit_compile, &api_jit_run, &api_jit_parse, &api_jit_non_parse);
+    print_lane_summary("ll_jit", &ll_jit_wall, &ll_jit_compile, &ll_jit_run, &ll_jit_parse, &ll_jit_non_parse);
+    print_lane_summary("ll_lli", &ll_lli_wall, NULL, NULL, NULL, NULL);
+
+    if (api_cmp_exe_wall.count && api_cmp_jit_wall.count) {
+        double api_wall_speedup = median_of_vec(&api_cmp_exe_wall) / median_of_vec(&api_cmp_jit_wall);
+        double api_np_speedup = median_of_vec(&api_cmp_exe_non_parse) / median_of_vec(&api_cmp_jit_non_parse);
+        printf("\napi_e2e wall speedup (exe/jit): %.3fx\n", api_wall_speedup);
+        printf("api_non_parse speedup (exe/jit): %.3fx\n", api_np_speedup);
+    } else {
+        printf("\napi_e2e: n/a (no matched tests)\n");
     }
 
-    if (cfg.lanes[LANE_API_E2E] && cfg.run_compat_check) {
-        cmd_result_t r = {0};
-        char timeout_buf[32];
-        char *cmd[24];
-        int n = 0;
-
-        if (!compat_ok) {
-            write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
-            ran_compat = 1;
-        } else if (!file_executable(cfg.bench_compat_check)) {
-            compat_ok = 0;
-            write_failure_row(fails,
-                              "api_e2e",
-                              "all",
-                              "all",
-                              "lfortran_llvm",
-                              "bench_compat_check_missing",
-                              127,
-                              cfg.bench_compat_check);
-        } else {
-            snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_sec);
-            cmd[n++] = (char *)cfg.bench_compat_check;
-            cmd[n++] = "--bench-dir";
-            cmd[n++] = (char *)cfg.bench_dir;
-            cmd[n++] = "--timeout";
-            cmd[n++] = timeout_buf;
-            if (cfg.runtime_lib) {
-                cmd[n++] = "--runtime-lib";
-                cmd[n++] = (char *)cfg.runtime_lib;
-            }
-            if (cfg.lfortran) {
-                cmd[n++] = "--lfortran";
-                cmd[n++] = (char *)cfg.lfortran;
-            }
-            cmd[n++] = NULL;
-
-            printf("[matrix] compat_check\n");
-            if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
-                compat_ok = 0;
-                write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
-                write_failure_row(fails,
-                                  "api_e2e",
-                                  "all",
-                                  "all",
-                                  "lfortran_llvm",
-                                  "bench_compat_check_failed",
-                                  r.rc,
-                                  cfg.bench_compat_check);
-            } else if (!file_exists(compat_ll) || !file_exists(compat_opts)) {
-                compat_ok = 0;
-                write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
-                write_failure_row(fails,
-                                  "api_e2e",
-                                  "all",
-                                  "all",
-                                  "lfortran_llvm",
-                                  "compat_artifacts_missing",
-                                  1,
-                                  cfg.bench_dir);
-            } else {
-                write_row_compat(rows,
-                                 "OK",
-                                 count_lines_file(compat_api),
-                                 count_lines_file(compat_ll),
-                                 cfg.bench_dir);
-            }
-            ran_compat = 1;
-        }
+    if (ll_cmp_lli_wall.count && ll_cmp_jit_wall.count) {
+        double ll_wall_speedup = median_of_vec(&ll_cmp_lli_wall) / median_of_vec(&ll_cmp_jit_wall);
+        printf("ll_e2e wall speedup (lli/jit): %.3fx\n", ll_wall_speedup);
+    } else {
+        printf("ll_e2e: n/a (no matched tests)\n");
     }
 
-    for (int mi = 0; mi < MODE_COUNT; mi++) {
-        const char *mode;
-        if (!cfg.modes[mi])
-            continue;
-        mode = k_mode_name[mi];
+    write_summary_md(summary_md, &cfg, &rows,
+                     &api_exe_wall, &api_exe_compile, &api_exe_run, &api_exe_non_parse,
+                     &api_jit_wall, &api_jit_compile, &api_jit_run, &api_jit_parse, &api_jit_non_parse,
+                     &ll_jit_wall, &ll_jit_compile, &ll_jit_run, &ll_jit_parse, &ll_jit_non_parse,
+                     &ll_lli_wall,
+                     &api_cmp_exe_wall, &api_cmp_jit_wall, &api_cmp_exe_non_parse, &api_cmp_jit_non_parse,
+                     &ll_cmp_lli_wall, &ll_cmp_jit_wall);
 
-        for (int pi = 0; pi < POLICY_COUNT; pi++) {
-            const char *policy;
-            if (!cfg.policies[pi])
-                continue;
-            policy = k_policy_name[pi];
+    printf("\nArtifacts:\n");
+    printf("  %s\n", rows_jsonl);
+    printf("  %s\n", compat_api);
+    printf("  %s\n", compat_ll);
+    printf("  %s\n", summary_md);
 
-            for (int li = 0; li < LANE_COUNT; li++) {
-                const char *lane;
-                char *mode_dir = NULL;
-                char *policy_dir = NULL;
-                char *lane_dir = NULL;
+    test_vec_free(&tests);
+    row_vec_free(&rows);
 
-                if (!cfg.lanes[li])
-                    continue;
-                lane = k_lane_name[li];
+    dbl_vec_free(&api_exe_wall);
+    dbl_vec_free(&api_exe_compile);
+    dbl_vec_free(&api_exe_run);
+    dbl_vec_free(&api_exe_non_parse);
+    dbl_vec_free(&api_jit_wall);
+    dbl_vec_free(&api_jit_compile);
+    dbl_vec_free(&api_jit_run);
+    dbl_vec_free(&api_jit_parse);
+    dbl_vec_free(&api_jit_non_parse);
+    dbl_vec_free(&ll_jit_wall);
+    dbl_vec_free(&ll_jit_compile);
+    dbl_vec_free(&ll_jit_run);
+    dbl_vec_free(&ll_jit_parse);
+    dbl_vec_free(&ll_jit_non_parse);
+    dbl_vec_free(&ll_lli_wall);
+    dbl_vec_free(&api_cmp_exe_wall);
+    dbl_vec_free(&api_cmp_jit_wall);
+    dbl_vec_free(&api_cmp_exe_non_parse);
+    dbl_vec_free(&api_cmp_jit_non_parse);
+    dbl_vec_free(&ll_cmp_lli_wall);
+    dbl_vec_free(&ll_cmp_jit_wall);
 
-                mode_dir = bench_path_join2(cfg.bench_dir, mode);
-                policy_dir = bench_path_join2(mode_dir, policy);
-                lane_dir = bench_path_join2(policy_dir, lane);
-                if (mkdir_p(lane_dir) != 0)
-                    die("failed to create lane dir: %s", lane_dir);
-
-                cells_attempted++;
-                printf("[matrix] mode=%s policy=%s lane=%s\n", mode, policy, lane);
-
-                if (li == LANE_IR_FILE) {
-                    cmd_result_t r = {0};
-                    char iters_buf[32], timeout_buf[32];
-                    char *sum_path = bench_path_join2(lane_dir, "bench_corpus_compare_summary.json");
-                    char *cmd[44];
-                    int n = 0;
-                    char status[64] = "UNKNOWN";
-                    long long attempted = 0, completed = 0;
-                    double sp_nonparse = 0.0, sp_total = 0.0;
-                    int ok = 0;
-
-                    if (!file_executable(cfg.bench_corpus_compare)) {
-                        write_failure_row(fails, lane, mode, policy, "llvm", "bench_corpus_compare_missing", 127, cfg.bench_corpus_compare);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-                    if (!file_executable(cfg.probe_runner)) {
-                        write_failure_row(fails, lane, mode, policy, "llvm", "liric_probe_runner_missing", 127, cfg.probe_runner);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-                    if (!file_executable(cfg.lli_phases)) {
-                        write_failure_row(fails, lane, mode, policy, "llvm", "bench_lli_phases_missing", 127, cfg.lli_phases);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
-                    snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_sec);
-
-                    cmd[n++] = (char *)cfg.bench_corpus_compare;
-                    cmd[n++] = "--bench-dir";
-                    cmd[n++] = lane_dir;
-                    cmd[n++] = "--iters";
-                    cmd[n++] = iters_buf;
-                    cmd[n++] = "--timeout";
-                    cmd[n++] = timeout_buf;
-                    cmd[n++] = "--policy";
-                    cmd[n++] = (char *)policy;
-                    cmd[n++] = "--probe-runner";
-                    cmd[n++] = (char *)cfg.probe_runner;
-                    cmd[n++] = "--lli-phases";
-                    cmd[n++] = (char *)cfg.lli_phases;
-                    if (cfg.runtime_lib) {
-                        cmd[n++] = "--runtime-lib";
-                        cmd[n++] = (char *)cfg.runtime_lib;
-                    }
-                    if (cfg.corpus) {
-                        cmd[n++] = "--corpus";
-                        cmd[n++] = (char *)cfg.corpus;
-                    }
-                    if (cfg.cache_dir) {
-                        cmd[n++] = "--cache-dir";
-                        cmd[n++] = (char *)cfg.cache_dir;
-                    }
-                    cmd[n++] = NULL;
-
-                    if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
-                        write_failure_row(fails, lane, mode, policy, "llvm", "bench_corpus_compare_failed", r.rc, sum_path);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    {
-                        char *json = bench_read_all_file(sum_path);
-                        if (!json) {
-                            write_failure_row(fails, lane, mode, policy, "llvm", "summary_missing", 1, sum_path);
-                            cells_failed++;
-                            free(sum_path);
-                            free(mode_dir);
-                            free(policy_dir);
-                            free(lane_dir);
-                            continue;
-                        }
-
-                        (void)json_get_string(json, "status", status, sizeof(status));
-                        (void)json_get_int64(json, "attempted_tests", &attempted);
-                        (void)json_get_int64(json, "completed_tests", &completed);
-                        (void)json_get_double(json, "compile_materialized_speedup_median", &sp_nonparse);
-                        (void)json_get_double(json, "total_materialized_speedup_median", &sp_total);
-
-                        ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted);
-                        write_row_ir(rows, mode, policy, sum_path, status, attempted, completed, sp_nonparse, sp_total);
-                        free(json);
-                    }
-
-                    if (ok)
-                        cells_ok++;
-                    else {
-                        write_failure_row(fails, lane, mode, policy, "llvm", "ir_lane_incomplete", 1, sum_path);
-                        cells_failed++;
-                    }
-
-                    free(sum_path);
-                } else if (li == LANE_API_E2E) {
-                    cmd_result_t r = {0};
-                    char iters_buf[32], timeout_buf[32], min_completed_buf[32], api_cases_buf[32];
-                    char *sum_path = bench_path_join2(lane_dir, "bench_api_summary.json");
-                    char *cmd[56];
-                    int n = 0;
-                    char status[64] = "UNKNOWN";
-                    long long attempted = 0, completed = 0, skipped = 0;
-                    int zero_skip = 0;
-                    int ok = 0;
-
-                    if (!compat_ok) {
-                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "compat_check_unavailable", 1, cfg.bench_dir);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    if (!file_executable(cfg.bench_api)) {
-                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "bench_api_missing", 127, cfg.bench_api);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
-                    snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg.timeout_ms);
-                    snprintf(min_completed_buf, sizeof(min_completed_buf), "%d", 1);
-                    snprintf(api_cases_buf, sizeof(api_cases_buf), "%d", cfg.api_cases);
-
-                    cmd[n++] = (char *)cfg.bench_api;
-                    cmd[n++] = "--bench-dir";
-                    cmd[n++] = lane_dir;
-                    cmd[n++] = "--iters";
-                    cmd[n++] = iters_buf;
-                    cmd[n++] = "--timeout-ms";
-                    cmd[n++] = timeout_buf;
-                    cmd[n++] = "--min-completed";
-                    cmd[n++] = min_completed_buf;
-                    cmd[n++] = "--require-zero-skips";
-                    cmd[n++] = "--liric-policy";
-                    cmd[n++] = (char *)policy;
-                    cmd[n++] = "--compat-list";
-                    cmd[n++] = compat_ll;
-                    cmd[n++] = "--options-jsonl";
-                    cmd[n++] = compat_opts;
-                    if (cfg.api_cases > 0) {
-                        cmd[n++] = "--fail-sample-limit";
-                        cmd[n++] = api_cases_buf;
-                    }
-                    if (cfg.lfortran) {
-                        cmd[n++] = "--lfortran";
-                        cmd[n++] = (char *)cfg.lfortran;
-                    }
-                    if (cfg.lfortran_liric) {
-                        cmd[n++] = "--lfortran-liric";
-                        cmd[n++] = (char *)cfg.lfortran_liric;
-                    }
-                    if (cfg.test_dir) {
-                        cmd[n++] = "--test-dir";
-                        cmd[n++] = (char *)cfg.test_dir;
-                    }
-                    if (cfg.runtime_lib) {
-                        cmd[n++] = "--runtime-lib";
-                        cmd[n++] = (char *)cfg.runtime_lib;
-                    }
-                    cmd[n++] = NULL;
-
-                    if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
-                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "bench_api_failed", r.rc, sum_path);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    {
-                        char *json = bench_read_all_file(sum_path);
-                        if (!json) {
-                            write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "summary_missing", 1, sum_path);
-                            cells_failed++;
-                            free(sum_path);
-                            free(mode_dir);
-                            free(policy_dir);
-                            free(lane_dir);
-                            continue;
-                        }
-
-                        (void)json_get_string(json, "status", status, sizeof(status));
-                        (void)json_get_int64(json, "attempted", &attempted);
-                        (void)json_get_int64(json, "completed", &completed);
-                        (void)json_get_int64(json, "skipped", &skipped);
-                        (void)json_get_bool(json, "zero_skip_gate_met", &zero_skip);
-
-                        ok = (strcmp(status, "OK") == 0 && attempted > 0 && completed == attempted && skipped == 0 && zero_skip);
-                        write_row_api(rows, mode, policy, sum_path, status, attempted, completed, skipped, zero_skip);
-                        free(json);
-                    }
-
-                    if (ok)
-                        cells_ok++;
-                    else {
-                        write_failure_row(fails, lane, mode, policy, "lfortran_llvm", "api_lane_incomplete", 1, sum_path);
-                        cells_failed++;
-                    }
-
-                    free(sum_path);
-                } else if (li == LANE_MICRO_C) {
-                    cmd_result_t r = {0};
-                    char iters_buf[32];
-                    char *sum_path = bench_path_join2(lane_dir, "bench_tcc_summary.json");
-                    char *cmd[20];
-                    int n = 0;
-                    char status[64] = "UNKNOWN";
-                    long long total_cases = 0, wall_passed = 0, inproc_passed = 0;
-                    double wall_ratio = 0.0, inproc_ratio = 0.0;
-                    int ok = 0;
-
-                    if (!file_executable(cfg.bench_tcc)) {
-                        write_failure_row(fails, lane, mode, policy, "tcc", "bench_tcc_missing", 127, cfg.bench_tcc);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg.iters);
-                    cmd[n++] = (char *)cfg.bench_tcc;
-                    cmd[n++] = "--iters";
-                    cmd[n++] = iters_buf;
-                    cmd[n++] = "--policy";
-                    cmd[n++] = (char *)policy;
-                    cmd[n++] = "--bench-dir";
-                    cmd[n++] = lane_dir;
-                    cmd[n++] = NULL;
-
-                    if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
-                        write_failure_row(fails, lane, mode, policy, "tcc", "bench_tcc_failed", r.rc, sum_path);
-                        cells_failed++;
-                        free(sum_path);
-                        free(mode_dir);
-                        free(policy_dir);
-                        free(lane_dir);
-                        continue;
-                    }
-
-                    {
-                        char *json = bench_read_all_file(sum_path);
-                        if (!json) {
-                            write_failure_row(fails, lane, mode, policy, "tcc", "summary_missing", 1, sum_path);
-                            cells_failed++;
-                            free(sum_path);
-                            free(mode_dir);
-                            free(policy_dir);
-                            free(lane_dir);
-                            continue;
-                        }
-
-                        (void)json_get_string(json, "status", status, sizeof(status));
-                        (void)json_get_int64(json, "total_cases", &total_cases);
-                        (void)json_get_int64(json, "wall_passed", &wall_passed);
-                        (void)json_get_int64(json, "inproc_passed", &inproc_passed);
-                        (void)json_get_double(json, "wall_speedup_ratio", &wall_ratio);
-                        (void)json_get_double(json, "inproc_speedup_ratio", &inproc_ratio);
-
-                        ok = (strcmp(status, "OK") == 0 && total_cases > 0 && wall_passed == total_cases && inproc_passed == total_cases);
-                        write_row_tcc(rows, mode, policy, sum_path, status, total_cases, wall_passed, inproc_passed, wall_ratio, inproc_ratio);
-                        free(json);
-                    }
-
-                    if (ok)
-                        cells_ok++;
-                    else {
-                        write_failure_row(fails, lane, mode, policy, "tcc", "micro_lane_incomplete", 1, sum_path);
-                        cells_failed++;
-                    }
-
-                    free(sum_path);
-                }
-
-                free(mode_dir);
-                free(policy_dir);
-                free(lane_dir);
-            }
-        }
-    }
-
-    fclose(rows);
-    fclose(fails);
-
-    {
-        FILE *sf = fopen(summary_path, "w");
-        char ts[64] = {0};
-        char status[16];
-        if (!sf)
-            die("failed to write summary: %s", summary_path);
-
-        format_iso8601_utc(ts, sizeof(ts));
-        strcpy(status, (cells_attempted > 0 && cells_failed == 0) ? "OK" : "FAILED");
-
-        fprintf(sf, "{\n");
-        fprintf(sf, "  \"schema_version\": 1,\n");
-        fprintf(sf, "  \"generated_at_utc\": \"%s\",\n", ts);
-        {
-            char *e_bench_dir = json_escape(cfg.bench_dir);
-            char *e_manifest = json_escape(cfg.manifest ? cfg.manifest : "");
-            char *e_rows = json_escape(rows_path);
-            char *e_fails = json_escape(fails_path);
-            fprintf(sf, "  \"bench_dir\": \"%s\",\n", e_bench_dir);
-            fprintf(sf, "  \"manifest\": \"%s\",\n", e_manifest);
-            fprintf(sf, "  \"rows_jsonl\": \"%s\",\n", e_rows);
-            fprintf(sf, "  \"failures_jsonl\": \"%s\",\n", e_fails);
-            free(e_bench_dir);
-            free(e_manifest);
-            free(e_rows);
-            free(e_fails);
-        }
-        fprintf(sf, "  \"status\": \"%s\",\n", status);
-        fprintf(sf, "  \"cells_attempted\": %d,\n", cells_attempted);
-        fprintf(sf, "  \"cells_ok\": %d,\n", cells_ok);
-        fprintf(sf, "  \"cells_failed\": %d,\n", cells_failed);
-        fprintf(sf, "  \"ran_compat_check\": %s,\n", ran_compat ? "true" : "false");
-        fprintf(sf, "  \"compat_ok\": %s\n", compat_ok ? "true" : "false");
-        fprintf(sf, "}\n");
-        fclose(sf);
-    }
-
-    printf("[matrix] summary: %s\n", summary_path);
-    printf("[matrix] rows:    %s\n", rows_path);
-    printf("[matrix] fails:   %s\n", fails_path);
-    printf("[matrix] cells: attempted=%d ok=%d failed=%d\n", cells_attempted, cells_ok, cells_failed);
-
-    if (cells_attempted == 0) {
-        fprintf(stderr, "no matrix cells attempted\n");
-        free(rows_path);
-        free(fails_path);
-        free(summary_path);
-        free(compat_ll);
-        free(compat_api);
-        free(compat_opts);
-        return 1;
-    }
-
-    free(rows_path);
-    free(fails_path);
-    free(summary_path);
-    free(compat_ll);
-    free(compat_api);
-    free(compat_opts);
-
-    if (cells_failed > 0 && !cfg.allow_partial)
-        return 1;
     return 0;
 }
