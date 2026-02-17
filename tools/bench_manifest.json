@@ -6,12 +6,22 @@
     "policies": ["direct", "ir"]
   },
   "lanes": {
-    "api_exe": {
+    "api_full_llvm": {
       "kind": "primitive",
       "baseline": "lfortran_llvm",
       "source": "bench_api"
     },
-    "api_jit": {
+    "api_full_liric": {
+      "kind": "primitive",
+      "baseline": "lfortran_llvm",
+      "source": "bench_api"
+    },
+    "api_backend_llvm": {
+      "kind": "primitive",
+      "baseline": "lfortran_llvm",
+      "source": "bench_api"
+    },
+    "api_backend_liric": {
       "kind": "primitive",
       "baseline": "lfortran_llvm",
       "source": "bench_api"
@@ -26,10 +36,13 @@
       "baseline": "llvm",
       "source": "bench_corpus_compare"
     },
-    "api_e2e": {
+    "api_full_e2e": {
       "kind": "derived",
-      "from": ["api_exe", "api_jit"],
-      "compat_alias": true
+      "from": ["api_full_llvm", "api_full_liric"]
+    },
+    "api_backend_e2e": {
+      "kind": "derived",
+      "from": ["api_backend_llvm", "api_backend_liric"]
     },
     "ll_e2e": {
       "kind": "derived",

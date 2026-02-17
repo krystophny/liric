@@ -2,9 +2,11 @@
 //
 // Canonical behavior:
 // - Matrix cells are lane x mode x policy.
-// - Primitive lanes are timed directly (api_exe, api_jit, ll_jit, ll_llvm, micro_c).
-// - Derived lanes are compatibility aliases/views (api_e2e, ll_e2e, ir_file).
-// - api_e2e is retained as a backward-compatible lane id.
+// - Primitive lanes are timed directly:
+//   api_full_llvm, api_full_liric, api_backend_llvm, api_backend_liric,
+//   ll_jit, ll_llvm, micro_c.
+// - Derived lanes are speedup views:
+//   api_full_e2e, api_backend_e2e, ll_e2e, ir_file.
 #define _POSIX_C_SOURCE 200809L
 
 #include <ctype.h>
@@ -32,15 +34,18 @@ typedef enum {
 } mode_id_t;
 
 typedef enum {
-    LANE_API_EXE = 0,
-    LANE_API_JIT = 1,
-    LANE_API_E2E = 2,
-    LANE_LL_JIT = 3,
-    LANE_LL_LLVM = 4,
-    LANE_LL_E2E = 5,
-    LANE_IR_FILE = 6,
-    LANE_MICRO_C = 7,
-    LANE_COUNT = 8
+    LANE_API_FULL_LLVM = 0,
+    LANE_API_FULL_LIRIC = 1,
+    LANE_API_FULL_E2E = 2,
+    LANE_API_BACKEND_LLVM = 3,
+    LANE_API_BACKEND_LIRIC = 4,
+    LANE_API_BACKEND_E2E = 5,
+    LANE_LL_JIT = 6,
+    LANE_LL_LLVM = 7,
+    LANE_LL_E2E = 8,
+    LANE_IR_FILE = 9,
+    LANE_MICRO_C = 10,
+    LANE_COUNT = 11
 } lane_id_t;
 
 typedef enum {
@@ -108,17 +113,27 @@ typedef struct {
     long long skipped;
     int zero_skip_gate_met;
 
-    double exe_wall_ms;
-    double exe_compile_ms;
-    double exe_run_ms;
-    double exe_parse_ms;
-    double exe_non_parse_ms;
+    double full_llvm_wall_ms;
+    double full_llvm_compile_ms;
+    double full_llvm_run_ms;
+    double full_llvm_parse_ms;
+    double full_llvm_non_parse_ms;
 
-    double jit_wall_ms;
-    double jit_compile_ms;
-    double jit_run_ms;
-    double jit_parse_ms;
-    double jit_non_parse_ms;
+    double full_liric_wall_ms;
+    double full_liric_compile_ms;
+    double full_liric_run_ms;
+    double full_liric_parse_ms;
+    double full_liric_non_parse_ms;
+
+    double backend_llvm_wall_ms;
+    double backend_llvm_compile_ms;
+    double backend_llvm_run_ms;
+    double backend_llvm_non_parse_ms;
+
+    double backend_liric_wall_ms;
+    double backend_liric_compile_ms;
+    double backend_liric_run_ms;
+    double backend_liric_non_parse_ms;
 
     char *summary_path;
     char *jsonl_path;
@@ -180,9 +195,12 @@ typedef struct {
 static const char *k_mode_name[MODE_COUNT] = {"isel", "copy_patch", "llvm"};
 static const char *k_policy_name[POLICY_COUNT] = {"direct", "ir"};
 static const char *k_lane_name[LANE_COUNT] = {
-    "api_exe",
-    "api_jit",
-    "api_e2e",
+    "api_full_llvm",
+    "api_full_liric",
+    "api_full_e2e",
+    "api_backend_llvm",
+    "api_backend_liric",
+    "api_backend_e2e",
     "ll_jit",
     "ll_llvm",
     "ll_e2e",
@@ -414,7 +432,12 @@ static void dbl_vec_free(dbl_vec_t *v) {
 }
 
 static int any_api_lane_selected(const cfg_t *cfg) {
-    return cfg->lanes[LANE_API_EXE] || cfg->lanes[LANE_API_JIT] || cfg->lanes[LANE_API_E2E];
+    return cfg->lanes[LANE_API_FULL_LLVM] ||
+           cfg->lanes[LANE_API_FULL_LIRIC] ||
+           cfg->lanes[LANE_API_FULL_E2E] ||
+           cfg->lanes[LANE_API_BACKEND_LLVM] ||
+           cfg->lanes[LANE_API_BACKEND_LIRIC] ||
+           cfg->lanes[LANE_API_BACKEND_E2E];
 }
 
 static int any_ll_lane_selected(const cfg_t *cfg) {
@@ -426,10 +449,13 @@ static int any_micro_lane_selected(const cfg_t *cfg) {
 }
 
 static const char *compat_api_lane_name(const cfg_t *cfg) {
-    if (cfg->lanes[LANE_API_E2E]) return "api_e2e";
-    if (cfg->lanes[LANE_API_JIT]) return "api_jit";
-    if (cfg->lanes[LANE_API_EXE]) return "api_exe";
-    return "api_e2e";
+    if (cfg->lanes[LANE_API_FULL_E2E]) return "api_full_e2e";
+    if (cfg->lanes[LANE_API_BACKEND_E2E]) return "api_backend_e2e";
+    if (cfg->lanes[LANE_API_FULL_LIRIC]) return "api_full_liric";
+    if (cfg->lanes[LANE_API_FULL_LLVM]) return "api_full_llvm";
+    if (cfg->lanes[LANE_API_BACKEND_LIRIC]) return "api_backend_liric";
+    if (cfg->lanes[LANE_API_BACKEND_LLVM]) return "api_backend_llvm";
+    return "api_full_e2e";
 }
 
 static void set_all_modes(cfg_t *cfg, int v) {
@@ -451,8 +477,10 @@ static void set_all_canonical_lanes(cfg_t *cfg) {
 
 static void set_default_lanes(cfg_t *cfg) {
     set_all_lanes(cfg, 0);
-    cfg->lanes[LANE_API_EXE] = 1;
-    cfg->lanes[LANE_API_JIT] = 1;
+    cfg->lanes[LANE_API_FULL_LLVM] = 1;
+    cfg->lanes[LANE_API_FULL_LIRIC] = 1;
+    cfg->lanes[LANE_API_BACKEND_LLVM] = 1;
+    cfg->lanes[LANE_API_BACKEND_LIRIC] = 1;
     cfg->lanes[LANE_LL_JIT] = 1;
     cfg->lanes[LANE_LL_LLVM] = 1;
 }
@@ -485,9 +513,12 @@ static int parse_lanes(cfg_t *cfg, const char *text) {
     set_all_lanes(cfg, 0);
     tok = strtok_r(tmp, ",", &save);
     while (tok) {
-        if (strcmp(tok, "api_exe") == 0) cfg->lanes[LANE_API_EXE] = 1;
-        else if (strcmp(tok, "api_jit") == 0) cfg->lanes[LANE_API_JIT] = 1;
-        else if (strcmp(tok, "api_e2e") == 0) cfg->lanes[LANE_API_E2E] = 1;
+        if (strcmp(tok, "api_full_llvm") == 0) cfg->lanes[LANE_API_FULL_LLVM] = 1;
+        else if (strcmp(tok, "api_full_liric") == 0) cfg->lanes[LANE_API_FULL_LIRIC] = 1;
+        else if (strcmp(tok, "api_full_e2e") == 0) cfg->lanes[LANE_API_FULL_E2E] = 1;
+        else if (strcmp(tok, "api_backend_llvm") == 0) cfg->lanes[LANE_API_BACKEND_LLVM] = 1;
+        else if (strcmp(tok, "api_backend_liric") == 0) cfg->lanes[LANE_API_BACKEND_LIRIC] = 1;
+        else if (strcmp(tok, "api_backend_e2e") == 0) cfg->lanes[LANE_API_BACKEND_E2E] = 1;
         else if (strcmp(tok, "ll_jit") == 0) cfg->lanes[LANE_LL_JIT] = 1;
         else if (strcmp(tok, "ll_llvm") == 0) cfg->lanes[LANE_LL_LLVM] = 1;
         else if (strcmp(tok, "ll_e2e") == 0) cfg->lanes[LANE_LL_E2E] = 1;
@@ -510,7 +541,10 @@ static void usage(void) {
     printf("  --manifest PATH          manifest path recorded in summary (default: tools/bench_manifest.json)\n");
     printf("  --modes LIST             comma list or 'all': isel,copy_patch,llvm\n");
     printf("  --policies LIST          comma list or 'all': direct,ir\n");
-    printf("  --lanes LIST             comma list or 'all': api_exe,api_jit,api_e2e,ll_jit,ll_llvm,ll_e2e,ir_file[,micro_c]\n");
+    printf("  --lanes LIST             comma list or 'all': ");
+    printf("api_full_llvm,api_full_liric,api_full_e2e,");
+    printf("api_backend_llvm,api_backend_liric,api_backend_e2e,");
+    printf("ll_jit,ll_llvm,ll_e2e,ir_file[,micro_c]\n");
     printf("  --iters N                iterations forwarded to lane runners (default: 1)\n");
     printf("  --api-cases N            api sample cap per cell (default: 100, 0=all)\n");
     printf("  --timeout N              timeout sec for corpus compare / compat (default: 15)\n");
@@ -999,17 +1033,20 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
     size_t cap = 0;
     ssize_t nread;
 
-    dbl_vec_t exe_wall = {0};
-    dbl_vec_t exe_compile = {0};
-    dbl_vec_t exe_run = {0};
-    dbl_vec_t exe_parse = {0};
-    dbl_vec_t exe_non_parse = {0};
+    dbl_vec_t full_llvm_wall = {0};
+    dbl_vec_t full_llvm_compile = {0};
+    dbl_vec_t full_llvm_run = {0};
+    dbl_vec_t full_llvm_parse = {0};
+    dbl_vec_t full_llvm_non_parse = {0};
 
-    dbl_vec_t jit_wall = {0};
-    dbl_vec_t jit_compile = {0};
-    dbl_vec_t jit_run = {0};
-    dbl_vec_t jit_parse = {0};
-    dbl_vec_t jit_non_parse = {0};
+    dbl_vec_t full_liric_wall = {0};
+    dbl_vec_t full_liric_compile = {0};
+    dbl_vec_t full_liric_run = {0};
+    dbl_vec_t full_liric_parse = {0};
+    dbl_vec_t full_liric_non_parse = {0};
+
+    dbl_vec_t backend_llvm = {0};
+    dbl_vec_t backend_liric = {0};
 
     if (!jsonl_path || !file_exists(jsonl_path)) return -1;
 
@@ -1020,6 +1057,7 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
         char status[64] = {0};
         double v_llvm_wall = 0.0, v_llvm_compile = 0.0, v_llvm_run = 0.0, v_llvm_parse = 0.0;
         double v_liric_wall = 0.0, v_liric_compile = 0.0, v_liric_run = 0.0, v_liric_parse = 0.0;
+        double v_llvm_backend = 0.0, v_liric_backend = 0.0;
 
         (void)nread;
         if (!json_get_string(line, "status", status, sizeof(status))) continue;
@@ -1034,59 +1072,79 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
         if (!json_get_double(line, "liric_compile_median_ms", &v_liric_compile)) continue;
         if (!json_get_double(line, "liric_run_median_ms", &v_liric_run)) continue;
         if (!json_get_double(line, "liric_llvm_ir_median_ms", &v_liric_parse)) continue;
+        if (!json_get_double(line, "llvm_backend_median_ms", &v_llvm_backend)) continue;
+        if (!json_get_double(line, "liric_backend_median_ms", &v_liric_backend)) continue;
 
-        dbl_vec_push(&exe_wall, v_llvm_wall);
-        dbl_vec_push(&exe_compile, v_llvm_compile);
-        dbl_vec_push(&exe_run, v_llvm_run);
-        dbl_vec_push(&exe_parse, v_llvm_parse);
-        dbl_vec_push(&exe_non_parse, v_llvm_compile + v_llvm_run);
+        dbl_vec_push(&full_llvm_wall, v_llvm_wall);
+        dbl_vec_push(&full_llvm_compile, v_llvm_compile);
+        dbl_vec_push(&full_llvm_run, v_llvm_run);
+        dbl_vec_push(&full_llvm_parse, v_llvm_parse);
+        dbl_vec_push(&full_llvm_non_parse, v_llvm_compile + v_llvm_run);
 
-        dbl_vec_push(&jit_wall, v_liric_wall);
-        dbl_vec_push(&jit_compile, v_liric_compile);
-        dbl_vec_push(&jit_run, v_liric_run);
-        dbl_vec_push(&jit_parse, v_liric_parse);
-        dbl_vec_push(&jit_non_parse, v_liric_compile + v_liric_run);
+        dbl_vec_push(&full_liric_wall, v_liric_wall);
+        dbl_vec_push(&full_liric_compile, v_liric_compile);
+        dbl_vec_push(&full_liric_run, v_liric_run);
+        dbl_vec_push(&full_liric_parse, v_liric_parse);
+        dbl_vec_push(&full_liric_non_parse, v_liric_compile + v_liric_run);
+
+        dbl_vec_push(&backend_llvm, v_llvm_backend);
+        dbl_vec_push(&backend_liric, v_liric_backend);
     }
 
     free(line);
     fclose(f);
 
-    if (exe_wall.n == 0 || jit_wall.n == 0) {
-        dbl_vec_free(&exe_wall);
-        dbl_vec_free(&exe_compile);
-        dbl_vec_free(&exe_run);
-        dbl_vec_free(&exe_parse);
-        dbl_vec_free(&exe_non_parse);
-        dbl_vec_free(&jit_wall);
-        dbl_vec_free(&jit_compile);
-        dbl_vec_free(&jit_run);
-        dbl_vec_free(&jit_parse);
-        dbl_vec_free(&jit_non_parse);
+    if (full_llvm_wall.n == 0 || full_liric_wall.n == 0 ||
+        backend_llvm.n == 0 || backend_liric.n == 0) {
+        dbl_vec_free(&full_llvm_wall);
+        dbl_vec_free(&full_llvm_compile);
+        dbl_vec_free(&full_llvm_run);
+        dbl_vec_free(&full_llvm_parse);
+        dbl_vec_free(&full_llvm_non_parse);
+        dbl_vec_free(&full_liric_wall);
+        dbl_vec_free(&full_liric_compile);
+        dbl_vec_free(&full_liric_run);
+        dbl_vec_free(&full_liric_parse);
+        dbl_vec_free(&full_liric_non_parse);
+        dbl_vec_free(&backend_llvm);
+        dbl_vec_free(&backend_liric);
         return -1;
     }
 
-    p->exe_wall_ms = bench_median(exe_wall.items, exe_wall.n);
-    p->exe_compile_ms = bench_median(exe_compile.items, exe_compile.n);
-    p->exe_run_ms = bench_median(exe_run.items, exe_run.n);
-    p->exe_parse_ms = bench_median(exe_parse.items, exe_parse.n);
-    p->exe_non_parse_ms = bench_median(exe_non_parse.items, exe_non_parse.n);
+    p->full_llvm_wall_ms = bench_median(full_llvm_wall.items, full_llvm_wall.n);
+    p->full_llvm_compile_ms = bench_median(full_llvm_compile.items, full_llvm_compile.n);
+    p->full_llvm_run_ms = bench_median(full_llvm_run.items, full_llvm_run.n);
+    p->full_llvm_parse_ms = bench_median(full_llvm_parse.items, full_llvm_parse.n);
+    p->full_llvm_non_parse_ms = bench_median(full_llvm_non_parse.items, full_llvm_non_parse.n);
 
-    p->jit_wall_ms = bench_median(jit_wall.items, jit_wall.n);
-    p->jit_compile_ms = bench_median(jit_compile.items, jit_compile.n);
-    p->jit_run_ms = bench_median(jit_run.items, jit_run.n);
-    p->jit_parse_ms = bench_median(jit_parse.items, jit_parse.n);
-    p->jit_non_parse_ms = bench_median(jit_non_parse.items, jit_non_parse.n);
+    p->full_liric_wall_ms = bench_median(full_liric_wall.items, full_liric_wall.n);
+    p->full_liric_compile_ms = bench_median(full_liric_compile.items, full_liric_compile.n);
+    p->full_liric_run_ms = bench_median(full_liric_run.items, full_liric_run.n);
+    p->full_liric_parse_ms = bench_median(full_liric_parse.items, full_liric_parse.n);
+    p->full_liric_non_parse_ms = bench_median(full_liric_non_parse.items, full_liric_non_parse.n);
 
-    dbl_vec_free(&exe_wall);
-    dbl_vec_free(&exe_compile);
-    dbl_vec_free(&exe_run);
-    dbl_vec_free(&exe_parse);
-    dbl_vec_free(&exe_non_parse);
-    dbl_vec_free(&jit_wall);
-    dbl_vec_free(&jit_compile);
-    dbl_vec_free(&jit_run);
-    dbl_vec_free(&jit_parse);
-    dbl_vec_free(&jit_non_parse);
+    p->backend_llvm_wall_ms = bench_median(backend_llvm.items, backend_llvm.n);
+    p->backend_llvm_compile_ms = p->full_llvm_compile_ms;
+    p->backend_llvm_run_ms = p->full_llvm_run_ms;
+    p->backend_llvm_non_parse_ms = p->backend_llvm_wall_ms;
+
+    p->backend_liric_wall_ms = bench_median(backend_liric.items, backend_liric.n);
+    p->backend_liric_compile_ms = p->full_liric_compile_ms;
+    p->backend_liric_run_ms = p->full_liric_run_ms;
+    p->backend_liric_non_parse_ms = p->backend_liric_wall_ms;
+
+    dbl_vec_free(&full_llvm_wall);
+    dbl_vec_free(&full_llvm_compile);
+    dbl_vec_free(&full_llvm_run);
+    dbl_vec_free(&full_llvm_parse);
+    dbl_vec_free(&full_llvm_non_parse);
+    dbl_vec_free(&full_liric_wall);
+    dbl_vec_free(&full_liric_compile);
+    dbl_vec_free(&full_liric_run);
+    dbl_vec_free(&full_liric_parse);
+    dbl_vec_free(&full_liric_non_parse);
+    dbl_vec_free(&backend_llvm);
+    dbl_vec_free(&backend_liric);
 
     return 0;
 }
@@ -1097,7 +1155,7 @@ static void run_api_provider(const cfg_t *cfg,
                              const char *policy_dir,
                              const char *compat_ll,
                              const char *compat_opts,
-                             int need_primitives,
+                             int need_metrics,
                              api_provider_t *p) {
     cmd_result_t r = {0};
     char iters_buf[32], timeout_buf[32], min_completed_buf[32], api_cases_buf[32];
@@ -1214,7 +1272,7 @@ static void run_api_provider(const cfg_t *cfg,
         return;
     }
 
-    if (need_primitives) {
+    if (need_metrics) {
         if (parse_api_jsonl_metrics(p->jsonl_path, p) != 0) {
             strcpy(p->fail_reason, "bench_api_jsonl_missing");
             p->ok = 0;
@@ -1853,7 +1911,7 @@ int main(int argc, char **argv) {
             micro_provider_t micro = {0};
 
             int want_api = any_api_lane_selected(&cfg);
-            int want_api_primitives = cfg.lanes[LANE_API_EXE] || cfg.lanes[LANE_API_JIT];
+            int want_api_metrics = want_api;
             int want_ll = any_ll_lane_selected(&cfg);
             int want_micro = any_micro_lane_selected(&cfg);
 
@@ -1874,7 +1932,7 @@ int main(int argc, char **argv) {
                     strcpy(ap.fail_reason, "compat_check_unavailable");
                     ap.summary_path = xstrdup(cfg.bench_dir);
                 } else {
-                    run_api_provider(&cfg, mode, policy, policy_dir, compat_ll, compat_opts, want_api_primitives, &ap);
+                    run_api_provider(&cfg, mode, policy, policy_dir, compat_ll, compat_opts, want_api_metrics, &ap);
                 }
             }
 
@@ -1894,7 +1952,7 @@ int main(int argc, char **argv) {
                 cells_attempted++;
                 printf("[matrix] mode=%s policy=%s lane=%s\n", mode, policy, lane);
 
-                if (li == LANE_API_EXE) {
+                if (li == LANE_API_FULL_LLVM) {
                     if (!ap.ran || !ap.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -1916,14 +1974,14 @@ int main(int argc, char **argv) {
                                      ap.attempted,
                                      ap.completed,
                                      ap.skipped,
-                                     ap.exe_wall_ms,
-                                     ap.exe_compile_ms,
-                                     ap.exe_run_ms,
-                                     ap.exe_parse_ms,
-                                     ap.exe_non_parse_ms,
+                                     ap.full_llvm_wall_ms,
+                                     ap.full_llvm_compile_ms,
+                                     ap.full_llvm_run_ms,
+                                     ap.full_llvm_parse_ms,
+                                     ap.full_llvm_non_parse_ms,
                                      ap.summary_path);
                     cells_ok++;
-                } else if (li == LANE_API_JIT) {
+                } else if (li == LANE_API_FULL_LIRIC) {
                     if (!ap.ran || !ap.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -1945,14 +2003,14 @@ int main(int argc, char **argv) {
                                      ap.attempted,
                                      ap.completed,
                                      ap.skipped,
-                                     ap.jit_wall_ms,
-                                     ap.jit_compile_ms,
-                                     ap.jit_run_ms,
-                                     ap.jit_parse_ms,
-                                     ap.jit_non_parse_ms,
+                                     ap.full_liric_wall_ms,
+                                     ap.full_liric_compile_ms,
+                                     ap.full_liric_run_ms,
+                                     ap.full_liric_parse_ms,
+                                     ap.full_liric_non_parse_ms,
                                      ap.summary_path);
                     cells_ok++;
-                } else if (li == LANE_API_E2E) {
+                } else if (li == LANE_API_FULL_E2E) {
                     if (!ap.ran || !ap.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -1966,8 +2024,102 @@ int main(int argc, char **argv) {
                         continue;
                     }
                     {
-                        double wall_speedup = (ap.jit_wall_ms > 0.0) ? ap.exe_wall_ms / ap.jit_wall_ms : 0.0;
-                        double np_speedup = (ap.jit_non_parse_ms > 0.0) ? ap.exe_non_parse_ms / ap.jit_non_parse_ms : 0.0;
+                        double wall_speedup =
+                            (ap.full_liric_wall_ms > 0.0) ? ap.full_llvm_wall_ms / ap.full_liric_wall_ms : 0.0;
+                        double np_speedup = (ap.full_liric_non_parse_ms > 0.0)
+                                                ? ap.full_llvm_non_parse_ms / ap.full_liric_non_parse_ms
+                                                : 0.0;
+                        write_row_speedup(rows,
+                                          lane,
+                                          mode,
+                                          policy,
+                                          "lfortran_llvm",
+                                          ap.status,
+                                          ap.attempted,
+                                          ap.completed,
+                                          ap.skipped,
+                                          wall_speedup,
+                                          np_speedup,
+                                          ap.summary_path);
+                    }
+                    cells_ok++;
+                } else if (li == LANE_API_BACKEND_LLVM) {
+                    if (!ap.ran || !ap.ok) {
+                        write_failure_row(fails,
+                                          lane,
+                                          mode,
+                                          policy,
+                                          "lfortran_llvm",
+                                          ap.fail_reason[0] ? ap.fail_reason : "api_lane_unavailable",
+                                          ap.rc,
+                                          ap.summary_path ? ap.summary_path : "");
+                        cells_failed++;
+                        continue;
+                    }
+                    write_row_timing(rows,
+                                     lane,
+                                     mode,
+                                     policy,
+                                     "lfortran_llvm",
+                                     ap.status,
+                                     ap.attempted,
+                                     ap.completed,
+                                     ap.skipped,
+                                     ap.backend_llvm_wall_ms,
+                                     ap.backend_llvm_compile_ms,
+                                     ap.backend_llvm_run_ms,
+                                     -1.0,
+                                     ap.backend_llvm_non_parse_ms,
+                                     ap.summary_path);
+                    cells_ok++;
+                } else if (li == LANE_API_BACKEND_LIRIC) {
+                    if (!ap.ran || !ap.ok) {
+                        write_failure_row(fails,
+                                          lane,
+                                          mode,
+                                          policy,
+                                          "lfortran_llvm",
+                                          ap.fail_reason[0] ? ap.fail_reason : "api_lane_unavailable",
+                                          ap.rc,
+                                          ap.summary_path ? ap.summary_path : "");
+                        cells_failed++;
+                        continue;
+                    }
+                    write_row_timing(rows,
+                                     lane,
+                                     mode,
+                                     policy,
+                                     "lfortran_llvm",
+                                     ap.status,
+                                     ap.attempted,
+                                     ap.completed,
+                                     ap.skipped,
+                                     ap.backend_liric_wall_ms,
+                                     ap.backend_liric_compile_ms,
+                                     ap.backend_liric_run_ms,
+                                     -1.0,
+                                     ap.backend_liric_non_parse_ms,
+                                     ap.summary_path);
+                    cells_ok++;
+                } else if (li == LANE_API_BACKEND_E2E) {
+                    if (!ap.ran || !ap.ok) {
+                        write_failure_row(fails,
+                                          lane,
+                                          mode,
+                                          policy,
+                                          "lfortran_llvm",
+                                          ap.fail_reason[0] ? ap.fail_reason : "api_lane_unavailable",
+                                          ap.rc,
+                                          ap.summary_path ? ap.summary_path : "");
+                        cells_failed++;
+                        continue;
+                    }
+                    {
+                        double wall_speedup =
+                            (ap.backend_liric_wall_ms > 0.0) ? ap.backend_llvm_wall_ms / ap.backend_liric_wall_ms : 0.0;
+                        double np_speedup = (ap.backend_liric_non_parse_ms > 0.0)
+                                                ? ap.backend_llvm_non_parse_ms / ap.backend_liric_non_parse_ms
+                                                : 0.0;
                         write_row_speedup(rows,
                                           lane,
                                           mode,

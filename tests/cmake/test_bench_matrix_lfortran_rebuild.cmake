@@ -102,6 +102,9 @@ cat > \"$bench_dir/bench_api_summary.json\" <<'JSON'
   \"zero_skip_gate_met\": true
 }
 JSON
+cat > \"$bench_dir/bench_api.jsonl\" <<'JSONL'
+{\"name\":\"api_case_01\",\"status\":\"ok\",\"liric_wall_median_ms\":10.0,\"llvm_wall_median_ms\":12.0,\"liric_compile_median_ms\":2.0,\"llvm_compile_median_ms\":2.5,\"liric_run_median_ms\":1.0,\"llvm_run_median_ms\":1.2,\"liric_llvm_ir_median_ms\":0.6,\"llvm_llvm_ir_median_ms\":0.7,\"liric_backend_median_ms\":3.0,\"llvm_backend_median_ms\":3.7}
+JSONL
 ")
 
 file(WRITE "${fake_lfortran_llvm}" "#!/usr/bin/env bash
@@ -124,7 +127,7 @@ execute_process(
         --manifest "${manifest}"
         --modes isel
         --policies direct
-        --lanes api_e2e
+        --lanes api_full_e2e
         --iters 1
         --timeout 5
         --timeout-ms 1000

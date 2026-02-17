@@ -2261,6 +2261,18 @@ next_test:
         double split_liric_backend_avg = 0.0;
         double split_llvm_backend_avg = 0.0;
         int split_has_data = 0;
+        int measurement_contract_version = 3;
+        int full_pipeline_has_data = 0;
+        int backend_isolated_has_data = 0;
+        double full_pipeline_liric_wall_median = 0.0;
+        double full_pipeline_llvm_wall_median = 0.0;
+        double full_pipeline_liric_non_parse_median = 0.0;
+        double full_pipeline_llvm_non_parse_median = 0.0;
+        double full_pipeline_wall_speedup_median = 0.0;
+        double full_pipeline_non_parse_speedup_median = 0.0;
+        double backend_isolated_liric_median = 0.0;
+        double backend_isolated_llvm_median = 0.0;
+        double backend_isolated_speedup_median = 0.0;
         int phase_idx;
 
         for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
@@ -2282,8 +2294,12 @@ next_test:
         double *ei = (double *)malloc(rows.n * sizeof(double));
         double *ir_sp = (double *)malloc(rows.n * sizeof(double));
         double *wall_sp = (double *)malloc(rows.n * sizeof(double));
+        double *liric_non_parse = (double *)malloc(rows.n * sizeof(double));
+        double *llvm_non_parse = (double *)malloc(rows.n * sizeof(double));
+        double *non_parse_sp = (double *)malloc(rows.n * sizeof(double));
         double *compile_sp = (double *)malloc(rows.n * sizeof(double));
         double *run_sp = (double *)malloc(rows.n * sizeof(double));
+        double *backend_sp = (double *)malloc(rows.n * sizeof(double));
         double *lb = (double *)malloc(rows.n * sizeof(double));
         double *eb = (double *)malloc(rows.n * sizeof(double));
         double *lg = (double *)malloc(rows.n * sizeof(double));
@@ -2334,8 +2350,12 @@ next_test:
             }
             ir_sp[j] = li[j] > 0 ? ei[j] / li[j] : 0.0;
             wall_sp[j] = lw[j] > 0 ? ew[j] / lw[j] : 0.0;
+            liric_non_parse[j] = lc[j] + lr[j];
+            llvm_non_parse[j] = ec[j] + er[j];
+            non_parse_sp[j] = liric_non_parse[j] > 0 ? llvm_non_parse[j] / liric_non_parse[j] : 0.0;
             compile_sp[j] = lc[j] > 0 ? ec[j] / lc[j] : 0.0;
             run_sp[j] = lr[j] > 0 ? er[j] / lr[j] : 0.0;
+            backend_sp[j] = lbe[j] > 0 ? ebe[j] / lbe[j] : 0.0;
             if (ir_sp[j] > 1.0) ir_faster++;
             if (wall_sp[j] > 1.0) wall_faster++;
             if (compile_sp[j] > 1.0) compile_faster++;
@@ -2412,6 +2432,17 @@ next_test:
         split_llvm_codegen_avg = sum_eg / (double)rows.n;
         split_liric_backend_avg = sum_lbe / (double)rows.n;
         split_llvm_backend_avg = sum_ebe / (double)rows.n;
+        full_pipeline_has_data = 1;
+        backend_isolated_has_data = 1;
+        full_pipeline_liric_wall_median = median(lw, rows.n);
+        full_pipeline_llvm_wall_median = median(ew, rows.n);
+        full_pipeline_liric_non_parse_median = median(liric_non_parse, rows.n);
+        full_pipeline_llvm_non_parse_median = median(llvm_non_parse, rows.n);
+        full_pipeline_wall_speedup_median = median(wall_sp, rows.n);
+        full_pipeline_non_parse_speedup_median = median(non_parse_sp, rows.n);
+        backend_isolated_liric_median = split_liric_backend_median;
+        backend_isolated_llvm_median = split_llvm_backend_median;
+        backend_isolated_speedup_median = median(backend_sp, rows.n);
         for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
             split_liric_phase_median[phase_idx] = median(li_phase[phase_idx], rows.n);
             split_llvm_phase_median[phase_idx] = median(ei_phase[phase_idx], rows.n);
@@ -2495,8 +2526,12 @@ next_test:
         free(ei);
         free(ir_sp);
         free(wall_sp);
+        free(liric_non_parse);
+        free(llvm_non_parse);
+        free(non_parse_sp);
         free(compile_sp);
         free(run_sp);
+        free(backend_sp);
         free(lb);
         free(eb);
         free(lg);
@@ -2525,6 +2560,8 @@ next_test:
         }
 
         fprintf(sf, "{\n");
+        fprintf(sf, "  \"schema_version\": 3,\n");
+        fprintf(sf, "  \"measurement_contract_version\": %d,\n", measurement_contract_version);
         fprintf(sf, "  \"attempted\": %zu,\n", attempted);
         fprintf(sf, "  \"completed\": %zu,\n", completed);
         fprintf(sf, "  \"completed_timed\": %zu,\n", completed_timed);
@@ -2566,6 +2603,27 @@ next_test:
         free(em);
         free(ep);
         }
+        fprintf(sf, "  \"full_pipeline\": {\n");
+        fprintf(sf, "    \"has_data\": %s,\n", full_pipeline_has_data ? "true" : "false");
+        fprintf(sf, "    \"liric\": {\n");
+        fprintf(sf, "      \"wall_median_ms\": %.6f,\n", full_pipeline_liric_wall_median);
+        fprintf(sf, "      \"non_parse_median_ms\": %.6f\n", full_pipeline_liric_non_parse_median);
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"llvm\": {\n");
+        fprintf(sf, "      \"wall_median_ms\": %.6f,\n", full_pipeline_llvm_wall_median);
+        fprintf(sf, "      \"non_parse_median_ms\": %.6f\n", full_pipeline_llvm_non_parse_median);
+        fprintf(sf, "    },\n");
+        fprintf(sf, "    \"speedup\": {\n");
+        fprintf(sf, "      \"wall_median\": %.6f,\n", full_pipeline_wall_speedup_median);
+        fprintf(sf, "      \"non_parse_median\": %.6f\n", full_pipeline_non_parse_speedup_median);
+        fprintf(sf, "    }\n");
+        fprintf(sf, "  },\n");
+        fprintf(sf, "  \"backend_isolated\": {\n");
+        fprintf(sf, "    \"has_data\": %s,\n", backend_isolated_has_data ? "true" : "false");
+        fprintf(sf, "    \"liric_median_ms\": %.6f,\n", backend_isolated_liric_median);
+        fprintf(sf, "    \"llvm_median_ms\": %.6f,\n", backend_isolated_llvm_median);
+        fprintf(sf, "    \"speedup_median\": %.6f\n", backend_isolated_speedup_median);
+        fprintf(sf, "  },\n");
         fprintf(sf, "  \"phase_split\": {\n");
         fprintf(sf, "    \"has_data\": %s,\n", split_has_data ? "true" : "false");
         fprintf(sf, "    \"lfortran_requires_changes\": {\n");

@@ -2,20 +2,21 @@
 
 `bench_matrix` is the canonical benchmark entrypoint.
 
-It replaces ad-hoc manual sequencing with one strict matrix run across:
+It runs a strict matrix across:
 - Modes: `isel`, `copy_patch`, `llvm`
 - Policies: `direct`, `ir`
 - Lanes:
-  - `ir_file`: corpus-based LIRIC vs real LLVM baseline (`bench_lane_ir` + `bench_lli_phases`)
-  - `api_e2e`: LFortran `--jit` backend comparison (`bench_lane_api`)
-  - `micro_c`: TinyCC baseline lane (`bench_lane_micro`)
+  - `api_full_llvm`, `api_full_liric`, `api_full_e2e`
+  - `api_backend_llvm`, `api_backend_liric`, `api_backend_e2e`
+  - `ll_jit`, `ll_llvm`, `ll_e2e`, `ir_file`
+  - `micro_c` (legacy, excluded from canonical `--lanes all`)
 
-## Hard-fail policy
+## Hard-Fail Policy
 
-Default policy is strict:
-- Any lane/mode failure fails the full run.
-- Empty or partial datasets fail the lane.
-- Missing required tools/binaries fail the lane.
+Default behavior is strict:
+- Any lane/mode failure fails the run.
+- Empty/missing datasets fail the lane.
+- Missing required binaries fail the lane.
 
 Use `--allow-partial` only for exploratory local runs.
 
@@ -33,31 +34,24 @@ Use `--allow-partial` only for exploratory local runs.
 
 ## Outputs
 
-`bench_matrix` writes canonical artifacts under `--bench-dir`:
-- `matrix_rows.jsonl`: one row per mode/lane cell
-- `matrix_failures.jsonl`: one row per failing cell
-- `matrix_summary.json`: run-level status and accounting
+`bench_matrix` writes:
+- `matrix_rows.jsonl`
+- `matrix_failures.jsonl`
+- `matrix_skips.jsonl`
+- `matrix_summary.json`
 
-`matrix_rows.jsonl` also includes a `compat_check` preflight row (`mode=all, policy=all`) so
-compatibility coverage is visible in the same result stream as benchmark cells.
+Provider artifacts remain in per-cell bundles:
+- API provider: `<bench_dir>/<mode>/<policy>/api_bundle/bench_api_summary.json`
+- LL provider: `<bench_dir>/<mode>/<policy>/ll_bundle/bench_corpus_compare_summary.json`
+- micro provider: `<bench_dir>/<mode>/<policy>/micro_bundle/bench_tcc_summary.json`
 
-Lane-local artifacts remain in mode/lane subdirectories (for drill-down), for example:
-- `/tmp/liric_bench/isel/direct/ir_file/bench_corpus_compare_summary.json`
-- `/tmp/liric_bench/llvm/direct/api_e2e/bench_api_summary.json`
-- `/tmp/liric_bench/copy_patch/ir/micro_c/bench_tcc_summary.json`
+## Baseline Meaning
 
-## Baseline meaning
-
-- `ir_file` lane baseline is actual LLVM (`lli` + ORC phase timing), not LIRIC compat headers.
-- `api_e2e` lane baseline is actual LFortran LLVM backend.
-- `micro_c` lane baseline is TinyCC (TCC), mandatory for this lane.
+- API lanes baseline: LFortran LLVM build
+- LL lanes baseline: LLVM (`lli`)
+- micro lane baseline: TinyCC (TCC)
 
 ## Notes
 
-- `api_e2e` lane performs strict LFortran rebuild preflight by default:
-  - `cmake --build ../lfortran/build -j<N>`
-  - `cmake --build ../lfortran/build-liric -j<N>` (fallback: `../lfortran/build_liric`) when a split WITH_LIRIC build is configured
-  Use `--skip-lfortran-rebuild` only for controlled local debugging.
-- `api_e2e` lane regenerates compatibility artifacts via `bench_compat_check` unless `--skip-compat-check` is passed.
-- `bench_compat_check` is a lane preflight producer used by `bench_matrix`; run it standalone only for focused debugging.
-- `bench_lane_micro` emits `bench_tcc_summary.json` so micro lane results can be gated in the unified matrix.
+- API lanes run strict LFortran rebuild preflight by default; disable only with `--skip-lfortran-rebuild`.
+- API lanes regenerate compatibility artifacts via `bench_compat_check` unless `--skip-compat-check` is set.
