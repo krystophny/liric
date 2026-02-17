@@ -1,5 +1,6 @@
-// API benchmark (direct-JIT mode): compare lfortran --jit execution
-// between LLVM build and WITH_LIRIC build (no object/link benchmark path).
+// API benchmark: compare lfortran execution between LLVM build and WITH_LIRIC
+// build. Execution mode auto-detects whether --jit is supported; otherwise the
+// runner uses direct compile+run invocation.
 
 #include <dirent.h>
 #include <ctype.h>
@@ -27,6 +28,7 @@ typedef bench_cmd_result_t cmd_result_t;
 typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
+    const char *lfortran_exec_mode;
     const char *runtime_lib;
     const char *liric_compile_mode;
     const char *liric_policy;
@@ -247,6 +249,49 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_
     return r;
 }
 
+static int lfortran_help_has_jit_flag(const char *lfortran_bin) {
+    cmd_result_t r = {0};
+    char *argv[3];
+    int has_jit = 0;
+
+    argv[0] = (char *)lfortran_bin;
+    argv[1] = "--help";
+    argv[2] = NULL;
+    r = run_cmd(argv, 5000, NULL, NULL);
+    if (r.rc == 0) {
+        if ((r.stdout_text && strstr(r.stdout_text, "--jit")) ||
+            (r.stderr_text && strstr(r.stderr_text, "--jit"))) {
+            has_jit = 1;
+        }
+    }
+    bench_free_cmd_result(&r);
+    return has_jit;
+}
+
+static int resolve_lfortran_exec_mode(const cfg_t *cfg, int *use_jit_flag_out) {
+    int llvm_has_jit;
+    int liric_has_jit;
+
+    if (!cfg || !use_jit_flag_out) return -1;
+    if (strcmp(cfg->lfortran_exec_mode, "jit") == 0) {
+        llvm_has_jit = lfortran_help_has_jit_flag(cfg->lfortran);
+        liric_has_jit = lfortran_help_has_jit_flag(cfg->lfortran_liric);
+        if (!llvm_has_jit || !liric_has_jit)
+            return -1;
+        *use_jit_flag_out = 1;
+        return 0;
+    }
+    if (strcmp(cfg->lfortran_exec_mode, "run") == 0) {
+        *use_jit_flag_out = 0;
+        return 0;
+    }
+
+    llvm_has_jit = lfortran_help_has_jit_flag(cfg->lfortran);
+    liric_has_jit = lfortran_help_has_jit_flag(cfg->lfortran_liric);
+    *use_jit_flag_out = (llvm_has_jit && liric_has_jit) ? 1 : 0;
+    return 0;
+}
+
 static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const strlist_t *opt_toks,
                                          const char *extra_opt,
@@ -254,13 +299,15 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
                                          const char *runtime_lib,
                                          const char *liric_compile_mode,
                                          const char *liric_policy,
+                                         int use_jit_flag,
                                          int timeout_ms,
                                          const char *work_dir,
                                          int with_time_report) {
     size_t j;
     size_t extra_n = (extra_opt && extra_opt[0] != '\0') ? 1 : 0;
     size_t time_report_n = with_time_report ? 1 : 0;
-    size_t argc_jit = 4 + time_report_n + opt_toks->n + extra_n + 1;
+    size_t jit_flag_n = use_jit_flag ? 1 : 0;
+    size_t argc_jit = 3 + jit_flag_n + time_report_n + opt_toks->n + extra_n + 1;
     char **argv = (char **)calloc(argc_jit + 1, sizeof(char *));
     size_t k = 0;
     cmd_result_t r;
@@ -277,7 +324,7 @@ static cmd_result_t run_lfortran_jit_cmd(const char *lfortran_bin,
 
     argv[k++] = (char *)lfortran_bin;
     argv[k++] = "--backend=llvm";
-    argv[k++] = "--jit";
+    if (use_jit_flag) argv[k++] = "--jit";
     if (with_time_report) argv[k++] = "--time-report";
     argv[k++] = "--no-color";
     for (j = 0; j < opt_toks->n; j++)
@@ -872,6 +919,8 @@ static void extract_timeout_phase_progress(const char *stdout_text,
         "LLVM IR creation",
         "LLVM opt",
         "LLVM -> JIT",
+        "LLVM -> BIN",
+        "Linking time",
         "JIT run",
         "Total time"
     };
@@ -1122,17 +1171,38 @@ static int parse_lfortran_time_report(const char *stdout_text, time_report_t *ou
     double file_read = 0.0, src_to_asr = 0.0, asr_passes = 0.0;
     double asr_to_mod = 0.0, llvm_ir = 0.0, llvm_opt = 0.0;
     double llvm_to_jit = 0.0, jit_run = 0.0, total = 0.0;
-    int ok =
+    int ok_common;
+
+    ok_common =
         parse_time_component_ms(clean, "File reading", &file_read) &&
         parse_time_component_ms(clean, "Src -> ASR", &src_to_asr) &&
         parse_time_component_ms(clean, "ASR passes (total)", &asr_passes) &&
         parse_time_component_ms(clean, "ASR -> mod", &asr_to_mod) &&
         parse_time_component_ms(clean, "LLVM IR creation", &llvm_ir) &&
-        parse_time_component_ms(clean, "LLVM opt", &llvm_opt) &&
-        parse_time_component_ms(clean, "LLVM -> JIT", &llvm_to_jit) &&
-        parse_time_component_ms(clean, "JIT run", &jit_run) &&
         parse_time_component_ms(clean, "Total time", &total);
-    if (ok) {
+
+    if (!parse_time_component_ms(clean, "LLVM opt", &llvm_opt))
+        llvm_opt = 0.0;
+
+    if (ok_common) {
+        double llvm_to_bin = 0.0;
+        double linking_ms = 0.0;
+        int has_llvm_to_jit = parse_time_component_ms(clean, "LLVM -> JIT", &llvm_to_jit);
+        int has_jit_run = parse_time_component_ms(clean, "JIT run", &jit_run);
+
+        if (!(has_llvm_to_jit && has_jit_run)) {
+            if (!parse_time_component_ms(clean, "LLVM -> BIN", &llvm_to_bin)) {
+                ok_common = 0;
+            } else {
+                if (!parse_time_component_ms(clean, "Linking time", &linking_ms))
+                    linking_ms = 0.0;
+                llvm_to_jit = llvm_to_bin + linking_ms;
+                jit_run = 0.0;
+            }
+        }
+    }
+
+    if (ok_common) {
         out->file_read_ms = file_read;
         out->src_to_asr_ms = src_to_asr;
         out->asr_passes_ms = asr_passes;
@@ -1144,7 +1214,7 @@ static int parse_lfortran_time_report(const char *stdout_text, time_report_t *ou
         out->total_ms = total;
     }
     free(clean);
-    return ok;
+    return ok_common;
 }
 
 static void synthesize_time_report_from_elapsed(double elapsed_ms, time_report_t *out) {
@@ -1361,10 +1431,11 @@ static int side_index(const char *side) {
     return 2;
 }
 
-#define SKIP_REASON_COUNT 13
+#define SKIP_REASON_COUNT 14
 static const char *k_skip_reasons[SKIP_REASON_COUNT] = {
     "workdir_create_failed",
     "source_missing",
+    "lfortran_cli_mismatch",
     "llvm_jit_failed",
     "llvm_jit_verifier_pointee_mismatch",
     "llvm_jit_runtime_io_error",
@@ -1494,8 +1565,17 @@ static int is_valid_liric_policy(const char *policy) {
     return strcmp(policy, "direct") == 0 || strcmp(policy, "ir") == 0;
 }
 
+static int is_valid_lfortran_exec_mode(const char *mode) {
+    if (!mode || !mode[0]) return 0;
+    return strcmp(mode, "auto") == 0 ||
+           strcmp(mode, "jit") == 0 ||
+           strcmp(mode, "run") == 0;
+}
+
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
     if (!r) return "llvm_jit_failed";
+    if (cmd_output_has(r, "The following argument was not expected"))
+        return "lfortran_cli_mismatch";
     if (r->rc == -SIGABRT || r->rc == -SIGSEGV)
         return classify_jit_failure_reason(0, r->rc);
     if (cmd_output_has(r, "explicit pointee type doesn't match operand's pointee type"))
@@ -1516,6 +1596,7 @@ static void usage(void) {
     printf("usage: bench_lane_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran, fallback: ../lfortran/build_liric/src/bin/lfortran)\n");
+    printf("  --lfortran-exec-mode MODE  lfortran execution mode: auto|jit|run (default: auto)\n");
     printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --liric-policy MODE  liric session policy: direct|ir\n");
@@ -1547,6 +1628,7 @@ static cfg_t parse_args(int argc, char **argv) {
                              : (file_exists(default_lfortran_liric_underscore)
                                     ? default_lfortran_liric_underscore
                                     : NULL);
+    cfg.lfortran_exec_mode = "auto";
     cfg.runtime_lib = NULL;
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
     if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
@@ -1576,6 +1658,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-liric") == 0 && i + 1 < argc) {
             cfg.lfortran_liric = argv[++i];
+        } else if (strcmp(argv[i], "--lfortran-exec-mode") == 0 && i + 1 < argc) {
+            cfg.lfortran_exec_mode = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--liric-compile-mode") == 0 && i + 1 < argc) {
@@ -1628,6 +1712,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.liric_compile_mode);
     if (!is_valid_liric_policy(cfg.liric_policy))
         die("invalid --liric-policy (expected direct|ir)", cfg.liric_policy);
+    if (!is_valid_lfortran_exec_mode(cfg.lfortran_exec_mode))
+        die("invalid --lfortran-exec-mode (expected auto|jit|run)", cfg.lfortran_exec_mode);
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
     if (!cfg.lfortran_liric || !cfg.lfortran_liric[0]) {
@@ -1649,11 +1735,18 @@ static cfg_t parse_args(int argc, char **argv) {
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
+    int use_jit_flag = 0;
+    const char *resolved_exec_mode = "run";
     char *compat_path = NULL;
     char *opts_path = NULL;
     char *fail_log_dir = NULL;
 
     setvbuf(stdout, NULL, _IOLBF, 0);
+
+    if (resolve_lfortran_exec_mode(&cfg, &use_jit_flag) != 0) {
+        die("requested --lfortran-exec-mode=jit but one or both binaries do not support --jit", NULL);
+    }
+    resolved_exec_mode = use_jit_flag ? "jit" : "run";
 
     if (cfg.compat_list) compat_path = xstrdup(cfg.compat_list);
     if (cfg.options_jsonl) opts_path = xstrdup(cfg.options_jsonl);
@@ -1719,6 +1812,7 @@ int main(int argc, char **argv) {
     printf("Benchmarking %zu tests, %d iterations each\n", tests.n, cfg.iters);
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
+    printf("  lfortran_exec_mode: %s (requested: %s)\n", resolved_exec_mode, cfg.lfortran_exec_mode);
     if (cfg.runtime_lib)
         printf("  runtime_lib:   %s\n", cfg.runtime_lib);
     printf("  liric_compile_mode: %s\n", cfg.liric_compile_mode);
@@ -1845,6 +1939,7 @@ int main(int argc, char **argv) {
                                                   cfg.runtime_lib,
                                                   NULL,
                                                   NULL,
+                                                  use_jit_flag,
                                                   cfg.timeout_ms,
                                                   attempt_work_dir,
                                                   attempt_with_time_report);
@@ -1862,6 +1957,7 @@ int main(int argc, char **argv) {
                                                    cfg.runtime_lib,
                                                    cfg.liric_compile_mode,
                                                    cfg.liric_policy,
+                                                   use_jit_flag,
                                                    cfg.timeout_ms,
                                                    attempt_work_dir,
                                                    attempt_with_time_report);
@@ -1921,6 +2017,16 @@ int main(int argc, char **argv) {
                         free_cmd_result(&llvm_r);
                         free_cmd_result(&liric_r);
                         continue;
+                    }
+
+                    if ((llvm_r.rc != 0 || liric_r.rc != 0) &&
+                        cmd_output_has(&llvm_r, "The following argument was not expected") &&
+                        cmd_output_has(&liric_r, "The following argument was not expected")) {
+                        skip_reason = "lfortran_cli_mismatch";
+                        skip_diag_from_cmd(&skip_diag, skip_reason, "harness", it, &llvm_r, cfg.timeout_ms);
+                        free_cmd_result(&llvm_r);
+                        free_cmd_result(&liric_r);
+                        break;
                     }
 
                     if ((llvm_r.rc != 0 || liric_r.rc != 0) &&
@@ -2439,8 +2545,10 @@ next_test:
             char *eo = json_escape(opts_path);
             char *em = json_escape(cfg.liric_compile_mode);
             char *ep = json_escape(cfg.liric_policy);
+            char *ex = json_escape(resolved_exec_mode);
         fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
         fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
+        fprintf(sf, "  \"lfortran_exec_mode\": \"%s\",\n", ex);
         fprintf(sf, "  \"liric_compile_mode\": \"%s\",\n", em);
         fprintf(sf, "  \"liric_policy\": \"%s\",\n", ep);
         {
@@ -2454,6 +2562,7 @@ next_test:
         }
         free(ec);
         free(eo);
+        free(ex);
         free(em);
         free(ep);
         }

@@ -31,11 +31,14 @@ Use only `bench_matrix`:
 Primitive lanes:
 - `api_exe`, `api_jit`
 - `ll_jit`, `ll_llvm`
-- `micro_c`
 
 Derived/compat lanes:
 - `api_e2e` (compat alias; derived from `api_exe` and `api_jit`)
 - `ll_e2e` and `ir_file` (derived from `ll_llvm` and `ll_jit`)
+
+Canonical `--lanes all` includes only LLVM-relative lanes:
+- `api_exe`, `api_jit`, `api_e2e`, `ll_jit`, `ll_llvm`, `ll_e2e`, `ir_file`
+- `micro_c` is legacy and not part of canonical matrix coverage
 
 Matrix axes:
 - modes: `isel`, `copy_patch`, `llvm`

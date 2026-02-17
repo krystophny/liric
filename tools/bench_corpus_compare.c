@@ -177,6 +177,7 @@ static int parse_probe_timing(const char *stderr_text,
                               probe_timing_t *out_timing) {
     const char *p = strstr(stderr_text, "TIMING ");
     double read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us;
+    double run_us;
     if (!p) return 0;
     if (sscanf(p,
                "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf lookup_us=%lf exec_us=%lf total_us=%lf",
@@ -188,6 +189,19 @@ static int parse_probe_timing(const char *stderr_text,
         out_timing->compile_ms = compile_us / 1000.0;
         out_timing->lookup_ms = lookup_us / 1000.0;
         out_timing->exec_ms = exec_us / 1000.0;
+        out_timing->total_ms = total_us / 1000.0;
+        return 1;
+    }
+    if (sscanf(p,
+               "TIMING read_us=%lf parse_us=%lf jit_create_us=%lf load_lib_us=%lf compile_us=%lf run_us=%lf total_us=%lf",
+               &read_us, &parse_us, &jit_create_us, &load_lib_us, &compile_us, &run_us, &total_us) == 7) {
+        out_timing->read_ms = read_us / 1000.0;
+        out_timing->parse_ms = parse_us / 1000.0;
+        out_timing->jit_create_ms = jit_create_us / 1000.0;
+        out_timing->load_lib_ms = load_lib_us / 1000.0;
+        out_timing->compile_ms = compile_us / 1000.0;
+        out_timing->lookup_ms = 0.0;
+        out_timing->exec_ms = run_us / 1000.0;
         out_timing->total_ms = total_us / 1000.0;
         return 1;
     }
@@ -316,7 +330,7 @@ static int load_corpus_tests(const cfg_t *cfg, testlist_t *tests) {
             free(ll_path);
             ll_path = tmp;
         }
-        if (ll_path && file_exists(ll_path))
+        if (ll_path && file_exists(ll_path) && ll_has_defined_main(ll_path))
             testlist_push(tests, name, ll_path);
         free(ll_path);
     }
@@ -525,7 +539,6 @@ static int run_suite(const cfg_t *cfg,
         const test_case_t *t = &tests->items[i];
         size_t ok_n = 0;
         int skipped = 0;
-        int parse_only = !ll_has_defined_main(t->ll_path);
         size_t it;
 
         double *liric_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
@@ -544,49 +557,26 @@ static int run_suite(const cfg_t *cfg,
         }
 
         for (it = 0; it < (size_t)cfg->iters; it++) {
-            cmd_result_t rp, ri, rp_parse_only;
+            cmd_result_t rp, ri;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
             double e_parse = 0.0, e_parse_input = 0.0;
             double e_add = 0.0, e_lookup = 0.0, e_compile_mat = 0.0;
-            probe_timing_t tp_parse_only, tp_full;
-
-            memset(&tp_parse_only, 0, sizeof(tp_parse_only));
+            probe_timing_t tp_full;
             memset(&tp_full, 0, sizeof(tp_full));
 
             char *probe_argv[20];
-            char *probe_parse_argv[16];
             int pk = 0;
-            int ppk = 0;
 
-            /* First isolate parser-only frontend cost. */
-            probe_parse_argv[ppk++] = (char *)cfg->probe_runner;
-            probe_parse_argv[ppk++] = "--timing";
-            probe_parse_argv[ppk++] = "--parse-only";
-            probe_parse_argv[ppk++] = (char *)t->ll_path;
-            probe_parse_argv[ppk] = NULL;
-
-            rp_parse_only = run_cmd(probe_parse_argv, cfg->timeout_sec, NULL);
-            if (rp_parse_only.rc != 0 || !parse_probe_timing(rp_parse_only.stderr_text, &tp_parse_only)) {
-                skipped = 1;
-                free_cmd_result(&rp_parse_only);
-                break;
-            }
-            free_cmd_result(&rp_parse_only);
-
-            /* Then run the normal no-exec probe path to capture materialization/lookup. */
+            /* Compatibility path for probe runner binaries without --no-exec/--parse-only. */
             probe_argv[pk++] = (char *)cfg->probe_runner;
             probe_argv[pk++] = "--timing";
             probe_argv[pk++] = "--no-exec";
             probe_argv[pk++] = "--policy";
             probe_argv[pk++] = (char *)cfg->policy;
-            if (parse_only) {
-                probe_argv[pk++] = "--parse-only";
-            } else {
-                probe_argv[pk++] = "--func";
-                probe_argv[pk++] = "main";
-                probe_argv[pk++] = "--sig";
-                probe_argv[pk++] = "i32_argc_argv";
-            }
+            probe_argv[pk++] = "--func";
+            probe_argv[pk++] = "main";
+            probe_argv[pk++] = "--sig";
+            probe_argv[pk++] = "i32_argc_argv";
             if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                 probe_argv[pk++] = "--load-lib";
                 probe_argv[pk++] = (char *)cfg->runtime_lib;
@@ -602,17 +592,9 @@ static int run_suite(const cfg_t *cfg,
             }
             free_cmd_result(&rp);
 
-            l_parse = tp_parse_only.parse_ms;
-            if (parse_only) {
-                l_compile = 0.0;
-                l_lookup = 0.0;
-            } else {
-                double feed_overhead_ms = tp_full.parse_ms - tp_parse_only.parse_ms;
-                if (feed_overhead_ms < 0.0)
-                    feed_overhead_ms = 0.0;
-                l_compile = tp_full.compile_ms + feed_overhead_ms;
-                l_lookup = tp_full.lookup_ms;
-            }
+            l_parse = tp_full.parse_ms;
+            l_compile = tp_full.compile_ms;
+            l_lookup = tp_full.lookup_ms;
 
             {
                 char *llvm_argv[20];
@@ -622,14 +604,10 @@ static int run_suite(const cfg_t *cfg,
                 llvm_argv[ek++] = "--no-exec";
                 llvm_argv[ek++] = "--iters";
                 llvm_argv[ek++] = "1";
-                if (parse_only) {
-                    llvm_argv[ek++] = "--parse-only";
-                } else {
-                    llvm_argv[ek++] = "--func";
-                    llvm_argv[ek++] = "main";
-                    llvm_argv[ek++] = "--sig";
-                    llvm_argv[ek++] = "i32_argc_argv";
-                }
+                llvm_argv[ek++] = "--func";
+                llvm_argv[ek++] = "main";
+                llvm_argv[ek++] = "--sig";
+                llvm_argv[ek++] = "i32_argc_argv";
                 if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                     llvm_argv[ek++] = "--load-lib";
                     llvm_argv[ek++] = (char *)cfg->runtime_lib;

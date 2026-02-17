@@ -26,11 +26,6 @@
       "baseline": "llvm",
       "source": "bench_corpus_compare"
     },
-    "micro_c": {
-      "kind": "primitive",
-      "baseline": "tcc",
-      "source": "bench_tcc"
-    },
     "api_e2e": {
       "kind": "derived",
       "from": ["api_exe", "api_jit"],

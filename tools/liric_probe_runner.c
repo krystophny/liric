@@ -87,14 +87,12 @@ static void free_file(file_buf_t *f) {
     }
 }
 
-static int run_symbol(lr_jit_t *jit, const char *func_name, const char *sig, int ignore_retcode) {
-    void *sym = lr_jit_get_function(jit, func_name);
+static int run_symbol_ptr(void *sym, const char *sig, int ignore_retcode) {
     char argv0[] = "liric";
     char *host_argv[] = {argv0, NULL};
     int host_argc = 1;
 
     if (!sym) {
-        fprintf(stderr, "function '%s' not found\n", func_name);
         return 3;
     }
 
@@ -158,20 +156,43 @@ int main(int argc, char **argv) {
     const char *func_name = "main";
     const char *sig = "i32";
     const char *input_file = NULL;
+    const char *policy = NULL;
     int ignore_retcode = 0;
     int timing = 0;
+    int no_exec = 0;
+    int parse_only = 0;
     const char *load_libs[64];
     int num_load_libs = 0;
 
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            fprintf(stderr,
+                    "usage: liric_probe_runner [options] <input.ll>\n"
+                    "  --func NAME            function to lookup (default: main)\n"
+                    "  --sig SIG              signature tag (default: i32)\n"
+                    "  --load-lib PATH        runtime library to dlopen (repeatable)\n"
+                    "  --policy MODE          set LIRIC_POLICY (direct|ir)\n"
+                    "  --ignore-retcode       force zero process rc on execution\n"
+                    "  --timing               print TIMING line to stderr\n"
+                    "  --no-exec              compile + lookup only (skip call)\n"
+                    "  --parse-only           parse only (skip JIT create/compile/lookup/exec)\n");
+            return 0;
+        }
         if (strcmp(argv[i], "--func") == 0 && i + 1 < argc) {
             func_name = argv[++i];
         } else if (strcmp(argv[i], "--sig") == 0 && i + 1 < argc) {
             sig = argv[++i];
+        } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
+            policy = argv[++i];
         } else if (strcmp(argv[i], "--ignore-retcode") == 0) {
             ignore_retcode = 1;
         } else if (strcmp(argv[i], "--timing") == 0) {
             timing = 1;
+        } else if (strcmp(argv[i], "--no-exec") == 0) {
+            no_exec = 1;
+        } else if (strcmp(argv[i], "--parse-only") == 0) {
+            parse_only = 1;
+            no_exec = 1;
         } else if (strcmp(argv[i], "--load-lib") == 0 && i + 1 < argc) {
             if (num_load_libs < 64) {
                 load_libs[num_load_libs++] = argv[++i];
@@ -197,7 +218,8 @@ int main(int argc, char **argv) {
     double t_jit_create_start = 0, t_jit_create_end = 0;
     double t_load_lib_start = 0, t_load_lib_end = 0;
     double t_compile_start = 0, t_compile_end = 0;
-    double t_run_start = 0, t_run_end = 0;
+    double t_lookup_start = 0, t_lookup_end = 0;
+    double t_exec_start = 0, t_exec_end = 0;
 
     if (timing) t_read_start = now_us();
     file_buf_t src = {0};
@@ -217,42 +239,71 @@ int main(int argc, char **argv) {
     }
     if (timing) t_parse_end = now_us();
 
-    if (timing) t_jit_create_start = now_us();
-    lr_jit_t *jit = lr_jit_create();
-    if (!jit) {
-        fprintf(stderr, "failed to create JIT\n");
-        lr_module_free(m);
-        free_file(&src);
-        return 1;
-    }
-    if (timing) t_jit_create_end = now_us();
+    lr_jit_t *jit = NULL;
+    int run_rc = 0;
 
-    if (timing) t_load_lib_start = now_us();
-    for (int i = 0; i < num_load_libs; i++) {
-        if (lr_jit_load_library(jit, load_libs[i]) != 0) {
-            fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
-            lr_jit_destroy(jit);
+    if (policy && policy[0] != '\0') {
+        if (setenv("LIRIC_POLICY", policy, 1) != 0) {
+            fprintf(stderr, "failed to set LIRIC_POLICY\n");
             lr_module_free(m);
             free_file(&src);
             return 1;
         }
     }
-    if (timing) t_load_lib_end = now_us();
 
-    if (timing) t_compile_start = now_us();
-    int rc = lr_jit_add_module(jit, m);
-    if (rc != 0) {
-        fprintf(stderr, "JIT compilation failed\n");
-        lr_jit_destroy(jit);
-        lr_module_free(m);
-        free_file(&src);
-        return 1;
+    if (!parse_only) {
+        void *sym = NULL;
+
+        if (timing) t_jit_create_start = now_us();
+        jit = lr_jit_create();
+        if (!jit) {
+            fprintf(stderr, "failed to create JIT\n");
+            lr_module_free(m);
+            free_file(&src);
+            return 1;
+        }
+        if (timing) t_jit_create_end = now_us();
+
+        if (timing) t_load_lib_start = now_us();
+        for (int i = 0; i < num_load_libs; i++) {
+            if (lr_jit_load_library(jit, load_libs[i]) != 0) {
+                fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
+                lr_jit_destroy(jit);
+                lr_module_free(m);
+                free_file(&src);
+                return 1;
+            }
+        }
+        if (timing) t_load_lib_end = now_us();
+
+        if (timing) t_compile_start = now_us();
+        int rc = lr_jit_add_module(jit, m);
+        if (rc != 0) {
+            fprintf(stderr, "JIT compilation failed\n");
+            lr_jit_destroy(jit);
+            lr_module_free(m);
+            free_file(&src);
+            return 1;
+        }
+        if (timing) t_compile_end = now_us();
+
+        if (timing) t_lookup_start = now_us();
+        sym = lr_jit_get_function(jit, func_name);
+        if (timing) t_lookup_end = now_us();
+        if (!sym) {
+            fprintf(stderr, "function '%s' not found\n", func_name);
+            lr_jit_destroy(jit);
+            lr_module_free(m);
+            free_file(&src);
+            return 3;
+        }
+
+        if (!no_exec) {
+            if (timing) t_exec_start = now_us();
+            run_rc = run_symbol_ptr(sym, sig, ignore_retcode);
+            if (timing) t_exec_end = now_us();
+        }
     }
-    if (timing) t_compile_end = now_us();
-
-    if (timing) t_run_start = now_us();
-    int run_rc = run_symbol(jit, func_name, sig, ignore_retcode);
-    if (timing) t_run_end = now_us();
 
     if (timing) {
         double read_us = t_read_end - t_read_start;
@@ -260,14 +311,15 @@ int main(int argc, char **argv) {
         double jit_create_us = t_jit_create_end - t_jit_create_start;
         double load_lib_us = t_load_lib_end - t_load_lib_start;
         double compile_us = t_compile_end - t_compile_start;
-        double run_us = t_run_end - t_run_start;
-        double total_us = read_us + parse_us + jit_create_us + load_lib_us + compile_us + run_us;
+        double lookup_us = t_lookup_end - t_lookup_start;
+        double exec_us = t_exec_end - t_exec_start;
+        double total_us = read_us + parse_us + jit_create_us + load_lib_us + compile_us + lookup_us + exec_us;
         fprintf(stderr, "TIMING read_us=%.1f parse_us=%.1f jit_create_us=%.1f "
-                "load_lib_us=%.1f compile_us=%.1f run_us=%.1f total_us=%.1f\n",
-                read_us, parse_us, jit_create_us, load_lib_us, compile_us, run_us, total_us);
+                "load_lib_us=%.1f compile_us=%.1f lookup_us=%.1f exec_us=%.1f total_us=%.1f\n",
+                read_us, parse_us, jit_create_us, load_lib_us, compile_us, lookup_us, exec_us, total_us);
     }
 
-    lr_jit_destroy(jit);
+    if (jit) lr_jit_destroy(jit);
     lr_module_free(m);
     free_file(&src);
     return run_rc;

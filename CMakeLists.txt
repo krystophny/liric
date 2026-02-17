@@ -12,18 +12,33 @@ add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
 add_library(liric STATIC
     src/arena.c
+    src/bc_decode.c
+    src/compile_mode.c
+    src/compiler.c
+    src/frontend_common.c
+    src/frontend_registry.c
     src/ir.c
+    src/module_emit.c
     src/ll_lexer.c
     src/ll_parser.c
+    src/llvm_backend.c
     src/wasm_decode.c
     src/wasm_to_ir.c
+    src/session.c
+    src/target_common.c
     src/target_registry.c
+    src/target_riscv64.c
+    src/target_shared.c
     src/target_x86_64.c
     src/target_aarch64.c
     src/jit.c
     src/liric.c
     src/liric_compat.c
     src/objfile.c
+    src/objfile_elf.c
+    src/objfile_macho.c
+    src/platform/platform_intrinsics.c
+    src/platform/platform_os.c
     src/llvm_stubs.c
 )
 target_include_directories(liric PUBLIC include)
