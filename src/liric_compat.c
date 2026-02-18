@@ -1522,21 +1522,6 @@ lc_value_t *lc_const_array_from_values(lc_module_compat_t *mod,
     total = lr_type_size(array_ty);
     elem_sz = lr_type_size(elem_ty);
 
-    if (getenv("LIRIC_COMPAT_DEBUG_ARRAY_CONST")) {
-        fprintf(stderr,
-                "[lc_const_array_from_values] count=%llu num_values=%u elem_kind=%d elem_sz=%zu total=%zu\n",
-                (unsigned long long)array_ty->array.count, num_values,
-                elem_ty ? (int)elem_ty->kind : -1, elem_sz, total);
-        for (uint32_t i = 0; i < num_values && i < 8; i++) {
-            lc_value_t *v = values ? values[i] : NULL;
-            fprintf(stderr, "  val[%u]: %s kind=%d ty_kind=%d agg_size=%zu int=%lld\n",
-                    i, v ? "set" : "null", v ? (int)v->kind : -1,
-                    (v && v->type) ? (int)v->type->kind : -1,
-                    (v && v->kind == LC_VAL_CONST_AGGREGATE) ? v->aggregate.size : 0u,
-                    (long long)((v && v->kind == LC_VAL_CONST_INT) ? v->const_int.val : 0));
-        }
-    }
-
     /* Some producers pass array constructors as a single aggregate value of
      * the full array type. Preserve that payload instead of treating it as
      * element[0], which would zero-fill the remaining elements. */
