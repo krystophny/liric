@@ -1044,6 +1044,7 @@ static void emit_cmovcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst,
 
 typedef struct x86_stream_phi_copy {
     uint32_t pred_block_id;
+    uint32_t succ_block_id;
     uint32_t dest_vreg;
     lr_operand_t src_op;
     bool emitted;
@@ -2345,6 +2346,7 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
                 continue;
             for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
                 if (ctx->phi_copies[pi].pred_block_id == source &&
+                    ctx->phi_copies[pi].succ_block_id == target &&
                     !ctx->phi_copies[pi].emitted) {
                     has_late = true;
                     break;
@@ -2354,7 +2356,8 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
                 continue;
             size_t stub_pos = cc->pos;
             for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
-                if (ctx->phi_copies[pi].pred_block_id != source)
+                if (ctx->phi_copies[pi].pred_block_id != source ||
+                    ctx->phi_copies[pi].succ_block_id != target)
                     continue;
                 emit_load_operand(cc, &ctx->phi_copies[pi].src_op,
                                   X86_RAX);
@@ -2419,6 +2422,7 @@ static int x86_64_compile_add_phi_copy(void *compile_ctx,
 
     x86_stream_phi_copy_t *entry = &ctx->phi_copies[ctx->phi_copy_count++];
     entry->pred_block_id = pred_block_id;
+    entry->succ_block_id = ctx->current_block_id;
     entry->dest_vreg = dest_vreg;
     entry->src_op = operand_from_desc(src_op);
     entry->emitted = false;
