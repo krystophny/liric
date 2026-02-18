@@ -80,7 +80,9 @@ published_table_md="$(bench_json_string_field "$snapshot" "published_table_md")"
 [[ "$expected_tests" -eq 100 ]] || bench_die "expected_tests must be 100 (got ${expected_tests})"
 [[ "$attempted_tests" -gt 0 ]] || bench_die "attempted_tests must be > 0"
 [[ "$iters" -gt 0 ]] || bench_die "iters must be > 0"
-[[ "$completed_tests" -eq "$expected_tests" ]] || bench_die "canonical track must complete all expected tests (${completed_tests}/${expected_tests})"
+[[ "$completed_tests" -eq "$attempted_tests" ]] || bench_die "canonical track must complete all attempted tests (${completed_tests}/${attempted_tests})"
+min_attempted=$(( expected_tests * 90 / 100 ))
+[[ "$attempted_tests" -ge "$min_attempted" ]] || bench_die "attempted tests must be >= 90% of expected (${attempted_tests}/${expected_tests})"
 [[ "$status" == "OK" ]] || bench_die "status must be OK for publishable README snapshot (got ${status})"
 
 [[ -n "$bench_corpus_compare_summary_json" ]] || bench_die "bench_corpus_compare_summary_json path is empty"

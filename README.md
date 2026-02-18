@@ -132,18 +132,13 @@ Runtime artifacts:
 
 ## Speedup Tables (2026-02-18)
 
-100-case corpus, non-parse median ms.
+100-case corpus, 3 iterations, non-parse median ms.
 
 ### API AOT (lfortran + liric AOT vs lfortran + LLVM, 100 integration tests)
 
-| Mode | Policy | Pass rate | Wall speedup (median) | Note |
-|------|--------|----------:|----------------------:|------|
-| isel | direct | 33/100 | **1.4x** | linker time dominates wall clock |
-| isel | ir | 37/100 | **1.4x** | linker time dominates wall clock |
-| copy_patch | direct | 33/100 | **1.4x** | linker time dominates wall clock |
-| copy_patch | ir | 37/100 | **1.4x** | linker time dominates wall clock |
-
-63 cases SIGSEGV at runtime (codegen bugs in complex Fortran patterns).
+| Mode | Policy | Pass rate | Wall speedup (median) | Backend speedup (median) |
+|------|--------|----------:|----------------------:|-------------------------:|
+| isel | ir | 100/100 | **1.66x** | **1.48x** |
 
 ### LL Corpus (compile-only, 100 .ll files, 3 iterations)
 

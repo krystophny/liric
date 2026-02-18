@@ -1544,8 +1544,17 @@ static void run_micro_provider(const cfg_t *cfg,
 }
 
 
+static void kill_stale_benchmark_processes(void) {
+    /* Kill leftover processes from interrupted benchmark runs.
+       Ignore errors — these may not exist. */
+    (void)system("pkill -9 -f 'bench_api|bench_corpus' 2>/dev/null");
+    (void)system("pkill -9 -f 'lfortran.*--jit' 2>/dev/null");
+}
+
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
+
+    kill_stale_benchmark_processes();
 
     FILE *rows = NULL;
     FILE *fails = NULL;
