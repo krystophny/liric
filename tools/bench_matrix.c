@@ -1546,11 +1546,11 @@ static void run_micro_provider(const cfg_t *cfg,
 
 static void kill_stale_benchmark_processes(void) {
     /* Kill leftover processes from interrupted benchmark runs.
-       Use -x (exact process name) for bench_api / bench_corpus to avoid
-       matching bench_matrix itself when invoked with --bench-api arg. */
+       Use -x (exact process name) for short names; use -f with anchored
+       pattern for names exceeding the 15-char comm limit. */
     (void)system("pkill -9 -x bench_api 2>/dev/null");
-    (void)system("pkill -9 -x bench_corpus_compare 2>/dev/null");
-    (void)system("pkill -9 -x liric_probe_runner 2>/dev/null");
+    (void)system("pkill -9 -f '^bench_corpus_compare' 2>/dev/null");
+    (void)system("pkill -9 -f '^liric_probe_runner' 2>/dev/null");
     (void)system("pkill -9 -f 'lfortran.*--jit' 2>/dev/null");
 }
 

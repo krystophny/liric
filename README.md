@@ -51,7 +51,7 @@ ctest --test-dir build --output-on-failure
                               -> MIR   templates to LLVM
                               -> x86   -> x86   ORC JIT
                                 |        |        |
-                              ~47x     ~47x     ~1x
+                              ~43x     ~44x     ~1x
                               faster   faster   (baseline
                               (LL)     (LL)     validation)
 
@@ -62,9 +62,9 @@ ctest --test-dir build --output-on-failure
   STANDALONE LANES (no lfortran involved)
 
   LL corpus    100 .ll files (same corpus as API lanes)
-               ll_jit:  liric parses+compiles each .ll   ~0.22ms
-               ll_llvm: lli (LLVM) runs each .ll         ~10.4ms
-               Speedup: ~47x (isel/copy_patch)
+               ll_jit:  liric parses+compiles each .ll   ~0.27ms
+               ll_llvm: lli (LLVM) runs each .ll         ~11.0ms
+               Speedup: ~43x (isel/copy_patch)
 
   Micro C      same corpus, lfortran --show-c output, liric vs TCC
                Speedup: ~4.5x in-process (isel/copy_patch)
@@ -132,22 +132,27 @@ Runtime artifacts:
 
 ## Speedup Tables (2026-02-18)
 
-100-case corpus, 3 iterations, non-parse median ms.
+100-case corpus, 3 iterations, median ms.
 
-### API AOT (lfortran + liric AOT vs lfortran + LLVM, 100 integration tests)
+### API AOT (lfortran + liric vs lfortran + LLVM, 100 integration tests)
 
-| Mode | Policy | Pass rate | Wall speedup (median) | Backend speedup (median) |
-|------|--------|----------:|----------------------:|-------------------------:|
-| isel | ir | 100/100 | **1.66x** | **1.48x** |
+| Mode | Policy | Pass rate | Wall speedup | Backend speedup |
+|------|--------|----------:|-------------:|----------------:|
+| isel | direct | 100/100 | **1.21x** | **1.09x** |
+| isel | ir | 100/100 | **1.20x** | **1.08x** |
+| copy_patch | direct | 100/100 | **1.21x** | **1.07x** |
+| copy_patch | ir | 100/100 | **1.20x** | **1.09x** |
+| llvm | direct | 100/100 | **1.21x** | **1.09x** |
+| llvm | ir | 100/100 | **1.20x** | **1.08x** |
 
-### LL Corpus (compile-only, 100 .ll files, 3 iterations)
+### LL Corpus (compile-only, 99/100 .ll files, 3 iterations)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 10.41 | 0.220 | **47x** |
-| isel | ir | 10.63 | 0.230 | **47x** |
-| copy_patch | direct | 10.43 | 0.229 | **47x** |
-| copy_patch | ir | 11.42 | 0.237 | **48x** |
+| isel | direct | 11.02 | 0.272 | **43x** |
+| isel | ir | 10.61 | 0.269 | **43x** |
+| copy_patch | direct | 10.81 | 0.270 | **44x** |
+| copy_patch | ir | 11.15 | 0.256 | **44x** |
 
 ### Micro C (liric vs TCC, corpus-driven in-process compile, 3 iterations)
 

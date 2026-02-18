@@ -857,7 +857,7 @@ static int a64_direct_ensure_block_offsets(a64_direct_ctx_t *ctx,
         memcpy(nb, cc->block_offsets,
                sizeof(size_t) * cc->num_block_offsets);
     for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
-        nb[i] = 0;
+        nb[i] = SIZE_MAX;
     cc->block_offsets = nb;
     cc->num_block_offsets = new_cap;
     return 0;
@@ -988,7 +988,7 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->num_static_alloca_offsets = 0;
     cc->block_offsets = lr_arena_array_uninit(arena, size_t, 8);
     cc->num_block_offsets = 8;
-    for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = 0;
+    for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = SIZE_MAX;
     cc->fixups = lr_arena_array_uninit(arena, a64_fixup_t, 16);
     cc->num_fixups = 0;
     cc->fixup_cap = 16;
@@ -1041,13 +1041,12 @@ static int aarch64_compile_emit(void *compile_ctx,
     if (desc->num_indices > 0 && !desc->indices)
         return -1;
 
-    if (desc->op != LR_OP_PHI) {
+    if (desc->op != LR_OP_PHI && desc->op != LR_OP_ALLOCA) {
         if (ctx->deferred.pending) {
             if (a64_flush_deferred_terminator(ctx) != 0)
                 return -1;
         }
-        if (ctx->block_offset_pending &&
-            ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
+        if (ctx->block_offset_pending) {
             ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
             invalidate_cached_gprs_a64(&ctx->cc);
         }
@@ -1778,8 +1777,7 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
     if (!ctx || !out_len)
         return -1;
 
-    if (ctx->block_offset_pending &&
-        ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
+    if (ctx->block_offset_pending) {
         ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
     }
     ctx->block_offset_pending = false;
@@ -1842,6 +1840,7 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
     for (uint32_t i = 0; i < cc->num_fixups; i++) {
         if (cc->fixups[i].target == UINT32_MAX) continue;
         if (cc->fixups[i].target >= cc->num_block_offsets) continue;
+        if (cc->block_offsets[cc->fixups[i].target] == SIZE_MAX) continue;
 
         int64_t target_pos = (int64_t)cc->block_offsets[cc->fixups[i].target];
         int64_t here = (int64_t)cc->fixups[i].insn_pos;

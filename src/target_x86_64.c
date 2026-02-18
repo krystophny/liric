@@ -1477,8 +1477,7 @@ static int x86_64_compile_emit(void *compile_ctx,
             if (flush_deferred_terminator(ctx) != 0)
                 return -1;
         }
-        if (ctx->block_offset_pending &&
-            ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
+        if (ctx->block_offset_pending) {
             ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
             invalidate_cached_gprs(&ctx->cc);
         }
@@ -2327,8 +2326,7 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
         return -1;
 #endif
 
-    if (ctx->block_offset_pending &&
-        ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
+    if (ctx->block_offset_pending) {
         ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
     }
     ctx->block_offset_pending = false;
