@@ -1022,7 +1022,7 @@ static int aarch64_compile_set_block(void *compile_ctx, uint32_t block_id) {
         return -1;
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
-    ctx->block_offset_pending = true;
+    ctx->block_offset_pending = (ctx->cc.block_offsets[block_id] == SIZE_MAX);
     return 0;
 }
 
@@ -1046,11 +1046,12 @@ static int aarch64_compile_emit(void *compile_ctx,
             if (a64_flush_deferred_terminator(ctx) != 0)
                 return -1;
         }
-        if (ctx->block_offset_pending) {
+        if (ctx->block_offset_pending &&
+            ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
             ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
             invalidate_cached_gprs_a64(&ctx->cc);
-            ctx->block_offset_pending = false;
         }
+        ctx->block_offset_pending = false;
     }
 
     cc = &ctx->cc;
@@ -1777,10 +1778,11 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
     if (!ctx || !out_len)
         return -1;
 
-    if (ctx->block_offset_pending) {
+    if (ctx->block_offset_pending &&
+        ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
         ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
-        ctx->block_offset_pending = false;
     }
+    ctx->block_offset_pending = false;
     if (a64_flush_deferred_terminator(ctx) != 0)
         return -1;
 

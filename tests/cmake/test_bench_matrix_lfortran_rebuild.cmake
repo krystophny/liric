@@ -138,6 +138,7 @@ execute_process(
         --lfortran-liric "${fake_lfortran_liric}"
         --bench-compat-check "${fake_compat}"
         --bench-api "${fake_api}"
+    WORKING_DIRECTORY "${root}"
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out
     ERROR_VARIABLE err

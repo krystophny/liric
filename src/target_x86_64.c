@@ -1447,7 +1447,7 @@ static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
        terminator is flushed by the first non-PHI instruction. */
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
-    ctx->block_offset_pending = true;
+    ctx->block_offset_pending = (ctx->cc.block_offsets[block_id] == SIZE_MAX);
     return 0;
 }
 
@@ -1477,11 +1477,12 @@ static int x86_64_compile_emit(void *compile_ctx,
             if (flush_deferred_terminator(ctx) != 0)
                 return -1;
         }
-        if (ctx->block_offset_pending) {
+        if (ctx->block_offset_pending &&
+            ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
             ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
             invalidate_cached_gprs(&ctx->cc);
-            ctx->block_offset_pending = false;
         }
+        ctx->block_offset_pending = false;
     }
 
     cc = &ctx->cc;
@@ -2326,10 +2327,11 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
         return -1;
 #endif
 
-    if (ctx->block_offset_pending) {
+    if (ctx->block_offset_pending &&
+        ctx->cc.block_offsets[ctx->current_block_id] == SIZE_MAX) {
         ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
-        ctx->block_offset_pending = false;
     }
+    ctx->block_offset_pending = false;
     if (flush_deferred_terminator(ctx) != 0)
         return -1;
 
