@@ -129,7 +129,9 @@ static int32_t alloc_slot(x86_compile_ctx_t *ctx, uint32_t vreg,
     }
 
     if (ctx->stack_slots[vreg] != 0) {
-        return ctx->stack_slots[vreg];
+        if ((uint32_t)size <= ctx->stack_slot_sizes[vreg])
+            return ctx->stack_slots[vreg];
+        /* Existing slot too small — allocate a larger one (old becomes dead) */
     }
 
     if (size < 8) size = 8;
@@ -353,6 +355,18 @@ static void emit_fp_setcc(uint8_t *buf, size_t *pos, size_t len,
 
 /* Emit: mov reg, [rbp + offset] (load vreg from stack) */
 static void emit_load_slot(x86_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
+    /* Static allocas: emit LEA inline instead of loading from slot.
+       This handles the case where the alloca instruction itself is in
+       unreachable code (e.g., placed after a deferred branch) but later
+       instructions reference the vreg. */
+    int32_t alloca_off = lr_target_lookup_static_alloca_offset(
+        ctx->static_alloca_offsets, ctx->num_static_alloca_offsets, vreg);
+    if (alloca_off != 0) {
+        encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x8D,
+                   reg, X86_RBP, alloca_off, 8);
+        set_cached_reg_vreg(ctx, reg, vreg);
+        return;
+    }
     int32_t off = alloc_slot(ctx, vreg, 8, 8);
     encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x8B, reg, X86_RBP, off, 8);
     set_cached_reg_vreg(ctx, reg, vreg);
@@ -1135,7 +1149,7 @@ static int direct_ensure_block_offsets(x86_direct_ctx_t *ctx,
         memcpy(nb, cc->block_offsets,
                sizeof(size_t) * cc->num_block_offsets);
     for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
-        nb[i] = 0;
+        nb[i] = SIZE_MAX;
     cc->block_offsets = nb;
     cc->num_block_offsets = new_cap;
     return 0;
@@ -1194,18 +1208,37 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
                 ret_sz = 8;
             if (dt->ops[0].kind == LR_VAL_VREG) {
                 uint32_t vreg = dt->ops[0].vreg;
-                size_t src_sz = 0;
-                int32_t src_off = alloc_slot(cc, vreg, 8, 8);
-                if (vreg < cc->num_stack_slots)
-                    src_sz = cc->stack_slot_sizes[vreg];
-                if (src_sz > ret_sz)
-                    src_sz = ret_sz;
-                if (src_sz > 0)
+                int32_t alloca_off = lr_target_lookup_static_alloca_offset(
+                    cc->static_alloca_offsets,
+                    cc->num_static_alloca_offsets, vreg);
+                if (alloca_off != 0) {
                     emit_mem_copy_base_to_base(cc, X86_RDI, 0,
-                                               X86_RBP, src_off, src_sz);
-                if (src_sz < ret_sz)
-                    emit_mem_zero_base(cc, X86_RDI, (int32_t)src_sz,
-                                       ret_sz - src_sz);
+                                               X86_RBP, alloca_off,
+                                               ret_sz);
+                } else {
+                    size_t src_sz = 0;
+                    int32_t src_off = alloc_slot(cc, vreg, 8, 8);
+                    if (vreg < cc->num_stack_slots)
+                        src_sz = cc->stack_slot_sizes[vreg];
+                    if (src_sz >= ret_sz) {
+                        emit_mem_copy_base_to_base(cc, X86_RDI, 0,
+                                                   X86_RBP, src_off,
+                                                   ret_sz);
+                    } else if (src_sz == 8) {
+                        encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8B,
+                                   X86_RAX, X86_RBP, src_off, 8);
+                        emit_mem_copy_base_to_base(cc, X86_RDI, 0,
+                                                   X86_RAX, 0, ret_sz);
+                    } else {
+                        if (src_sz > 0)
+                            emit_mem_copy_base_to_base(cc, X86_RDI, 0,
+                                                       X86_RBP, src_off,
+                                                       src_sz);
+                        if (src_sz < ret_sz)
+                            emit_mem_zero_base(cc, X86_RDI, (int32_t)src_sz,
+                                               ret_sz - src_sz);
+                    }
+                }
             } else if (dt->ops[0].kind == LR_VAL_UNDEF ||
                        dt->ops[0].kind == LR_VAL_NULL) {
                 emit_mem_zero_base(cc, X86_RDI, 0, ret_sz);
@@ -1345,7 +1378,7 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->num_static_alloca_offsets = 0;
     cc->block_offsets = lr_arena_array_uninit(arena, size_t, 8);
     cc->num_block_offsets = 8;
-    for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = 0;
+    for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = SIZE_MAX;
     cc->fixups = lr_arena_array_uninit(arena, x86_fixup_t, 16);
     cc->num_fixups = 0;
     cc->fixup_cap = 16;
@@ -1710,11 +1743,35 @@ static int x86_64_compile_emit(void *compile_ctx,
             }
             if (ops[0].kind == LR_VAL_VREG) {
                 uint32_t vreg = ops[0].vreg;
+                int32_t alloca_off = lr_target_lookup_static_alloca_offset(
+                    cc->static_alloca_offsets,
+                    cc->num_static_alloca_offsets, vreg);
+                if (alloca_off != 0) {
+                    /* Source is a static alloca — data lives at the
+                       alloca offset, not in the vreg pointer slot. */
+                    emit_mem_copy_base_to_base(cc, X86_RCX, 0,
+                                               X86_RBP, alloca_off,
+                                               store_sz);
+                    break;
+                }
                 size_t src_sz = 0;
                 int32_t src_off = alloc_slot(cc, vreg, 8, 8);
                 if (vreg < cc->num_stack_slots)
                     src_sz = cc->stack_slot_sizes[vreg];
-                if (src_sz > store_sz) src_sz = store_sz;
+                if (src_sz >= store_sz) {
+                    emit_mem_copy_base_to_base(cc, X86_RCX, 0,
+                                               X86_RBP, src_off,
+                                               store_sz);
+                    break;
+                }
+                /* Slot holds a pointer to the data — dereference it */
+                if (src_sz == 8) {
+                    encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8B,
+                               X86_RAX, X86_RBP, src_off, 8);
+                    emit_mem_copy_base_to_base(cc, X86_RCX, 0,
+                                               X86_RAX, 0, store_sz);
+                    break;
+                }
                 if (src_sz > 0)
                     emit_mem_copy_base_to_base(cc, X86_RCX, 0,
                                                X86_RBP, src_off, src_sz);
@@ -2231,9 +2288,14 @@ static int x86_64_compile_emit(void *compile_ctx,
         }
         break;
     }
-    case LR_OP_PHI:
-        (void)alloc_slot(cc, desc->dest, 8, 8);
+    case LR_OP_PHI: {
+        size_t phi_sz = desc->type ? lr_type_size(desc->type) : 8;
+        size_t phi_al = desc->type ? lr_type_align(desc->type) : 8;
+        if (phi_sz < 8) phi_sz = 8;
+        if (phi_al < 8) phi_al = 8;
+        (void)alloc_slot(cc, desc->dest, phi_sz, phi_al);
         break;
+    }
     case LR_OP_UNREACHABLE:
         break;
     default:
@@ -2310,7 +2372,9 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
         uint32_t target = cc->fixups[i].target;
         if (target == UINT32_MAX)
             continue;
-        if (target < cc->num_block_offsets && fix_pos + 4 <= cc->buflen) {
+        if (target < cc->num_block_offsets &&
+            cc->block_offsets[target] != SIZE_MAX &&
+            fix_pos + 4 <= cc->buflen) {
             int32_t rel = (int32_t)((int64_t)cc->block_offsets[target] -
                                     (int64_t)(fix_pos + 4));
             cc->buf[fix_pos + 0] = (uint8_t)(rel);
