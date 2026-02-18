@@ -1570,11 +1570,14 @@ static void run_micro_provider(const cfg_t *cfg,
 static void kill_stale_benchmark_processes(void) {
     /* Kill leftover processes from interrupted benchmark runs.
        Use -x (exact process name) for short names; use -f with anchored
-       pattern for names exceeding the 15-char comm limit. */
+       pattern for names exceeding the 15-char comm limit.
+       Also kill orphaned lfortran test executables (.out binaries) that
+       escaped process-group cleanup. */
     (void)system("pkill -9 -x bench_api 2>/dev/null");
     (void)system("pkill -9 -f '^bench_corpus_compare' 2>/dev/null");
     (void)system("pkill -9 -f '^liric_probe_runner' 2>/dev/null");
     (void)system("pkill -9 -f 'lfortran.*--jit' 2>/dev/null");
+    (void)system("pkill -9 -f '/tmp/liric_bench/.*\\.out' 2>/dev/null");
 }
 
 int main(int argc, char **argv) {

@@ -143,7 +143,7 @@ static int wait_with_timeout(pid_t pid, int timeout_ms, int timeout_grace_ms, in
                         *status_out = status;
                         return 0;
                     }
-                    (void)kill(pid, SIGKILL);
+                    (void)kill(-pid, SIGKILL);
                     do {
                         r = waitpid(pid, &status, 0);
                     } while (r < 0 && errno == EINTR);
@@ -214,6 +214,7 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
     if (pid == 0) {
         int fdout = out_fd;
         int fderr = err_fd;
+        setpgid(0, 0);
         if (opts->work_dir && chdir(opts->work_dir) != 0) _exit(127);
         if (opts->env_lib_dir) {
             setenv("DYLD_LIBRARY_PATH", opts->env_lib_dir, 1);
