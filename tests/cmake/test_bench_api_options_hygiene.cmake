@@ -32,7 +32,6 @@ execute_process(
         --lfortran-liric "${TRUE_BIN}"
         --test-dir "${test_dir}"
         --bench-dir "${bench_dir}"
-        --iters 1
         --timeout 1
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out

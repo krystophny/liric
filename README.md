@@ -103,7 +103,6 @@ LL and micro_c lanes are standalone (no lfortran subprocess).
   --modes all \
   --policies all \
   --lanes all \
-  --iters 1 \
   --timeout 15 \
   --timeout-ms 5000
 ```
@@ -122,9 +121,9 @@ Lane tools (bench_matrix calls these internally):
 
 ```bash
 ./build/bench_compat_check --timeout 15
-./build/bench_corpus_compare --iters 1 --policy direct
-./build/bench_api --iters 1 --liric-policy direct
-./build/bench_tcc --iters 1 --policy direct --corpus /tmp/liric_bench/corpus_from_compat.tsv --cache-dir /tmp/liric_bench/cache_from_compat
+./build/bench_corpus_compare --policy direct
+./build/bench_api --liric-policy direct
+./build/bench_tcc --policy direct --corpus /tmp/liric_bench/corpus_from_compat.tsv --cache-dir /tmp/liric_bench/cache_from_compat
 ```
 
 Runtime artifacts:

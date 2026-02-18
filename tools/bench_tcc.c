@@ -7,7 +7,7 @@
  *   WALL-CLOCK: subprocess `tcc -c file.c` vs `liric_probe_runner --no-exec`
  *   IN-PROCESS: `tcc_compile_string()` vs `lr_compiler_feed_ll()+lookup`
  *
- * Usage: ./build/bench_tcc [--iters N] [--bench-dir PATH]
+ * Usage: ./build/bench_tcc [--bench-dir PATH]
  *            [--corpus PATH] [--cache-dir PATH]
  *            [--probe-runner PATH] [--policy direct|ir]
  *            [--lfortran-include-dir PATH]
@@ -322,7 +322,6 @@ static int create_tcc_stub_dir(const char *bench_dir, char *out_path, size_t out
 
 static void usage(void) {
     printf("usage: bench_tcc [options]\n");
-    printf("  --iters N                  iterations (best-of) (default: 1)\n");
     printf("  --bench-dir PATH           output directory (default: /tmp/liric_bench)\n");
     printf("  --corpus PATH              corpus TSV file\n");
     printf("  --cache-dir PATH           corpus cache directory\n");
@@ -333,7 +332,6 @@ static void usage(void) {
 }
 
 int main(int argc, char **argv) {
-    int iters = 1;
     const char *bench_dir = "/tmp/liric_bench";
     const char *corpus_path = NULL;
     const char *cache_dir = NULL;
@@ -355,8 +353,6 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage();
             return 0;
-        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            iters = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--bench-dir") == 0 && i + 1 < argc) {
             bench_dir = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
@@ -380,7 +376,6 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    if (iters < 1) iters = 1;
     if (strcmp(policy, "direct") != 0 && strcmp(policy, "ir") != 0) {
         fprintf(stderr, "error: invalid --policy value: %s (expected direct|ir)\n", policy);
         return 1;
@@ -472,8 +467,7 @@ int main(int argc, char **argv) {
                 fprintf(sf, "{\n  \"status\": \"OK\",\n");
                 fprintf(sf, "  \"mode\": \"%s\",\n", liric_mode_name);
                 fprintf(sf, "  \"policy\": \"%s\",\n", policy);
-                fprintf(sf, "  \"iters\": %d,\n", iters);
-                fprintf(sf, "  \"total_cases\": 0,\n");
+                        fprintf(sf, "  \"total_cases\": 0,\n");
                 fprintf(sf, "  \"wall_passed\": 0,\n");
                 fprintf(sf, "  \"inproc_passed\": 0,\n");
                 fprintf(sf, "  \"skipped\": 0,\n");
@@ -488,8 +482,8 @@ int main(int argc, char **argv) {
     }
 
     printf("bench_tcc: %zu corpus cases (with both .ll and .c), "
-           "%d iterations (best-of), mode=%s, policy=%s\n\n",
-           corpus.count, iters, liric_mode_name, policy);
+           "mode=%s, policy=%s\n\n",
+           corpus.count, liric_mode_name, policy);
 
     /* === WALL-CLOCK === */
     printf("=== WALL-CLOCK: subprocess (tcc -c) vs (liric probe_runner --no-exec) ===\n");
@@ -503,7 +497,7 @@ int main(int argc, char **argv) {
         corpus_case_t *tc = &corpus.items[ci];
         double best_tcc = 1e18, best_liric = 1e18;
 
-        for (int it = 0; it < iters; it++) {
+        for (int it = 0; it < 1; it++) {
             char stub_inc[PATH_MAX], real_inc[PATH_MAX];
             char *tcc_argv[16];
             int n = 0;
@@ -527,7 +521,7 @@ int main(int argc, char **argv) {
             if (t >= 0.0 && t < best_tcc) best_tcc = t;
         }
 
-        for (int it = 0; it < iters; it++) {
+        for (int it = 0; it < 1; it++) {
             char *liric_argv[16];
             int n = 0;
             liric_argv[n++] = (char *)probe_runner_path;
@@ -606,7 +600,7 @@ int main(int argc, char **argv) {
         int tcc_ok = 1, lr_ok = 1;
 
         /* TCC in-process: compile string */
-        for (int it = 0; it < iters; it++) {
+        for (int it = 0; it < 1; it++) {
             TCCState *s = tcc_new();
             if (!s) { tcc_ok = 0; break; }
             tcc_set_output_type(s, TCC_OUTPUT_MEMORY);
@@ -629,7 +623,7 @@ int main(int argc, char **argv) {
         }
 
         /* Liric in-process: feed_ll */
-        for (int it = 0; it < iters; it++) {
+        for (int it = 0; it < 1; it++) {
             lr_compiler_config_t ccfg;
             lr_compiler_error_t cerr;
             lr_compiler_t *c;
@@ -724,7 +718,6 @@ int main(int argc, char **argv) {
         fprintf(sf, "  \"status\": \"%s\",\n", status);
         fprintf(sf, "  \"mode\": \"%s\",\n", liric_mode_name);
         fprintf(sf, "  \"policy\": \"%s\",\n", policy);
-        fprintf(sf, "  \"iters\": %d,\n", iters);
         fprintf(sf, "  \"total_cases\": %zu,\n", corpus.count);
         fprintf(sf, "  \"wall_passed\": %d,\n", wall_passed);
         fprintf(sf, "  \"inproc_passed\": %d,\n", inproc_passed);

@@ -28,8 +28,7 @@ Use `--allow-partial` only for exploratory local runs.
   --bench-dir /tmp/liric_bench \
   --modes all \
   --policies all \
-  --lanes all \
-  --iters 1
+  --lanes all
 ```
 
 ## Outputs

@@ -21,7 +21,6 @@ execute_process(
         --modes isel
         --policies direct
         --lanes api_full_llvm
-        --iters 1
         --timeout 5
         --timeout-ms 500
         --skip-lfortran-rebuild

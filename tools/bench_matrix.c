@@ -67,7 +67,6 @@ typedef struct {
     const char *corpus;
     const char *cache_dir;
 
-    int iters;
     int timeout_sec;
     int timeout_ms;
     int api_cases;
@@ -122,6 +121,11 @@ typedef struct {
     double backend_liric_compile_ms;
     double backend_liric_run_ms;
     double backend_liric_non_parse_ms;
+
+    double full_llvm_elapsed_ms;
+    double full_liric_elapsed_ms;
+    double full_llvm_overhead_ms;
+    double full_liric_overhead_ms;
 
     char *summary_path;
     char *jsonl_path;
@@ -510,7 +514,6 @@ static void usage(void) {
     printf("api_full_llvm,api_full_liric,");
     printf("api_backend_llvm,api_backend_liric,");
     printf("ll_jit,ll_llvm[,micro_c]\n");
-    printf("  --iters N                iterations forwarded to lane runners (default: 1)\n");
     printf("  --api-cases N            api sample cap per cell (default: 100, 0=all)\n");
     printf("  --timeout N              timeout sec for corpus compare / compat (default: 15)\n");
     printf("  --timeout-ms N           timeout ms for bench_api (default: 3000)\n");
@@ -550,7 +553,6 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.build_dir = "build";
     cfg.manifest = "tools/bench_manifest.json";
-    cfg.iters = 1;
     cfg.api_cases = 100;
     cfg.timeout_sec = 15;
     cfg.timeout_ms = 3000;
@@ -601,9 +603,6 @@ static cfg_t parse_args(int argc, char **argv) {
             const char *v = argv[++i];
             if (strcmp(v, "all") == 0) set_all_canonical_lanes(&cfg);
             else if (parse_lanes(&cfg, v) != 0) die("invalid --lanes value: %s", v);
-        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            cfg.iters = atoi(argv[++i]);
-            if (cfg.iters <= 0) cfg.iters = 1;
         } else if (strcmp(argv[i], "--api-cases") == 0 && i + 1 < argc) {
             cfg.api_cases = atoi(argv[++i]);
             if (cfg.api_cases < 0) cfg.api_cases = 0;
@@ -1086,6 +1085,11 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
     dbl_vec_t backend_llvm = {0};
     dbl_vec_t backend_liric = {0};
 
+    dbl_vec_t overhead_llvm = {0};
+    dbl_vec_t overhead_liric = {0};
+    dbl_vec_t elapsed_llvm = {0};
+    dbl_vec_t elapsed_liric = {0};
+
     if (!jsonl_path || !file_exists(jsonl_path)) return -1;
 
     f = fopen(jsonl_path, "r");
@@ -1127,6 +1131,20 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
 
         dbl_vec_push(&backend_llvm, v_llvm_backend);
         dbl_vec_push(&backend_liric, v_liric_backend);
+
+        {
+            double v_llvm_overhead = 0.0, v_liric_overhead = 0.0;
+            double v_llvm_elapsed = 0.0, v_liric_elapsed = 0.0;
+            if (json_get_double(line, "llvm_overhead_median_ms", &v_llvm_overhead) &&
+                json_get_double(line, "liric_overhead_median_ms", &v_liric_overhead) &&
+                json_get_double(line, "llvm_elapsed_median_ms", &v_llvm_elapsed) &&
+                json_get_double(line, "liric_elapsed_median_ms", &v_liric_elapsed)) {
+                dbl_vec_push(&overhead_llvm, v_llvm_overhead);
+                dbl_vec_push(&overhead_liric, v_liric_overhead);
+                dbl_vec_push(&elapsed_llvm, v_llvm_elapsed);
+                dbl_vec_push(&elapsed_liric, v_liric_elapsed);
+            }
+        }
     }
 
     free(line);
@@ -1146,6 +1164,10 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
         dbl_vec_free(&full_liric_non_parse);
         dbl_vec_free(&backend_llvm);
         dbl_vec_free(&backend_liric);
+        dbl_vec_free(&overhead_llvm);
+        dbl_vec_free(&overhead_liric);
+        dbl_vec_free(&elapsed_llvm);
+        dbl_vec_free(&elapsed_liric);
         return -1;
     }
 
@@ -1171,6 +1193,17 @@ static int parse_api_jsonl_metrics(const char *jsonl_path, api_provider_t *p) {
     p->backend_liric_run_ms = p->full_liric_run_ms;
     p->backend_liric_non_parse_ms = p->backend_liric_wall_ms;
 
+    if (overhead_llvm.n > 0) {
+        p->full_llvm_overhead_ms = bench_median(overhead_llvm.items, overhead_llvm.n);
+        p->full_liric_overhead_ms = bench_median(overhead_liric.items, overhead_liric.n);
+        p->full_llvm_elapsed_ms = bench_median(elapsed_llvm.items, elapsed_llvm.n);
+        p->full_liric_elapsed_ms = bench_median(elapsed_liric.items, elapsed_liric.n);
+    }
+
+    dbl_vec_free(&overhead_llvm);
+    dbl_vec_free(&overhead_liric);
+    dbl_vec_free(&elapsed_llvm);
+    dbl_vec_free(&elapsed_liric);
     dbl_vec_free(&full_llvm_wall);
     dbl_vec_free(&full_llvm_compile);
     dbl_vec_free(&full_llvm_run);
@@ -1196,7 +1229,7 @@ static void run_api_provider(const cfg_t *cfg,
                              int need_metrics,
                              api_provider_t *p) {
     cmd_result_t r = {0};
-    char iters_buf[32], timeout_buf[32], min_completed_buf[32], api_cases_buf[32];
+    char timeout_buf[32], min_completed_buf[32], api_cases_buf[32];
     char *api_dir;
     char *cmd[56];
     int n = 0;
@@ -1231,7 +1264,6 @@ static void run_api_provider(const cfg_t *cfg,
         return;
     }
 
-    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg->iters);
     snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg->timeout_ms);
     snprintf(min_completed_buf, sizeof(min_completed_buf), "%d", 1);
     snprintf(api_cases_buf, sizeof(api_cases_buf), "%d", cfg->api_cases);
@@ -1239,8 +1271,6 @@ static void run_api_provider(const cfg_t *cfg,
     cmd[n++] = (char *)cfg->bench_api;
     cmd[n++] = "--bench-dir";
     cmd[n++] = api_dir;
-    cmd[n++] = "--iters";
-    cmd[n++] = iters_buf;
     cmd[n++] = "--timeout-ms";
     cmd[n++] = timeout_buf;
     cmd[n++] = "--min-completed";
@@ -1329,7 +1359,7 @@ static void run_ll_provider(const cfg_t *cfg,
                             const char *policy_dir,
                             ll_provider_t *p) {
     cmd_result_t r = {0};
-    char iters_buf[32], timeout_buf[32];
+    char timeout_buf[32];
     char *ll_dir;
     char *cmd[44];
     int n = 0;
@@ -1368,14 +1398,11 @@ static void run_ll_provider(const cfg_t *cfg,
         return;
     }
 
-    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg->iters);
     snprintf(timeout_buf, sizeof(timeout_buf), "%d", cfg->timeout_sec);
 
     cmd[n++] = (char *)cfg->bench_corpus_compare;
     cmd[n++] = "--bench-dir";
     cmd[n++] = ll_dir;
-    cmd[n++] = "--iters";
-    cmd[n++] = iters_buf;
     cmd[n++] = "--timeout";
     cmd[n++] = timeout_buf;
     cmd[n++] = "--policy";
@@ -1452,7 +1479,6 @@ static void run_micro_provider(const cfg_t *cfg,
                                const char *policy_dir,
                                micro_provider_t *p) {
     cmd_result_t r = {0};
-    char iters_buf[32];
     char *micro_dir;
     char *cmd[30];
     int n = 0;
@@ -1479,10 +1505,7 @@ static void run_micro_provider(const cfg_t *cfg,
         return;
     }
 
-    snprintf(iters_buf, sizeof(iters_buf), "%d", cfg->iters);
     cmd[n++] = (char *)cfg->bench_tcc;
-    cmd[n++] = "--iters";
-    cmd[n++] = iters_buf;
     cmd[n++] = "--policy";
     cmd[n++] = (char *)policy;
     cmd[n++] = "--bench-dir";
@@ -1578,6 +1601,10 @@ int main(int argc, char **argv) {
 
     int compat_ok = 1;
     int ran_compat = 0;
+
+    double best_llvm_elapsed = 0.0, best_liric_elapsed = 0.0;
+    double best_llvm_overhead = 0.0, best_liric_overhead = 0.0;
+    int have_overhead = 0;
 
     if (!require_any(cfg.lanes, LANE_COUNT)) die("no lanes selected");
     if (!require_any(cfg.modes, MODE_COUNT)) die("no modes selected");
@@ -1772,6 +1799,13 @@ int main(int argc, char **argv) {
                     ap.summary_path = xstrdup(cfg.bench_dir);
                 } else {
                     run_api_provider(&cfg, mode, policy, policy_dir, compat_ll, compat_opts, want_api_metrics, &ap);
+                    if (ap.ok && ap.full_llvm_elapsed_ms > 0.0) {
+                        best_llvm_elapsed = ap.full_llvm_elapsed_ms;
+                        best_liric_elapsed = ap.full_liric_elapsed_ms;
+                        best_llvm_overhead = ap.full_llvm_overhead_ms;
+                        best_liric_overhead = ap.full_liric_overhead_ms;
+                        have_overhead = 1;
+                    }
                 }
             }
 
@@ -2050,7 +2084,34 @@ int main(int argc, char **argv) {
         fprintf(sf, "  \"cells_ok\": %d,\n", cells_ok);
         fprintf(sf, "  \"cells_failed\": %d,\n", cells_failed);
         fprintf(sf, "  \"ran_compat_check\": %s,\n", ran_compat ? "true" : "false");
-        fprintf(sf, "  \"compat_ok\": %s\n", compat_ok ? "true" : "false");
+        fprintf(sf, "  \"compat_ok\": %s", compat_ok ? "true" : "false");
+
+        if (have_overhead) {
+            double actual_sp = best_liric_elapsed > 0.0
+                ? best_llvm_elapsed / best_liric_elapsed : 0.0;
+            double llvm_net = best_llvm_elapsed - best_llvm_overhead;
+            double liric_net = best_liric_elapsed - best_liric_overhead;
+            double theoretical_sp = liric_net > 0.0 ? llvm_net / liric_net : 0.0;
+            double compression = theoretical_sp > 0.0 ? actual_sp / theoretical_sp : 0.0;
+            double llvm_pct = best_llvm_elapsed > 0.0
+                ? 100.0 * best_llvm_overhead / best_llvm_elapsed : 0.0;
+            double liric_pct = best_liric_elapsed > 0.0
+                ? 100.0 * best_liric_overhead / best_liric_elapsed : 0.0;
+
+            fprintf(sf, ",\n  \"overhead_analysis\": {\n");
+            fprintf(sf, "    \"llvm_elapsed_median_ms\": %.6f,\n", best_llvm_elapsed);
+            fprintf(sf, "    \"liric_elapsed_median_ms\": %.6f,\n", best_liric_elapsed);
+            fprintf(sf, "    \"llvm_overhead_median_ms\": %.6f,\n", best_llvm_overhead);
+            fprintf(sf, "    \"liric_overhead_median_ms\": %.6f,\n", best_liric_overhead);
+            fprintf(sf, "    \"overhead_pct_of_llvm_elapsed\": %.2f,\n", llvm_pct);
+            fprintf(sf, "    \"overhead_pct_of_liric_elapsed\": %.2f,\n", liric_pct);
+            fprintf(sf, "    \"actual_speedup\": %.6f,\n", actual_sp);
+            fprintf(sf, "    \"theoretical_speedup_without_overhead\": %.6f,\n", theoretical_sp);
+            fprintf(sf, "    \"amdahl_compression_factor\": %.6f\n", compression);
+            fprintf(sf, "  }\n");
+        } else {
+            fprintf(sf, "\n");
+        }
 
         fprintf(sf, "}\n");
         fclose(sf);

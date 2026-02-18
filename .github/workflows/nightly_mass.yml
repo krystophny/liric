@@ -105,7 +105,6 @@ jobs:
           ./tools/bench_api_clean_gate.sh \
             --build-dir "${LIRIC_BUILD}" \
             --bench-dir "${MASS_OUT}/bench_api_clean_gate" \
-            --iters 1 \
             --timeout-ms 3000 \
             --compat-timeout 15 \
             --lfortran "${LFORTRAN_BUILD}/src/bin/lfortran" \

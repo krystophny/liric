@@ -80,7 +80,6 @@ execute_process(
         --lfortran-liric "${fake_liric}"
         --test-dir "${test_dir}"
         --bench-dir "${bench_dir}"
-        --iters 1
         --timeout 5
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out

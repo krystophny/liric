@@ -60,7 +60,6 @@ echo \"ok\" > \"${compat_log}\"
 
 file(WRITE "${fake_api}" "#!/usr/bin/env bash
 set -euo pipefail
-iters=''
 timeout_ms=''
 bench_dir=''
 compile_mode=''
@@ -70,7 +69,6 @@ lfortran_liric=''
 test_dir=''
 while [[ $# -gt 0 ]]; do
     case \"$1\" in
-        --iters) iters=\"$2\"; shift 2 ;;
         --timeout-ms) timeout_ms=\"$2\"; shift 2 ;;
         --bench-dir) bench_dir=\"$2\"; shift 2 ;;
         --liric-compile-mode) compile_mode=\"$2\"; shift 2 ;;
@@ -81,7 +79,6 @@ while [[ $# -gt 0 ]]; do
         *) echo \"unexpected arg in fake bench_api: $1\" >&2; exit 110 ;;
     esac
 done
-[[ \"$iters\" == \"2\" ]] || { echo \"bad iters: $iters\" >&2; exit 111; }
 [[ \"$timeout_ms\" == \"4321\" ]] || { echo \"bad timeout_ms: $timeout_ms\" >&2; exit 112; }
 [[ \"$bench_dir\" == \"${bench_dir}\" ]] || { echo \"bad bench_dir: $bench_dir\" >&2; exit 113; }
 [[ \"$compile_mode\" == \"isel\" ]] || { echo \"bad compile_mode: $compile_mode\" >&2; exit 118; }
@@ -120,7 +117,6 @@ execute_process(
     COMMAND "${BASH_EXE}" "${GATE_SCRIPT}"
         --build-dir "${fake_build}"
         --bench-dir "${bench_dir}"
-        --iters 2
         --timeout-ms 4321
         --compat-timeout 17
         --lfortran /opt/lfortran-llvm/bin/lfortran

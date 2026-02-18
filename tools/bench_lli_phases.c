@@ -38,7 +38,6 @@ typedef struct {
     const char *func_name;
     const char *sig;
     const char *input_file;
-    int iters;
     int json_output;
     int no_exec;
     int parse_only;
@@ -148,17 +147,13 @@ static int parse_args(int argc, char **argv, args_t *a) {
     a->func_name = "main";
     a->sig = "i32";
     a->input_file = NULL;
-    a->iters = 1;
     a->json_output = 0;
     a->no_exec = 0;
     a->parse_only = 0;
     a->num_load_libs = 0;
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            a->iters = atoi(argv[++i]);
-            if (a->iters <= 0) a->iters = 1;
-        } else if (strcmp(argv[i], "--json") == 0) {
+        if (strcmp(argv[i], "--json") == 0) {
             a->json_output = 1;
         } else if (strcmp(argv[i], "--no-exec") == 0) {
             a->no_exec = 1;
@@ -184,7 +179,7 @@ static int parse_args(int argc, char **argv, args_t *a) {
 
     if (!a->input_file) {
         fprintf(stderr,
-            "usage: bench_lli_phases [--iters N] [--json] [--func NAME] [--sig SIG] "
+            "usage: bench_lli_phases [--json] [--func NAME] [--sig SIG] "
             "[--load-lib LIB] [--no-exec] [--parse-only] file.ll\n");
         return 1;
     }
@@ -221,7 +216,7 @@ int main(int argc, char **argv) {
     LLVMInitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
 
-    for (i = 0; i < a.iters; i++) {
+    for (i = 0; i < 1; i++) {
         LLVMContextRef ctx = NULL;
         LLVMMemoryBufferRef buf = NULL;
         LLVMModuleRef mod = NULL;
@@ -342,29 +337,27 @@ int main(int argc, char **argv) {
         LLVMContextDispose(ctx);
     }
 
-    double iters_d = (double)a.iters;
-    double avg_parse_input = parse_input_total / iters_d;
+    double avg_parse_input = parse_input_total;
     double avg_parse = avg_parse_input;
-    double avg_add = jit_total / iters_d;
-    double avg_lookup = lookup_total / iters_d;
-    double avg_exec = exec_total / iters_d;
+    double avg_add = jit_total;
+    double avg_lookup = lookup_total;
+    double avg_exec = exec_total;
     double avg_compile = avg_add + avg_lookup;
     double avg_total = avg_parse + avg_add + avg_lookup + avg_exec;
     double avg_compile_materialized = avg_add + avg_lookup;
 
     if (a.json_output) {
-        printf("{\"file\":\"%s\",\"iters\":%d,"
+        printf("{\"file\":\"%s\","
                "\"parse_input_ms\":%.6f,\"parse_ms\":%.6f,"
                "\"add_module_ms\":%.6f,\"lookup_ms\":%.6f,"
                "\"compile_materialized_ms\":%.6f,\"compile_ms\":%.6f,\"exec_ms\":%.6f,"
                "\"total_ms\":%.6f,\"retcode\":%d}\n",
-               a.input_file, a.iters,
+               a.input_file,
                avg_parse_input, avg_parse, avg_add, avg_lookup,
                avg_compile_materialized, avg_compile, avg_exec,
                avg_total, retcode_last);
     } else {
         printf("file:       %s\n", a.input_file);
-        printf("iters:      %d\n", a.iters);
         printf("parse:      %.6f ms\n", avg_parse);
         printf("add_module: %.6f ms  (lazy registration)\n", avg_add);
         printf("lookup:     %.6f ms  (triggers lazy compile)\n", avg_lookup);

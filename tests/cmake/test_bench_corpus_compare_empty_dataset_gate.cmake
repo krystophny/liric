@@ -26,7 +26,6 @@ function(run_case allow_empty expect_rc)
         --corpus "${corpus}"
         --cache-dir "${cache_dir}"
         --bench-dir "${bench_dir}"
-        --iters 1
         --timeout 1
     )
     if(allow_empty)

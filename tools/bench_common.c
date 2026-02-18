@@ -155,7 +155,7 @@ static int wait_with_timeout(pid_t pid, int timeout_ms, int timeout_grace_ms, in
                     return 1;
                 }
                 ts.tv_sec = 0;
-                ts.tv_nsec = 1000000L;
+                ts.tv_nsec = 100000L;
                 nanosleep(&ts, NULL);
                 continue;
             }

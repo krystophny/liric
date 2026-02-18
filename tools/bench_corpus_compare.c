@@ -59,7 +59,6 @@ typedef struct {
     const char *corpus_tsv;
     const char *cache_dir;
     const char *bench_dir;
-    int iters;
     int timeout_sec;
     int allow_empty;
 } cfg_t;
@@ -341,7 +340,6 @@ static int load_corpus_tests(const cfg_t *cfg, testlist_t *tests) {
 
 static void usage(void) {
     printf("usage: bench_corpus_compare [options]\n");
-    printf("  --iters N             iterations per test (default: 3)\n");
     printf("  --timeout N           command timeout in seconds (default: 30)\n");
     printf("  --probe-runner PATH   path to liric_probe_runner\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
@@ -372,7 +370,6 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.corpus_tsv = "tools/corpus_100.tsv";
     cfg.cache_dir = "/tmp/liric_lfortran_mass/cache";
     cfg.bench_dir = "/tmp/liric_bench";
-    cfg.iters = 1;
     cfg.timeout_sec = 30;
     cfg.allow_empty = 0;
 
@@ -380,9 +377,6 @@ static cfg_t parse_args(int argc, char **argv) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             usage();
             exit(0);
-        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            cfg.iters = atoi(argv[++i]);
-            if (cfg.iters <= 0) cfg.iters = 1;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             cfg.timeout_sec = atoi(argv[++i]);
             if (cfg.timeout_sec <= 0) cfg.timeout_sec = 30;
@@ -533,7 +527,7 @@ static int run_suite(const cfg_t *cfg,
     jf = fopen(jsonl_path, "w");
     if (!jf) die("failed to open output", jsonl_path);
 
-    printf("Corpus compare: %zu tests, %d iterations each\n", tests->n, cfg->iters);
+    printf("Corpus compare: %zu tests\n", tests->n);
 
     for (i = 0; i < tests->n; i++) {
         const test_case_t *t = &tests->items[i];
@@ -541,22 +535,22 @@ static int run_suite(const cfg_t *cfg,
         int skipped = 0;
         size_t it;
 
-        double *liric_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *liric_compile = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *liric_lookup = (double *)calloc((size_t)cfg->iters, sizeof(double));
+        double *liric_parse = (double *)calloc(1, sizeof(double));
+        double *liric_compile = (double *)calloc(1, sizeof(double));
+        double *liric_lookup = (double *)calloc(1, sizeof(double));
 
-        double *llvm_parse = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_parse_input = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_add_module = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_lookup = (double *)calloc((size_t)cfg->iters, sizeof(double));
-        double *llvm_compile_mat = (double *)calloc((size_t)cfg->iters, sizeof(double));
+        double *llvm_parse = (double *)calloc(1, sizeof(double));
+        double *llvm_parse_input = (double *)calloc(1, sizeof(double));
+        double *llvm_add_module = (double *)calloc(1, sizeof(double));
+        double *llvm_lookup = (double *)calloc(1, sizeof(double));
+        double *llvm_compile_mat = (double *)calloc(1, sizeof(double));
 
         if (!liric_parse || !liric_compile || !liric_lookup || !llvm_parse ||
             !llvm_parse_input || !llvm_add_module || !llvm_lookup || !llvm_compile_mat) {
             die("out of memory", NULL);
         }
 
-        for (it = 0; it < (size_t)cfg->iters; it++) {
+        for (it = 0; it < 1; it++) {
             cmd_result_t rp, ri;
             double l_parse = 0.0, l_compile = 0.0, l_lookup = 0.0;
             double e_parse = 0.0, e_parse_input = 0.0;
@@ -602,8 +596,6 @@ static int run_suite(const cfg_t *cfg,
                 llvm_argv[ek++] = (char *)cfg->lli_phases;
                 llvm_argv[ek++] = "--json";
                 llvm_argv[ek++] = "--no-exec";
-                llvm_argv[ek++] = "--iters";
-                llvm_argv[ek++] = "1";
                 llvm_argv[ek++] = "--func";
                 llvm_argv[ek++] = "main";
                 llvm_argv[ek++] = "--sig";
@@ -673,7 +665,7 @@ static int run_suite(const cfg_t *cfg,
                     : 0.0;
 
             fprintf(jf,
-                    "{\"name\":\"%s\",\"iters\":%zu,"
+                    "{\"name\":\"%s\","
                     "\"liric_parse_median_ms\":%.6f,\"liric_compile_median_ms\":%.6f,"
                     "\"liric_lookup_median_ms\":%.6f,"
                     "\"liric_compile_materialized_median_ms\":%.6f,"
@@ -686,7 +678,7 @@ static int run_suite(const cfg_t *cfg,
                     "\"llvm_total_materialized_median_ms\":%.6f,"
                     "\"compile_materialized_speedup\":%.6f,"
                     "\"total_materialized_speedup\":%.6f}\n",
-                    t->name, ok_n,
+                    t->name,
                     r.liric_parse_ms, r.liric_compile_ms, r.liric_lookup_ms,
                     r.liric_compile_materialized_ms, r.liric_total_materialized_ms,
                     r.llvm_parse_ms, r.llvm_parse_input_ms,
@@ -750,11 +742,9 @@ int main(int argc, char **argv) {
                     "\"dataset_name\":\"corpus_100\","
                     "\"liric_policy\":\"%s\","
                     "\"expected_tests\":100,"
-                    "\"attempted_tests\":0,"
-                    "\"iters\":%d"
+                    "\"attempted_tests\":0"
                     "}\n",
-                    cfg.policy,
-                    cfg.iters);
+                    cfg.policy);
             fclose(ef);
         }
         fprintf(stderr, "EMPTY DATASET: no corpus tests available\n");
@@ -795,7 +785,6 @@ int main(int argc, char **argv) {
             "\"expected_tests\":100,"
             "\"attempted_tests\":%zu,"
             "\"completed_tests\":%zu,"
-            "\"iters\":%d,"
             "\"liric_parse_median_ms\":%.6f,"
             "\"liric_compile_median_ms\":%.6f,"
             "\"liric_lookup_median_ms\":%.6f,"
@@ -818,7 +807,6 @@ int main(int argc, char **argv) {
             cfg.policy,
             summary.attempted,
             summary.completed,
-            cfg.iters,
             summary.liric_parse_median_ms,
             summary.liric_compile_median_ms,
             summary.liric_lookup_median_ms,

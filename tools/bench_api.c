@@ -36,7 +36,6 @@ typedef struct {
     const char *bench_dir;
     const char *compat_list;
     const char *options_jsonl;
-    int iters;
     int timeout_ms;
     int min_completed;
     int keep_fail_workdirs;
@@ -78,6 +77,10 @@ typedef struct {
     double llvm_codegen_ms;
     double liric_backend_ms;
     double llvm_backend_ms;
+    double liric_elapsed_ms;
+    double llvm_elapsed_ms;
+    double liric_overhead_ms;
+    double llvm_overhead_ms;
     int time_report_fallback;
 } row_t;
 
@@ -1200,7 +1203,7 @@ static void resolve_default_compat_artifacts(const char *bench_dir, char **compa
     *opts_path = path_join2(bench_dir, "compat_ll_options.jsonl");
 }
 
-static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done) {
+static void write_json_success_row(FILE *f, const row_t *row) {
     char *en;
     double wall_sp;
     double compile_sp;
@@ -1214,7 +1217,7 @@ static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done)
     run_sp = row->liric_run_ms > 0 ? row->llvm_run_ms / row->liric_run_ms : 0.0;
 
     fprintf(f,
-            "{\"name\":\"%s\",\"status\":\"ok\",\"iters\":%zu,"
+            "{\"name\":\"%s\",\"status\":\"ok\","
             "\"time_report_fallback\":%s,"
             "\"frontend_median_ms\":%.6f,"
             "\"liric_llvm_ir_median_ms\":%.6f,\"llvm_llvm_ir_median_ms\":%.6f,"
@@ -1224,8 +1227,10 @@ static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done)
             "\"liric_before_asr_to_mod_median_ms\":%.6f,"
             "\"llvm_before_asr_to_mod_median_ms\":%.6f,"
             "\"liric_codegen_median_ms\":%.6f,\"llvm_codegen_median_ms\":%.6f,"
-            "\"liric_backend_median_ms\":%.6f,\"llvm_backend_median_ms\":%.6f",
-            en, iters_done,
+            "\"liric_backend_median_ms\":%.6f,\"llvm_backend_median_ms\":%.6f,"
+            "\"liric_elapsed_median_ms\":%.6f,\"llvm_elapsed_median_ms\":%.6f,"
+            "\"liric_overhead_median_ms\":%.6f,\"llvm_overhead_median_ms\":%.6f",
+            en,
             row->time_report_fallback ? "true" : "false",
             row->frontend_ms,
             row->liric_llvm_ir_ms, row->llvm_llvm_ir_ms,
@@ -1234,7 +1239,9 @@ static void write_json_success_row(FILE *f, const row_t *row, size_t iters_done)
             row->liric_run_ms, row->llvm_run_ms,
             row->liric_before_asr_to_mod_ms, row->llvm_before_asr_to_mod_ms,
             row->liric_codegen_ms, row->llvm_codegen_ms,
-            row->liric_backend_ms, row->llvm_backend_ms);
+            row->liric_backend_ms, row->llvm_backend_ms,
+            row->liric_elapsed_ms, row->llvm_elapsed_ms,
+            row->liric_overhead_ms, row->llvm_overhead_ms);
 
     fprintf(f, ",\"phase_median_ms\":{\"liric\":{");
     for (p = 0; p < PHASE_COUNT; p++) {
@@ -1570,7 +1577,6 @@ static void usage(void) {
     printf("  --bench-dir PATH     output directory (default: /tmp/liric_bench)\n");
     printf("  --compat-list PATH   compat list file (default: compat_ll.txt)\n");
     printf("  --options-jsonl PATH options jsonl file (default matches chosen compat list)\n");
-    printf("  --iters N            iterations per test (default: 3)\n");
     printf("  --timeout N          per-command timeout in seconds (compat alias)\n");
     printf("  --timeout-ms N       per-command timeout in milliseconds (default: 3000)\n");
     printf("  --keep-fail-workdirs keep workdirs for skipped tests (default: off)\n");
@@ -1606,7 +1612,6 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
     cfg.options_jsonl = NULL;
-    cfg.iters = 1;
     cfg.timeout_ms = 3000;
     cfg.keep_fail_workdirs = 0;
     cfg.fail_sample_limit = 0;
@@ -1640,9 +1645,6 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.compat_list = argv[++i];
         } else if (strcmp(argv[i], "--options-jsonl") == 0 && i + 1 < argc) {
             cfg.options_jsonl = argv[++i];
-        } else if (strcmp(argv[i], "--iters") == 0 && i + 1 < argc) {
-            cfg.iters = atoi(argv[++i]);
-            if (cfg.iters <= 0) cfg.iters = 1;
         } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
             double sec = atof(argv[++i]);
             cfg.timeout_ms = (int)(sec * 1000.0);
@@ -1775,7 +1777,7 @@ int main(int argc, char **argv) {
     else
         fail_log_dir = path_join2(cfg.bench_dir, "fail_logs");
 
-    printf("Benchmarking %zu tests, %d iterations each\n", tests.n, cfg.iters);
+    printf("Benchmarking %zu tests\n", tests.n);
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
     printf("  lfortran_exec_mode: %s (requested: %s)\n", resolved_exec_mode, cfg.lfortran_exec_mode);
@@ -1813,21 +1815,23 @@ int main(int argc, char **argv) {
             skip_diag_t skip_diag;
             char *source_path = NULL;
             size_t it;
-            double *liric_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_wall = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_compile = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_run = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *frontend = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_llvm_ir = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_llvm_ir = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_before_asr_to_mod = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_before_asr_to_mod = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_codegen = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_codegen = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *liric_backend = (double *)calloc((size_t)cfg.iters, sizeof(double));
-            double *llvm_backend = (double *)calloc((size_t)cfg.iters, sizeof(double));
+            double *liric_wall = (double *)calloc(1, sizeof(double));
+            double *llvm_wall = (double *)calloc(1, sizeof(double));
+            double *liric_compile = (double *)calloc(1, sizeof(double));
+            double *liric_run = (double *)calloc(1, sizeof(double));
+            double *llvm_compile = (double *)calloc(1, sizeof(double));
+            double *llvm_run = (double *)calloc(1, sizeof(double));
+            double *frontend = (double *)calloc(1, sizeof(double));
+            double *liric_llvm_ir = (double *)calloc(1, sizeof(double));
+            double *llvm_llvm_ir = (double *)calloc(1, sizeof(double));
+            double *liric_before_asr_to_mod = (double *)calloc(1, sizeof(double));
+            double *llvm_before_asr_to_mod = (double *)calloc(1, sizeof(double));
+            double *liric_codegen = (double *)calloc(1, sizeof(double));
+            double *llvm_codegen = (double *)calloc(1, sizeof(double));
+            double *liric_backend = (double *)calloc(1, sizeof(double));
+            double *llvm_backend = (double *)calloc(1, sizeof(double));
+            double *liric_elapsed = (double *)calloc(1, sizeof(double));
+            double *llvm_elapsed = (double *)calloc(1, sizeof(double));
             double *liric_phase[PHASE_COUNT];
             double *llvm_phase[PHASE_COUNT];
             size_t ok_n = 0;
@@ -1843,8 +1847,8 @@ int main(int argc, char **argv) {
             memset(&skip_diag, 0, sizeof(skip_diag));
 
             for (p = 0; p < PHASE_COUNT; p++) {
-                liric_phase[p] = (double *)calloc((size_t)cfg.iters, sizeof(double));
-                llvm_phase[p] = (double *)calloc((size_t)cfg.iters, sizeof(double));
+                liric_phase[p] = (double *)calloc(1, sizeof(double));
+                llvm_phase[p] = (double *)calloc(1, sizeof(double));
             }
 
             strlist_init(&opt_toks);
@@ -1877,12 +1881,13 @@ int main(int argc, char **argv) {
                 goto skip_test;
             }
 
-            for (it = 0; it < (size_t)cfg.iters; it++) {
+            for (it = 0; it < 1; it++) {
                 cmd_result_t llvm_r, liric_r;
                 time_report_t llvm_time;
                 time_report_t liric_time;
                 double llvm_front = 0.0, llvm_compile_ms = 0.0, llvm_run_ms = 0.0, llvm_wall_ms = 0.0;
                 double liric_front = 0.0, liric_compile_ms = 0.0, liric_run_ms = 0.0, liric_wall_ms = 0.0;
+                double llvm_elapsed_val = 0.0, liric_elapsed_val = 0.0;
                 const char *attempt_work_dir = work_dir;
                 const char *extra_retry_opt = NULL;
                 int retried_test_dir = 0;
@@ -2041,6 +2046,8 @@ int main(int argc, char **argv) {
                     synthesize_time_report_from_elapsed(liric_r.elapsed_ms, &liric_time);
                     test_time_report_fallback = 1;
                 }
+                llvm_elapsed_val = llvm_r.elapsed_ms;
+                liric_elapsed_val = liric_r.elapsed_ms;
                 free_cmd_result(&llvm_r);
                 free_cmd_result(&liric_r);
 
@@ -2070,6 +2077,8 @@ int main(int argc, char **argv) {
                 liric_codegen[ok_n] = liric_time.llvm_ir_ms + liric_time.llvm_opt_ms;
                 llvm_backend[ok_n] = llvm_time.llvm_to_jit_ms + llvm_time.jit_run_ms;
                 liric_backend[ok_n] = liric_time.llvm_to_jit_ms + liric_time.jit_run_ms;
+                llvm_elapsed[ok_n] = llvm_elapsed_val;
+                liric_elapsed[ok_n] = liric_elapsed_val;
                 for (p = 0; p < PHASE_COUNT; p++) {
                     llvm_phase[p][ok_n] = phase_value_from_time_report(&llvm_time, p);
                     liric_phase[p][ok_n] = phase_value_from_time_report(&liric_time, p);
@@ -2107,6 +2116,8 @@ int main(int argc, char **argv) {
                 double llvm_codegen_m = median(llvm_codegen, ok_n);
                 double liric_backend_m = median(liric_backend, ok_n);
                 double llvm_backend_m = median(llvm_backend, ok_n);
+                double liric_elapsed_m = median(liric_elapsed, ok_n);
+                double llvm_elapsed_m = median(llvm_elapsed, ok_n);
                 double wall_sp = lw > 0 ? ew / lw : 0.0;
                 double compile_sp = lc > 0 ? ec / lc : 0.0;
                 int p2;
@@ -2129,6 +2140,15 @@ int main(int argc, char **argv) {
                 row.llvm_codegen_ms = llvm_codegen_m;
                 row.liric_backend_ms = liric_backend_m;
                 row.llvm_backend_ms = llvm_backend_m;
+                row.liric_elapsed_ms = liric_elapsed_m;
+                row.llvm_elapsed_ms = llvm_elapsed_m;
+                if (!test_time_report_fallback) {
+                    row.liric_overhead_ms = liric_elapsed_m > lw ? liric_elapsed_m - lw : 0.0;
+                    row.llvm_overhead_ms = llvm_elapsed_m > ew ? llvm_elapsed_m - ew : 0.0;
+                } else {
+                    row.liric_overhead_ms = 0.0;
+                    row.llvm_overhead_ms = 0.0;
+                }
                 row.time_report_fallback = test_time_report_fallback;
                 for (p2 = 0; p2 < PHASE_COUNT; p2++) {
                     row.liric_phase_ms[p2] = median(liric_phase[p2], ok_n);
@@ -2136,7 +2156,7 @@ int main(int argc, char **argv) {
                 }
                 rowlist_push(&rows, row);
 
-                write_json_success_row(jf, &row, ok_n);
+                write_json_success_row(jf, &row);
                 printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), ir %.2fms vs %.2fms (%.2fx), jit %.2fms vs %.2fms (%.2fx)\n",
                        i + 1, tests.n, name, lw, ew, wall_sp, liric_ir, llvm_ir, ir_sp, lc, ec, compile_sp);
             }
@@ -2183,6 +2203,8 @@ next_test:
             free(llvm_codegen);
             free(liric_backend);
             free(llvm_backend);
+            free(liric_elapsed);
+            free(llvm_elapsed);
             for (p = 0; p < PHASE_COUNT; p++) {
                 free(liric_phase[p]);
                 free(llvm_phase[p]);
@@ -2346,7 +2368,7 @@ next_test:
 
         printf("\n========================================================================\n");
         printf("  API JIT mode: Fortran frontend + LLVM JIT vs Fortran frontend + liric JIT\n");
-        printf("  %zu tests, %d iterations each\n", rows.n, cfg.iters);
+        printf("  %zu tests\n", rows.n);
         printf("========================================================================\n");
 
         printf("\n  FRONTEND (common to both)\n");
@@ -2534,7 +2556,6 @@ next_test:
         fprintf(sf, "  \"completed_time_report_fallback\": %zu,\n", time_report_fallback_completed);
         fprintf(sf, "  \"completed_nonzero_compat\": %zu,\n", compat_nonzero_completed);
         fprintf(sf, "  \"skipped\": %zu,\n", skipped);
-        fprintf(sf, "  \"iters\": %d,\n", cfg.iters);
         fprintf(sf, "  \"timeout_ms\": %d,\n", cfg.timeout_ms);
         fprintf(sf, "  \"min_completed\": %d,\n", cfg.min_completed);
         fprintf(sf, "  \"completion_threshold_met\": %s,\n",

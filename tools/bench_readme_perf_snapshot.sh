@@ -12,7 +12,6 @@ usage: bench_readme_perf_snapshot.sh [options]
   --build-dir PATH       build dir containing benchmark tools (default: ./build)
   --bench-dir PATH       benchmark output dir (default: /tmp/liric_bench)
   --out-dir PATH         output dir for published artifacts (default: docs/benchmarks)
-  --iters N              iterations for corpus comparator (default: 3)
   --timeout N            timeout seconds per command (default: 30)
   --corpus PATH          corpus TSV (default: tools/corpus_100.tsv)
   --cache-dir PATH       corpus cache dir (default: /tmp/liric_lfortran_mass/cache)
@@ -33,7 +32,6 @@ USAGE
 build_dir="./build"
 bench_dir="/tmp/liric_bench"
 out_dir="docs/benchmarks"
-iters="3"
 timeout_sec="30"
 corpus_tsv="tools/corpus_100.tsv"
 cache_dir="/tmp/liric_lfortran_mass/cache"
@@ -56,11 +54,6 @@ while [[ $# -gt 0 ]]; do
         --out-dir)
             [[ $# -ge 2 ]] || bench_die "missing value for $1"
             out_dir="$2"
-            shift 2
-            ;;
-        --iters)
-            [[ $# -ge 2 ]] || bench_die "missing value for $1"
-            iters="$2"
             shift 2
             ;;
         --timeout)
@@ -120,7 +113,6 @@ if [[ "$no_run" == "0" ]]; then
         --corpus "$corpus_tsv"
         --cache-dir "$cache_dir"
         --bench-dir "$bench_dir"
-        --iters "$iters"
         --timeout "$timeout_sec"
     )
     if [[ -n "$runtime_lib" ]]; then
@@ -140,12 +132,10 @@ dataset_name="$(bench_json_string_field "$summary_path" "dataset_name")"
 expected_tests="$(bench_json_int_field "$summary_path" "expected_tests")"
 attempted_tests="$(bench_json_int_field "$summary_path" "attempted_tests")"
 completed_tests="$(bench_json_int_field "$summary_path" "completed_tests")"
-summary_iters="$(bench_json_int_field "$summary_path" "iters")"
 
 [[ "$dataset_name" == "corpus_100" ]] || bench_die "dataset_name must be corpus_100 (got '${dataset_name}')"
 [[ "$expected_tests" -eq 100 ]] || bench_die "expected_tests must be 100 (got '${expected_tests}')"
 [[ "$attempted_tests" -gt 0 ]] || bench_die "attempted_tests must be > 0"
-[[ "$summary_iters" -gt 0 ]] || bench_die "iters must be > 0"
 
 liric_parse="$(bench_json_number_field "$summary_path" "liric_parse_median_ms")"
 liric_compile_mat="$(bench_json_number_field "$summary_path" "liric_compile_materialized_median_ms")"
@@ -200,7 +190,6 @@ cat > "$snapshot_path" <<EOF_JSON
   "dataset_name": "$(bench_json_escape "$dataset_name")",
   "expected_tests": ${expected_tests},
   "attempted_tests": ${attempted_tests},
-  "iters": ${summary_iters},
   "canonical_track": "corpus_canonical",
   "completed_tests": ${completed_tests},
   "liric_parse_median_ms": ${liric_parse},
@@ -229,7 +218,7 @@ Generated: ${generated_at_utc}
 Benchmark commit: ${benchmark_commit}
 Host: ${host_cpu} (${host_kernel})
 Toolchain: ${cc_version}; ${lli_version}
-Dataset: ${dataset_name} (expected ${expected_tests}, attempted ${attempted_tests}, iters ${summary_iters})
+Dataset: ${dataset_name} (expected ${expected_tests}, attempted ${attempted_tests})
 Canonical track: corpus_canonical (${status}; completed ${completed_tests}/${attempted_tests})
 
 Artifacts:

@@ -19,7 +19,6 @@ usage: bench_api_clean_gate.sh [options]
   --liric-compile-mode M  compile mode for liric backend in bench_api (default: isel)
   --cmake PATH            path to integration_tests/CMakeLists.txt (forwarded to bench_compat_check)
   --workers N             worker count hint (forwarded to bench_compat_check)
-  --iters N               bench_api iterations (default: 1)
   --timeout-ms N          bench_api timeout in ms (default: 3000)
   --compat-timeout N      bench_compat_check timeout in seconds (default: 15)
   --no-run                only validate existing summary artifacts in bench-dir
@@ -45,7 +44,6 @@ runtime_lib=""
 liric_compile_mode="isel"
 cmake_path=""
 workers=""
-iters="1"
 timeout_ms="3000"
 compat_timeout="15"
 no_run="0"
@@ -102,11 +100,6 @@ while [[ $# -gt 0 ]]; do
             workers="$2"
             shift 2
             ;;
-        --iters)
-            [[ $# -ge 2 ]] || bench_die "missing value for $1"
-            iters="$2"
-            shift 2
-            ;;
         --timeout-ms)
             [[ $# -ge 2 ]] || bench_die "missing value for $1"
             timeout_ms="$2"
@@ -137,7 +130,6 @@ if [[ "$no_run" == "0" ]]; then
         --bench-dir "$bench_dir"
     )
     api_args=(
-        --iters "$iters"
         --timeout-ms "$timeout_ms"
         --bench-dir "$bench_dir"
         --liric-compile-mode "$liric_compile_mode"

@@ -30,7 +30,6 @@ function(run_case case_name allow_empty expect_rc)
         --bench-dir "${bench_dir}"
         --compat-list "${compat}"
         --options-jsonl "${opts}"
-        --iters 1
         --timeout 1
     )
     if(allow_empty)

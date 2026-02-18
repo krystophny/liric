@@ -4,7 +4,7 @@ Generated: 2026-02-18T08:09:18Z
 Benchmark commit: e693eac39fdc814c86e8fe3f77cf7a100694ffa8
 Host: AMD Ryzen 9 5950X 16-Core Processor (Linux 6.19.2-2-cachyos x86_64 GNU/Linux)
 Toolchain: cc (GCC) 15.2.1 20260209; LLVM version 21.1.8
-Dataset: corpus_100 (expected 100, attempted 95, iters 3)
+Dataset: corpus_100 (expected 100, attempted 95)
 Canonical track: corpus_canonical (OK; completed 95/95)
 
 Artifacts:

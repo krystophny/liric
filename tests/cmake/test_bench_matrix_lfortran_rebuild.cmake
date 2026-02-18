@@ -79,7 +79,7 @@ options_jsonl=''
 while [[ $# -gt 0 ]]; do
     case \"$1\" in
         --bench-dir) bench_dir=\"$2\"; shift 2 ;;
-        --iters|--timeout-ms|--min-completed|--fail-sample-limit) shift 2 ;;
+        --timeout-ms|--min-completed|--fail-sample-limit) shift 2 ;;
         --require-zero-skips) shift 1 ;;
         --liric-policy) policy=\"$2\"; shift 2 ;;
         --compat-list) compat_list=\"$2\"; shift 2 ;;
@@ -128,7 +128,6 @@ execute_process(
         --modes isel
         --policies direct
         --lanes api_full_llvm
-        --iters 1
         --timeout 5
         --timeout-ms 1000
         --cmake "${fake_cmake}"

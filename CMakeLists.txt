@@ -253,6 +253,9 @@ target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 add_executable(bench_matrix tools/bench_matrix.c tools/bench_common.c)
 target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
 
+add_executable(bench_overhead_probe tools/bench_overhead_probe.c tools/bench_common.c)
+target_link_libraries(bench_overhead_probe PRIVATE ${LIRIC_PLATFORM_LIBS})
+
 option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
 if(WITH_BENCH_TCC)
     find_path(LIRTCC_INCLUDE_DIR libtcc.h)

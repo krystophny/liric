@@ -14,7 +14,6 @@
   "dataset_name": "corpus_100",
   "expected_tests": 100,
   "attempted_tests": 95,
-  "iters": 3,
   "canonical_track": "corpus_canonical",
   "completed_tests": 95,
   "liric_parse_median_ms": 0.212000,
