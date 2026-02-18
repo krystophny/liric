@@ -71,11 +71,6 @@ typedef struct lr_target {
     int (*compile_add_phi_copy)(void *compile_ctx, uint32_t pred_block_id,
                                 uint32_t succ_block_id, uint32_t dest_vreg,
                                 const lr_operand_desc_t *src_op);
-    /* Flush deferred state (e.g. pending terminators) before suspend. */
-    int (*compile_flush_pending)(void *compile_ctx);
-    /* Get/set the current code write position (for suspend/resume). */
-    size_t (*compile_get_pos)(void *compile_ctx);
-    int (*compile_set_pos)(void *compile_ctx, size_t new_pos);
 } lr_target_t;
 
 const lr_target_t *lr_target_x86_64(void);

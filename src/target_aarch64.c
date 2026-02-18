@@ -1895,32 +1895,6 @@ static int aarch64_compile_add_phi_copy(void *compile_ctx,
     return 0;
 }
 
-static int aarch64_compile_flush_pending(void *compile_ctx) {
-    a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
-    if (!ctx)
-        return -1;
-    if (ctx->block_offset_pending) {
-        ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
-        ctx->block_offset_pending = false;
-    }
-    if (ctx->deferred.pending)
-        return a64_flush_deferred_terminator(ctx);
-    return 0;
-}
-
-static size_t aarch64_compile_get_pos(void *compile_ctx) {
-    a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
-    return ctx ? ctx->cc.pos : 0;
-}
-
-static int aarch64_compile_set_pos(void *compile_ctx, size_t new_pos) {
-    a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
-    if (!ctx || new_pos > ctx->cc.buflen)
-        return -1;
-    ctx->cc.pos = new_pos;
-    return 0;
-}
-
 static const lr_target_t aarch64_target = {
     .name = "aarch64",
     .ptr_size = 8,
@@ -1929,9 +1903,6 @@ static const lr_target_t aarch64_target = {
     .compile_set_block = aarch64_compile_set_block,
     .compile_end = aarch64_compile_end,
     .compile_add_phi_copy = aarch64_compile_add_phi_copy,
-    .compile_flush_pending = aarch64_compile_flush_pending,
-    .compile_get_pos = aarch64_compile_get_pos,
-    .compile_set_pos = aarch64_compile_set_pos,
 };
 
 const lr_target_t *lr_target_aarch64(void) {

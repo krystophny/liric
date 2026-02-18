@@ -2429,32 +2429,6 @@ static int x86_64_compile_add_phi_copy(void *compile_ctx,
     return 0;
 }
 
-static int x86_64_compile_flush_pending(void *compile_ctx) {
-    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
-    if (!ctx)
-        return -1;
-    if (ctx->block_offset_pending) {
-        ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
-        ctx->block_offset_pending = false;
-    }
-    if (ctx->deferred.pending)
-        return flush_deferred_terminator(ctx);
-    return 0;
-}
-
-static size_t x86_64_compile_get_pos(void *compile_ctx) {
-    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
-    return ctx ? ctx->cc.pos : 0;
-}
-
-static int x86_64_compile_set_pos(void *compile_ctx, size_t new_pos) {
-    x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
-    if (!ctx || new_pos > ctx->cc.buflen)
-        return -1;
-    ctx->cc.pos = new_pos;
-    return 0;
-}
-
 static const lr_target_t x86_64_target = {
     .name = "x86_64",
     .ptr_size = 8,
@@ -2463,9 +2437,6 @@ static const lr_target_t x86_64_target = {
     .compile_set_block = x86_64_compile_set_block,
     .compile_end = x86_64_compile_end,
     .compile_add_phi_copy = x86_64_compile_add_phi_copy,
-    .compile_flush_pending = x86_64_compile_flush_pending,
-    .compile_get_pos = x86_64_compile_get_pos,
-    .compile_set_pos = x86_64_compile_set_pos,
 };
 
 const lr_target_t *lr_target_x86_64(void) {
