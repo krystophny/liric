@@ -1467,9 +1467,12 @@ static int x86_64_compile_emit(void *compile_ctx,
         return -1;
 
     /* PHI instructions register phi copies without flushing the deferred
-       terminator. The first non-PHI instruction flushes it (applying any
-       registered phi copies) then records the block offset. */
-    if (desc->op != LR_OP_PHI) {
+       terminator. ALLOCA instructions also skip the flush — the compat API
+       may emit allocas after the block terminator (LLVM treats alloca as
+       entry-block regardless of position), so we must not interpose a jmp
+       between the preceding code and alloca setup.  The first non-PHI,
+       non-ALLOCA instruction flushes the deferred terminator. */
+    if (desc->op != LR_OP_PHI && desc->op != LR_OP_ALLOCA) {
         if (ctx->deferred.pending) {
             if (flush_deferred_terminator(ctx) != 0)
                 return -1;
@@ -1671,9 +1674,15 @@ static int x86_64_compile_emit(void *compile_ctx,
     case LR_OP_ALLOCA: {
         size_t elem_sz = lr_type_size(desc->type);
         if (elem_sz < 1) elem_sz = 1;
+        /* Treat all constant-count allocas as static: LLVM semantics
+           guarantee alloca is entry-block regardless of IR position,
+           so we use the fixed frame for any compile-time-known size. */
         bool use_static = (nops == 0) ||
-            (ops[0].kind == LR_VAL_IMM_I64 && ops[0].imm_i64 == 1);
+            (ops[0].kind == LR_VAL_IMM_I64);
         if (use_static) {
+            int64_t count = (nops > 0) ? ops[0].imm_i64 : 1;
+            if (count < 1) count = 1;
+            size_t total_sz = elem_sz * (size_t)count;
             int32_t off = lr_target_lookup_static_alloca_offset(
                 cc->static_alloca_offsets, cc->num_static_alloca_offsets,
                 desc->dest);
@@ -1682,7 +1691,7 @@ static int x86_64_compile_emit(void *compile_ctx,
                 if (elem_align == 0) elem_align = 1;
                 cc->stack_size = (uint32_t)align_up(cc->stack_size,
                                                      elem_align);
-                cc->stack_size += (uint32_t)elem_sz;
+                cc->stack_size += (uint32_t)total_sz;
                 off = -(int32_t)cc->stack_size;
                 lr_target_set_static_alloca_offset(
                     cc->arena, &cc->static_alloca_offsets,
