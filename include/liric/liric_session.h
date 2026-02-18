@@ -179,6 +179,20 @@ lr_func_t *lr_session_cur_func(lr_session_t *s);
 lr_block_t *lr_session_cur_block(lr_session_t *s);
 lr_jit_t *lr_session_jit(lr_session_t *s);
 
+/* ---- Function suspension/resumption for interleaved generation --------- */
+
+/* Suspend the active direct-mode function compilation, saving all state.
+   Returns 0 on success, -1 on error. */
+int lr_session_suspend_func(lr_session_t *s);
+
+/* Resume a previously suspended function compilation by its index in the
+   suspended list. Returns 0 on success, -1 on error. */
+int lr_session_resume_func(lr_session_t *s, uint32_t suspended_idx);
+
+/* Find a suspended function by its lr_func_t pointer.
+   Returns the index in the suspended list, or -1 if not found. */
+int lr_session_find_suspended(lr_session_t *s, lr_func_t *func);
+
 /* ---- Inline convenience wrappers --------------------------------------- */
 
 static inline uint32_t lr_emit_add(lr_session_t *s, lr_type_t *ty,

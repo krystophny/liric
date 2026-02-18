@@ -79,6 +79,35 @@ typedef struct session_phi_copy_entry {
     lr_phi_copy_desc_t copy;
 } session_phi_copy_entry_t;
 
+/* Per-function temp buffer capacity for direct mode compilation.
+   Each function compiles into its own malloc'd buffer to prevent
+   buffer overlap when lfortran interleaves function generation. */
+#define FUNC_COMPILE_BUF_CAP (1u << 20)
+
+/* Saved state for a suspended direct-mode function compilation.
+   When the compat layer switches from function A to function B mid-build,
+   A's compile state is saved here so it can be resumed later. */
+typedef struct suspended_compile {
+    lr_func_t *func;
+    lr_block_t *cur_block;
+    lr_block_t **blocks;
+    bool *block_seen;
+    bool *block_terminated;
+    uint32_t block_count;
+    uint32_t block_cap;
+    session_phi_copy_entry_t *phi_copies;
+    uint32_t phi_copy_count;
+    uint32_t phi_copy_cap;
+    void *compile_ctx;
+    uint8_t *func_buf;
+    size_t func_buf_cap;
+    uint32_t direct_reloc_base;
+    uint32_t direct_reloc_count_at_suspend;
+    bool compile_active;
+    bool compile_opened_update;
+    uint32_t emitted_count;
+} suspended_compile_t;
+
 struct lr_session {
     session_config_t cfg;
     lr_jit_t *jit;
@@ -101,6 +130,23 @@ struct lr_session {
     bool direct_llvm_stream;
     bool compile_opened_update;
     uint32_t emitted_count;
+
+    /* Per-function temp buffer for direct mode compilation */
+    uint8_t *func_compile_buf;
+    size_t func_compile_buf_cap;
+
+    /* For resumed functions: the end of this function's relocs from before
+       suspension. Relocs in [direct_reloc_base, direct_reloc_suspend_end)
+       belong to this function; any in [direct_reloc_suspend_end,
+       direct_reloc_resume_base) belong to other functions already adjusted. */
+    uint32_t direct_reloc_suspend_end;
+    uint32_t direct_reloc_resume_base;
+    bool compile_resumed;
+
+    /* Suspended function compilations for interleaved generation */
+    suspended_compile_t *suspended;
+    uint32_t suspended_count;
+    uint32_t suspended_cap;
 
     /* DIRECT mode blob capture for exe/obj emission */
     lr_objfile_ctx_t direct_obj_ctx;
@@ -512,19 +558,27 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     meta.mode = s->jit->mode;
     meta.jit = s->jit;
 
-    s->compile_start = align_up_size(s->jit->code_size, 16u);
-    if (s->compile_start >= s->jit->code_cap) {
-        err_set(err, S_ERR_BACKEND, "jit code buffer exhausted");
-        s->module->obj_ctx = NULL;
-        return -1;
+    /* Allocate a per-function temp buffer so interleaved function
+       generation does not corrupt the JIT code buffer. The backend
+       writes into this temp buffer; finish_direct_compile copies
+       the result to the final JIT location. */
+    if (!s->func_compile_buf) {
+        s->func_compile_buf = (uint8_t *)malloc(FUNC_COMPILE_BUF_CAP);
+        if (!s->func_compile_buf) {
+            err_set(err, S_ERR_BACKEND, "function compile buffer alloc failed");
+            s->module->obj_ctx = NULL;
+            return -1;
+        }
+        s->func_compile_buf_cap = FUNC_COMPILE_BUF_CAP;
     }
 
-    /* Register function symbol as defined in text section so
-       apply_jit_relocs can resolve intra-module references. */
+    /* Ensure the function symbol exists in the obj_ctx symbol table so the
+       backend can emit relocations against it. Mark as undefined here;
+       finish_direct_compile sets the real offset once code is placed. */
     if (s->cur_func->name && s->cur_func->name[0]) {
         uint32_t sym_idx = lr_obj_ensure_symbol(
             &s->direct_obj_ctx, s->cur_func->name,
-            true, 1, (uint32_t)s->compile_start);
+            false, 0, 0);
         if (sym_idx == UINT32_MAX) {
             err_set(err, S_ERR_BACKEND, "function symbol registration failed");
             s->module->obj_ctx = NULL;
@@ -547,8 +601,8 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
 
     rc = s->jit->target->compile_begin(
         &s->compile_ctx, &meta, s->module,
-        s->jit->code_buf + s->compile_start,
-        s->jit->code_cap - s->compile_start,
+        s->func_compile_buf,
+        s->func_compile_buf_cap,
         s->jit->arena
     );
     if (rc != 0 || !s->compile_ctx) {
@@ -562,13 +616,28 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     }
 
     s->compile_active = true;
+    s->compile_resumed = false;
+    s->direct_reloc_suspend_end = 0;
+    s->direct_reloc_resume_base = 0;
     return 0;
+}
+
+/* Count the relocs belonging to the current function, accounting for any
+   gap caused by other functions compiled during a suspension. */
+static uint32_t count_func_relocs(const struct lr_session *s) {
+    uint32_t count;
+    if (!s->compile_resumed) {
+        return s->direct_obj_ctx.num_relocs - s->direct_reloc_base;
+    }
+    count = s->direct_reloc_suspend_end - s->direct_reloc_base;
+    count += s->direct_obj_ctx.num_relocs - s->direct_reloc_resume_base;
+    return count;
 }
 
 static int capture_blob(struct lr_session *s, const uint8_t *code,
                         size_t code_len) {
     lr_objfile_ctx_t *oc = &s->direct_obj_ctx;
-    uint32_t num_relocs = oc->num_relocs - s->direct_reloc_base;
+    uint32_t num_relocs = count_func_relocs(s);
 
     if (ensure_blob_capacity(s, s->blob_count + 1u) != 0)
         return -1;
@@ -588,7 +657,8 @@ static int capture_blob(struct lr_session *s, const uint8_t *code,
 
     /* Convert obj relocs (index-based) to cached relocs (name-based).
        At this point reloc offsets are function-relative (not yet adjusted
-       to absolute), so they can be stored directly in the blob. */
+       to absolute), so they can be stored directly in the blob.
+       For resumed functions, iterate over two ranges to skip the gap. */
     if (num_relocs > 0) {
         lr_cached_reloc_t *cached = (lr_cached_reloc_t *)calloc(
             num_relocs, sizeof(*cached));
@@ -596,16 +666,40 @@ static int capture_blob(struct lr_session *s, const uint8_t *code,
             free(code_copy);
             return -1;
         }
-        for (uint32_t i = 0; i < num_relocs; i++) {
-            const lr_obj_reloc_t *rel = &oc->relocs[s->direct_reloc_base + i];
+        uint32_t ci = 0;
+        uint32_t end1, start2, end2;
+        if (s->compile_resumed) {
+            end1 = s->direct_reloc_suspend_end;
+            start2 = s->direct_reloc_resume_base;
+            end2 = oc->num_relocs;
+        } else {
+            end1 = oc->num_relocs;
+            start2 = end1;
+            end2 = end1;
+        }
+        for (uint32_t ri = s->direct_reloc_base; ri < end1; ri++) {
+            const lr_obj_reloc_t *rel = &oc->relocs[ri];
             if (rel->symbol_idx >= oc->num_symbols) {
                 free(cached);
                 free(code_copy);
                 return -1;
             }
-            cached[i].offset = rel->offset;
-            cached[i].type = rel->type;
-            cached[i].symbol_name = oc->symbols[rel->symbol_idx].name;
+            cached[ci].offset = rel->offset;
+            cached[ci].type = rel->type;
+            cached[ci].symbol_name = oc->symbols[rel->symbol_idx].name;
+            ci++;
+        }
+        for (uint32_t ri = start2; ri < end2; ri++) {
+            const lr_obj_reloc_t *rel = &oc->relocs[ri];
+            if (rel->symbol_idx >= oc->num_symbols) {
+                free(cached);
+                free(code_copy);
+                return -1;
+            }
+            cached[ci].offset = rel->offset;
+            cached[ci].type = rel->type;
+            cached[ci].symbol_name = oc->symbols[rel->symbol_idx].name;
+            ci++;
         }
         blob->relocs = cached;
         blob->num_relocs = num_relocs;
@@ -651,12 +745,29 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         return -1;
     }
 
+    /* Assign final JIT offset now that compile_end has produced the code
+       in the per-function temp buffer. */
+    s->compile_start = align_up_size(s->jit->code_size, 16u);
     if (s->compile_start + code_len > s->jit->code_cap) {
         err_set(err, S_ERR_BACKEND, "jit code buffer overflow");
         s->module->obj_ctx = NULL;
         if (should_close_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         return -1;
+    }
+
+    /* Copy compiled code from per-function temp buffer to JIT code buffer */
+    if (code_len > 0)
+        memcpy(s->jit->code_buf + s->compile_start,
+               s->func_compile_buf, code_len);
+
+    /* Define the symbol in obj_ctx with the real JIT position.
+       The symbol was registered as undefined in begin_direct_compile. */
+    if (s->cur_func->name && s->cur_func->name[0]) {
+        uint32_t sym_idx = lr_obj_ensure_symbol(
+            &s->direct_obj_ctx, s->cur_func->name,
+            true, 1, (uint32_t)s->compile_start);
+        (void)sym_idx;
     }
 
     /* Capture blob (pre-relocation code + relocs) for later exe/obj emission.
@@ -670,9 +781,18 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     }
 
     /* Adjust reloc offsets from function-relative to absolute within the
-       JIT code buffer, matching the pattern in jit.c:compile_one_function. */
-    for (uint32_t ri = s->direct_reloc_base; ri < s->direct_obj_ctx.num_relocs; ri++)
-        s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
+       JIT code buffer, matching the pattern in jit.c:compile_one_function.
+       For resumed functions, skip relocs belonging to other functions that
+       were compiled during the suspension gap. */
+    if (s->compile_resumed) {
+        for (uint32_t ri = s->direct_reloc_base; ri < s->direct_reloc_suspend_end; ri++)
+            s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
+        for (uint32_t ri = s->direct_reloc_resume_base; ri < s->direct_obj_ctx.num_relocs; ri++)
+            s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
+    } else {
+        for (uint32_t ri = s->direct_reloc_base; ri < s->direct_obj_ctx.num_relocs; ri++)
+            s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
+    }
 
     /* Apply JIT relocations on the live code copy for immediate execution */
     s->jit->code_size = s->compile_start + code_len;
@@ -882,6 +1002,187 @@ static void finish_function_state(struct lr_session *s) {
     s->direct_llvm_stream = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
+    s->compile_resumed = false;
+    s->direct_reloc_suspend_end = 0;
+    s->direct_reloc_resume_base = 0;
+}
+
+/* ---- Suspend / resume for interleaved function generation -------------- */
+
+static int ensure_suspended_capacity(struct lr_session *s, uint32_t need) {
+    suspended_compile_t *new_list;
+    uint32_t new_cap;
+    if (need <= s->suspended_cap)
+        return 0;
+    new_cap = s->suspended_cap == 0 ? 4u : s->suspended_cap;
+    while (new_cap < need)
+        new_cap *= 2u;
+    new_list = (suspended_compile_t *)realloc(
+        s->suspended, sizeof(*new_list) * new_cap);
+    if (!new_list)
+        return -1;
+    s->suspended = new_list;
+    s->suspended_cap = new_cap;
+    return 0;
+}
+
+int lr_session_suspend_func(struct lr_session *s) {
+    suspended_compile_t *slot;
+    if (!s || !s->cur_func || !s->compile_active)
+        return -1;
+    if (ensure_suspended_capacity(s, s->suspended_count + 1u) != 0)
+        return -1;
+
+    slot = &s->suspended[s->suspended_count];
+    memset(slot, 0, sizeof(*slot));
+    slot->func = s->cur_func;
+    slot->cur_block = s->cur_block;
+    slot->blocks = s->blocks;
+    slot->block_seen = s->block_seen;
+    slot->block_terminated = s->block_terminated;
+    slot->block_count = s->block_count;
+    slot->block_cap = s->block_cap;
+    slot->phi_copies = s->phi_copies;
+    slot->phi_copy_count = s->phi_copy_count;
+    slot->phi_copy_cap = s->phi_copy_cap;
+    slot->compile_ctx = s->compile_ctx;
+    slot->direct_reloc_base = s->direct_reloc_base;
+    slot->direct_reloc_count_at_suspend = s->direct_obj_ctx_active ?
+        s->direct_obj_ctx.num_relocs : 0;
+    slot->compile_active = s->compile_active;
+    slot->compile_opened_update = s->compile_opened_update;
+    slot->emitted_count = s->emitted_count;
+
+    /* Move the per-function temp buffer ownership to the suspended slot.
+       A new buffer will be allocated when the next function begins. */
+    slot->func_buf = s->func_compile_buf;
+    slot->func_buf_cap = s->func_compile_buf_cap;
+    s->func_compile_buf = NULL;
+    s->func_compile_buf_cap = 0;
+
+    s->suspended_count++;
+
+    /* Close the JIT update that was opened for this function's compile. */
+    if (s->compile_opened_update && s->jit && s->jit->update_active)
+        lr_jit_end_update(s->jit);
+
+    /* Clear session state without freeing the arrays (now owned by slot) */
+    s->cur_func = NULL;
+    s->cur_block = NULL;
+    s->blocks = NULL;
+    s->block_seen = NULL;
+    s->block_terminated = NULL;
+    s->block_count = 0;
+    s->block_cap = 0;
+    s->phi_copies = NULL;
+    s->phi_copy_count = 0;
+    s->phi_copy_cap = 0;
+    s->compile_ctx = NULL;
+    s->compile_start = 0;
+    s->compile_active = false;
+    s->compile_opened_update = false;
+    s->emitted_count = 0;
+    if (s->module)
+        s->module->obj_ctx = NULL;
+
+    return 0;
+}
+
+int lr_session_resume_func(struct lr_session *s, uint32_t suspended_idx) {
+    suspended_compile_t *slot;
+    if (!s || suspended_idx >= s->suspended_count)
+        return -1;
+    if (s->cur_func)
+        return -1;
+
+    slot = &s->suspended[suspended_idx];
+
+    /* Free any existing block tracking arrays (should be NULL after
+       suspend, but guard against leaks). */
+    free(s->blocks);
+    free(s->block_seen);
+    free(s->block_terminated);
+    free(s->phi_copies);
+
+    /* Restore all compile state from the suspended slot */
+    s->cur_func = slot->func;
+    s->cur_block = slot->cur_block;
+    s->blocks = slot->blocks;
+    s->block_seen = slot->block_seen;
+    s->block_terminated = slot->block_terminated;
+    s->block_count = slot->block_count;
+    s->block_cap = slot->block_cap;
+    s->phi_copies = slot->phi_copies;
+    s->phi_copy_count = slot->phi_copy_count;
+    s->phi_copy_cap = slot->phi_copy_cap;
+    s->compile_ctx = slot->compile_ctx;
+    s->direct_reloc_base = slot->direct_reloc_base;
+    s->compile_active = slot->compile_active;
+    s->compile_opened_update = slot->compile_opened_update;
+    s->emitted_count = slot->emitted_count;
+
+    /* Track reloc gap: relocs in [suspend_end, current_num_relocs) belong
+       to other functions compiled between suspend and resume. */
+    s->compile_resumed = true;
+    s->direct_reloc_suspend_end = slot->direct_reloc_count_at_suspend;
+    s->direct_reloc_resume_base = s->direct_obj_ctx_active ?
+        s->direct_obj_ctx.num_relocs : 0;
+
+    /* Restore the per-function temp buffer */
+    free(s->func_compile_buf);
+    s->func_compile_buf = slot->func_buf;
+    s->func_compile_buf_cap = slot->func_buf_cap;
+
+    /* Re-open JIT update for the resumed compile context */
+    if (s->compile_active && s->jit) {
+        if (!s->jit->update_active) {
+            lr_jit_begin_update(s->jit);
+            s->compile_opened_update = s->jit->update_active;
+        }
+        s->module->obj_ctx = &s->direct_obj_ctx;
+    }
+
+    /* Remove from suspended list by shifting remaining entries down */
+    s->suspended_count--;
+    if (suspended_idx < s->suspended_count) {
+        memmove(&s->suspended[suspended_idx],
+                &s->suspended[suspended_idx + 1],
+                sizeof(*s->suspended) * (s->suspended_count - suspended_idx));
+    }
+
+    return 0;
+}
+
+int lr_session_find_suspended(struct lr_session *s, lr_func_t *func) {
+    uint32_t i;
+    if (!s)
+        return -1;
+    if (!func) {
+        /* Return first suspended entry index, or -1 if none */
+        return s->suspended_count > 0 ? 0 : -1;
+    }
+    for (i = 0; i < s->suspended_count; i++) {
+        if (s->suspended[i].func == func)
+            return (int)i;
+    }
+    return -1;
+}
+
+static void free_suspended_list(struct lr_session *s) {
+    uint32_t i;
+    if (!s)
+        return;
+    for (i = 0; i < s->suspended_count; i++) {
+        free(s->suspended[i].blocks);
+        free(s->suspended[i].block_seen);
+        free(s->suspended[i].block_terminated);
+        free(s->suspended[i].phi_copies);
+        free(s->suspended[i].func_buf);
+    }
+    free(s->suspended);
+    s->suspended = NULL;
+    s->suspended_count = 0;
+    s->suspended_cap = 0;
 }
 
 static int append_phi_copy(struct lr_session *s, uint32_t pred_block_id,
@@ -1108,6 +1409,8 @@ void lr_session_destroy(struct lr_session *s) {
     free(s->blobs);
     if (s->direct_obj_ctx_active)
         lr_objfile_ctx_destroy(&s->direct_obj_ctx);
+    free_suspended_list(s);
+    free(s->func_compile_buf);
     free(s->phi_copies);
     free(s->block_terminated);
     free(s->block_seen);

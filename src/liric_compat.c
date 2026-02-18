@@ -500,7 +500,7 @@ static lr_operand_t compat_desc_to_operand(const lr_operand_desc_t *d) {
     return op;
 }
 
-static int compat_finish_active_func(lc_module_compat_t *mod) {
+static int compat_finish_one_func(lc_module_compat_t *mod) {
     lr_error_t err;
     int rc;
     if (!mod || !mod->session)
@@ -515,10 +515,40 @@ static int compat_finish_active_func(lc_module_compat_t *mod) {
     return rc;
 }
 
+static int compat_finish_active_func(lc_module_compat_t *mod) {
+    lr_error_t err;
+    int suspended_idx;
+
+    if (!mod || !mod->session)
+        return -1;
+
+    /* Finalize the currently active function */
+    if (compat_finish_one_func(mod) != 0)
+        return -1;
+
+    /* Finalize any remaining suspended functions by resuming and
+       finishing each one. This handles arbitrary interleaving depth. */
+    for (;;) {
+        suspended_idx = lr_session_find_suspended(mod->session, NULL);
+        if (suspended_idx < 0)
+            break;
+        /* Resume uses the raw index; find_suspended(NULL) returns
+           the first entry (index 0) when any exist. */
+        memset(&err, 0, sizeof(err));
+        if (lr_session_resume_func(mod->session, 0) != 0)
+            return -1;
+        if (compat_finish_one_func(mod) != 0)
+            return -1;
+    }
+
+    return 0;
+}
+
 static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                             lr_error_t *err) {
     lr_session_t *s;
     lr_func_t *active;
+    int suspended_idx;
     if (!mod || !mod->session || !b)
         return -1;
     if (!f)
@@ -532,10 +562,27 @@ static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f
 
     active = lr_session_cur_func(s);
     if (active != f) {
-        if (active && compat_finish_active_func(mod) != 0)
-            return -1;
-        if (lr_session_func_begin_existing(s, mod->mod, f, err) != 0)
-            return -1;
+        /* Switching functions: suspend the active one instead of
+           finalizing it so we can resume it later if needed. */
+        if (active) {
+            if (lr_session_is_compiling(s)) {
+                if (lr_session_suspend_func(s) != 0)
+                    return -1;
+            } else {
+                if (compat_finish_one_func(mod) != 0)
+                    return -1;
+            }
+        }
+
+        /* Check if the target function was previously suspended */
+        suspended_idx = lr_session_find_suspended(s, f);
+        if (suspended_idx >= 0) {
+            if (lr_session_resume_func(s, (uint32_t)suspended_idx) != 0)
+                return -1;
+        } else {
+            if (lr_session_func_begin_existing(s, mod->mod, f, err) != 0)
+                return -1;
+        }
     }
     if (lr_session_cur_block(s) == b)
         return 0;
