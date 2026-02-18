@@ -2970,6 +2970,8 @@ lc_value_t *lc_create_fpext(lc_module_compat_t *mod, lr_block_t *b,
                              lr_func_t *f, lc_value_t *val,
                              lr_type_t *to_type, const char *name) {
     (void)name;
+    if (val && val->type && to_type && val->type->kind == to_type->kind)
+        return val;
     return compat_cast(mod, b, f, LR_OP_FPEXT, val, to_type);
 }
 
@@ -2977,6 +2979,8 @@ lc_value_t *lc_create_fptrunc(lc_module_compat_t *mod, lr_block_t *b,
                                lr_func_t *f, lc_value_t *val,
                                lr_type_t *to_type, const char *name) {
     (void)name;
+    if (val && val->type && to_type && val->type->kind == to_type->kind)
+        return val;
     return compat_cast(mod, b, f, LR_OP_FPTRUNC, val, to_type);
 }
 
