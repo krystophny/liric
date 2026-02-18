@@ -755,7 +755,7 @@ int test_session_add_phi_copy_api(void) {
 
     copy.dest_vreg = 999;
     copy.src_op = LR_IMM(7, i32);
-    rc = lr_session_add_phi_copy(s, b0, &copy, &err);
+    rc = lr_session_add_phi_copy(s, b0, b0, &copy, &err);
     TEST_ASSERT_EQ(rc, 0, "add phi copy");
 
     lr_emit_ret(s, LR_IMM(42, i32));

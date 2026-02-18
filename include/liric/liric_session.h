@@ -15,6 +15,29 @@ extern "C" {
 
 typedef struct lr_session lr_session_t;
 
+/* Snapshot of a suspended direct-mode compilation (opaque internals). */
+typedef struct lr_session_compile_snapshot {
+    void *cur_func;         /* lr_func_t * */
+    void *cur_block;        /* lr_block_t * */
+    void *compile_ctx;      /* backend compile context */
+    size_t compile_start;
+    uint32_t block_count;
+    uint32_t block_cap;
+    uint32_t emitted_count;
+    uint32_t direct_reloc_base;
+    uint32_t phi_copy_count;
+    uint32_t phi_copy_cap;
+    void *blocks;           /* lr_block_t ** */
+    void *block_seen;       /* bool * */
+    void *block_terminated; /* bool * */
+    void *phi_copies;       /* session_phi_copy_entry_t * */
+    bool compile_active;
+    bool compile_opened_update;
+    bool direct_llvm_stream;
+    bool has_return;
+    bool valid;
+} lr_session_compile_snapshot_t;
+
 /* ---- Config ------------------------------------------------------------ */
 
 typedef enum lr_session_mode {
@@ -125,9 +148,24 @@ int lr_session_func_begin_existing(lr_session_t *s, lr_module_t *module,
                                     lr_func_t *func, lr_error_t *err);
 uint32_t lr_session_param(lr_session_t *s, uint32_t idx);
 int lr_session_add_phi_copy(lr_session_t *s, uint32_t pred_block_id,
+                            uint32_t succ_block_id,
                             const lr_phi_copy_desc_t *copy,
                             lr_error_t *err);
 int lr_session_func_end(lr_session_t *s, void **out_addr, lr_error_t *err);
+
+/* Suspend the current direct-mode function compilation.  Saves all
+   per-function session state (compile context, block tracking, phi copies)
+   into *snap.  Updates jit->code_size so the next function's code goes
+   AFTER the partial compilation.  Returns 0 on success. */
+int lr_session_suspend_compile(lr_session_t *s,
+                                lr_session_compile_snapshot_t *snap);
+
+/* Resume a previously suspended compilation.  If another function is active,
+   finishes it first.  Restores compile state from *snap, advances the
+   backend write position past any code emitted since suspension.  Clears
+   *snap on success.  Returns 0 on success. */
+int lr_session_resume_compile(lr_session_t *s,
+                               lr_session_compile_snapshot_t *snap);
 
 /* ---- Blocks ------------------------------------------------------------ */
 
@@ -175,6 +213,7 @@ int lr_session_emit_exe_with_runtime(lr_session_t *s, const char *path,
 lr_module_t *lr_session_module(lr_session_t *s);
 bool lr_session_is_direct(lr_session_t *s);
 bool lr_session_is_compiling(lr_session_t *s);
+bool lr_session_has_return(lr_session_t *s);
 lr_func_t *lr_session_cur_func(lr_session_t *s);
 lr_block_t *lr_session_cur_block(lr_session_t *s);
 lr_jit_t *lr_session_jit(lr_session_t *s);

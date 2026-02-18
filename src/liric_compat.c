@@ -100,6 +100,7 @@ typedef struct lc_module_compat {
     lr_global_t **global_by_sym;
     uint32_t sym_cache_cap;
     lc_const_value_meta_t *const_value_meta;
+    lr_session_compile_snapshot_t snapshot;
 } lc_module_compat_t;
 
 struct lc_const_reloc_meta {
@@ -515,6 +516,21 @@ static int compat_finish_active_func(lc_module_compat_t *mod) {
     return rc;
 }
 
+/* Finish any active function AND any suspended function in the snapshot.
+   Used by finalize/lookup/emit paths that need all compilation complete. */
+static int compat_finish_all_funcs(lc_module_compat_t *mod) {
+    if (!mod || !mod->session)
+        return -1;
+    if (compat_finish_active_func(mod) != 0)
+        return -1;
+    if (mod->snapshot.valid) {
+        if (lr_session_resume_compile(mod->session, &mod->snapshot) != 0)
+            return -1;
+        return compat_finish_active_func(mod);
+    }
+    return 0;
+}
+
 static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                             lr_error_t *err) {
     lr_session_t *s;
@@ -532,10 +548,29 @@ static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f
 
     active = lr_session_cur_func(s);
     if (active != f) {
-        if (active && compat_finish_active_func(mod) != 0)
-            return -1;
-        if (lr_session_func_begin_existing(s, mod->mod, f, err) != 0)
-            return -1;
+        if (active) {
+            /* Switching away from the active function.  Only suspend if:
+               1. No snapshot already exists (only one suspended func)
+               2. We have an active direct compilation
+               3. The function is INCOMPLETE (no ret/ret_void emitted yet)
+               Complete functions finish normally to preserve AOT blob capture. */
+            if (!mod->snapshot.valid && lr_session_is_compiling(s) &&
+                !lr_session_has_return(s)) {
+                if (lr_session_suspend_compile(s, &mod->snapshot) != 0)
+                    return -1;
+            } else {
+                if (compat_finish_active_func(mod) != 0)
+                    return -1;
+            }
+        }
+        /* Resume the suspended function if it matches, else start fresh. */
+        if (mod->snapshot.valid && mod->snapshot.cur_func == (void *)f) {
+            if (lr_session_resume_compile(s, &mod->snapshot) != 0)
+                return -1;
+        } else {
+            if (lr_session_func_begin_existing(s, mod->mod, f, err) != 0)
+                return -1;
+        }
     }
     if (lr_session_cur_block(s) == b)
         return 0;
@@ -2836,12 +2871,12 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
     if (phi->session) {
         if (lr_session_is_direct(phi->session)) {
             (void)lr_session_add_phi_copy(phi->session, block->id,
-                                          &copy, &err);
+                                          phi->block->id, &copy, &err);
         } else if (lr_session_bind_ir(phi->session, phi->mod,
                                       phi->func, phi->block,
                                       &err) == 0) {
             (void)lr_session_add_phi_copy(phi->session, block->id,
-                                          &copy, &err);
+                                          phi->block->id, &copy, &err);
         }
     }
     /* Keep PHI instruction operands in sync whenever an IR PHI exists.
@@ -3176,7 +3211,7 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     lr_func_t *f;
     lr_global_t *g;
 
-    if (compat_finish_active_func(mod) != 0)
+    if (compat_finish_all_funcs(mod) != 0)
         return -1;
 
     session_jit = lr_session_jit(mod->session);
@@ -3246,13 +3281,13 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
 int lc_module_finalize_for_execution(lc_module_compat_t *mod) {
     if (!mod)
         return -1;
-    return compat_finish_active_func(mod);
+    return compat_finish_all_funcs(mod);
 }
 
 void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name) {
     if (!mod || !name || !name[0])
         return NULL;
-    if (compat_finish_active_func(mod) != 0)
+    if (compat_finish_all_funcs(mod) != 0)
         return NULL;
     return lr_session_lookup(mod->session, name);
 }
@@ -3267,7 +3302,7 @@ void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
     lr_error_t err = {0};
     if (!mod || !out) return -1;
-    if (compat_finish_active_func(mod) != 0) return -1;
+    if (compat_finish_all_funcs(mod) != 0) return -1;
     if (mod->session) {
         int rc = lr_session_emit_object_stream(mod->session, out, &err);
         if (rc != 0 && err.msg[0])
@@ -3282,7 +3317,7 @@ int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     lr_error_t err = {0};
     if (!mod || !filename) return -1;
-    if (compat_finish_active_func(mod) != 0) return -1;
+    if (compat_finish_all_funcs(mod) != 0) return -1;
     if (lr_session_emit_object(mod->session, filename, &err) != 0) {
         if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
             fprintf(stderr, "lc_module_emit_object: %s\n", err.msg);
@@ -3295,7 +3330,7 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
     lr_error_t err = {0};
     if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
-    if (compat_finish_active_func(mod) != 0) return -1;
+    if (compat_finish_all_funcs(mod) != 0) return -1;
     if (lr_session_emit_exe_with_runtime(mod->session, filename,
                                          runtime_ll, runtime_len,
                                          &err) != 0) {

@@ -118,7 +118,7 @@ static int replay_phi_copies(const lr_target_t *target, void *compile_ctx,
                     return -1;
                 uint32_t pred_id = inst->operands[pi + 1].block_id;
                 if (target->compile_add_phi_copy(
-                        compile_ctx, pred_id, inst->dest,
+                        compile_ctx, pred_id, b->id, inst->dest,
                         &val_desc) != 0)
                     return -1;
             }

@@ -754,6 +754,7 @@ static void patch_prologue_stack_adjust(a64_compile_ctx_t *ctx, size_t imm_pos,
 
 typedef struct a64_stream_phi_copy {
     uint32_t pred_block_id;
+    uint32_t succ_block_id;
     uint32_t dest_vreg;
     lr_operand_t src_op;
     bool emitted;
@@ -1798,6 +1799,7 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
             bool has_late = false;
             for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
                 if (ctx->phi_copies[pi].pred_block_id == source &&
+                    ctx->phi_copies[pi].succ_block_id == target &&
                     !ctx->phi_copies[pi].emitted) {
                     has_late = true;
                     break;
@@ -1807,7 +1809,8 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
                 continue;
             size_t stub_pos = cc->pos;
             for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
-                if (ctx->phi_copies[pi].pred_block_id != source)
+                if (ctx->phi_copies[pi].pred_block_id != source ||
+                    ctx->phi_copies[pi].succ_block_id != target)
                     continue;
                 emit_load_operand(cc, &ctx->phi_copies[pi].src_op, A64_X9);
                 emit_store_slot(cc, ctx->phi_copies[pi].dest_vreg, A64_X9);
@@ -1872,6 +1875,7 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
 
 static int aarch64_compile_add_phi_copy(void *compile_ctx,
                                         uint32_t pred_block_id,
+                                        uint32_t succ_block_id,
                                         uint32_t dest_vreg,
                                         const lr_operand_desc_t *src_op) {
     a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
@@ -1884,9 +1888,36 @@ static int aarch64_compile_add_phi_copy(void *compile_ctx,
 
     a64_stream_phi_copy_t *entry = &ctx->phi_copies[ctx->phi_copy_count++];
     entry->pred_block_id = pred_block_id;
+    entry->succ_block_id = succ_block_id;
     entry->dest_vreg = dest_vreg;
     entry->src_op = a64_operand_from_desc(src_op);
     entry->emitted = false;
+    return 0;
+}
+
+static int aarch64_compile_flush_pending(void *compile_ctx) {
+    a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
+    if (!ctx)
+        return -1;
+    if (ctx->block_offset_pending) {
+        ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
+        ctx->block_offset_pending = false;
+    }
+    if (ctx->deferred.pending)
+        return a64_flush_deferred_terminator(ctx);
+    return 0;
+}
+
+static size_t aarch64_compile_get_pos(void *compile_ctx) {
+    a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
+    return ctx ? ctx->cc.pos : 0;
+}
+
+static int aarch64_compile_set_pos(void *compile_ctx, size_t new_pos) {
+    a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
+    if (!ctx || new_pos > ctx->cc.buflen)
+        return -1;
+    ctx->cc.pos = new_pos;
     return 0;
 }
 
@@ -1898,6 +1929,9 @@ static const lr_target_t aarch64_target = {
     .compile_set_block = aarch64_compile_set_block,
     .compile_end = aarch64_compile_end,
     .compile_add_phi_copy = aarch64_compile_add_phi_copy,
+    .compile_flush_pending = aarch64_compile_flush_pending,
+    .compile_get_pos = aarch64_compile_get_pos,
+    .compile_set_pos = aarch64_compile_set_pos,
 };
 
 const lr_target_t *lr_target_aarch64(void) {

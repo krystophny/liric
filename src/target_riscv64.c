@@ -685,10 +685,12 @@ static int rv_compile_end(void *compile_ctx, size_t *out_len) {
 
 static int rv_compile_add_phi_copy(void *compile_ctx,
                                    uint32_t pred_block_id,
+                                   uint32_t succ_block_id,
                                    uint32_t dest_vreg,
                                    const lr_operand_desc_t *src_op) {
     (void)compile_ctx;
     (void)pred_block_id;
+    (void)succ_block_id;
     (void)dest_vreg;
     (void)src_op;
     return -1;
@@ -725,6 +727,22 @@ static int rv_compile_begin_rv64im(void **compile_ctx,
                                    arena, &rv_feat_im);
 }
 
+static int rv_compile_flush_pending(void *compile_ctx) {
+    (void)compile_ctx;
+    return 0;
+}
+
+static size_t rv_compile_get_pos(void *compile_ctx) {
+    (void)compile_ctx;
+    return 0;
+}
+
+static int rv_compile_set_pos(void *compile_ctx, size_t new_pos) {
+    (void)compile_ctx;
+    (void)new_pos;
+    return -1;
+}
+
 static const lr_target_t target_riscv64gc = {
     .name = "riscv64gc",
     .ptr_size = 8,
@@ -733,6 +751,9 @@ static const lr_target_t target_riscv64gc = {
     .compile_set_block = rv_compile_set_block,
     .compile_end = rv_compile_end,
     .compile_add_phi_copy = rv_compile_add_phi_copy,
+    .compile_flush_pending = rv_compile_flush_pending,
+    .compile_get_pos = rv_compile_get_pos,
+    .compile_set_pos = rv_compile_set_pos,
 };
 
 static const lr_target_t target_riscv64im = {
@@ -743,6 +764,9 @@ static const lr_target_t target_riscv64im = {
     .compile_set_block = rv_compile_set_block,
     .compile_end = rv_compile_end,
     .compile_add_phi_copy = rv_compile_add_phi_copy,
+    .compile_flush_pending = rv_compile_flush_pending,
+    .compile_get_pos = rv_compile_get_pos,
+    .compile_set_pos = rv_compile_set_pos,
 };
 
 const lr_target_t *lr_target_riscv64(void) {

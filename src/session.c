@@ -101,6 +101,7 @@ struct lr_session {
     bool direct_llvm_stream;
     bool compile_opened_update;
     uint32_t emitted_count;
+    bool has_return;
 
     /* DIRECT mode blob capture for exe/obj emission */
     lr_objfile_ctx_t direct_obj_ctx;
@@ -113,6 +114,29 @@ struct lr_session {
     uint32_t blob_cap;
     bool ir_module_jit_ready;
 };
+
+/* Must match the layout in liric_session.h exactly. */
+typedef struct lr_session_compile_snapshot {
+    void *cur_func;
+    void *cur_block;
+    void *compile_ctx;
+    size_t compile_start;
+    uint32_t block_count;
+    uint32_t block_cap;
+    uint32_t emitted_count;
+    uint32_t direct_reloc_base;
+    uint32_t phi_copy_count;
+    uint32_t phi_copy_cap;
+    void *blocks;
+    void *block_seen;
+    void *block_terminated;
+    void *phi_copies;
+    bool compile_active;
+    bool compile_opened_update;
+    bool direct_llvm_stream;
+    bool has_return;
+    bool valid;
+} lr_session_compile_snapshot_t;
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
                         session_error_t *err);
@@ -882,6 +906,7 @@ static void finish_function_state(struct lr_session *s) {
     s->direct_llvm_stream = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
+    s->has_return = false;
 }
 
 static int append_phi_copy(struct lr_session *s, uint32_t pred_block_id,
@@ -1398,6 +1423,7 @@ uint32_t lr_session_param(struct lr_session *s, uint32_t idx) {
 }
 
 int lr_session_add_phi_copy(struct lr_session *s, uint32_t pred_block_id,
+                            uint32_t succ_block_id,
                             const lr_phi_copy_desc_t *copy,
                             session_error_t *err) {
     err_clear(err);
@@ -1412,7 +1438,7 @@ int lr_session_add_phi_copy(struct lr_session *s, uint32_t pred_block_id,
     if (s->compile_active && s->compile_ctx && s->jit &&
         s->jit->target && s->jit->target->compile_add_phi_copy) {
         if (s->jit->target->compile_add_phi_copy(
-                s->compile_ctx, pred_block_id,
+                s->compile_ctx, pred_block_id, succ_block_id,
                 copy->dest_vreg, &copy->src_op) != 0) {
             err_set(err, S_ERR_BACKEND, "backend phi copy failed");
             return -1;
@@ -1458,6 +1484,171 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
     }
 
     finish_function_state(s);
+    return 0;
+}
+
+int lr_session_suspend_compile(struct lr_session *s,
+                                lr_session_compile_snapshot_t *snap) {
+    size_t pos;
+    if (!s || !snap)
+        return -1;
+    if (!s->compile_active || !s->compile_ctx)
+        return -1;
+    if (!s->jit || !s->jit->target || !s->jit->target->compile_get_pos)
+        return -1;
+
+    /* Flush deferred terminators so code bytes are written at the
+       current pos, before we snapshot the write position. */
+    if (s->jit->target->compile_flush_pending &&
+        s->jit->target->compile_flush_pending(s->compile_ctx) != 0)
+        return -1;
+
+    /* Get current write position from backend. */
+    pos = s->jit->target->compile_get_pos(s->compile_ctx);
+
+    /* Update jit->code_size so the next function starts after partial code. */
+    s->jit->code_size = align_up_size(s->compile_start + pos, 16u);
+    if (s->jit->update_active)
+        s->jit->update_dirty = true;
+
+    /* Adjust part-1 relocations to absolute offsets.  Must happen before
+       the interrupter adds its own function-relative relocations. */
+    if (s->direct_obj_ctx_active) {
+        for (uint32_t ri = s->direct_reloc_base;
+             ri < s->direct_obj_ctx.num_relocs; ri++)
+            s->direct_obj_ctx.relocs[ri].offset +=
+                (uint32_t)s->compile_start;
+
+        /* Patch what we can immediately.  Unresolved relocs become pending. */
+        const char *missing = NULL;
+        int patch_rc = patch_direct_relocs(s, s->direct_reloc_base, &missing);
+        if (patch_rc > 0) {
+            if (!s->direct_pending_relocs ||
+                s->direct_reloc_base < s->direct_pending_reloc_start)
+                s->direct_pending_reloc_start = s->direct_reloc_base;
+            s->direct_pending_relocs = true;
+        } else if (patch_rc < 0) {
+            return -1;
+        }
+    }
+
+    /* Save all per-function state to snapshot (transfer ownership of
+       dynamically allocated arrays). */
+    memset(snap, 0, sizeof(*snap));
+    snap->cur_func = s->cur_func;
+    snap->cur_block = s->cur_block;
+    snap->compile_ctx = s->compile_ctx;
+    snap->compile_start = s->compile_start;
+    snap->block_count = s->block_count;
+    snap->block_cap = s->block_cap;
+    snap->emitted_count = s->emitted_count;
+    snap->direct_reloc_base = s->direct_reloc_base;
+    snap->phi_copy_count = s->phi_copy_count;
+    snap->phi_copy_cap = s->phi_copy_cap;
+    snap->blocks = s->blocks;
+    snap->block_seen = s->block_seen;
+    snap->block_terminated = s->block_terminated;
+    snap->phi_copies = s->phi_copies;
+    snap->compile_active = s->compile_active;
+    snap->compile_opened_update = s->compile_opened_update;
+    snap->direct_llvm_stream = s->direct_llvm_stream;
+    snap->has_return = s->has_return;
+    snap->valid = true;
+
+    /* Reset session state.  Don't free arrays — snapshot owns them. */
+    s->cur_func = NULL;
+    s->cur_block = NULL;
+    s->compile_ctx = NULL;
+    s->compile_start = 0;
+    s->blocks = NULL;
+    s->block_seen = NULL;
+    s->block_terminated = NULL;
+    s->block_count = 0;
+    s->block_cap = 0;
+    s->phi_copies = NULL;
+    s->phi_copy_count = 0;
+    s->phi_copy_cap = 0;
+    s->compile_active = false;
+    s->compile_opened_update = false;
+    s->direct_llvm_stream = false;
+    s->emitted_count = 0;
+    s->has_return = false;
+
+    /* Clear module obj_ctx so the interrupter gets a clean state. */
+    if (s->module)
+        s->module->obj_ctx = NULL;
+
+    return 0;
+}
+
+int lr_session_resume_compile(struct lr_session *s,
+                               lr_session_compile_snapshot_t *snap) {
+    size_t new_pos;
+    if (!s || !snap || !snap->valid)
+        return -1;
+
+    /* If another function is currently active, finish it first. */
+    if (s->cur_func) {
+        session_error_t err = {0};
+        if (lr_session_func_end(s, NULL, &err) != 0)
+            return -1;
+    }
+
+    /* Free any arrays the session owns from the interrupter. */
+    free(s->blocks);
+    free(s->block_seen);
+    free(s->block_terminated);
+    free(s->phi_copies);
+
+    /* Restore all per-function state from snapshot. */
+    s->cur_func = (lr_func_t *)snap->cur_func;
+    s->cur_block = (lr_block_t *)snap->cur_block;
+    s->compile_ctx = snap->compile_ctx;
+    s->compile_start = snap->compile_start;
+    s->block_count = snap->block_count;
+    s->block_cap = snap->block_cap;
+    s->emitted_count = snap->emitted_count;
+    s->has_return = snap->has_return;
+    s->compile_active = snap->compile_active;
+    s->compile_opened_update = snap->compile_opened_update;
+    s->direct_llvm_stream = snap->direct_llvm_stream;
+    s->phi_copy_count = snap->phi_copy_count;
+    s->phi_copy_cap = snap->phi_copy_cap;
+
+    /* Transfer ownership of arrays back from snapshot. */
+    s->blocks = (lr_block_t **)snap->blocks;
+    s->block_seen = (bool *)snap->block_seen;
+    s->block_terminated = (bool *)snap->block_terminated;
+    s->phi_copies = (session_phi_copy_entry_t *)snap->phi_copies;
+
+    /* Set reloc base past all intervening relocations.  Part-1 relocs
+       are already absolute (adjusted during suspend).  Part-2 relocs
+       start fresh from here. */
+    if (s->direct_obj_ctx_active) {
+        s->direct_reloc_base = s->direct_obj_ctx.num_relocs;
+        s->module->obj_ctx = &s->direct_obj_ctx;
+    }
+
+    /* Advance backend write position past code emitted by interrupters. */
+    if (s->compile_active && s->compile_ctx && s->jit &&
+        s->jit->target && s->jit->target->compile_set_pos) {
+        new_pos = s->jit->code_size - s->compile_start;
+        if (s->jit->target->compile_set_pos(s->compile_ctx, new_pos) != 0)
+            return -1;
+    }
+
+    /* Ensure JIT buffer is writable for continued compilation.  The
+       interrupter's finish may have closed the update. */
+    if (s->compile_active && s->jit && !s->jit->update_active) {
+        lr_jit_begin_update(s->jit);
+        s->compile_opened_update = s->jit->update_active;
+        if (!s->jit->update_active)
+            return -1;
+    }
+
+    /* Clear snapshot. */
+    memset(snap, 0, sizeof(*snap));
+
     return 0;
 }
 
@@ -1680,7 +1871,8 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
                 if (normalized.operands[pi + 1].kind == LR_OP_KIND_BLOCK)
                     pred_id = normalized.operands[pi + 1].block_id;
                 if (s->jit->target->compile_add_phi_copy(
-                        s->compile_ctx, pred_id, dest,
+                        s->compile_ctx, pred_id,
+                        s->cur_block->id, dest,
                         &normalized.operands[pi]) != 0) {
                     err_set(err, S_ERR_BACKEND, "backend phi copy failed");
                     free(resolved_call_ops);
@@ -1698,6 +1890,8 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
 
     s->block_seen[s->cur_block->id] = true;
     s->block_terminated[s->cur_block->id] = is_terminator(normalized.op);
+    if (normalized.op == LR_OP_RET || normalized.op == LR_OP_RET_VOID)
+        s->has_return = true;
     s->emitted_count++;
     return dest;
 }
@@ -2111,6 +2305,10 @@ bool lr_session_is_direct(struct lr_session *s) {
 
 bool lr_session_is_compiling(struct lr_session *s) {
     return s && (s->compile_active || s->direct_llvm_stream);
+}
+
+bool lr_session_has_return(struct lr_session *s) {
+    return s && s->has_return;
 }
 
 lr_func_t *lr_session_cur_func(struct lr_session *s) {
