@@ -72,7 +72,9 @@ ctest --test-dir build --output-on-failure
 
 ### Matrix axes
 
-The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells**.
+The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells** (minus 6:
+LL and micro_c lanes are skipped for `mode=llvm` since standalone JIT
+does not support LLVM backend mode).
 All lanes use the same 100-case corpus (first 100 from `compat_ll.txt`).
 
 - **Mode** (compilation backend): `isel`, `copy_patch`, `llvm`
@@ -138,27 +140,18 @@ Runtime artifacts:
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 100/100 | **1.21x** | **1.09x** |
-| isel | ir | 100/100 | **1.20x** | **1.08x** |
-| copy_patch | direct | 100/100 | **1.21x** | **1.07x** |
-| copy_patch | ir | 100/100 | **1.20x** | **1.09x** |
-| llvm | direct | 100/100 | **1.21x** | **1.09x** |
-| llvm | ir | 100/100 | **1.20x** | **1.08x** |
+| isel | direct | 100/100 | **1.14x** | **1.00x** |
+| isel | ir | 100/100 | **1.14x** | **1.00x** |
+| copy_patch | direct | 100/100 | **1.14x** | **1.01x** |
+| copy_patch | ir | 100/100 | **1.14x** | **1.01x** |
+| llvm | direct | 100/100 | **1.16x** | **1.02x** |
+| llvm | ir | 100/100 | **1.16x** | **1.00x** |
 
 ### LL Corpus (compile-only, 99/100 .ll files, 3 iterations)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 11.02 | 0.272 | **43x** |
-| isel | ir | 10.61 | 0.269 | **43x** |
-| copy_patch | direct | 10.81 | 0.270 | **44x** |
-| copy_patch | ir | 11.15 | 0.256 | **44x** |
-
-### Micro C (liric vs TCC, corpus-driven in-process compile, 3 iterations)
-
-| Mode | Policy | Speedup |
-|------|--------|--------:|
-| isel | direct | **4.3x** |
-| isel | ir | **4.5x** |
-| copy_patch | direct | **4.6x** |
-| copy_patch | ir | **5.2x** |
+| isel | direct | 6.11 | 0.121 | **51x** |
+| isel | ir | 5.99 | 0.117 | **51x** |
+| copy_patch | direct | 6.27 | 0.112 | **56x** |
+| copy_patch | ir | 5.73 | 0.120 | **48x** |

@@ -1775,11 +1775,16 @@ int main(int argc, char **argv) {
                 }
             }
 
-            if (want_ll) {
+            /* LL and micro_c lanes use standalone liric JIT which does not
+               support mode=llvm (JIT compile returns -1 by design).
+               Only the API lanes work with mode=llvm via the compat layer. */
+            int is_llvm_mode = (strcmp(mode, "llvm") == 0);
+
+            if (want_ll && !is_llvm_mode) {
                 run_ll_provider(&cfg, mode, policy, policy_dir, &ll);
             }
 
-            if (want_micro) {
+            if (want_micro && !is_llvm_mode) {
                 run_micro_provider(&cfg, mode, policy, policy_dir, &micro);
             }
 
@@ -1908,6 +1913,7 @@ int main(int argc, char **argv) {
                                      ap.summary_path);
                     cells_ok++;
                 } else if (li == LANE_LL_JIT) {
+                    if (is_llvm_mode) { cells_attempted--; continue; }
                     if (!ll.ran || !ll.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -1937,6 +1943,7 @@ int main(int argc, char **argv) {
                                      ll.summary_path);
                     cells_ok++;
                 } else if (li == LANE_LL_LLVM) {
+                    if (is_llvm_mode) { cells_attempted--; continue; }
                     if (!ll.ran || !ll.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -1966,6 +1973,7 @@ int main(int argc, char **argv) {
                                      ll.summary_path);
                     cells_ok++;
                 } else if (li == LANE_MICRO_C) {
+                    if (is_llvm_mode) { cells_attempted--; continue; }
                     if (!micro.ran || !micro.ok) {
                         write_failure_row(fails,
                                           lane,
