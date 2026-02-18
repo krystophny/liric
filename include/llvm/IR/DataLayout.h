@@ -3,7 +3,7 @@
 
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/ADT/StringRef.h"
-#include <llvm-c/LiricCompat.h>
+#include <liric/liric_compat.h>
 #include <cstdint>
 
 namespace llvm {

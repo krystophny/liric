@@ -1,7 +1,7 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_CORE_H
 #define LLVM_EXECUTIONENGINE_ORC_CORE_H
 
-#include <llvm-c/LiricSession.h>
+#include <liric/liric_compat.h>
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/ExecutionEngine/Orc/CoreContainers.h"

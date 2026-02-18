@@ -1,4 +1,4 @@
-#include <llvm-c/LiricSession.h>
+#include <liric/liric_compat.h>
 #include <liric/liric_legacy.h>
 
 #include <stdlib.h>

@@ -1,7 +1,7 @@
 #ifndef LLVM_EXECUTIONENGINE_ORC_IRCOMPILELAYER_H
 #define LLVM_EXECUTIONENGINE_ORC_IRCOMPILELAYER_H
 
-#include <llvm-c/LiricCompat.h>
+#include <liric/liric_compat.h>
 #include "llvm/ExecutionEngine/Orc/Layer.h"
 #include "llvm/ExecutionEngine/Orc/ThreadSafeModule.h"
 #include "llvm/Support/Error.h"

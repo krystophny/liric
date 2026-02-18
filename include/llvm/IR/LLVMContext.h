@@ -1,7 +1,7 @@
 #ifndef LLVM_IR_LLVMCONTEXT_H
 #define LLVM_IR_LLVMCONTEXT_H
 
-#include <llvm-c/LiricCompat.h>
+#include <liric/liric_compat.h>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
