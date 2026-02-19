@@ -323,6 +323,7 @@ def bucket_coverage($counts; $map):
 ($rows | taxonomy_counts(.; ["mismatch"])) as $mismatch_taxonomy_counts |
 ($rows | taxonomy_counts(.; ["unsupported_feature", "unsupported_abi"])) as $unsupported_taxonomy_counts |
 ($baseline_rows | taxonomy_counts(.; ["unsupported_feature", "unsupported_abi"])) as $baseline_unsupported_taxonomy_counts |
+($mismatch_taxonomy_counts | bucket_coverage(.; $bucket_map_obj)) as $mismatch_bucket_issue_coverage |
 ($rows | unsupported_total(.)) as $unsupported_total_current |
 ($baseline_rows | unsupported_total(.)) as $unsupported_total_baseline |
 ($unsupported_total_current - $unsupported_total_baseline) as $unsupported_total_delta |
@@ -346,6 +347,12 @@ def bucket_coverage($counts; $map):
     )
 ) as $unsupported_taxonomy_delta |
 ($unsupported_taxonomy_counts | bucket_coverage(.; $bucket_map_obj)) as $unsupported_bucket_issue_coverage |
+(
+  [ $mismatch_bucket_issue_coverage[]
+    | select(.mapped | not)
+    | .taxonomy_node
+  ]
+) as $mismatch_bucket_unmapped |
 (
   [ $unsupported_bucket_issue_coverage[]
     | select(.mapped | not)
@@ -393,6 +400,8 @@ def bucket_coverage($counts; $map):
   "classification_counts": counts($rows),
   "taxonomy_counts": $all_taxonomy_counts,
   "mismatch_taxonomy_counts": $mismatch_taxonomy_counts,
+  "mismatch_bucket_issue_coverage": $mismatch_bucket_issue_coverage,
+  "mismatch_bucket_unmapped": $mismatch_bucket_unmapped,
   "unsupported_taxonomy_counts": $unsupported_taxonomy_counts,
   "unsupported_bucket_issue_coverage": $unsupported_bucket_issue_coverage,
   "unsupported_bucket_unmapped": $unsupported_bucket_unmapped,
@@ -448,6 +457,49 @@ def bucket_coverage($counts; $map):
         | sort_by(.key)
         | .[]
         | "- \(.key): \(.value)"
+      end
+    ' "$summary_json_path"
+    echo
+    echo "## Taxonomy Counts (Mismatch)"
+    echo
+    jq -r '
+      (.mismatch_taxonomy_counts // {}) as $counts |
+      if ($counts | length) == 0 then "- (none)"
+      else
+        $counts
+        | to_entries
+        | sort_by(-.value, .key)
+        | .[]
+        | "- \(.key): \(.value)"
+      end
+    ' "$summary_json_path"
+    echo
+    echo "## Mismatch Bucket Coverage"
+    echo
+    jq -r '
+      (.mismatch_bucket_issue_coverage // []) as $rows |
+      if ($rows | length) == 0 then "- (none)"
+      else
+        $rows[]
+        | "- \(.taxonomy_node): \(.count) -> " +
+          (if ((.issues // []) | length) > 0 then (.issues | join(", "))
+           elif ((.rationale // "") != "") then "deferred"
+           else "unmapped"
+           end) +
+          (if ((.rationale // "") != "") then " (\(.rationale))"
+           else ""
+           end)
+      end
+    ' "$summary_json_path"
+    echo
+    echo "## Mismatch Bucket Mapping Gaps"
+    echo
+    jq -r '
+      (.mismatch_bucket_unmapped // []) as $rows |
+      if ($rows | length) == 0 then "- none"
+      else
+        $rows[]
+        | "- " + .
       end
     ' "$summary_json_path"
     echo
