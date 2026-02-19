@@ -23,6 +23,8 @@ usage: lfortran_api_compat.sh [options]
 This lane validates compile-time API compatibility:
   LFortran built with -DWITH_LIRIC=yes uses Liric's LLVM C++ compatibility
   API internally, then runs LFortran's own test runners.
+  Reference tests default to "--exclude-backend llvm" in WITH_LIRIC lane
+  unless backend selection is explicitly set via --ref-args.
 EOF
 }
 
@@ -33,6 +35,16 @@ die() {
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+ref_args_has_backend_policy() {
+    local args="${1:-}"
+    [[ "$args" == *"--no-llvm"* ]] && return 0
+    [[ "$args" == *"--exclude-backend"* ]] && return 0
+    [[ "$args" == *"--backend"* ]] && return 0
+    [[ "$args" == *" -b "* ]] && return 0
+    [[ "$args" == -b* ]] && return 0
+    return 1
 }
 
 abs_path() {
@@ -54,6 +66,72 @@ normalize_path() {
     base="$(basename "$p")"
     parent="$(cd "$parent" && pwd)"
     printf '%s/%s\n' "$parent" "$base"
+}
+
+json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+write_summary_json() {
+    local out="$1"
+
+    if command -v jq >/dev/null 2>&1; then
+        if jq -n \
+            --arg lfortran_dir "$lfortran_dir" \
+            --arg lfortran_ref "$lfortran_ref" \
+            --arg lfortran_bin "$lfortran_liric_bin" \
+            --arg run_ref_tests "$run_ref_tests" \
+            --arg run_itests "$run_itests" \
+            --arg workers "$workers" \
+            --arg status "$status" \
+            '{
+              lfortran_dir: $lfortran_dir,
+              lfortran_ref: $lfortran_ref,
+              lfortran_liric_bin: $lfortran_bin,
+              run_ref_tests: $run_ref_tests,
+              run_itests: $run_itests,
+              workers: ($workers|tonumber),
+              status: ($status|tonumber),
+              pass: (($status|tonumber) == 0)
+            }' > "$out"; then
+            return 0
+        fi
+        echo "lfortran_api_compat: WARN: jq summary generation failed; using shell fallback" >&2
+    fi
+
+    local esc_lfortran_dir
+    local esc_lfortran_ref
+    local esc_lfortran_bin
+    local esc_run_ref_tests
+    local esc_run_itests
+    local pass_flag="false"
+    if [[ "$status" -eq 0 ]]; then
+        pass_flag="true"
+    fi
+    esc_lfortran_dir="$(json_escape "$lfortran_dir")"
+    esc_lfortran_ref="$(json_escape "$lfortran_ref")"
+    esc_lfortran_bin="$(json_escape "$lfortran_liric_bin")"
+    esc_run_ref_tests="$(json_escape "$run_ref_tests")"
+    esc_run_itests="$(json_escape "$run_itests")"
+
+    cat > "$out" <<EOF
+{
+  "lfortran_dir": "${esc_lfortran_dir}",
+  "lfortran_ref": "${esc_lfortran_ref}",
+  "lfortran_liric_bin": "${esc_lfortran_bin}",
+  "run_ref_tests": "${esc_run_ref_tests}",
+  "run_itests": "${esc_run_itests}",
+  "workers": ${workers},
+  "status": ${status},
+  "pass": ${pass_flag}
+}
+EOF
 }
 
 detect_workers() {
@@ -189,7 +267,6 @@ done
 
 need_cmd git
 need_cmd cmake
-need_cmd jq
 
 PYTHON_BIN=""
 if command -v python >/dev/null 2>&1; then
@@ -269,9 +346,20 @@ if [[ "$resolved_lfortran" != "$lfortran_liric_bin" ]]; then
 fi
 
 if [[ "$run_ref_tests" == "yes" ]]; then
+    ref_default_args=""
+    if ! ref_args_has_backend_policy "$ref_args"; then
+        ref_default_args="--exclude-backend llvm"
+        echo "lfortran_api_compat: applying WITH_LIRIC reference policy: ${ref_default_args}" >&2
+    fi
     (
         cd "$lfortran_dir"
-        if [[ -n "$ref_args" ]]; then
+        if [[ -n "$ref_default_args" && -n "$ref_args" ]]; then
+            # shellcheck disable=SC2086
+            "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
+        elif [[ -n "$ref_default_args" ]]; then
+            # shellcheck disable=SC2086
+            "$PYTHON_BIN" ./run_tests.py $ref_default_args
+        elif [[ -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
             "$PYTHON_BIN" ./run_tests.py $ref_args
         else
@@ -293,24 +381,7 @@ if [[ "$run_itests" == "yes" ]]; then
 fi
 
 summary_json="${output_root}/summary.json"
-jq -n \
-    --arg lfortran_dir "$lfortran_dir" \
-    --arg lfortran_ref "$lfortran_ref" \
-    --arg lfortran_bin "$lfortran_liric_bin" \
-    --arg run_ref_tests "$run_ref_tests" \
-    --arg run_itests "$run_itests" \
-    --arg workers "$workers" \
-    --arg status "$status" \
-    '{
-      lfortran_dir: $lfortran_dir,
-      lfortran_ref: $lfortran_ref,
-      lfortran_liric_bin: $lfortran_bin,
-      run_ref_tests: $run_ref_tests,
-      run_itests: $run_itests,
-      workers: ($workers|tonumber),
-      status: ($status|tonumber),
-      pass: (($status|tonumber) == 0)
-    }' > "$summary_json"
+write_summary_json "$summary_json"
 
 if [[ "$status" -ne 0 ]]; then
     echo "lfortran_api_compat: FAILED (see ${log_root})" >&2

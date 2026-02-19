@@ -681,6 +681,14 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_llvm_backend_workflow_contract.cmake
 )
 
+add_test(
+    NAME lfortran_api_compat_ref_policy
+    COMMAND ${CMAKE_COMMAND}
+        -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_ref_policy.cmake
+)
+
 if(CMAKE_NM AND NOT WITH_REAL_LLVM_BACKEND)
     add_test(
         NAME liric_static_archive_no_llvm_undef
