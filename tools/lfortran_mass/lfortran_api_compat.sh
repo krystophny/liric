@@ -6,6 +6,7 @@ usage() {
 usage: lfortran_api_compat.sh [options]
   --workspace PATH        workspace root for lfortran clone/build (default: /tmp/liric_lfortran_api_compat)
   --output-root PATH      output root for logs/artifacts (default: /tmp/liric_lfortran_api_compat_out)
+  --fresh-workspace       remove existing workspace checkout/build and output root before running
   --lfortran-dir PATH     use an existing lfortran checkout (skip clone if present)
   --lfortran-repo URL     lfortran git URL (default: https://github.com/krystophny/lfortran.git)
   --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot)
@@ -35,6 +36,49 @@ die() {
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+ensure_lfortran_version_file() {
+    local repo_dir="$1"
+    local version_file="${repo_dir}/version"
+    local version_value=""
+
+    if [[ -f "$version_file" ]]; then
+        return 0
+    fi
+
+    version_value="$(git -C "$repo_dir" describe --tags --always --dirty 2>/dev/null | sed 's/^v//')"
+    [[ -n "$version_value" ]] || version_value="0.0.0-unknown"
+    printf '%s\n' "$version_value" > "$version_file"
+    echo "lfortran_api_compat: generated missing version file (${version_value})" >&2
+}
+
+ensure_lfortran_generated_sources() {
+    local repo_dir="$1"
+    local generated_preprocessor="${repo_dir}/src/lfortran/parser/preprocessor.cpp"
+    local tag_count="0"
+    local fallback_tag="v0.0.0-liric-aot"
+
+    if [[ -f "$generated_preprocessor" ]]; then
+        return 0
+    fi
+
+    tag_count="$(git -C "$repo_dir" tag --list | wc -l | tr -d '[:space:]')"
+    if [[ "$tag_count" == "0" ]]; then
+        if ! git -C "$repo_dir" rev-parse "$fallback_tag" >/dev/null 2>&1; then
+            git -C "$repo_dir" tag "$fallback_tag" HEAD
+            echo "lfortran_api_compat: created local fallback tag ${fallback_tag} for build0.sh" >&2
+        fi
+    fi
+
+    need_cmd bash
+    need_cmd re2c
+    need_cmd bison
+    echo "lfortran_api_compat: missing generated parser sources, running build0.sh" >&2
+    (
+        cd "$repo_dir"
+        RE2C="$(command -v re2c)" BISON="$(command -v bison)" bash -e build0.sh
+    )
 }
 
 ref_args_has_backend_policy() {
@@ -181,6 +225,7 @@ ref_args=""
 itest_args=""
 skip_lfortran_build="no"
 skip_checkout="no"
+fresh_workspace="no"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -193,6 +238,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || die "missing value for $1"
             output_root="$2"
             shift 2
+            ;;
+        --fresh-workspace)
+            fresh_workspace="yes"
+            shift
             ;;
         --lfortran-dir)
             [[ $# -ge 2 ]] || die "missing value for $1"
@@ -284,13 +333,18 @@ liric_build="${liric_root}/build"
 mkdir -p "$workspace" "$output_root"
 workspace="$(normalize_path "$workspace")"
 output_root="$(normalize_path "$output_root")"
-log_root="${output_root}/logs"
-mkdir -p "$log_root"
 
 if [[ -z "$lfortran_dir" ]]; then
     lfortran_dir="${workspace}/lfortran"
 fi
 lfortran_dir="$(normalize_path "$lfortran_dir")"
+
+if [[ "$fresh_workspace" == "yes" ]]; then
+    rm -rf "$lfortran_dir" "$output_root"
+fi
+
+log_root="${output_root}/logs"
+mkdir -p "$output_root" "$log_root"
 
 if [[ ! -d "$lfortran_dir/.git" ]]; then
     git clone "$lfortran_repo" "$lfortran_dir" \
@@ -310,6 +364,11 @@ if [[ "$skip_checkout" != "yes" ]]; then
         2>&1 | tee "${log_root}/checkout.log"
 fi
 
+ensure_lfortran_version_file "$lfortran_dir" \
+    2>&1 | tee "${log_root}/prepare_lfortran_version.log"
+ensure_lfortran_generated_sources "$lfortran_dir" \
+    2>&1 | tee "${log_root}/prepare_lfortran_generated_sources.log"
+
 if [[ ! -x "${liric_build}/liric_probe_runner" || ! -f "${liric_build}/libliric.a" ]]; then
     cmake -S "$liric_root" -B "$liric_build" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" \
         2>&1 | tee "${log_root}/build_liric_configure.log"
@@ -323,6 +382,7 @@ if [[ "$skip_lfortran_build" != "yes" ]]; then
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DWITH_LIRIC=yes \
         -DLIRIC_DIR="$liric_root" \
+        -DWITH_RUNTIME_STACKTRACE=yes \
         -DWITH_LLVM=OFF \
         2>&1 | tee "${log_root}/build_lfortran_liric_configure.log"
     cmake --build "$lfortran_build_liric" -j"$workers" \
@@ -371,6 +431,10 @@ fi
 if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
+        if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
+            export LFORTRAN_LINKER="gcc"
+            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+        fi
         if [[ -n "$itest_args" ]]; then
             # shellcheck disable=SC2086
             "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers" $itest_args
