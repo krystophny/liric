@@ -195,6 +195,8 @@ jq -c '
 jq -c '
 def str_lc($v): ($v // "" | tostring | ascii_downcase);
 def has_any($s; $patterns): reduce $patterns[] as $p (false; . or ($s | contains($p)));
+def lli_output_comparable:
+  ((.lli_ok // false) and (.lli_match // false));
 def classify_liric_fail:
   (str_lc(.error)) as $err |
   if has_any($err; ["unresolved symbol", "function not found", "unsupported signature", "entrypoint", "dlsym"])
@@ -203,7 +205,13 @@ def classify_liric_fail:
   end;
 def mismatch_symptom:
   if (.llvm_rc != .liric_rc) then "rc-mismatch"
+  elif lli_output_comparable then "wrong-stdout"
   else "wrong-stdout"
+  end;
+def mismatch_family:
+  if (.llvm_rc != .liric_rc) then "general"
+  elif lli_output_comparable then "general"
+  else "noncomparable-ir"
   end;
 def feature_family:
   (str_lc(.options)) as $opts |
@@ -231,7 +239,7 @@ def taxonomy($c):
   elif $c == "lfortran_emit_fail" then "codegen|compiler-error|general"
   elif $c == "unsupported_abi" then "jit-link|unresolved-symbol|runtime-api"
   elif $c == "unsupported_feature" then ("runtime|unsupported-feature|" + feature_family)
-  elif $c == "mismatch" then ("output-format|" + mismatch_symptom + "|general")
+  elif $c == "mismatch" then ("output-format|" + mismatch_symptom + "|" + mismatch_family)
   else "runtime|unknown|general"
   end;
 . as $row |
