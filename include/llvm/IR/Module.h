@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <cstdint>
+#include <cstdio>
 
 namespace llvm {
 
@@ -57,6 +59,7 @@ public:
         if (current_ == compat_) current_ = nullptr;
         if (detail::fallback_module == compat_)
             detail::fallback_module = ctx_.getDefaultModule();
+        detail::clear_global_aliases(compat_);
         lc_module_destroy(compat_);
     }
 
@@ -69,6 +72,25 @@ public:
         return LLVMContext::getGlobal().getDefaultModule();
     }
     static void setCurrentModule(lc_module_compat_t *m) { current_ = m; }
+
+    static bool isLocalGlobalLinkage(GlobalValue::LinkageTypes linkage) {
+        return linkage == GlobalValue::InternalLinkage ||
+               linkage == GlobalValue::PrivateLinkage;
+    }
+
+    static std::string linkageScopedGlobalName(
+        lc_module_compat_t *compat, StringRef name,
+        GlobalValue::LinkageTypes linkage) {
+        std::string base = name.str();
+        if (!compat || base.empty() || !isLocalGlobalLinkage(linkage))
+            return base;
+        char suffix[32];
+        std::snprintf(suffix, sizeof(suffix), "%llx",
+                      (unsigned long long)(uintptr_t)compat);
+        base += ".__liric_local.";
+        base += suffix;
+        return base;
+    }
 
     lc_module_compat_t *getCompat() const { return compat_; }
     lr_module_t *getIR() const { return lc_module_get_ir(compat_); }
@@ -114,6 +136,9 @@ public:
         (void)AllowInternal;
         Module::setCurrentModule(compat_);
         std::string global_name = Name.str();
+        std::string alias_name = detail::lookup_global_alias(compat_, global_name);
+        if (!alias_name.empty())
+            global_name = alias_name;
 
         for (const auto &og : owned_globals_) {
             lc_value_t *gv = detail::lookup_value_wrapper(og.get());
@@ -198,19 +223,33 @@ public:
         const char *name, Type *ty, bool is_const,
         GlobalValue::LinkageTypes linkage,
         const void *init_data = nullptr, size_t init_size = 0) {
-        (void)linkage;
         Module::setCurrentModule(compat_);
+        std::string requested_name = name ? name : "";
+        std::string actual_name =
+            linkageScopedGlobalName(compat_, requested_name, linkage);
+        const char *symbol_name = actual_name.empty() ? name : actual_name.c_str();
+        if (!symbol_name)
+            symbol_name = "";
         lc_value_t *gv;
-        if (init_data && init_size > 0) {
-            gv = lc_global_create(compat_, name, ty->impl(), is_const,
+        bool must_define = (init_data && init_size > 0) ||
+                           isLocalGlobalLinkage(linkage);
+        if (must_define) {
+            gv = lc_global_create(compat_, symbol_name, ty->impl(), is_const,
                                   init_data, init_size);
         } else {
-            gv = lc_global_declare(compat_, name, ty->impl());
+            gv = lc_global_declare(compat_, symbol_name, ty->impl());
         }
         auto g = std::make_unique<GlobalVariable>();
         (void)gv;
         GlobalVariable *ptr = g.get();
         detail::register_value_wrapper(ptr, gv);
+        ptr->setLinkage(linkage);
+        std::string final_name = actual_name;
+        if (gv && gv->kind == LC_VAL_GLOBAL && gv->global.name)
+            final_name = gv->global.name;
+        if (!requested_name.empty() && requested_name != final_name) {
+            detail::register_global_alias(compat_, requested_name, final_name);
+        }
         owned_globals_.push_back(std::move(g));
         return ptr;
     }
@@ -435,6 +474,7 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
     if (created) {
         detail::register_value_wrapper(this,
             detail::lookup_value_wrapper(created));
+        setLinkage(Linkage);
         if (Initializer) {
             Module::setCurrentModule(M.getCompat());
             setInitializer(Initializer);

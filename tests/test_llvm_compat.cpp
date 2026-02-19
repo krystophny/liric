@@ -519,6 +519,44 @@ static int test_duplicate_global_names_are_uniquified() {
     return 0;
 }
 
+static int test_private_global_strings_are_module_scoped() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod_a("private_strings_a", ctx);
+    llvm::Module mod_b("private_strings_b", ctx);
+
+    llvm::IRBuilder<> builder_a(ctx);
+    builder_a.SetModule(mod_a.getCompat());
+    llvm::IRBuilder<> builder_b(ctx);
+    builder_b.SetModule(mod_b.getCompat());
+
+    llvm::Constant *a_named = builder_a.CreateGlobalStringPtr("ERROR STOP", "ERROR STOP");
+    llvm::Constant *b_named = builder_b.CreateGlobalStringPtr("ERROR STOP", "ERROR STOP");
+    TEST_ASSERT(a_named != nullptr, "named string created in first module");
+    TEST_ASSERT(b_named != nullptr, "named string created in second module");
+    TEST_ASSERT(a_named->impl()->kind == LC_VAL_GLOBAL, "first named string is global");
+    TEST_ASSERT(b_named->impl()->kind == LC_VAL_GLOBAL, "second named string is global");
+    TEST_ASSERT(a_named->impl()->global.name != nullptr, "first named global has name");
+    TEST_ASSERT(b_named->impl()->global.name != nullptr, "second named global has name");
+    TEST_ASSERT(std::strcmp(a_named->impl()->global.name,
+                            b_named->impl()->global.name) != 0,
+                "named private global symbols are module-scoped");
+    TEST_ASSERT(mod_a.getNamedGlobal("ERROR STOP") != nullptr,
+                "first module resolves named private global by original name");
+    TEST_ASSERT(mod_b.getNamedGlobal("ERROR STOP") != nullptr,
+                "second module resolves named private global by original name");
+
+    llvm::Constant *a_auto = builder_a.CreateGlobalStringPtr("x");
+    llvm::Constant *b_auto = builder_b.CreateGlobalStringPtr("x");
+    TEST_ASSERT(a_auto != nullptr, "auto string created in first module");
+    TEST_ASSERT(b_auto != nullptr, "auto string created in second module");
+    TEST_ASSERT(a_auto->impl()->global.name != nullptr, "first auto global has name");
+    TEST_ASSERT(b_auto->impl()->global.name != nullptr, "second auto global has name");
+    TEST_ASSERT(std::strcmp(a_auto->impl()->global.name,
+                            b_auto->impl()->global.name) != 0,
+                "auto private global symbols are module-scoped");
+    return 0;
+}
+
 static int test_function_creation() {
     llvm::LLVMContext ctx;
     llvm::Module mod("funcs", ctx);
@@ -667,8 +705,11 @@ static int test_builder_syncs_module_from_insert_block() {
     lr_module_t *m = lc_module_get_ir(mod.getCompat());
     TEST_ASSERT(m != nullptr, "module ir handle");
     TEST_ASSERT(m->first_global != nullptr, "global was created");
-    TEST_ASSERT(std::strcmp(m->first_global->name, "serialization_info") == 0,
-                "global has correct name");
+    TEST_ASSERT(m->first_global->name != nullptr, "global has symbol name");
+    TEST_ASSERT(std::strstr(m->first_global->name, "serialization_info") != nullptr,
+                "global symbol keeps original name as prefix");
+    TEST_ASSERT(mod.getNamedGlobal("serialization_info") != nullptr,
+                "named global lookup resolves original string name");
     TEST_ASSERT(main_fn->getIRFunc() != nullptr, "main IR func exists");
     return 0;
 }
@@ -1780,6 +1821,7 @@ int main() {
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
     RUN_TEST(test_create_global_without_initializer_is_declaration);
     RUN_TEST(test_duplicate_global_names_are_uniquified);
+    RUN_TEST(test_private_global_strings_are_module_scoped);
     RUN_TEST(test_parse_assembly_wrapper_fast_path);
 
     fprintf(stderr, "\nFunction tests:\n");

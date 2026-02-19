@@ -952,17 +952,23 @@ public:
         lr_type_t *arr_ty = lr_type_array_new(lc_module_get_ir(mod), elem_ty,
                                               data.size());
         std::string generated_name;
-        const char *name = nullptr;
+        std::string actual_name;
         std::string explicit_name = Name.str();
         if (!explicit_name.empty()) {
-            name = explicit_name.c_str();
+            actual_name = Module::linkageScopedGlobalName(
+                mod, explicit_name, GlobalValue::PrivateLinkage);
         } else {
             static thread_local unsigned long long str_id = 0;
             generated_name = ".str." + std::to_string(str_id++);
-            name = generated_name.c_str();
+            actual_name = Module::linkageScopedGlobalName(
+                mod, generated_name, GlobalValue::PrivateLinkage);
         }
         lc_value_t *gv = lc_global_create(
-            mod, name, arr_ty, true, data.data(), data.size());
+            mod, actual_name.c_str(), arr_ty, true, data.data(), data.size());
+        if (!explicit_name.empty() && gv && gv->kind == LC_VAL_GLOBAL &&
+            gv->global.name && explicit_name != gv->global.name) {
+            detail::register_global_alias(mod, explicit_name, gv->global.name);
+        }
         return static_cast<Constant *>(Value::wrap(gv));
     }
 

@@ -4,11 +4,13 @@
 #include <liric/liric_compat.h>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <unordered_map>
 
 namespace llvm {
 
 class Function;
+class Module;
 class LLVMContext;
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -36,6 +38,8 @@ namespace detail {
         type_contexts;
     inline thread_local std::unordered_map<const lr_type_t *, vector_type_info>
         vector_types;
+    inline thread_local std::unordered_map<const lc_module_compat_t *,
+        std::unordered_map<std::string, std::string>> global_aliases;
 
     inline void register_value_wrapper(const void *obj, lc_value_t *v) {
         if (obj && v) value_wrappers[obj] = v;
@@ -48,6 +52,32 @@ namespace detail {
 
     inline void unregister_value_wrapper(const void *obj) {
         if (obj) value_wrappers.erase(obj);
+    }
+
+    inline void register_global_alias(const lc_module_compat_t *mod,
+                                      const std::string &logical_name,
+                                      const std::string &actual_name) {
+        if (!mod || logical_name.empty() || actual_name.empty())
+            return;
+        global_aliases[mod][logical_name] = actual_name;
+    }
+
+    inline std::string lookup_global_alias(const lc_module_compat_t *mod,
+                                           const std::string &logical_name) {
+        if (!mod || logical_name.empty())
+            return std::string();
+        auto mit = global_aliases.find(mod);
+        if (mit == global_aliases.end())
+            return std::string();
+        auto ait = mit->second.find(logical_name);
+        if (ait == mit->second.end())
+            return std::string();
+        return ait->second;
+    }
+
+    inline void clear_global_aliases(const lc_module_compat_t *mod) {
+        if (mod)
+            global_aliases.erase(mod);
     }
 
     inline void register_function_wrapper(const lr_func_t *f, Function *fn) {
