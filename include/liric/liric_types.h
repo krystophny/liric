@@ -96,6 +96,7 @@ struct lr_global {
     struct lr_reloc *relocs;
     bool is_const;
     bool is_external;
+    bool is_local;
     uint32_t id;
     struct lr_global *next;
 };

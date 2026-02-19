@@ -207,6 +207,7 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
     oc->symbols[idx].offset = offset;
     oc->symbols[idx].section = section;
     oc->symbols[idx].is_defined = is_defined;
+    oc->symbols[idx].is_local = false;
 
     slot = hash & (oc->symbol_index_cap - 1u);
     while (oc->symbol_index[slot] != 0)
@@ -498,13 +499,15 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
             memcpy(out->data_buf + out->data_pos, g->init_data, copy_n);
         }
 
-        if (lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
-                                 (uint32_t)out->data_pos) == UINT32_MAX) {
+        uint32_t gsym = lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
+                                             (uint32_t)out->data_pos);
+        if (gsym == UINT32_MAX) {
             m->obj_ctx = NULL;
             lr_arena_destroy(arena);
             obj_build_result_destroy(out);
             return -1;
         }
+        out->ctx.symbols[gsym].is_local = g->is_local;
 
         for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
             uint32_t sym_idx = lr_obj_ensure_symbol(
@@ -637,11 +640,13 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
             memcpy(out->data_buf + out->data_pos, g->init_data, copy_n);
         }
 
-        if (lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
-                                 (uint32_t)out->data_pos) == UINT32_MAX) {
+        uint32_t gsym = lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
+                                             (uint32_t)out->data_pos);
+        if (gsym == UINT32_MAX) {
             obj_build_result_destroy(out);
             return -1;
         }
+        out->ctx.symbols[gsym].is_local = g->is_local;
 
         for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
             uint32_t rel_sym = lr_obj_ensure_symbol(

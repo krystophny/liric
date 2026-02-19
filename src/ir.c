@@ -852,6 +852,8 @@ lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
     g->name = lr_arena_strdup(a, name, strlen(name));
     g->type = type;
     g->is_const = is_const;
+    g->is_external = false;
+    g->is_local = false;
     g->id = m->num_globals++;
     if (!m->first_global) m->first_global = g;
     else m->last_global->next = g;
@@ -2155,12 +2157,14 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                 dg->type = merge_remap_type(dest, sg->type);
                 dg->is_const = sg->is_const;
                 dg->is_external = false;
+                dg->is_local = sg->is_local;
                 merge_copy_global_data(dest, dg, sg);
             }
         } else {
             lr_global_t *ng = lr_global_create(dest, sg->name,
                 merge_remap_type(dest, sg->type), sg->is_const);
             ng->is_external = sg->is_external;
+            ng->is_local = sg->is_local;
             merge_copy_global_data(dest, ng, sg);
         }
     }
