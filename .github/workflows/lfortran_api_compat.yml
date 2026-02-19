@@ -1,0 +1,66 @@
+name: LFortran API Compatibility (WITH_LIRIC)
+
+on:
+  schedule:
+    - cron: "45 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lfortran-api-compat-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  lfortran-api-compat:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+          - os: ubuntu-24.04-arm
+            label: linux-arm64
+          - os: macos-14
+            label: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout liric
+        uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake bison re2c zstd jq python3 git
+
+      - name: Install macOS deps
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja cmake bison re2c zstd jq
+
+      - name: Run LFortran full suites with WITH_LIRIC
+        run: |
+          set -euo pipefail
+          chmod +x ./tools/lfortran_mass/lfortran_api_compat.sh
+          ./tools/lfortran_mass/lfortran_api_compat.sh \
+            --workspace "${RUNNER_TEMP}/lfortran_api_compat_work" \
+            --output-root "${RUNNER_TEMP}/lfortran_api_compat_out" \
+            --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
+            --lfortran-ref upstream/main \
+            --run-ref-tests yes \
+            --run-itests yes
+
+      - name: Upload API compat artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lfortran-api-compat-${{ matrix.label }}
+          retention-days: 30
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/lfortran_api_compat_out/summary.json
+            ${{ runner.temp }}/lfortran_api_compat_out/logs/*.log

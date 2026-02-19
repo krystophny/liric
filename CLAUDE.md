@@ -20,6 +20,19 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+## LFortran API Compatibility (WITH_LIRIC)
+
+Run LFortran's own suites using a compile-time `WITH_LIRIC` build:
+
+```bash
+./tools/lfortran_mass/lfortran_api_compat.sh \
+  --workspace /tmp/liric_lfortran_api_compat \
+  --output-root /tmp/liric_lfortran_api_compat_out
+```
+
+This checks that LFortran can run its native test runners while using Liric's
+LLVM-compat API internally (not just `.ll` replay).
+
 ## Benchmarking (Canonical)
 
 Use only `bench_matrix`:

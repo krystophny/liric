@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     env:
@@ -115,6 +115,16 @@ jobs:
             --cmake "${LFORTRAN_ROOT}/integration_tests/CMakeLists.txt" \
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
+      - name: Render per-case failure task list
+        if: always()
+        run: |
+          set -euo pipefail
+          chmod +x ./tools/lfortran_mass/render_fail_tasklist.sh
+          ./tools/lfortran_mass/render_fail_tasklist.sh \
+            --results-jsonl "${MASS_OUT}/results.jsonl" \
+            --summary-json "${MASS_OUT}/summary.json" \
+            --out "${MASS_OUT}/failure_task_list.md"
+
       - name: Validate README benchmark snapshot contract
         run: |
           set -euo pipefail
@@ -169,6 +179,7 @@ jobs:
             ${{ env.MASS_OUT }}/results.jsonl
             ${{ env.MASS_OUT }}/summary.json
             ${{ env.MASS_OUT }}/summary.md
+            ${{ env.MASS_OUT }}/failure_task_list.md
             ${{ env.MASS_OUT }}/failures.csv
             ${{ env.MASS_OUT }}/bench_api_clean_gate/compat_check.jsonl
             ${{ env.MASS_OUT }}/bench_api_clean_gate/compat_api.txt
