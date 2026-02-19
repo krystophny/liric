@@ -27,7 +27,7 @@ if(NOT EXISTS "${liric_build}/liric_probe_runner" OR NOT EXISTS "${liric_build}/
     return()
 endif()
 
-set(root "${WORKDIR}/lfortran_api_compat_ref_policy")
+set(root "${WORKDIR}/lfortran_api_compat_ref_policy_sandbox")
 set(fake_bin "${root}/fake_bin")
 set(default_lfortran "${root}/lfortran_default")
 set(override_lfortran "${root}/lfortran_override")
