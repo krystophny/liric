@@ -545,6 +545,14 @@ add_test(
 )
 
 add_test(
+    NAME bench_api_subprocess_overhead_summary
+    COMMAND ${CMAKE_COMMAND}
+        -DBENCH_API=$<TARGET_FILE:bench_api>
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_subprocess_overhead_summary.cmake
+)
+
+add_test(
     NAME bench_api_empty_dataset_gate
     COMMAND ${CMAKE_COMMAND}
         -DBENCH_API=$<TARGET_FILE:bench_api>
