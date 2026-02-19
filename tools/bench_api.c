@@ -2258,6 +2258,17 @@ next_test:
         double full_pipeline_llvm_non_parse_median = 0.0;
         double full_pipeline_wall_speedup_median = 0.0;
         double full_pipeline_non_parse_speedup_median = 0.0;
+        int subprocess_overhead_has_data = 0;
+        size_t subprocess_overhead_samples = 0;
+        double subprocess_overhead_liric_median = 0.0;
+        double subprocess_overhead_llvm_median = 0.0;
+        double subprocess_overhead_liric_avg = 0.0;
+        double subprocess_overhead_llvm_avg = 0.0;
+        double subprocess_overhead_shared_floor_median = 0.0;
+        double subprocess_overhead_observed_wall_speedup_median = 0.0;
+        double subprocess_overhead_adjusted_liric_wall_median = 0.0;
+        double subprocess_overhead_adjusted_llvm_wall_median = 0.0;
+        double subprocess_overhead_adjusted_wall_speedup_median = 0.0;
         double backend_isolated_liric_median = 0.0;
         double backend_isolated_llvm_median = 0.0;
         double backend_isolated_speedup_median = 0.0;
@@ -2288,6 +2299,8 @@ next_test:
         double *compile_sp = (double *)malloc(rows.n * sizeof(double));
         double *run_sp = (double *)malloc(rows.n * sizeof(double));
         double *backend_sp = (double *)malloc(rows.n * sizeof(double));
+        double *loh = (double *)malloc(rows.n * sizeof(double));
+        double *eoh = (double *)malloc(rows.n * sizeof(double));
         double *lb = (double *)malloc(rows.n * sizeof(double));
         double *eb = (double *)malloc(rows.n * sizeof(double));
         double *lg = (double *)malloc(rows.n * sizeof(double));
@@ -2310,6 +2323,8 @@ next_test:
         double sum_lb = 0.0, sum_eb = 0.0;
         double sum_lg = 0.0, sum_eg = 0.0;
         double sum_lbe = 0.0, sum_ebe = 0.0;
+        double sum_loh = 0.0, sum_eoh = 0.0;
+        size_t overhead_n = 0;
 
         for (phase_idx = 0; phase_idx < PHASE_COUNT; phase_idx++) {
             li_phase[phase_idx] = (double *)malloc(rows.n * sizeof(double));
@@ -2344,6 +2359,13 @@ next_test:
             compile_sp[j] = lc[j] > 0 ? ec[j] / lc[j] : 0.0;
             run_sp[j] = lr[j] > 0 ? er[j] / lr[j] : 0.0;
             backend_sp[j] = lbe[j] > 0 ? ebe[j] / lbe[j] : 0.0;
+            if (!rows.items[j].time_report_fallback) {
+                loh[overhead_n] = rows.items[j].liric_overhead_ms;
+                eoh[overhead_n] = rows.items[j].llvm_overhead_ms;
+                sum_loh += loh[overhead_n];
+                sum_eoh += eoh[overhead_n];
+                overhead_n++;
+            }
             if (ir_sp[j] > 1.0) ir_faster++;
             if (wall_sp[j] > 1.0) wall_faster++;
             if (compile_sp[j] > 1.0) compile_faster++;
@@ -2428,6 +2450,52 @@ next_test:
         full_pipeline_llvm_non_parse_median = median(llvm_non_parse, rows.n);
         full_pipeline_wall_speedup_median = median(wall_sp, rows.n);
         full_pipeline_non_parse_speedup_median = median(non_parse_sp, rows.n);
+        if (overhead_n > 0) {
+            subprocess_overhead_has_data = 1;
+            subprocess_overhead_samples = overhead_n;
+            subprocess_overhead_liric_median = median(loh, overhead_n);
+            subprocess_overhead_llvm_median = median(eoh, overhead_n);
+            subprocess_overhead_liric_avg = sum_loh / (double)overhead_n;
+            subprocess_overhead_llvm_avg = sum_eoh / (double)overhead_n;
+            subprocess_overhead_shared_floor_median = subprocess_overhead_liric_median;
+            if (subprocess_overhead_llvm_median < subprocess_overhead_shared_floor_median)
+                subprocess_overhead_shared_floor_median = subprocess_overhead_llvm_median;
+            if (subprocess_overhead_shared_floor_median < 0.0)
+                subprocess_overhead_shared_floor_median = 0.0;
+            subprocess_overhead_observed_wall_speedup_median = full_pipeline_wall_speedup_median;
+            subprocess_overhead_adjusted_liric_wall_median =
+                full_pipeline_liric_wall_median - subprocess_overhead_shared_floor_median;
+            subprocess_overhead_adjusted_llvm_wall_median =
+                full_pipeline_llvm_wall_median - subprocess_overhead_shared_floor_median;
+            if (subprocess_overhead_adjusted_liric_wall_median < 0.0)
+                subprocess_overhead_adjusted_liric_wall_median = 0.0;
+            if (subprocess_overhead_adjusted_llvm_wall_median < 0.0)
+                subprocess_overhead_adjusted_llvm_wall_median = 0.0;
+            subprocess_overhead_adjusted_wall_speedup_median =
+                subprocess_overhead_adjusted_liric_wall_median > 0.0
+                    ? (subprocess_overhead_adjusted_llvm_wall_median /
+                       subprocess_overhead_adjusted_liric_wall_median)
+                    : 0.0;
+        }
+
+        printf("\n  SUBPROCESS OVERHEAD FLOOR (elapsed - time_report total)\n");
+        if (subprocess_overhead_has_data) {
+            printf("  Samples:   %zu (rows without time-report fallback)\n",
+                   subprocess_overhead_samples);
+            printf("  Median:    liric %.3f ms, llvm %.3f ms, shared floor %.3f ms\n",
+                   subprocess_overhead_liric_median,
+                   subprocess_overhead_llvm_median,
+                   subprocess_overhead_shared_floor_median);
+            printf("  Average:   liric %.3f ms, llvm %.3f ms\n",
+                   subprocess_overhead_liric_avg,
+                   subprocess_overhead_llvm_avg);
+            printf("  Wall speedup median (observed/adjusted): %.2fx / %.2fx\n",
+                   subprocess_overhead_observed_wall_speedup_median,
+                   subprocess_overhead_adjusted_wall_speedup_median);
+        } else {
+            printf("  Not available: all completed rows required time-report fallback\n");
+        }
+
         backend_isolated_liric_median = split_liric_backend_median;
         backend_isolated_llvm_median = split_llvm_backend_median;
         backend_isolated_speedup_median = median(backend_sp, rows.n);
@@ -2520,6 +2588,8 @@ next_test:
         free(compile_sp);
         free(run_sp);
         free(backend_sp);
+        free(loh);
+        free(eoh);
         free(lb);
         free(eb);
         free(lg);
@@ -2702,6 +2772,20 @@ next_test:
             fprintf(sf, "      \"lookup_dispatch_met\": null\n");
         fprintf(sf, "    },\n");
         fprintf(sf, "    \"all_targets_met\": %s\n", tracker_all_targets_met ? "true" : "false");
+        fprintf(sf, "  },\n");
+        fprintf(sf, "  \"subprocess_overhead\": {\n");
+        fprintf(sf, "    \"has_data\": %s,\n", subprocess_overhead_has_data ? "true" : "false");
+        fprintf(sf, "    \"samples\": %zu,\n", subprocess_overhead_samples);
+        fprintf(sf, "    \"method\": \"elapsed_ms_minus_time_report_total\",\n");
+        fprintf(sf, "    \"liric_median_ms\": %.6f,\n", subprocess_overhead_liric_median);
+        fprintf(sf, "    \"llvm_median_ms\": %.6f,\n", subprocess_overhead_llvm_median);
+        fprintf(sf, "    \"liric_avg_ms\": %.6f,\n", subprocess_overhead_liric_avg);
+        fprintf(sf, "    \"llvm_avg_ms\": %.6f,\n", subprocess_overhead_llvm_avg);
+        fprintf(sf, "    \"shared_floor_median_ms\": %.6f,\n", subprocess_overhead_shared_floor_median);
+        fprintf(sf, "    \"observed_wall_speedup_median\": %.6f,\n", subprocess_overhead_observed_wall_speedup_median);
+        fprintf(sf, "    \"adjusted_liric_wall_median_ms\": %.6f,\n", subprocess_overhead_adjusted_liric_wall_median);
+        fprintf(sf, "    \"adjusted_llvm_wall_median_ms\": %.6f,\n", subprocess_overhead_adjusted_llvm_wall_median);
+        fprintf(sf, "    \"adjusted_wall_speedup_median\": %.6f\n", subprocess_overhead_adjusted_wall_speedup_median);
         fprintf(sf, "  },\n");
         fprintf(sf, "  \"skip_reasons\": {\n");
         for (i = 0; i < SKIP_REASON_COUNT; i++) {
