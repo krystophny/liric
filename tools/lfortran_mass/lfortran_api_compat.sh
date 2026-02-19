@@ -23,6 +23,8 @@ usage: lfortran_api_compat.sh [options]
 This lane validates compile-time API compatibility:
   LFortran built with -DWITH_LIRIC=yes uses Liric's LLVM C++ compatibility
   API internally, then runs LFortran's own test runners.
+  Reference tests default to "--exclude-backend llvm" in WITH_LIRIC lane
+  unless backend selection is explicitly set via --ref-args.
 EOF
 }
 
@@ -33,6 +35,16 @@ die() {
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+ref_args_has_backend_policy() {
+    local args="${1:-}"
+    [[ "$args" == *"--no-llvm"* ]] && return 0
+    [[ "$args" == *"--exclude-backend"* ]] && return 0
+    [[ "$args" == *"--backend"* ]] && return 0
+    [[ "$args" == *" -b "* ]] && return 0
+    [[ "$args" == -b* ]] && return 0
+    return 1
 }
 
 abs_path() {
@@ -269,9 +281,20 @@ if [[ "$resolved_lfortran" != "$lfortran_liric_bin" ]]; then
 fi
 
 if [[ "$run_ref_tests" == "yes" ]]; then
+    ref_default_args=""
+    if ! ref_args_has_backend_policy "$ref_args"; then
+        ref_default_args="--exclude-backend llvm"
+        echo "lfortran_api_compat: applying WITH_LIRIC reference policy: ${ref_default_args}" >&2
+    fi
     (
         cd "$lfortran_dir"
-        if [[ -n "$ref_args" ]]; then
+        if [[ -n "$ref_default_args" && -n "$ref_args" ]]; then
+            # shellcheck disable=SC2086
+            "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
+        elif [[ -n "$ref_default_args" ]]; then
+            # shellcheck disable=SC2086
+            "$PYTHON_BIN" ./run_tests.py $ref_default_args
+        elif [[ -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
             "$PYTHON_BIN" ./run_tests.py $ref_args
         else
