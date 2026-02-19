@@ -1567,17 +1567,24 @@ static void run_micro_provider(const cfg_t *cfg,
 }
 
 
+static void run_best_effort_cmd(const char *cmd) {
+    int rc = system(cmd);
+    if (rc == -1) {
+        fprintf(stderr, "warn: cleanup command failed to execute: %s\n", cmd);
+    }
+}
+
 static void kill_stale_benchmark_processes(void) {
     /* Kill leftover processes from interrupted benchmark runs.
        Use -x (exact process name) for short names; use -f with anchored
        pattern for names exceeding the 15-char comm limit.
        Also kill orphaned lfortran test executables (.out binaries) that
        escaped process-group cleanup. */
-    (void)system("pkill -9 -x bench_api 2>/dev/null");
-    (void)system("pkill -9 -f '^bench_corpus_compare' 2>/dev/null");
-    (void)system("pkill -9 -f '^liric_probe_runner' 2>/dev/null");
-    (void)system("pkill -9 -f 'lfortran.*--jit' 2>/dev/null");
-    (void)system("pkill -9 -f '/tmp/liric_bench/.*\\.out' 2>/dev/null");
+    run_best_effort_cmd("pkill -9 -x bench_api 2>/dev/null");
+    run_best_effort_cmd("pkill -9 -f '^bench_corpus_compare' 2>/dev/null");
+    run_best_effort_cmd("pkill -9 -f '^liric_probe_runner' 2>/dev/null");
+    run_best_effort_cmd("pkill -9 -f 'lfortran.*--jit' 2>/dev/null");
+    run_best_effort_cmd("pkill -9 -f '/tmp/liric_bench/.*\\.out' 2>/dev/null");
 }
 
 int main(int argc, char **argv) {

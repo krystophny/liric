@@ -50,7 +50,10 @@ public:
     bool use_empty() const { return true; }
     bool hasOneUse() const { return false; }
 
-    void replaceAllUsesWith(Value *V) { (void)V; }
+    void replaceAllUsesWith(Value *V) {
+        if (!V) return;
+        lc_value_replace_all_uses_with(impl(), V->impl());
+    }
 };
 
 } // namespace llvm

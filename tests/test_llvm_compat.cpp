@@ -75,6 +75,33 @@ static int tests_failed = 0;
     } \
 } while (0)
 
+class ScopedEnvVar {
+    const char *name_;
+    char *old_value_;
+
+public:
+    ScopedEnvVar(const char *name, const char *value)
+        : name_(name), old_value_(nullptr) {
+        const char *current = std::getenv(name_);
+        if (current) old_value_ = ::strdup(current);
+        if (value) {
+            setenv(name_, value, 1);
+        } else {
+            unsetenv(name_);
+        }
+    }
+
+    ~ScopedEnvVar() {
+        if (old_value_) {
+            setenv(name_, old_value_, 1);
+            std::free(old_value_);
+            old_value_ = nullptr;
+        } else {
+            unsetenv(name_);
+        }
+    }
+};
+
 static int ret42_symbol_for_stringref_lookup(void) {
     return 42;
 }
@@ -1186,6 +1213,79 @@ static int test_target_select_noop() {
     return 0;
 }
 
+static int test_replace_all_uses_with_rewrites_existing_operands() {
+    ScopedEnvVar policy("LIRIC_POLICY", "ir");
+    llvm::LLVMContext ctx;
+    llvm::Module mod("rauw_operands", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *params[] = {i32};
+    auto *fty = llvm::FunctionType::get(
+        i32, llvm::ArrayRef<llvm::Type *>(params, 1), false);
+    auto *fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage, "rauw_operand_fn", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+
+    llvm::Value *x = fn->getArg(0);
+    llvm::Value *one = llvm::ConstantInt::get(i32, 1);
+    llvm::Value *two = llvm::ConstantInt::get(i32, 2);
+    llvm::Value *tmp = builder.CreateAdd(x, one, "tmp");
+    llvm::Value *mul = builder.CreateMul(tmp, two, "mul");
+    tmp->replaceAllUsesWith(x);
+    builder.CreateRet(mul);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(int);
+    fn_t fp = (fn_t)jit.lookup("rauw_operand_fn");
+    TEST_ASSERT(fp != nullptr, "lookup rauw_operand_fn");
+    TEST_ASSERT_EQ(fp(7), 14, "replaceAllUsesWith rewrites existing IR uses");
+    return 0;
+}
+
+static int test_switch_add_case_builds_dispatch_chain() {
+    ScopedEnvVar policy("LIRIC_POLICY", "ir");
+    llvm::LLVMContext ctx;
+    llvm::Module mod("switch_add_case", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *params[] = {i32};
+    auto *fty = llvm::FunctionType::get(
+        i32, llvm::ArrayRef<llvm::Type *>(params, 1), false);
+    auto *fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage, "switch_case_fn", mod);
+
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    auto *case1 = llvm::BasicBlock::Create(ctx, "case1", fn);
+    auto *case2 = llvm::BasicBlock::Create(ctx, "case2", fn);
+    auto *def = llvm::BasicBlock::Create(ctx, "default", fn);
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *x = fn->getArg(0);
+    auto *sw = builder.CreateSwitch(x, def, 2);
+    TEST_ASSERT(sw != nullptr, "CreateSwitch");
+    sw->addCase(llvm::ConstantInt::get(i32, 1), case1);
+    sw->addCase(llvm::ConstantInt::get(i32, 2), case2);
+
+    builder.SetInsertPoint(case1);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 11));
+    builder.SetInsertPoint(case2);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 22));
+    builder.SetInsertPoint(def);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 33));
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(int);
+    fn_t fp = (fn_t)jit.lookup("switch_case_fn");
+    TEST_ASSERT(fp != nullptr, "lookup switch_case_fn");
+    TEST_ASSERT_EQ(fp(1), 11, "switch case 1");
+    TEST_ASSERT_EQ(fp(2), 22, "switch case 2");
+    TEST_ASSERT_EQ(fp(9), 33, "switch default");
+    return 0;
+}
+
 static int test_jit_smoke_ret_42() {
     llvm::LLVMContext ctx;
     llvm::Module mod("jit_smoke", ctx);
@@ -1498,6 +1598,8 @@ int main() {
     RUN_TEST(test_noop_di_builder);
 
     fprintf(stderr, "\nJIT smoke tests:\n");
+    RUN_TEST(test_replace_all_uses_with_rewrites_existing_operands);
+    RUN_TEST(test_switch_add_case_builds_dispatch_chain);
     RUN_TEST(test_jit_smoke_ret_42);
     RUN_TEST(test_jit_smoke_add_args);
     RUN_TEST(test_jit_smoke_vector_return_call);

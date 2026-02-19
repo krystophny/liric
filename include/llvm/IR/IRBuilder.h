@@ -649,6 +649,20 @@ public:
         return nullptr;
     }
 
+    SwitchInst *CreateSwitch(Value *V, BasicBlock *Default,
+                             unsigned NumCases = 10) {
+        (void)NumCases;
+        if (!M() || !B() || !F() || !V || !Default || !Default->impl_block()) {
+            return nullptr;
+        }
+        lc_switch_builder_t *builder = lc_switch_builder_create(
+            M(), B(), F(), V->impl(), Default->impl_block());
+        if (!builder) {
+            return nullptr;
+        }
+        return new SwitchInst(builder);
+    }
+
     void CreateUnreachable() {
         lc_create_unreachable(M(), B());
     }

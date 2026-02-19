@@ -135,12 +135,28 @@ typedef struct lc_alloca_inst {
     lr_type_t *alloc_type;
 } lc_alloca_inst_t;
 
+typedef struct lc_switch_builder {
+    lc_module_compat_t *mod;
+    lr_func_t *func;
+    lr_block_t *tail_block;
+    lr_block_t *default_block;
+    lc_value_t *cond;
+    uint32_t case_index;
+} lc_switch_builder_t;
+
 /* ---- Internal desc_to_op (same as session.c) ---- */
 
 /* Forward declaration for safe_undef */
 lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);
 void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *src, lc_value_t *size);
+void lc_create_br(lc_module_compat_t *mod, lr_block_t *b, lr_block_t *target);
+void lc_create_cond_br(lc_module_compat_t *mod, lr_block_t *b,
+                       lc_value_t *cond, lr_block_t *true_bb,
+                       lr_block_t *false_bb);
+lc_value_t *lc_create_icmp_eq(lc_module_compat_t *mod, lr_block_t *b,
+                              lr_func_t *f, lc_value_t *lhs,
+                              lc_value_t *rhs, const char *name);
 
 /* ---- Value pool (slab-based to avoid pointer invalidation) ---- */
 
@@ -498,6 +514,101 @@ static lr_operand_t compat_desc_to_operand(const lr_operand_desc_t *d) {
         break;
     }
     return op;
+}
+
+static bool compat_operand_equal(const lr_operand_t *a,
+                                 const lr_operand_t *b) {
+    if (!a || !b)
+        return false;
+    if (a->kind != b->kind || a->type != b->type ||
+        a->global_offset != b->global_offset)
+        return false;
+    switch (a->kind) {
+    case LR_VAL_VREG:
+        return a->vreg == b->vreg;
+    case LR_VAL_IMM_I64:
+        return a->imm_i64 == b->imm_i64;
+    case LR_VAL_IMM_F64:
+        return a->imm_f64 == b->imm_f64;
+    case LR_VAL_BLOCK:
+        return a->block_id == b->block_id;
+    case LR_VAL_GLOBAL:
+        return a->global_id == b->global_id;
+    case LR_VAL_NULL:
+    case LR_VAL_UNDEF:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void compat_invalidate_func_caches(lr_func_t *f) {
+    if (!f)
+        return;
+    f->block_array = NULL;
+    f->linear_inst_array = NULL;
+    f->block_inst_offsets = NULL;
+    f->num_linear_insts = 0;
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        b->inst_array = NULL;
+        b->num_insts = 0;
+    }
+}
+
+static lr_func_t *compat_owner_func(lc_value_t *val) {
+    if (!val)
+        return NULL;
+    switch (val->kind) {
+    case LC_VAL_VREG:
+        return val->vreg.func;
+    case LC_VAL_ARGUMENT:
+        return val->argument.func;
+    case LC_VAL_GLOBAL:
+        return val->global.func;
+    case LC_VAL_BLOCK:
+        return val->block.func ? val->block.func
+                               : (val->block.block ? val->block.block->func : NULL);
+    default:
+        return NULL;
+    }
+}
+
+int lc_value_replace_all_uses_with(lc_value_t *from, lc_value_t *to) {
+    lr_operand_desc_t from_desc;
+    lr_operand_desc_t to_desc;
+    lr_operand_t from_op;
+    lr_operand_t to_op;
+    lr_func_t *f;
+    int replacements = 0;
+
+    if (!from || !to || from == to)
+        return 0;
+
+    from_desc = lc_value_to_desc(from);
+    to_desc = lc_value_to_desc(to);
+    from_op = compat_desc_to_operand(&from_desc);
+    to_op = compat_desc_to_operand(&to_desc);
+    f = compat_owner_func(from);
+    if (!f)
+        f = compat_owner_func(to);
+    if (!f)
+        return 0;
+
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            for (uint32_t i = 0; i < inst->num_operands; i++) {
+                lr_operand_t *op = &inst->operands[i];
+                if (!compat_operand_equal(op, &from_op))
+                    continue;
+                *op = to_op;
+                replacements++;
+            }
+        }
+    }
+
+    if (replacements > 0)
+        compat_invalidate_func_caches(f);
+    return replacements;
 }
 
 static int compat_finish_one_func(lc_module_compat_t *mod) {
@@ -1920,6 +2031,104 @@ bool lc_block_has_terminator(lr_block_t *block) {
         || op == LR_OP_CONDBR || op == LR_OP_UNREACHABLE;
 }
 
+static bool compat_is_fallback_br_to_default(const lr_block_t *block,
+                                             const lr_block_t *default_block) {
+    if (!block || !block->last || !default_block)
+        return false;
+    if (block->last->op != LR_OP_BR || block->last->num_operands != 1u)
+        return false;
+    if (block->last->operands[0].kind != LR_VAL_BLOCK)
+        return false;
+    return block->last->operands[0].block_id == default_block->id;
+}
+
+static int compat_pop_last_inst(lr_block_t *block) {
+    lr_inst_t *prev = NULL;
+    lr_inst_t *cur = NULL;
+    if (!block || !block->last)
+        return -1;
+    cur = block->first;
+    while (cur && cur != block->last) {
+        prev = cur;
+        cur = cur->next;
+    }
+    if (!cur)
+        return -1;
+    if (prev)
+        prev->next = NULL;
+    else
+        block->first = NULL;
+    block->last = prev;
+    block->inst_array = NULL;
+    block->num_insts = 0;
+    if (block->func)
+        compat_invalidate_func_caches(block->func);
+    return 0;
+}
+
+lc_switch_builder_t *lc_switch_builder_create(lc_module_compat_t *mod,
+                                              lr_block_t *origin,
+                                              lr_func_t *func,
+                                              lc_value_t *cond,
+                                              lr_block_t *default_block) {
+    lc_switch_builder_t *sw;
+    if (!mod || !origin || !func || !cond || !default_block)
+        return NULL;
+
+    (void)lc_block_attach(mod, default_block);
+    lc_create_br(mod, origin, default_block);
+
+    sw = (lc_switch_builder_t *)calloc(1, sizeof(*sw));
+    if (!sw)
+        return NULL;
+    sw->mod = mod;
+    sw->func = func;
+    sw->tail_block = origin;
+    sw->default_block = default_block;
+    sw->cond = cond;
+    sw->case_index = 0;
+    return sw;
+}
+
+int lc_switch_builder_add_case(lc_switch_builder_t *sw,
+                               lc_value_t *on_value,
+                               lr_block_t *dest_block) {
+    char name_buf[64];
+    lc_value_t *next_val;
+    lr_block_t *next_block;
+    lc_value_t *cmp;
+
+    if (!sw || !sw->mod || !sw->func || !sw->tail_block || !sw->default_block ||
+        !sw->cond || !on_value || !dest_block) {
+        return -1;
+    }
+
+    (void)lc_block_attach(sw->mod, dest_block);
+    if (!compat_is_fallback_br_to_default(sw->tail_block, sw->default_block))
+        return -1;
+    if (compat_pop_last_inst(sw->tail_block) != 0)
+        return -1;
+
+    snprintf(name_buf, sizeof(name_buf), "switch.case.%u", sw->case_index++);
+    next_val = lc_block_create(sw->mod, sw->func, name_buf);
+    next_block = lc_value_get_block(next_val);
+    if (!next_block)
+        return -1;
+
+    cmp = lc_create_icmp_eq(sw->mod, sw->tail_block, sw->func, sw->cond,
+                            on_value, "switch.cmp");
+    if (!cmp)
+        return -1;
+    lc_create_cond_br(sw->mod, sw->tail_block, cmp, dest_block, next_block);
+    lc_create_br(sw->mod, next_block, sw->default_block);
+    sw->tail_block = next_block;
+    return 0;
+}
+
+void lc_switch_builder_destroy(lc_switch_builder_t *sw) {
+    free(sw);
+}
+
 /* ---- Global variable ---- */
 
 static size_t global_storage_size(const lr_global_t *g) {
@@ -3261,9 +3470,10 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         void *addr = NULL;
         if (!f->name || !f->name[0])
             continue;
-        addr = lr_session_lookup(mod->session, f->name);
-        if (session_jit->mode == LR_COMPILE_LLVM && !addr)
+        if (session_jit->mode == LR_COMPILE_LLVM)
             addr = lr_jit_get_function(session_jit, f->name);
+        else
+            addr = lr_session_lookup(mod->session, f->name);
         if (!f->is_decl && !addr)
             return -1;
         if (addr)
@@ -3274,9 +3484,10 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         void *addr = NULL;
         if (!g->name || !g->name[0])
             continue;
-        addr = lr_session_lookup(mod->session, g->name);
-        if (session_jit->mode == LR_COMPILE_LLVM && !addr)
+        if (session_jit->mode == LR_COMPILE_LLVM)
             addr = lr_jit_get_function(session_jit, g->name);
+        else
+            addr = lr_session_lookup(mod->session, g->name);
         if (!g->is_external && !addr)
             return -1;
         if (addr)
