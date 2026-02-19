@@ -66,3 +66,42 @@ execute_process(
 if(NOT checkout_rc EQUAL 0)
     message(FATAL_ERROR "failed to checkout lfortran ref: ${LFORTRAN_REF}")
 endif()
+
+execute_process(
+    COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" reset --hard "${LFORTRAN_REF}"
+    RESULT_VARIABLE reset_rc
+)
+if(NOT reset_rc EQUAL 0)
+    message(FATAL_ERROR "failed to reset lfortran checkout to ref: ${LFORTRAN_REF}")
+endif()
+
+set(_lfortran_compat_patch
+    "${CMAKE_CURRENT_LIST_DIR}/patches/lfortran_llvm20_opaque_pointer.patch")
+if(EXISTS "${_lfortran_compat_patch}")
+    execute_process(
+        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" apply --check "${_lfortran_compat_patch}"
+        RESULT_VARIABLE patch_check_rc
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(patch_check_rc EQUAL 0)
+        execute_process(
+            COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" apply "${_lfortran_compat_patch}"
+            RESULT_VARIABLE patch_apply_rc
+        )
+        if(NOT patch_apply_rc EQUAL 0)
+            message(FATAL_ERROR "failed to apply managed lfortran compatibility patch")
+        endif()
+    else()
+        execute_process(
+            COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" apply --reverse --check "${_lfortran_compat_patch}"
+            RESULT_VARIABLE patch_reverse_check_rc
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+        if(NOT patch_reverse_check_rc EQUAL 0)
+            message(FATAL_ERROR
+                "managed lfortran compatibility patch no longer applies cleanly")
+        endif()
+    endif()
+endif()

@@ -72,9 +72,11 @@ ctest --test-dir build --output-on-failure
 
 ### Matrix axes
 
-The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells** (minus 6:
-LL and micro_c lanes are skipped for `mode=llvm` since standalone JIT
-does not support LLVM backend mode).
+The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells**.
+`bench_matrix` always skips LL and micro_c lanes for `mode=llvm` (minus 6)
+because standalone JIT does not support LLVM backend mode. If liric is built
+without real LLVM backend support (`WITH_REAL_LLVM_BACKEND=OFF`), `mode=llvm`
+API lanes are also skipped (minus 8).
 All lanes use the same 100-case corpus (first 100 from `compat_ll.txt`).
 
 - **Mode** (compilation backend): `isel`, `copy_patch`, `llvm`
@@ -130,6 +132,8 @@ Runtime artifacts:
 - `/tmp/liric_bench/matrix_rows.jsonl`
 - `/tmp/liric_bench/matrix_failures.jsonl`
 - `/tmp/liric_bench/matrix_summary.json`
+
+`mode=llvm` API lanes require a liric build with `WITH_REAL_LLVM_BACKEND=ON`.
 
 ## Compatibility Guardrails
 

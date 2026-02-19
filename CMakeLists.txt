@@ -29,6 +29,13 @@ add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 
 option(WITH_REAL_LLVM_BACKEND "Enable real LLVM C API backend for mode 'llvm'" OFF)
 set(LIRIC_LLVM_CONFIG_EXE "" CACHE FILEPATH "Path to llvm-config for real LLVM backend")
+if(NOT LIRIC_LLVM_CONFIG_EXE)
+    if(EXISTS "/opt/homebrew/opt/llvm@20/bin/llvm-config")
+        set(LIRIC_LLVM_CONFIG_EXE "/opt/homebrew/opt/llvm@20/bin/llvm-config")
+    elseif(EXISTS "/usr/local/opt/llvm@20/bin/llvm-config")
+        set(LIRIC_LLVM_CONFIG_EXE "/usr/local/opt/llvm@20/bin/llvm-config")
+    endif()
+endif()
 set(LIRIC_LLVM_COMPAT_MIN_MAJOR "11")
 set(LIRIC_HAVE_LLVM_C_LLJIT 0)
 set(LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR 0)
@@ -55,6 +62,65 @@ set(LIRIC_LFORTRAN_REF "origin/liric-aot"
     CACHE STRING "LFortran git ref for CMake-managed checkout")
 set(LIRIC_LFORTRAN_REMOTE "origin"
     CACHE STRING "Remote name used for LFortran ref policy")
+set(LIRIC_LFORTRAN_C_COMPILER ""
+    CACHE FILEPATH "Optional C compiler override for CMake-managed LFortran builds")
+set(LIRIC_LFORTRAN_CXX_COMPILER ""
+    CACHE FILEPATH "Optional C++ compiler override for CMake-managed LFortran builds")
+
+set(LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE "${LIRIC_LFORTRAN_C_COMPILER}")
+set(LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE "${LIRIC_LFORTRAN_CXX_COMPILER}")
+
+if(NOT LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE OR NOT LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE)
+    # Homebrew LLVM static archives on macOS are built against libc++, so
+    # default managed LFortran builds to clang/clang++ unless explicitly overridden.
+    if(APPLE)
+        find_program(_liric_clang_exe NAMES clang)
+        find_program(_liric_clangxx_exe NAMES clang++)
+        if(_liric_clang_exe AND _liric_clangxx_exe)
+            if(NOT LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE)
+                set(LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE "${_liric_clang_exe}")
+            endif()
+            if(NOT LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE)
+                set(LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE "${_liric_clangxx_exe}")
+            endif()
+        endif()
+    endif()
+
+    if(NOT LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE AND DEFINED ENV{CC} AND NOT "$ENV{CC}" STREQUAL "")
+        set(LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE "$ENV{CC}")
+    endif()
+
+    if(NOT LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE AND DEFINED ENV{CXX} AND NOT "$ENV{CXX}" STREQUAL "")
+        set(_liric_env_cxx "$ENV{CXX}")
+        set(_liric_cxx_candidate "${_liric_env_cxx}")
+        if(_liric_env_cxx MATCHES "(.*/)?gcc-([0-9]+)$")
+            find_program(_liric_gxx_candidate NAMES "g++-${CMAKE_MATCH_2}")
+            if(_liric_gxx_candidate)
+                set(_liric_cxx_candidate "${_liric_gxx_candidate}")
+            endif()
+        elseif(_liric_env_cxx MATCHES "(.*/)?gcc$")
+            find_program(_liric_gxx_candidate NAMES g++)
+            if(_liric_gxx_candidate)
+                set(_liric_cxx_candidate "${_liric_gxx_candidate}")
+            endif()
+        endif()
+        set(LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE "${_liric_cxx_candidate}")
+    endif()
+
+    if(NOT LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE AND
+       LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE MATCHES "(.*/)?gcc-([0-9]+)$")
+        find_program(_liric_gxx_candidate NAMES "g++-${CMAKE_MATCH_2}")
+        if(_liric_gxx_candidate)
+            set(LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE "${_liric_gxx_candidate}")
+        endif()
+    elseif(NOT LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE AND
+           LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE MATCHES "(.*/)?gcc$")
+        find_program(_liric_gxx_candidate NAMES g++)
+        if(_liric_gxx_candidate)
+            set(LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE "${_liric_gxx_candidate}")
+        endif()
+    endif()
+endif()
 
 if(WITH_REAL_LLVM_BACKEND)
     if(LIRIC_LLVM_CONFIG_EXE)
@@ -267,6 +333,9 @@ target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 
 add_executable(bench_matrix tools/bench_matrix.c tools/bench_common.c)
 target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
+target_compile_definitions(bench_matrix PRIVATE
+    LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND=$<BOOL:${WITH_REAL_LLVM_BACKEND}>
+)
 
 add_executable(bench_overhead_probe tools/bench_overhead_probe.c tools/bench_common.c)
 target_link_libraries(bench_overhead_probe PRIVATE ${LIRIC_PLATFORM_LIBS})
@@ -287,7 +356,24 @@ else()
 endif()
 
 option(WITH_BENCH_LLI_PHASES "Build bench_lli_phases when LLVM C ORC APIs are available" ON)
-find_program(LLVM_CONFIG_EXE llvm-config)
+if(LIRIC_LLVM_CONFIG_EXE)
+    set(LLVM_CONFIG_EXE "${LIRIC_LLVM_CONFIG_EXE}")
+else()
+    set(LLVM_CONFIG_EXE "")
+    foreach(_cand
+            /opt/homebrew/opt/llvm@20/bin/llvm-config
+            /usr/local/opt/llvm@20/bin/llvm-config
+            /opt/homebrew/opt/llvm/bin/llvm-config
+            /usr/local/opt/llvm/bin/llvm-config)
+        if(EXISTS "${_cand}")
+            set(LLVM_CONFIG_EXE "${_cand}")
+            break()
+        endif()
+    endforeach()
+    if(NOT LLVM_CONFIG_EXE)
+        find_program(LLVM_CONFIG_EXE NAMES llvm-config)
+    endif()
+endif()
 if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES)
     execute_process(
         COMMAND ${LLVM_CONFIG_EXE} --includedir
@@ -341,6 +427,39 @@ else()
     set(LIRIC_EXTERNAL_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 endif()
 
+set(LIRIC_LFORTRAN_LLVM_COMPILER_ARGS "")
+if(LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE)
+    list(APPEND LIRIC_LFORTRAN_LLVM_COMPILER_ARGS
+        -DCMAKE_C_COMPILER=${LIRIC_LFORTRAN_C_COMPILER_EFFECTIVE})
+endif()
+if(LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE)
+    list(APPEND LIRIC_LFORTRAN_LLVM_COMPILER_ARGS
+        -DCMAKE_CXX_COMPILER=${LIRIC_LFORTRAN_CXX_COMPILER_EFFECTIVE})
+endif()
+
+set(LIRIC_LFORTRAN_LLVM_DIR "" CACHE PATH
+    "Optional LLVM_DIR override for baseline LFortran build")
+set(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE "${LIRIC_LFORTRAN_LLVM_DIR}")
+if(NOT LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE AND LLVM_CONFIG_EXE)
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --cmakedir
+        OUTPUT_VARIABLE _liric_lfortran_llvm_cmakedir
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _liric_lfortran_llvm_cmakedir_rc
+    )
+    if(_liric_lfortran_llvm_cmakedir_rc EQUAL 0 AND
+       EXISTS "${_liric_lfortran_llvm_cmakedir}/LLVMConfig.cmake")
+        set(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE
+            "${_liric_lfortran_llvm_cmakedir}")
+    endif()
+endif()
+
+set(LIRIC_LFORTRAN_LLVM_ARGS "")
+if(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE)
+    list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
+        -DLLVM_DIR=${LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE})
+endif()
+
 add_custom_target(
     lfortran_prepare
     COMMAND ${CMAKE_COMMAND}
@@ -360,7 +479,12 @@ add_custom_target(
         -B ${LIRIC_LFORTRAN_BUILD_LLVM}
         -G Ninja
         -DCMAKE_BUILD_TYPE=${LIRIC_EXTERNAL_BUILD_TYPE}
-    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM} --parallel
+        ${LIRIC_LFORTRAN_LLVM_COMPILER_ARGS}
+        ${LIRIC_LFORTRAN_LLVM_ARGS}
+        -DBUILD_TESTING=OFF
+        -DWITH_LLVM=yes
+    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM}
+        --target lfortran lfortran_runtime --parallel
     DEPENDS lfortran_prepare
     COMMENT "Configure/build LFortran baseline LLVM in ${LIRIC_LFORTRAN_BUILD_LLVM}"
     USES_TERMINAL
@@ -373,11 +497,13 @@ add_custom_target(
         -B ${LIRIC_LFORTRAN_BUILD_LIRIC}
         -G Ninja
         -DCMAKE_BUILD_TYPE=${LIRIC_EXTERNAL_BUILD_TYPE}
+        -DBUILD_TESTING=OFF
         -DWITH_LIRIC=yes
         -DLIRIC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -DWITH_RUNTIME_STACKTRACE=yes
         -DWITH_LLVM=OFF
-    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC} --parallel
+    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
+        --target lfortran lfortran_runtime --parallel
     DEPENDS lfortran_prepare liric_probe_runner
     COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
     USES_TERMINAL

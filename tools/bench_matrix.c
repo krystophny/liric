@@ -21,6 +21,10 @@
 
 #include "bench_common.h"
 
+#ifndef LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND
+#define LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND 0
+#endif
+
 typedef enum {
     MODE_ISEL = 0,
     MODE_COPY_PATCH = 1,
@@ -74,6 +78,7 @@ typedef struct {
     int run_compat_check;
     int allow_partial;
     int rebuild_lfortran;
+    int rebuild_jobs;
 
     int modes[MODE_COUNT];
     int lanes[LANE_COUNT];
@@ -380,8 +385,19 @@ static int run_cmd_with_mode(const char *mode, char *const argv[], cmd_result_t 
 
 static int host_nproc(void) {
     long n = -1;
+#if defined(__APPLE__)
+    FILE *fp = popen("sysctl -n hw.logicalcpu 2>/dev/null", "r");
+    if (fp) {
+        char buf[64];
+        if (fgets(buf, sizeof(buf), fp)) {
+            long sysctl_n = strtol(buf, NULL, 10);
+            if (sysctl_n > 0) n = sysctl_n;
+        }
+        pclose(fp);
+    }
+#endif
 #if defined(_SC_NPROCESSORS_ONLN)
-    n = sysconf(_SC_NPROCESSORS_ONLN);
+    if (n < 1) n = sysconf(_SC_NPROCESSORS_ONLN);
 #endif
 #if defined(_SC_NPROCESSORS_CONF)
     if (n < 1) n = sysconf(_SC_NPROCESSORS_CONF);
@@ -414,6 +430,13 @@ static int any_api_lane_selected(const cfg_t *cfg) {
            cfg->lanes[LANE_API_FULL_LIRIC] ||
            cfg->lanes[LANE_API_BACKEND_LLVM] ||
            cfg->lanes[LANE_API_BACKEND_LIRIC];
+}
+
+static int any_api_mode_selected_and_supported(const cfg_t *cfg) {
+    if (!any_api_lane_selected(cfg)) return 0;
+    if (cfg->modes[MODE_ISEL] || cfg->modes[MODE_COPY_PATCH]) return 1;
+    if (cfg->modes[MODE_LLVM] && LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND) return 1;
+    return 0;
 }
 
 static int any_ll_lane_selected(const cfg_t *cfg) {
@@ -527,6 +550,7 @@ static void usage(void) {
     printf("  --lfortran-build-dir PATH rebuild dir for lfortran LLVM binary (default: build/deps/lfortran/build-llvm)\n");
     printf("  --lfortran-liric-build-dir PATH rebuild dir for lfortran WITH_LIRIC binary (only needed for split builds)\n");
     printf("  --cmake PATH             cmake executable for lfortran rebuild preflight (default: cmake)\n");
+    printf("  --jobs N                 jobs for lfortran rebuild preflight (default: host CPUs)\n");
     printf("  --skip-lfortran-rebuild  disable lfortran rebuild preflight\n");
     printf("  --rebuild-lfortran       enable lfortran rebuild preflight (default)\n");
     printf("  --test-dir PATH          lfortran integration_tests directory (bench_api)\n");
@@ -557,16 +581,13 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.run_compat_check = 1;
     cfg.allow_partial = 0;
     cfg.rebuild_lfortran = 1;
+    cfg.rebuild_jobs = host_nproc();
     cfg.cmake = "cmake";
 
-    cfg.lfortran = file_exists(default_lfortran_llvm) ? default_lfortran_llvm : NULL;
-    cfg.lfortran_liric = file_exists(default_lfortran_liric)
-                             ? default_lfortran_liric
-                             : NULL;
+    cfg.lfortran = default_lfortran_llvm;
+    cfg.lfortran_liric = default_lfortran_liric;
     cfg.lfortran_build_dir = "build/deps/lfortran/build-llvm";
-    cfg.lfortran_liric_build_dir = dir_exists(default_lfortran_build_liric)
-                                       ? default_lfortran_build_liric
-                                       : NULL;
+    cfg.lfortran_liric_build_dir = default_lfortran_build_liric;
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
@@ -626,6 +647,9 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran_liric_build_dir = argv[++i];
         } else if (strcmp(argv[i], "--cmake") == 0 && i + 1 < argc) {
             cfg.cmake = argv[++i];
+        } else if (strcmp(argv[i], "--jobs") == 0 && i + 1 < argc) {
+            cfg.rebuild_jobs = atoi(argv[++i]);
+            if (cfg.rebuild_jobs < 1) cfg.rebuild_jobs = 1;
         } else if (strcmp(argv[i], "--skip-lfortran-rebuild") == 0) {
             cfg.rebuild_lfortran = 0;
         } else if (strcmp(argv[i], "--rebuild-lfortran") == 0) {
@@ -674,7 +698,7 @@ static int run_lfortran_rebuild_step(const cfg_t *cfg,
                                      const char *failed_reason) {
     cmd_result_t r = {0};
     char jobs_buf[32];
-    char *cmd[8];
+    char *cmd[12];
     int n = 0;
 
     if (!build_dir || !build_dir[0] || !dir_exists(build_dir)) {
@@ -689,12 +713,16 @@ static int run_lfortran_rebuild_step(const cfg_t *cfg,
         return -1;
     }
 
-    snprintf(jobs_buf, sizeof(jobs_buf), "%d", host_nproc());
+    snprintf(jobs_buf, sizeof(jobs_buf), "%d",
+             cfg->rebuild_jobs > 0 ? cfg->rebuild_jobs : host_nproc());
     cmd[n++] = (char *)cfg->cmake;
     cmd[n++] = "--build";
     cmd[n++] = (char *)build_dir;
     cmd[n++] = "-j";
     cmd[n++] = jobs_buf;
+    cmd[n++] = "--target";
+    cmd[n++] = "lfortran";
+    cmd[n++] = "lfortran_runtime";
     cmd[n++] = NULL;
 
     printf("[matrix] rebuild: %s\n", build_dir);
@@ -1039,11 +1067,13 @@ static int prepare_ll_corpus_from_compat(const cfg_t *cfg,
         free(case_dir_path);
     }
 
+    if (copied == 0) goto fail;
     fclose(compat);
     fclose(corpus);
     free(ll_dir);
-
-    if (copied == 0) goto fail;
+    compat = NULL;
+    corpus = NULL;
+    ll_dir = NULL;
     printf("[matrix] ll corpus: %zu cases (max %d)\n", copied, max_cases);
     *out_corpus_path = corpus_path;
     *out_cache_dir = cache_dir;
@@ -1631,20 +1661,9 @@ int main(int argc, char **argv) {
     fails = fopen(fails_path, "w");
     if (!fails) die("failed to open failures output: %s", fails_path);
 
-    if (any_api_lane_selected(&cfg)) {
+    if (any_api_mode_selected_and_supported(&cfg)) {
         const char *api_lane = compat_api_lane_name(&cfg);
-        if (!cfg.lfortran || !cfg.lfortran[0] || !file_exists(cfg.lfortran)) {
-            write_failure_row(fails, api_lane, "all", "all", "lfortran_llvm", "lfortran_binary_missing", 127,
-                              cfg.lfortran ? cfg.lfortran : "");
-            compat_ok = 0;
-        }
-        if (!cfg.lfortran_liric || !cfg.lfortran_liric[0] || !file_exists(cfg.lfortran_liric)) {
-            write_failure_row(fails, api_lane, "all", "all", "lfortran_llvm", "lfortran_liric_binary_missing", 127,
-                              cfg.lfortran_liric ? cfg.lfortran_liric : "");
-            compat_ok = 0;
-        }
-
-        if (cfg.rebuild_lfortran && compat_ok) {
+        if (cfg.rebuild_lfortran) {
             if (run_lfortran_rebuild_step(&cfg,
                                           fails,
                                           api_lane,
@@ -1682,9 +1701,21 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (!cfg.lfortran || !cfg.lfortran[0] || !file_exists(cfg.lfortran)) {
+            write_failure_row(fails, api_lane, "all", "all", "lfortran_llvm", "lfortran_binary_missing", 127,
+                              cfg.lfortran ? cfg.lfortran : "");
+            compat_ok = 0;
+        }
+        if (!cfg.lfortran_liric || !cfg.lfortran_liric[0] || !file_exists(cfg.lfortran_liric)) {
+            write_failure_row(fails, api_lane, "all", "all", "lfortran_llvm", "lfortran_liric_binary_missing", 127,
+                              cfg.lfortran_liric ? cfg.lfortran_liric : "");
+            compat_ok = 0;
+        }
+
         if (cfg.run_compat_check) {
             cmd_result_t r = {0};
             char timeout_buf[32];
+            char api_limit_buf[32];
             char *cmd[24];
             int n = 0;
 
@@ -1708,6 +1739,11 @@ int main(int argc, char **argv) {
                 cmd[n++] = (char *)cfg.bench_dir;
                 cmd[n++] = "--timeout";
                 cmd[n++] = timeout_buf;
+                if (cfg.api_cases > 0) {
+                    snprintf(api_limit_buf, sizeof(api_limit_buf), "%d", cfg.api_cases);
+                    cmd[n++] = "--limit";
+                    cmd[n++] = api_limit_buf;
+                }
                 if (cfg.runtime_lib) {
                     cmd[n++] = "--runtime-lib";
                     cmd[n++] = (char *)cfg.runtime_lib;
@@ -1784,6 +1820,8 @@ int main(int argc, char **argv) {
             int want_api_metrics = want_api;
             int want_ll = any_ll_lane_selected(&cfg);
             int want_micro = any_micro_lane_selected(&cfg);
+            int is_llvm_mode = (strcmp(mode, "llvm") == 0);
+            int api_mode_supported = !is_llvm_mode || LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND;
 
             if (!cfg.policies[pi]) continue;
             policy = k_policy_name[pi];
@@ -1792,7 +1830,7 @@ int main(int argc, char **argv) {
             policy_dir = bench_path_join2(mode_dir, policy);
             if (mkdir_p(policy_dir) != 0) die("failed to create policy dir: %s", policy_dir);
 
-            if (want_api) {
+            if (want_api && api_mode_supported) {
                 if (!compat_ok) {
                     memset(&ap, 0, sizeof(ap));
                     ap.ran = 1;
@@ -1815,8 +1853,11 @@ int main(int argc, char **argv) {
 
             /* LL and micro_c lanes use standalone liric JIT which does not
                support mode=llvm (JIT compile returns -1 by design).
-               Only the API lanes work with mode=llvm via the compat layer. */
-            int is_llvm_mode = (strcmp(mode, "llvm") == 0);
+               API mode=llvm requires WITH_REAL_LLVM_BACKEND at build time. */
+            if (want_api && !api_mode_supported) {
+                printf("[matrix] mode=%s policy=%s api lanes skipped (real LLVM backend disabled)\n",
+                       mode, policy);
+            }
 
             if (want_ll && !is_llvm_mode) {
                 run_ll_provider(&cfg, mode, policy, policy_dir, &ll);
@@ -1830,6 +1871,17 @@ int main(int argc, char **argv) {
                 const char *lane = k_lane_name[li];
 
                 if (!cfg.lanes[li]) continue;
+                if (is_llvm_mode && !api_mode_supported &&
+                    (li == LANE_API_FULL_LLVM ||
+                     li == LANE_API_FULL_LIRIC ||
+                     li == LANE_API_BACKEND_LLVM ||
+                     li == LANE_API_BACKEND_LIRIC)) {
+                    continue;
+                }
+                if (is_llvm_mode &&
+                    (li == LANE_LL_JIT || li == LANE_LL_LLVM || li == LANE_MICRO_C)) {
+                    continue;
+                }
 
                 cells_attempted++;
                 printf("[matrix] mode=%s policy=%s lane=%s\n", mode, policy, lane);
@@ -1951,7 +2003,6 @@ int main(int argc, char **argv) {
                                      ap.summary_path);
                     cells_ok++;
                 } else if (li == LANE_LL_JIT) {
-                    if (is_llvm_mode) { cells_attempted--; continue; }
                     if (!ll.ran || !ll.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -1981,7 +2032,6 @@ int main(int argc, char **argv) {
                                      ll.summary_path);
                     cells_ok++;
                 } else if (li == LANE_LL_LLVM) {
-                    if (is_llvm_mode) { cells_attempted--; continue; }
                     if (!ll.ran || !ll.ok) {
                         write_failure_row(fails,
                                           lane,
@@ -2011,7 +2061,6 @@ int main(int argc, char **argv) {
                                      ll.summary_path);
                     cells_ok++;
                 } else if (li == LANE_MICRO_C) {
-                    if (is_llvm_mode) { cells_attempted--; continue; }
                     if (!micro.ran || !micro.ok) {
                         write_failure_row(fails,
                                           lane,

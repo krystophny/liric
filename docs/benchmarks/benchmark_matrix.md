@@ -11,6 +11,10 @@ It runs a strict matrix across:
   - `ll_jit`, `ll_llvm`
   - `micro_c`
 
+Lane availability is capability-aware:
+- LL and micro lanes are skipped for `mode=llvm`.
+- API lanes in `mode=llvm` require `WITH_REAL_LLVM_BACKEND=ON`; otherwise they are skipped.
+
 ## Hard-Fail Policy
 
 Default behavior is strict:

@@ -53,6 +53,7 @@ while [[ $# -gt 0 ]]; do
     case \"$1\" in
         --bench-dir) bench_dir=\"$2\"; shift 2 ;;
         --timeout) shift 2 ;;
+        --limit) shift 2 ;;
         --runtime-lib) shift 2 ;;
         --lfortran) shift 2 ;;
         *) echo \"unexpected arg in fake bench_compat_check: $1\" >&2; exit 101 ;;
