@@ -1194,6 +1194,9 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
         g = lr_global_create(m, name, type, false);
         if (!g)
             return safe_undef(mod);
+        /* LLVM's getOrInsertGlobal creates/returns a declaration until an
+         * initializer is attached, so keep the new symbol unresolved here. */
+        g->is_external = true;
         cache_global_by_symbol(mod, sym_id, g);
     }
     return lc_value_global(mod, sym_id, m->type_ptr, g->name);

@@ -106,6 +106,17 @@ static int ret42_symbol_for_stringref_lookup(void) {
     return 42;
 }
 
+static lr_global_t *find_module_global_by_name(lr_module_t *ir,
+                                               const char *name) {
+    if (!ir || !name)
+        return nullptr;
+    for (lr_global_t *g = ir->first_global; g; g = g->next) {
+        if (g->name && std::strcmp(g->name, name) == 0)
+            return g;
+    }
+    return nullptr;
+}
+
 static int test_llvm_version() {
     TEST_ASSERT_EQ(LLVM_VERSION_MAJOR, 21, "version major");
     return 0;
@@ -368,6 +379,8 @@ static int test_global_lookup_set_initializer_and_jit() {
     llvm::LLVMContext ctx;
     llvm::Module mod("global_init", ctx);
     llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    lr_module_t *ir = lc_module_get_ir(mod.getCompat());
+    TEST_ASSERT(ir != nullptr, "module ir");
 
     llvm::Constant *inserted = mod.getOrInsertGlobal("g", i32);
     TEST_ASSERT(inserted != nullptr, "getOrInsertGlobal");
@@ -375,9 +388,14 @@ static int test_global_lookup_set_initializer_and_jit() {
     llvm::GlobalVariable *g = mod.getNamedGlobal("g");
     TEST_ASSERT(g != nullptr, "getNamedGlobal");
     TEST_ASSERT(!g->hasInitializer(), "no initializer initially");
+    lr_global_t *ir_g = find_module_global_by_name(ir, "g");
+    TEST_ASSERT(ir_g != nullptr, "global present in IR");
+    TEST_ASSERT(ir_g->is_external, "global starts as declaration");
 
     g->setInitializer(llvm::ConstantInt::get(i32, 123));
     TEST_ASSERT(g->hasInitializer(), "initializer applied");
+    TEST_ASSERT(!ir_g->is_external, "initializer materializes definition");
+    TEST_ASSERT(ir_g->init_data != nullptr, "initializer bytes present");
 
     llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
     llvm::Function *fn = llvm::Function::Create(
@@ -398,6 +416,25 @@ static int test_global_lookup_set_initializer_and_jit() {
     fn_t fp = (fn_t)jit.lookup("read_g");
     TEST_ASSERT(fp != nullptr, "lookup read_g");
     TEST_ASSERT_EQ(fp(), 123, "global initializer value");
+    return 0;
+}
+
+static int test_create_global_without_initializer_is_declaration() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("global_decl", ctx);
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    lr_module_t *ir = lc_module_get_ir(mod.getCompat());
+    TEST_ASSERT(ir != nullptr, "module ir");
+
+    llvm::GlobalVariable *g = mod.createGlobalVariable(
+        "extern_only", i32, false, llvm::GlobalValue::ExternalLinkage);
+    TEST_ASSERT(g != nullptr, "global declaration created");
+
+    lr_global_t *ir_g = find_module_global_by_name(ir, "extern_only");
+    TEST_ASSERT(ir_g != nullptr, "decl global in IR");
+    TEST_ASSERT(ir_g->is_external, "decl global remains external");
+    TEST_ASSERT(ir_g->init_data == nullptr, "decl global has no initializer");
+    TEST_ASSERT_EQ(ir_g->init_size, 0u, "decl global has no init bytes");
     return 0;
 }
 
@@ -1706,6 +1743,7 @@ int main() {
     RUN_TEST(test_constant_data_array_addnull);
     RUN_TEST(test_constant_struct_and_array_bytes);
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
+    RUN_TEST(test_create_global_without_initializer_is_declaration);
     RUN_TEST(test_duplicate_global_names_are_uniquified);
     RUN_TEST(test_parse_assembly_wrapper_fast_path);
 

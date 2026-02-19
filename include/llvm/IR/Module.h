@@ -205,8 +205,7 @@ public:
             gv = lc_global_create(compat_, name, ty->impl(), is_const,
                                   init_data, init_size);
         } else {
-            gv = lc_global_create(compat_, name, ty->impl(), is_const,
-                                  nullptr, 0);
+            gv = lc_global_declare(compat_, name, ty->impl());
         }
         auto g = std::make_unique<GlobalVariable>();
         (void)gv;
