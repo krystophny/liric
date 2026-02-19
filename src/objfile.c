@@ -104,10 +104,8 @@ static const char *remap_intrinsic(const char *name) {
     if (strcmp(name, "llvm.sqrt.f64") == 0) return "sqrt";
     if (strcmp(name, "llvm.copysign.f32") == 0) return "copysignf";
     if (strcmp(name, "llvm.copysign.f64") == 0) return "copysign";
-    if (strcmp(name, "llvm.powi.f32.i32") == 0) return "powf";
-    if (strcmp(name, "llvm.powi.f64.i32") == 0) return "pow";
-    if (strcmp(name, "llvm.powi.f32.i64") == 0) return "powf";
-    if (strcmp(name, "llvm.powi.f64.i64") == 0) return "pow";
+    /* Keep llvm.powi.* unmapped: libc pow/powf take floating exponents and
+       are ABI-incompatible with powi's integer exponent signatures. */
     if (strcmp(name, "llvm.fabs.f32") == 0) return "fabsf";
     if (strcmp(name, "llvm.fabs.f64") == 0) return "fabs";
     if (strcmp(name, "llvm.sin.f32") == 0) return "sinf";
@@ -460,13 +458,11 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
         }
     }
 
-    if (preserve_symbol_names) {
-        if (obj_define_intrinsic_stubs(out, target) != 0) {
-            m->obj_ctx = NULL;
-            lr_arena_destroy(arena);
-            obj_build_result_destroy(out);
-            return -1;
-        }
+    if (obj_define_intrinsic_stubs(out, target) != 0) {
+        m->obj_ctx = NULL;
+        lr_arena_destroy(arena);
+        obj_build_result_destroy(out);
+        return -1;
     }
 
     for (lr_global_t *g = m->first_global; g; g = g->next) {
@@ -608,11 +604,9 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         }
     }
 
-    if (preserve_symbol_names) {
-        if (obj_define_intrinsic_stubs(out, target) != 0) {
-            obj_build_result_destroy(out);
-            return -1;
-        }
+    if (obj_define_intrinsic_stubs(out, target) != 0) {
+        obj_build_result_destroy(out);
+        return -1;
     }
 
     /* Globals (same as obj_build_module) */

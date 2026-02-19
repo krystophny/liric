@@ -420,6 +420,17 @@ add_test(
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|aarch64|arm64")
     add_test(
+        NAME liric_cli_obj_powi_negative_exponent_link
+        COMMAND ${CMAKE_COMMAND}
+            -DCLI=$<TARGET_FILE:liric_bin>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_obj_powi_neg.ll
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_obj_powi_negative_exponent_link
+            -DCC=${CMAKE_C_COMPILER}
+            -DNM=${CMAKE_NM}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_obj_link_run.cmake
+    )
+
+    add_test(
         NAME liric_cli_exe_intrinsic_math
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:liric_bin>
