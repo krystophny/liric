@@ -2,6 +2,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <cstdint>
 
 #include <liric/liric_compat.h>
 
@@ -555,6 +556,136 @@ static int test_private_global_strings_are_module_scoped() {
                             b_auto->impl()->global.name) != 0,
                 "auto private global symbols are module-scoped");
     return 0;
+}
+
+static int test_set_linkage_updates_object_symbol_binding() {
+#if !defined(__linux__)
+    return 0;
+#else
+    llvm::LLVMContext ctx;
+    llvm::Module mod("linkage_object_symbols", ctx);
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    const int32_t init_demote = 11;
+    const int32_t init_promote = 22;
+
+    llvm::GlobalVariable *demote = mod.createGlobalVariable(
+        "demote_linkage", i32, true, llvm::GlobalValue::ExternalLinkage,
+        &init_demote, sizeof(init_demote));
+    llvm::GlobalVariable *promote = mod.createGlobalVariable(
+        "promote_linkage", i32, true, llvm::GlobalValue::InternalLinkage,
+        &init_promote, sizeof(init_promote));
+    TEST_ASSERT(demote != nullptr, "demote linkage global created");
+    TEST_ASSERT(promote != nullptr, "promote linkage global created");
+
+    demote->setLinkage(llvm::GlobalValue::InternalLinkage);
+    promote->setLinkage(llvm::GlobalValue::ExternalLinkage);
+
+    const char *demote_name = demote->impl()->global.name;
+    const char *promote_name = promote->impl()->global.name;
+    TEST_ASSERT(demote_name != nullptr, "demote linkage symbol name");
+    TEST_ASSERT(promote_name != nullptr, "promote linkage symbol name");
+
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = llvm::Function::Create(
+        ft, llvm::GlobalValue::ExternalLinkage, "linkage_probe_main", mod);
+    TEST_ASSERT(fn != nullptr, "probe function created");
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(entry != nullptr, "probe function entry");
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+
+    const char *path = "/tmp/liric_test_llvm_compat_linkage_binding.o";
+    std::remove(path);
+    int rc = lc_module_emit_object(mod.getCompat(), path);
+    TEST_ASSERT_EQ(rc, 0, "emit object for linkage binding test");
+
+    FILE *fp = std::fopen(path, "rb");
+    TEST_ASSERT(fp != nullptr, "open emitted object");
+    TEST_ASSERT_EQ(std::fseek(fp, 0, SEEK_END), 0, "seek emitted object");
+    long fsize = std::ftell(fp);
+    TEST_ASSERT(fsize > 64, "emitted object has ELF payload");
+    TEST_ASSERT_EQ(std::fseek(fp, 0, SEEK_SET), 0, "rewind emitted object");
+
+    uint8_t *buf = static_cast<uint8_t *>(std::malloc((size_t)fsize));
+    TEST_ASSERT(buf != nullptr, "allocate object buffer");
+    size_t nread = std::fread(buf, 1, (size_t)fsize, fp);
+    std::fclose(fp);
+    TEST_ASSERT(nread == (size_t)fsize, "read full object payload");
+
+    auto rd16 = [](const uint8_t *p) -> uint16_t {
+        return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    };
+    auto rd32 = [](const uint8_t *p) -> uint32_t {
+        return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+               ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    };
+    auto rd64 = [](const uint8_t *p) -> uint64_t {
+        uint64_t v = 0;
+        for (int i = 0; i < 8; i++)
+            v |= ((uint64_t)p[i]) << (8u * i);
+        return v;
+    };
+
+    TEST_ASSERT(buf[0] == 0x7f && buf[1] == 'E' && buf[2] == 'L' && buf[3] == 'F',
+                "object is ELF");
+    uint64_t e_shoff = rd64(buf + 40);
+    uint16_t e_shentsize = rd16(buf + 58);
+    uint16_t e_shnum = rd16(buf + 60);
+    TEST_ASSERT(e_shoff != 0 && e_shentsize >= 64 && e_shnum > 0, "ELF section header table");
+
+    uint64_t symtab_off = 0;
+    uint64_t symtab_size = 0;
+    uint32_t symtab_link = 0;
+    uint32_t first_global = 0;
+    for (uint16_t i = 0; i < e_shnum; i++) {
+        const uint8_t *sh = buf + e_shoff + (uint64_t)i * e_shentsize;
+        if (rd32(sh + 4) != 2u)
+            continue;
+        symtab_off = rd64(sh + 24);
+        symtab_size = rd64(sh + 32);
+        symtab_link = rd32(sh + 40);
+        first_global = rd32(sh + 44);
+        break;
+    }
+    TEST_ASSERT(symtab_off != 0 && symtab_size >= 24, "symtab present");
+    TEST_ASSERT(symtab_link < e_shnum, "symtab link section index valid");
+
+    const uint8_t *strtab_sh = buf + e_shoff + (uint64_t)symtab_link * e_shentsize;
+    uint64_t strtab_off = rd64(strtab_sh + 24);
+    TEST_ASSERT(strtab_off != 0, "strtab present");
+
+    uint32_t demote_idx = UINT32_MAX;
+    uint32_t promote_idx = UINT32_MAX;
+    uint8_t demote_bind = 0xff;
+    uint8_t promote_bind = 0xff;
+    uint32_t num_syms = (uint32_t)(symtab_size / 24u);
+    for (uint32_t i = 0; i < num_syms; i++) {
+        const uint8_t *sym = buf + symtab_off + (uint64_t)i * 24u;
+        uint32_t st_name = rd32(sym);
+        if (st_name == 0)
+            continue;
+        const char *name = reinterpret_cast<const char *>(buf + strtab_off + st_name);
+        if (std::strcmp(name, demote_name) == 0) {
+            demote_idx = i;
+            demote_bind = (uint8_t)(sym[4] >> 4);
+        }
+        if (std::strcmp(name, promote_name) == 0) {
+            promote_idx = i;
+            promote_bind = (uint8_t)(sym[4] >> 4);
+        }
+    }
+
+    TEST_ASSERT(demote_idx != UINT32_MAX, "demoted symbol found in symtab");
+    TEST_ASSERT(promote_idx != UINT32_MAX, "promoted symbol found in symtab");
+    TEST_ASSERT_EQ((int)demote_bind, 0, "demoted internal symbol is STB_LOCAL");
+    TEST_ASSERT_EQ((int)promote_bind, 1, "promoted external symbol is STB_GLOBAL");
+    TEST_ASSERT(demote_idx < first_global, "demoted local symbol listed before globals");
+    TEST_ASSERT(promote_idx >= first_global, "promoted global symbol listed in global range");
+
+    std::free(buf);
+    std::remove(path);
+    return 0;
+#endif
 }
 
 static int test_function_creation() {
@@ -1897,6 +2028,7 @@ int main() {
     RUN_TEST(test_create_global_without_initializer_is_declaration);
     RUN_TEST(test_duplicate_global_names_are_uniquified);
     RUN_TEST(test_private_global_strings_are_module_scoped);
+    RUN_TEST(test_set_linkage_updates_object_symbol_binding);
     RUN_TEST(test_parse_assembly_wrapper_fast_path);
 
     fprintf(stderr, "\nFunction tests:\n");

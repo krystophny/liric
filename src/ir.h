@@ -142,6 +142,7 @@ typedef struct lr_global {
     lr_reloc_t *relocs;
     bool is_const;
     bool is_external;
+    bool is_local;
     uint32_t id;
     struct lr_global *next;
 } lr_global_t;

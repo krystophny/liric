@@ -334,15 +334,43 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
 
     size_t strtab_size = 1;
     uint32_t *str_offsets = calloc(oc->num_symbols, sizeof(uint32_t));
-    if (!str_offsets) return -1;
+    uint32_t *elf_sym_index = calloc(oc->num_symbols, sizeof(uint32_t));
+    uint32_t *sym_order = calloc(oc->num_symbols, sizeof(uint32_t));
+    if (!str_offsets || !elf_sym_index || !sym_order) {
+        free(str_offsets);
+        free(elf_sym_index);
+        free(sym_order);
+        return -1;
+    }
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
         str_offsets[i] = (uint32_t)strtab_size;
         strtab_size += strlen(oc->symbols[i].name) + 1;
     }
 
     uint32_t num_section_syms = has_data ? 2 : 1; /* .text, optionally .data */
-    uint32_t first_global = 1 + num_section_syms; /* after null + section syms */
-    uint32_t total_syms = first_global + oc->num_symbols;
+    uint32_t local_syms = 0;
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        const lr_obj_symbol_t *sym = &oc->symbols[i];
+        if (sym->is_defined && sym->is_local)
+            local_syms++;
+    }
+    uint32_t first_local = 1 + num_section_syms;
+    uint32_t first_global = first_local + local_syms;
+    uint32_t total_syms = first_global + (oc->num_symbols - local_syms);
+    uint32_t next_local = first_local;
+    uint32_t next_global = first_global;
+    uint32_t local_pos = 0;
+    uint32_t global_pos = local_syms;
+    for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        const lr_obj_symbol_t *sym = &oc->symbols[i];
+        if (sym->is_defined && sym->is_local) {
+            elf_sym_index[i] = next_local++;
+            sym_order[local_pos++] = i;
+        } else {
+            elf_sym_index[i] = next_global++;
+            sym_order[global_pos++] = i;
+        }
+    }
 
     /* Layout computation */
     size_t ehdr_size = 64;
@@ -383,6 +411,8 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
     uint8_t *buf = calloc(1, total_size);
     if (!buf) {
         free(str_offsets);
+        free(elf_sym_index);
+        free(sym_order);
         return -1;
     }
     uint8_t *p = buf;
@@ -419,7 +449,7 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
         for (uint32_t i = 0; i < oc->num_relocs; i++) {
             const lr_obj_reloc_t *r = &oc->relocs[i];
             lr_reloc_mapped_t mapped = reloc_mapper(r->type);
-            uint32_t elf_sym = first_global + r->symbol_idx;
+            uint32_t elf_sym = elf_sym_index[r->symbol_idx];
             w64(&rp, (uint64_t)r->offset);
             w64(&rp, ELF64_R_INFO(elf_sym, mapped.native_type));
             w64(&rp, (uint64_t)(int64_t)mapped.addend);
@@ -432,7 +462,7 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
         for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
             const lr_obj_reloc_t *r = &oc->data_relocs[i];
             lr_reloc_mapped_t mapped = reloc_mapper(r->type);
-            uint32_t elf_sym = first_global + r->symbol_idx;
+            uint32_t elf_sym = elf_sym_index[r->symbol_idx];
             w64(&rp, (uint64_t)r->offset);
             w64(&rp, ELF64_R_INFO(elf_sym, mapped.native_type));
             w64(&rp, (uint64_t)(int64_t)mapped.addend);
@@ -462,11 +492,15 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
             w64(&sp, 0);
         }
 
-        for (uint32_t i = 0; i < oc->num_symbols; i++) {
+        for (uint32_t oi = 0; oi < oc->num_symbols; oi++) {
+            uint32_t i = sym_order[oi];
             const lr_obj_symbol_t *sym = &oc->symbols[i];
+            uint8_t bind = (sym->is_defined && sym->is_local)
+                ? STB_LOCAL
+                : STB_GLOBAL;
             w32(&sp, str_offsets[i]);
             uint8_t stt = (sym->is_defined && sym->section == 1) ? STT_FUNC : STT_NOTYPE;
-            w8(&sp, ELF64_ST_INFO(STB_GLOBAL, stt));
+            w8(&sp, ELF64_ST_INFO(bind, stt));
             w8(&sp, 0);
             if (sym->is_defined) {
                 uint16_t shndx = (sym->section == 1) ? text_shndx : data_shndx;
@@ -592,6 +626,8 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
 
     free(buf);
     free(str_offsets);
+    free(elf_sym_index);
+    free(sym_order);
 
     return written == total_size ? 0 : -1;
 }

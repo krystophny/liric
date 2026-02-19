@@ -19,6 +19,7 @@
 #include <memory>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 
 namespace llvm {
 
@@ -92,6 +93,27 @@ public:
         return base;
     }
 
+    static void applyCompatGlobalLinkage(
+        lc_module_compat_t *compat, lc_value_t *global_value,
+        GlobalValue::LinkageTypes linkage) {
+        if (!compat || !global_value || global_value->kind != LC_VAL_GLOBAL ||
+            !global_value->global.name)
+            return;
+        lr_module_t *m = lc_module_get_ir(compat);
+        if (!m)
+            return;
+        for (lr_global_t *g = m->first_global; g; g = g->next) {
+            if (!g->name || std::strcmp(g->name, global_value->global.name) != 0)
+                continue;
+            g->is_local = isLocalGlobalLinkage(linkage);
+            if (g->is_local)
+                g->is_external = false;
+            if (linkage == GlobalValue::AvailableExternallyLinkage)
+                g->is_external = true;
+            return;
+        }
+    }
+
     lc_module_compat_t *getCompat() const { return compat_; }
     lr_module_t *getIR() const { return lc_module_get_ir(compat_); }
     LLVMContext &getContext() { return ctx_; }
@@ -155,6 +177,7 @@ public:
         auto g = std::make_unique<GlobalVariable>();
         GlobalVariable *ptr = g.get();
         detail::register_value_wrapper(ptr, gv);
+        ptr->setCompatMod(compat_);
         const_cast<Module *>(this)->owned_globals_.push_back(std::move(g));
         return ptr;
     }
@@ -243,6 +266,7 @@ public:
         (void)gv;
         GlobalVariable *ptr = g.get();
         detail::register_value_wrapper(ptr, gv);
+        ptr->setCompatMod(compat_);
         ptr->setLinkage(linkage);
         std::string final_name = actual_name;
         if (gv && gv->kind == LC_VAL_GLOBAL && gv->global.name)
@@ -471,6 +495,7 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
     (void)InsertBefore; (void)TLMode; (void)AddressSpace;
     GlobalVariable *created =
         M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
+    setCompatMod(M.getCompat());
     if (created) {
         detail::register_value_wrapper(this,
             detail::lookup_value_wrapper(created));
@@ -490,8 +515,18 @@ inline void GlobalVariable::setConstant(bool v) {
     (void)v;
 }
 
+inline void GlobalVariable::setLinkage(LinkageTypes lt) {
+    GlobalValue::setLinkage(lt);
+    lc_module_compat_t *mod = compat_mod_;
+    if (!mod)
+        mod = Module::getCurrentModule();
+    Module::applyCompatGlobalLinkage(mod, impl(), lt);
+}
+
 inline bool GlobalVariable::hasInitializer() const {
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    lc_module_compat_t *mod = compat_mod_;
+    if (!mod)
+        mod = Module::getCurrentModule();
     if (!mod)
         return false;
     return lc_global_has_initializer(mod, impl());
@@ -502,7 +537,9 @@ inline Constant *GlobalVariable::getInitializer() const {
 }
 
 inline void GlobalVariable::setInitializer(Constant *InitVal) {
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    lc_module_compat_t *mod = compat_mod_;
+    if (!mod)
+        mod = Module::getCurrentModule();
     if (!mod || !InitVal)
         return;
     (void)lc_global_set_initializer(mod, impl(), InitVal->impl());

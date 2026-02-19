@@ -23,6 +23,10 @@ public:
         LocalExecTLSModel,
     };
 
+private:
+    lc_module_compat_t *compat_mod_ = nullptr;
+
+public:
     GlobalVariable() = default;
     ~GlobalVariable() {
         detail::unregister_value_wrapper(this);
@@ -41,6 +45,10 @@ public:
     bool hasInitializer() const;
     Constant *getInitializer() const;
     void setInitializer(Constant *InitVal);
+    void setLinkage(LinkageTypes lt);
+
+    void setCompatMod(lc_module_compat_t *m) { compat_mod_ = m; }
+    lc_module_compat_t *getCompatMod() const { return compat_mod_; }
 
     template <typename AlignTy>
     void setAlignment(AlignTy A) { (void)A; }
