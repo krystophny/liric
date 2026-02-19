@@ -31,6 +31,10 @@
     "issues": [445],
     "rationale": "Current nightly wrong-stdout mismatch class."
   },
+  "output-format|wrong-stdout|noncomparable-ir": {
+    "issues": [441],
+    "rationale": "Reference LLVM-IR lane diverges from native baseline output; not Liric-only stdout drift."
+  },
   "output-format|wrong-stderr|general": {
     "issues": [55],
     "rationale": "Differential stderr mismatch tracking."
