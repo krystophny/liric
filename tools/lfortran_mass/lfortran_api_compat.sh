@@ -68,6 +68,72 @@ normalize_path() {
     printf '%s/%s\n' "$parent" "$base"
 }
 
+json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+write_summary_json() {
+    local out="$1"
+
+    if command -v jq >/dev/null 2>&1; then
+        if jq -n \
+            --arg lfortran_dir "$lfortran_dir" \
+            --arg lfortran_ref "$lfortran_ref" \
+            --arg lfortran_bin "$lfortran_liric_bin" \
+            --arg run_ref_tests "$run_ref_tests" \
+            --arg run_itests "$run_itests" \
+            --arg workers "$workers" \
+            --arg status "$status" \
+            '{
+              lfortran_dir: $lfortran_dir,
+              lfortran_ref: $lfortran_ref,
+              lfortran_liric_bin: $lfortran_bin,
+              run_ref_tests: $run_ref_tests,
+              run_itests: $run_itests,
+              workers: ($workers|tonumber),
+              status: ($status|tonumber),
+              pass: (($status|tonumber) == 0)
+            }' > "$out"; then
+            return 0
+        fi
+        echo "lfortran_api_compat: WARN: jq summary generation failed; using shell fallback" >&2
+    fi
+
+    local esc_lfortran_dir
+    local esc_lfortran_ref
+    local esc_lfortran_bin
+    local esc_run_ref_tests
+    local esc_run_itests
+    local pass_flag="false"
+    if [[ "$status" -eq 0 ]]; then
+        pass_flag="true"
+    fi
+    esc_lfortran_dir="$(json_escape "$lfortran_dir")"
+    esc_lfortran_ref="$(json_escape "$lfortran_ref")"
+    esc_lfortran_bin="$(json_escape "$lfortran_liric_bin")"
+    esc_run_ref_tests="$(json_escape "$run_ref_tests")"
+    esc_run_itests="$(json_escape "$run_itests")"
+
+    cat > "$out" <<EOF
+{
+  "lfortran_dir": "${esc_lfortran_dir}",
+  "lfortran_ref": "${esc_lfortran_ref}",
+  "lfortran_liric_bin": "${esc_lfortran_bin}",
+  "run_ref_tests": "${esc_run_ref_tests}",
+  "run_itests": "${esc_run_itests}",
+  "workers": ${workers},
+  "status": ${status},
+  "pass": ${pass_flag}
+}
+EOF
+}
+
 detect_workers() {
     if command -v nproc >/dev/null 2>&1; then
         nproc
@@ -201,7 +267,6 @@ done
 
 need_cmd git
 need_cmd cmake
-need_cmd jq
 
 PYTHON_BIN=""
 if command -v python >/dev/null 2>&1; then
@@ -316,24 +381,7 @@ if [[ "$run_itests" == "yes" ]]; then
 fi
 
 summary_json="${output_root}/summary.json"
-jq -n \
-    --arg lfortran_dir "$lfortran_dir" \
-    --arg lfortran_ref "$lfortran_ref" \
-    --arg lfortran_bin "$lfortran_liric_bin" \
-    --arg run_ref_tests "$run_ref_tests" \
-    --arg run_itests "$run_itests" \
-    --arg workers "$workers" \
-    --arg status "$status" \
-    '{
-      lfortran_dir: $lfortran_dir,
-      lfortran_ref: $lfortran_ref,
-      lfortran_liric_bin: $lfortran_bin,
-      run_ref_tests: $run_ref_tests,
-      run_itests: $run_itests,
-      workers: ($workers|tonumber),
-      status: ($status|tonumber),
-      pass: (($status|tonumber) == 0)
-    }' > "$summary_json"
+write_summary_json "$summary_json"
 
 if [[ "$status" -ne 0 ]]; then
     echo "lfortran_api_compat: FAILED (see ${log_root})" >&2

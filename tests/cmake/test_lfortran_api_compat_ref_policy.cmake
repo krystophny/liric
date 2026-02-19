@@ -47,6 +47,12 @@ exit 0
 ")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_python}")
 
+set(fake_jq "${fake_bin}/jq")
+file(WRITE "${fake_jq}" "#!/usr/bin/env bash
+exit 127
+")
+execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_jq}")
+
 function(make_fake_lfortran_tree path)
     file(MAKE_DIRECTORY "${path}/.git")
     file(MAKE_DIRECTORY "${path}/build-liric/src/bin")
@@ -93,6 +99,14 @@ if(NOT default_args_text MATCHES "--exclude-backend[ \t]+llvm")
     message(FATAL_ERROR
         "default reference policy must suppress llvm backend snapshots\nargs:\n${default_args_text}"
     )
+endif()
+set(default_summary "${root}/out_default/summary.json")
+if(NOT EXISTS "${default_summary}")
+    message(FATAL_ERROR "default run did not produce summary.json")
+endif()
+file(READ "${default_summary}" default_summary_text)
+if(NOT default_summary_text MATCHES "\"pass\"[ \t]*:[ \t]*true")
+    message(FATAL_ERROR "default run summary must report pass=true\nsummary:\n${default_summary_text}")
 endif()
 
 file(REMOVE "${override_log}")
