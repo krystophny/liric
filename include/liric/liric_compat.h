@@ -86,6 +86,8 @@ typedef struct lc_alloca_inst {
     lr_type_t *alloc_type;
 } lc_alloca_inst_t;
 
+typedef struct lc_switch_builder lc_switch_builder_t;
+
 /* ---- Context ---- */
 lc_context_t *lc_context_create(void);
 void lc_context_destroy(lc_context_t *ctx);
@@ -201,6 +203,18 @@ lr_func_t *lc_value_get_block_func(lc_value_t *val);
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val);
 lr_type_t *lc_value_get_alloca_type(lc_value_t *val);
 bool lc_block_has_terminator(lr_block_t *block);
+
+/* ---- Value/switch compat helpers ---- */
+int lc_value_replace_all_uses_with(lc_value_t *from, lc_value_t *to);
+lc_switch_builder_t *lc_switch_builder_create(lc_module_compat_t *mod,
+                                              lr_block_t *origin,
+                                              lr_func_t *func,
+                                              lc_value_t *cond,
+                                              lr_block_t *default_block);
+int lc_switch_builder_add_case(lc_switch_builder_t *sw,
+                               lc_value_t *on_value,
+                               lr_block_t *dest_block);
+void lc_switch_builder_destroy(lc_switch_builder_t *sw);
 
 /* ---- Global variable ---- */
 lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,

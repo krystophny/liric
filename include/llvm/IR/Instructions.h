@@ -82,8 +82,27 @@ public:
 };
 
 class SwitchInst : public Instruction {
+    lc_switch_builder_t *builder_;
+
 public:
-    void addCase(Value *, BasicBlock *) {}
+    explicit SwitchInst(lc_switch_builder_t *builder)
+        : builder_(builder) {}
+
+    ~SwitchInst() {
+        if (builder_) {
+            lc_switch_builder_destroy(builder_);
+            builder_ = nullptr;
+        }
+    }
+
+    void addCase(Value *on_value, BasicBlock *dest) {
+        if (!builder_ || !on_value || !dest) return;
+        lr_block_t *dest_block = dest->impl_block();
+        if (!dest_block) return;
+        (void)lc_switch_builder_add_case(builder_,
+                                         on_value->impl(),
+                                         dest_block);
+    }
 };
 
 class SelectInst : public Instruction {};
