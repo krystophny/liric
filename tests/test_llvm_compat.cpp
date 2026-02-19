@@ -670,6 +670,75 @@ static int test_basicblock_mutation_ops() {
     return 0;
 }
 
+static int test_function_block_list_insert_and_iteration() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("fn_block_list", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = mod.createFunction("order_fn", ft, false);
+    TEST_ASSERT(fn != nullptr, "function created");
+
+    llvm::BasicBlock *detached = llvm::BasicBlock::Create(ctx, "detached", nullptr);
+    TEST_ASSERT(detached != nullptr && detached->impl_block() != nullptr,
+                "detached block created");
+    lr_func_t *irf = fn->getIRFunc();
+    TEST_ASSERT(irf != nullptr, "function has IR backing");
+    TEST_ASSERT(irf->first_block == nullptr, "detached block is not auto-attached");
+
+    fn->insert(fn->end(), detached);
+    TEST_ASSERT(irf->first_block == detached->impl_block(), "insert(end, bb) attaches block");
+    TEST_ASSERT(irf->last_block == detached->impl_block(), "single attached block is tail");
+    TEST_ASSERT_EQ(fn->getBasicBlockList().size(), 1, "list size after first insert");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::BasicBlock *tail = llvm::BasicBlock::Create(ctx, "tail", fn);
+    TEST_ASSERT(entry != nullptr && tail != nullptr, "extra blocks created");
+    TEST_ASSERT_EQ(fn->getBasicBlockList().size(), 3, "list size after auto-attach");
+
+    fn->insert(entry, tail);
+    const char *expected_order[] = {"detached", "tail", "entry"};
+
+    int iter_count = 0;
+    for (auto it = fn->begin(); it != fn->end(); ++it) {
+        llvm::BasicBlock *bb = *it;
+        TEST_ASSERT(bb != nullptr, "function iterator yields block");
+        TEST_ASSERT(std::strcmp(bb->impl_block()->name, expected_order[iter_count]) == 0,
+                    "function iterator order is preserved");
+        ++iter_count;
+    }
+    TEST_ASSERT_EQ(iter_count, 3, "function iterator traverses all blocks");
+
+    iter_count = 0;
+    auto &bbl = fn->getBasicBlockList();
+    for (auto it = bbl.begin(); it != bbl.end(); ++it) {
+        llvm::BasicBlock *bb = *it;
+        TEST_ASSERT(bb != nullptr, "block list iterator yields block");
+        TEST_ASSERT(std::strcmp(bb->impl_block()->name, expected_order[iter_count]) == 0,
+                    "block list iterator order is preserved");
+        ++iter_count;
+    }
+    TEST_ASSERT_EQ(iter_count, 3, "block list iterator traverses all blocks");
+
+    llvm::Function *fn2 = mod.createFunction("push_back_fn", ft, false);
+    TEST_ASSERT(fn2 != nullptr, "second function created");
+    llvm::BasicBlock *only = llvm::BasicBlock::Create(ctx, "only", nullptr);
+    TEST_ASSERT(only != nullptr && only->impl_block() != nullptr,
+                "push_back test block created");
+    lr_func_t *irf2 = fn2->getIRFunc();
+    TEST_ASSERT(irf2 != nullptr, "second function has IR backing");
+    TEST_ASSERT(irf2->first_block == nullptr, "second function starts detached");
+
+    auto &bbl2 = fn2->getBasicBlockList();
+    TEST_ASSERT_EQ(bbl2.size(), 0, "second function list starts empty");
+    bbl2.push_back(only);
+    TEST_ASSERT(irf2->first_block == only->impl_block(), "push_back attaches detached block");
+    TEST_ASSERT(irf2->last_block == only->impl_block(), "push_back updates tail");
+    TEST_ASSERT_EQ(bbl2.size(), 1, "second function list size after push_back");
+
+    return 0;
+}
+
 static int test_irbuilder_arithmetic() {
     llvm::LLVMContext ctx;
     llvm::Module mod("arith", ctx);
@@ -1647,6 +1716,7 @@ int main() {
     RUN_TEST(test_block_parent_recovery_from_ir_func_link);
     RUN_TEST(test_builder_syncs_module_from_insert_block);
     RUN_TEST(test_basicblock_mutation_ops);
+    RUN_TEST(test_function_block_list_insert_and_iteration);
 
     fprintf(stderr, "\nIRBuilder tests:\n");
     RUN_TEST(test_irbuilder_arithmetic);

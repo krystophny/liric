@@ -15,11 +15,73 @@ namespace llvm {
 class Module;
 
 class Function : public GlobalValue {
+public:
+    class iterator {
+        Function *owner_;
+        lr_block_t *block_;
+
+        BasicBlock *current_block() const {
+            if (!owner_ || !owner_->compat_mod_ || !block_) return nullptr;
+            lc_value_t *bv = lc_value_block_ref(owner_->compat_mod_, block_);
+            if (!bv) return nullptr;
+            detail::register_block_parent(block_, owner_);
+            return BasicBlock::wrap(bv);
+        }
+
+    public:
+        iterator(Function *owner = nullptr, lr_block_t *block = nullptr)
+            : owner_(owner), block_(block) {}
+
+        BasicBlock *operator*() const { return current_block(); }
+        BasicBlock *operator->() const { return current_block(); }
+        iterator &operator++() {
+            if (block_) block_ = block_->next;
+            return *this;
+        }
+        bool operator!=(const iterator &o) const { return block_ != o.block_; }
+        bool operator==(const iterator &o) const { return block_ == o.block_; }
+        operator BasicBlock *() const { return current_block(); }
+    };
+
+    class BasicBlockListType {
+        Function *owner_;
+
+    public:
+        using iterator = Function::iterator;
+
+        explicit BasicBlockListType(Function *owner = nullptr) : owner_(owner) {}
+
+        void setOwner(Function *owner) { owner_ = owner; }
+
+        iterator begin() {
+            lr_func_t *f = owner_ ? owner_->getIRFunc() : nullptr;
+            return iterator(owner_, f ? f->first_block : nullptr);
+        }
+
+        iterator end() { return iterator(owner_, nullptr); }
+
+        unsigned size() const {
+            lr_func_t *f = owner_ ? owner_->getIRFunc() : nullptr;
+            unsigned n = 0;
+            for (lr_block_t *b = f ? f->first_block : nullptr; b; b = b->next) {
+                ++n;
+            }
+            return n;
+        }
+
+        void push_back(BasicBlock *bb) {
+            if (!owner_) return;
+            owner_->insert(owner_->end(), bb);
+        }
+    };
+
+private:
     lc_value_t *func_val_;
     lc_module_compat_t *compat_mod_;
+    BasicBlockListType block_list_;
 
 public:
-    Function() : func_val_(nullptr), compat_mod_(nullptr) {}
+    Function() : func_val_(nullptr), compat_mod_(nullptr), block_list_(this) {}
 
     void setFuncVal(lc_value_t *fv) { func_val_ = fv; }
     lc_value_t *getFuncVal() const { return func_val_; }
@@ -145,24 +207,48 @@ public:
         return *BasicBlock::wrap(bv);
     }
 
-    class BasicBlockListType {
-    public:
-        using iterator = BasicBlock *;
-        iterator begin() { return nullptr; }
-        iterator end() { return nullptr; }
-        unsigned size() const { return 0; }
-    };
-
     BasicBlockListType &getBasicBlockList() {
-        static BasicBlockListType bbl;
-        return bbl;
+        block_list_.setOwner(this);
+        return block_list_;
     }
 
-    void insert(BasicBlock *, BasicBlock *) {}
+    void insert(iterator insert_before, BasicBlock *bb) {
+        insert(static_cast<BasicBlock *>(insert_before), bb);
+    }
 
-    using iterator = BasicBlock *;
-    BasicBlock *begin() { return nullptr; }
-    BasicBlock *end() { return nullptr; }
+    void insert(BasicBlock *insert_before, BasicBlock *bb) {
+        lr_func_t *f = getIRFunc();
+        if (!f || !compat_mod_ || !bb) return;
+
+        lr_block_t *block = bb->impl_block();
+        if (!block || block->func != f) return;
+
+        bool attached = false;
+        for (lr_block_t *it = f->first_block; it; it = it->next) {
+            if (it == block) {
+                attached = true;
+                break;
+            }
+        }
+        if (!attached) {
+            if (lc_block_attach(compat_mod_, block) != 0) return;
+            detail::register_block_parent(block, this);
+        }
+
+        if (!insert_before || insert_before == bb) return;
+
+        lr_block_t *anchor = insert_before->impl_block();
+        if (!anchor || anchor->func != f || anchor == block) return;
+
+        bb->moveBefore(insert_before);
+    }
+
+    iterator begin() {
+        lr_func_t *f = getIRFunc();
+        return iterator(this, f ? f->first_block : nullptr);
+    }
+
+    iterator end() { return iterator(this, nullptr); }
 };
 
 } // namespace llvm
