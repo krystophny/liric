@@ -1,14 +1,18 @@
 #if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
-void LLVMInitializeAArch64Target(void) {}
-void LLVMInitializeAArch64TargetInfo(void) {}
-void LLVMInitializeAArch64TargetMC(void) {}
-void LLVMInitializeAArch64AsmPrinter(void) {}
-void LLVMInitializeAArch64AsmParser(void) {}
-void LLVMInitializeX86Target(void) {}
-void LLVMInitializeX86TargetInfo(void) {}
-void LLVMInitializeX86TargetMC(void) {}
-void LLVMInitializeX86AsmPrinter(void) {}
-void LLVMInitializeX86AsmParser(void) {}
+#define LLVM_TARGET(TargetName) void LLVMInitialize##TargetName##Target(void) {}
+#include "llvm/Config/Targets.def"
+
+#define LLVM_TARGET(TargetName) void LLVMInitialize##TargetName##TargetInfo(void) {}
+#include "llvm/Config/Targets.def"
+
+#define LLVM_TARGET(TargetName) void LLVMInitialize##TargetName##TargetMC(void) {}
+#include "llvm/Config/Targets.def"
+
+#define LLVM_ASM_PRINTER(TargetName) void LLVMInitialize##TargetName##AsmPrinter(void) {}
+#include "llvm/Config/AsmPrinters.def"
+
+#define LLVM_ASM_PARSER(TargetName) void LLVMInitialize##TargetName##AsmParser(void) {}
+#include "llvm/Config/AsmParsers.def"
 #else
 int liric_real_llvm_backend_uses_system_target_init_symbols = 1;
 #endif

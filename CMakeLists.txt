@@ -690,6 +690,14 @@ if(CMAKE_NM AND NOT WITH_REAL_LLVM_BACKEND)
             -DHAVE_LLVM_BITCODE=OFF
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_static_archive_symbols.cmake
     )
+    add_test(
+        NAME llvm_target_init_stubs_defined
+        COMMAND ${CMAKE_COMMAND}
+            -DNM_EXE=${CMAKE_NM}
+            -DARCHIVE=$<TARGET_FILE:liric>
+            -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_llvm_target_init_stubs.cmake
+    )
 endif()
 
 include(GNUInstallDirs)
