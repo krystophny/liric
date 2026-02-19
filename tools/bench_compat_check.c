@@ -851,7 +851,7 @@ int main(int argc, char **argv) {
         emit_argv[3 + t->extra_args.n] = t->source;
         emit_argv[4 + t->extra_args.n] = NULL;
 
-        emit_r = run_cmd(emit_argv, cfg.timeout_sec, ll_path, NULL, NULL);
+        emit_r = run_cmd(emit_argv, cfg.timeout_sec, ll_path, NULL, work_dir);
         if (emit_r.rc != 0 || !file_exists(ll_path)) {
             free(error);
             error = xstrdup("emit failed");
@@ -879,7 +879,7 @@ int main(int argc, char **argv) {
         compile_argv[4 + t->extra_args.n] = bin_path;
         compile_argv[5 + t->extra_args.n] = NULL;
 
-        compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, NULL, NULL);
+        compile_r = run_cmd(compile_argv, cfg.timeout_sec, NULL, NULL, work_dir);
         free(compile_argv);
         if (compile_r.rc != 0) {
             free(error);

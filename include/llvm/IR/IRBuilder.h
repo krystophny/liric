@@ -157,7 +157,7 @@ public:
             if (parent) {
                 f = parent->getIRFunc();
                 mod_ = parent->getCompatMod();
-                detail::current_function = parent;
+                detail::current_function_ref() = parent;
             }
         }
         func_ = f ? f : nullptr;
@@ -165,7 +165,7 @@ public:
             Function *fn = detail::lookup_function_wrapper(func_);
             if (fn) {
                 mod_ = fn->getCompatMod();
-                detail::current_function = fn;
+                detail::current_function_ref() = fn;
                 detail::register_block_parent(block_, fn);
             }
         }
@@ -196,7 +196,7 @@ public:
         Function *fn = detail::lookup_function_wrapper(func_);
         if (fn) {
             mod_ = fn->getCompatMod();
-            detail::current_function = fn;
+            detail::current_function_ref() = fn;
         }
     }
 
@@ -205,7 +205,7 @@ public:
         mod_ = fn->getCompatMod();
         func_ = fn->getIRFunc();
         block_ = nullptr;
-        detail::current_function = fn;
+        detail::current_function_ref() = fn;
     }
 
     void ClearInsertionPoint() { block_ = nullptr; }

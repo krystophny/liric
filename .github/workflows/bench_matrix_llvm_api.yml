@@ -1,0 +1,71 @@
+name: Bench Matrix LLVM API
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  bench-matrix-llvm-api:
+    name: bench_matrix (mode=llvm api lanes)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup micromamba
+        uses: mamba-org/setup-micromamba@v2.0.2
+        with:
+          micromamba-version: "2.0.4-0"
+          environment-file: tools/llvm_backend_environment.yml
+          create-args: >-
+            llvmdev=20
+          cache-environment: true
+          cache-environment-key: bench-matrix-llvm-api-llvm20
+
+      - name: Configure and build
+        shell: bash -e -l {0}
+        run: |
+          llvm_config="$(command -v llvm-config || command -v llvm-config-20 || true)"
+          if [[ -z "${llvm_config}" ]]; then
+            echo "llvm-config not found" >&2
+            exit 1
+          fi
+          cmake -S . -B build -G Ninja \
+            -DWITH_REAL_LLVM_BACKEND=ON \
+            -DWITH_BENCH_TCC=OFF \
+            -DWITH_BENCH_LLI_PHASES=OFF \
+            -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
+          cmake --build build -j"$(nproc)" --target bench_matrix lfortran_build_all
+
+      - name: Run bench_matrix llvm API lanes
+        shell: bash -e -l {0}
+        run: |
+          ./build/bench_matrix \
+            --bench-dir /tmp/liric_bench_llvm_api \
+            --modes llvm \
+            --policies direct,ir \
+            --lanes api_full_llvm,api_backend_llvm \
+            --api-cases 10 \
+            --timeout 15
+
+      - name: Assert summary
+        shell: bash -e -l {0}
+        run: |
+          summary=/tmp/liric_bench_llvm_api/matrix_summary.json
+          test -f "${summary}"
+          jq -e '
+            .status == "OK" and
+            .cells_attempted == 4 and
+            .cells_failed == 0 and
+            .compat_ok == true
+          ' "${summary}" >/dev/null
+          if [[ -s /tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
+            echo "matrix_failures.jsonl is not empty" >&2
+            cat /tmp/liric_bench_llvm_api/matrix_failures.jsonl >&2
+            exit 1
+          fi

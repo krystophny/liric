@@ -1,8 +1,45 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f57b531da..8c89fccf6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -151,6 +151,8 @@ endif()
+ set(WITH_LLVM no CACHE BOOL "Build with LLVM support")
+ set(WITH_LIRIC no CACHE BOOL "Use liric as LLVM replacement (C++ compat headers)")
+ set(LIRIC_DIR "" CACHE PATH "Path to liric source/build directory")
++set(LIRIC_REQUIRE_REAL_LLVM_LINK no CACHE BOOL
++    "When WITH_LIRIC is enabled, link LLVM libraries required by liric")
+ set(WITH_TARGET_AARCH64 no CACHE BOOL "Enable target AARCH64")
+ set(WITH_TARGET_X86 no CACHE BOOL "Enable target X86")
+ set(WITH_TARGET_WASM no CACHE BOOL "Enable target WebAssembly")
+@@ -235,8 +237,22 @@ if (WITH_LIRIC)
+         "${LIRIC_DIR}/include")
+     set_property(TARGET p::llvm PROPERTY INTERFACE_COMPILE_OPTIONS
+         $<$<COMPILE_LANGUAGE:CXX>:${LFORTRAN_CXX_NO_RTTI_FLAG}>)
++    set(_lfortran_liric_link_libs "${LIRIC_LIB}" stdc++)
++    if (LIRIC_REQUIRE_REAL_LLVM_LINK)
++        set(_lfortran_liric_llvm_components core support mcjit orcjit native asmparser asmprinter)
++        find_package(LLVM REQUIRED)
++        message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} for WITH_LIRIC linkage")
++        message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
++        if (TARGET LLVMCore)
++            llvm_map_components_to_libnames(_lfortran_liric_llvm_libs
++                ${_lfortran_liric_llvm_components})
++        else()
++            set(_lfortran_liric_llvm_libs "LLVM")
++        endif()
++        list(APPEND _lfortran_liric_link_libs ${_lfortran_liric_llvm_libs})
++    endif()
+     set_property(TARGET p::llvm PROPERTY INTERFACE_LINK_LIBRARIES
+-        "${LIRIC_LIB}" stdc++)
++        ${_lfortran_liric_link_libs})
+     set(HAVE_LFORTRAN_LLVM yes)
+     set(WITH_LLVM yes)
+ elseif (WITH_LLVM)
 diff --git a/src/libasr/codegen/llvm_utils.h b/src/libasr/codegen/llvm_utils.h
-index c42f81a79..29183ddce 100644
+index b1aa2e123..9dd780c8f 100644
 --- a/src/libasr/codegen/llvm_utils.h
 +++ b/src/libasr/codegen/llvm_utils.h
-@@ -1214,7 +1214,7 @@ class LLVMFinalize {
+@@ -1214,7 +1214,7 @@ if(get_struct_sym(member_variable) == struct_sym /*recursive declaration*/){cont
              if(is_class_type){
                  auto const class_type_llvm = llvm_utils_->getClassType(struct_sym);
                  auto const consecutive_field_ptr = llvm_utils_->CreateGEP2(class_type_llvm, data_ptr, 1);

@@ -1366,11 +1366,37 @@ static void run_api_provider(const cfg_t *cfg,
 
     if (need_metrics) {
         if (parse_api_jsonl_metrics(p->jsonl_path, p) != 0) {
-            strcpy(p->fail_reason, "bench_api_jsonl_missing");
-            p->ok = 0;
-            p->rc = 1;
-            free(api_dir);
-            return;
+            /* Some API runs can complete successfully without timed rows
+               (e.g. mode=llvm cases that pass compat but emit no jsonl metrics).
+               Keep lane status from summary and mark timings unavailable. */
+            fprintf(stderr,
+                    "[matrix] warning: metrics unavailable for mode=%s policy=%s "
+                    "(summary=%s, jsonl=%s); using summary-only status\n",
+                    mode, policy,
+                    p->summary_path ? p->summary_path : "",
+                    p->jsonl_path ? p->jsonl_path : "");
+            p->full_llvm_wall_ms = -1.0;
+            p->full_llvm_compile_ms = -1.0;
+            p->full_llvm_run_ms = -1.0;
+            p->full_llvm_parse_ms = -1.0;
+            p->full_llvm_non_parse_ms = -1.0;
+            p->full_liric_wall_ms = -1.0;
+            p->full_liric_compile_ms = -1.0;
+            p->full_liric_run_ms = -1.0;
+            p->full_liric_parse_ms = -1.0;
+            p->full_liric_non_parse_ms = -1.0;
+            p->backend_llvm_wall_ms = -1.0;
+            p->backend_llvm_compile_ms = -1.0;
+            p->backend_llvm_run_ms = -1.0;
+            p->backend_llvm_non_parse_ms = -1.0;
+            p->backend_liric_wall_ms = -1.0;
+            p->backend_liric_compile_ms = -1.0;
+            p->backend_liric_run_ms = -1.0;
+            p->backend_liric_non_parse_ms = -1.0;
+            p->full_llvm_overhead_ms = -1.0;
+            p->full_liric_overhead_ms = -1.0;
+            p->full_llvm_elapsed_ms = -1.0;
+            p->full_liric_elapsed_ms = -1.0;
         }
     }
 

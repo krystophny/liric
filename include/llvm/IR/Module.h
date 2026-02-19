@@ -43,7 +43,7 @@ public:
         : ctx_(ctx), name_(name.str()) {
         compat_ = lc_module_create(ctx.impl(), name_.c_str());
         current_ = compat_;
-        detail::fallback_module = compat_;
+        detail::fallback_module_ref() = compat_;
     }
 
     ~Module() {
@@ -52,14 +52,14 @@ public:
         }
         for (auto &of : owned_functions_) {
             Function *fn = of.get();
-            if (detail::current_function == fn) detail::current_function = nullptr;
+            if (detail::current_function_ref() == fn) detail::current_function_ref() = nullptr;
             detail::unregister_blocks_for_function(fn);
             detail::unregister_value_wrapper(fn);
             detail::unregister_function_wrapper(fn->getIRFunc());
         }
         if (current_ == compat_) current_ = nullptr;
-        if (detail::fallback_module == compat_)
-            detail::fallback_module = ctx_.getDefaultModule();
+        if (detail::fallback_module_ref() == compat_)
+            detail::fallback_module_ref() = ctx_.getDefaultModule();
         detail::clear_global_aliases(compat_);
         lc_module_destroy(compat_);
     }
@@ -69,7 +69,7 @@ public:
 
     static lc_module_compat_t *getCurrentModule() {
         if (current_) return current_;
-        if (detail::fallback_module) return detail::fallback_module;
+        if (detail::fallback_module_ref()) return detail::fallback_module_ref();
         return LLVMContext::getGlobal().getDefaultModule();
     }
     static void setCurrentModule(lc_module_compat_t *m) { current_ = m; }
@@ -238,7 +238,7 @@ public:
         detail::register_value_wrapper(ptr, fv);
         owned_functions_.push_back(std::move(fn));
         detail::register_function_wrapper(ptr->getIRFunc(), ptr);
-        if (!is_decl) detail::current_function = ptr;
+        if (!is_decl) detail::current_function_ref() = ptr;
         return ptr;
     }
 
@@ -573,12 +573,12 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         fn = InsertBefore->getParent();
     }
     if (!fn) {
-        fn = detail::current_function;
+        fn = detail::current_function_ref();
     }
     lc_module_compat_t *mod = nullptr;
     lr_func_t *f = nullptr;
     if (fn) {
-        detail::current_function = fn;
+        detail::current_function_ref() = fn;
         mod = fn->getCompatMod();
         f = fn->getIRFunc();
     }
@@ -586,7 +586,7 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         f = lc_value_get_block_func(InsertBefore->impl());
         if (!fn && f) {
             fn = detail::lookup_function_wrapper(f);
-            if (fn) detail::current_function = fn;
+            if (fn) detail::current_function_ref() = fn;
         }
         if (!mod) {
             mod = Module::getCurrentModule();
