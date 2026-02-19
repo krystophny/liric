@@ -203,6 +203,10 @@ lr_func_t *lc_value_get_block_func(lc_value_t *val);
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val);
 lr_type_t *lc_value_get_alloca_type(lc_value_t *val);
 bool lc_block_has_terminator(lr_block_t *block);
+bool lc_func_uses_block_id(lr_func_t *func, lr_block_t *skip_block,
+                            uint32_t block_id);
+void lc_func_remap_block_operands_after_erase(lr_func_t *func,
+                                               uint32_t removed_id);
 
 /* ---- Value/switch compat helpers ---- */
 int lc_value_replace_all_uses_with(lc_value_t *from, lc_value_t *to);

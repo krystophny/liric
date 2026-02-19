@@ -2031,6 +2031,38 @@ bool lc_block_has_terminator(lr_block_t *block) {
         || op == LR_OP_CONDBR || op == LR_OP_UNREACHABLE;
 }
 
+bool lc_func_uses_block_id(lr_func_t *func, lr_block_t *skip_block,
+                            uint32_t block_id) {
+    if (!func) return false;
+    for (lr_block_t *b = func->first_block; b; b = b->next) {
+        if (b == skip_block) continue;
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
+                if (inst->operands[oi].kind == LR_VAL_BLOCK
+                    && inst->operands[oi].block_id == block_id) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+void lc_func_remap_block_operands_after_erase(lr_func_t *func,
+                                               uint32_t removed_id) {
+    if (!func) return;
+    for (lr_block_t *b = func->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
+                if (inst->operands[oi].kind == LR_VAL_BLOCK
+                    && inst->operands[oi].block_id > removed_id) {
+                    inst->operands[oi].block_id--;
+                }
+            }
+        }
+    }
+}
+
 static bool compat_is_fallback_br_to_default(const lr_block_t *block,
                                              const lr_block_t *default_block) {
     if (!block || !block->last || !default_block)
