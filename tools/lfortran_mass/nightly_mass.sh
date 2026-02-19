@@ -194,7 +194,7 @@ jq -c '
 
 jq -c '
 def str_lc($v): ($v // "" | tostring | ascii_downcase);
-def has_any($s; $patterns): any($patterns[]; $s | contains(.));
+def has_any($s; $patterns): reduce $patterns[] as $p (false; . or ($s | contains($p)));
 def classify_liric_fail:
   (str_lc(.error)) as $err |
   if has_any($err; ["unresolved symbol", "function not found", "unsupported signature", "entrypoint", "dlsym"])
