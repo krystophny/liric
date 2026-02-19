@@ -355,9 +355,9 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
     const char *default_runtime_dylib =
-        "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+        "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
     const char *default_runtime_so =
-        "../lfortran/build/src/runtime/liblfortran_runtime.so";
+        "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";

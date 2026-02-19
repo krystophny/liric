@@ -55,13 +55,18 @@ execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_jq}")
 
 function(make_fake_lfortran_tree path)
     file(MAKE_DIRECTORY "${path}/.git")
+    file(MAKE_DIRECTORY "${path}/build-llvm/src/bin")
     file(MAKE_DIRECTORY "${path}/build-liric/src/bin")
     file(MAKE_DIRECTORY "${path}/integration_tests")
+    file(WRITE "${path}/build-llvm/src/bin/lfortran" "#!/usr/bin/env bash
+exit 0
+")
     file(WRITE "${path}/build-liric/src/bin/lfortran" "#!/usr/bin/env bash
 exit 0
 ")
     file(WRITE "${path}/run_tests.py" "print('stub')\n")
     file(WRITE "${path}/integration_tests/run_tests.py" "print('stub')\n")
+    execute_process(COMMAND "${CHMOD_EXE}" +x "${path}/build-llvm/src/bin/lfortran")
     execute_process(COMMAND "${CHMOD_EXE}" +x "${path}/build-liric/src/bin/lfortran")
 endfunction()
 

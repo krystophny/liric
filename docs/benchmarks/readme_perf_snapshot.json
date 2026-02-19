@@ -29,7 +29,7 @@
   "artifacts": {
     "bench_corpus_compare_summary_json": "/tmp/liric_bench/bench_corpus_compare_summary.json",
     "bench_corpus_compare_jsonl": "/tmp/liric_bench/bench_corpus_compare.jsonl",
-    "published_snapshot_json": "/home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_snapshot.json",
-    "published_table_md": "/home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_table.md"
+    "published_snapshot_json": "docs/benchmarks/readme_perf_snapshot.json",
+    "published_table_md": "docs/benchmarks/readme_perf_table.md"
   }
 }

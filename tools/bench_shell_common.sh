@@ -104,6 +104,8 @@ bench_require_executable() {
 bench_find_runtime_lib() {
     local lfortran_src="$1"
     local first=""
+    local preferred_llvm=""
+    local preferred_liric=""
     local cand=""
     if [[ ! -d "$lfortran_src" ]]; then
         return 1
@@ -113,14 +115,24 @@ bench_find_runtime_lib() {
             first="$cand"
         fi
         case "$cand" in
-            */build-liric/*|*/build_liric/*)
-                echo "$cand"
-                return 0
+            */build-llvm/*)
+                preferred_llvm="$cand"
+                ;;
+            */build-liric/*)
+                preferred_liric="$cand"
                 ;;
         esac
     done < <(find "$lfortran_src" -maxdepth 5 -type f \
         \( -name 'liblfortran_runtime.so' -o -name 'liblfortran_runtime.so.*' -o -name 'liblfortran_runtime.dylib' \) \
         | sort)
+    if [[ -n "$preferred_llvm" ]]; then
+        echo "$preferred_llvm"
+        return 0
+    fi
+    if [[ -n "$preferred_liric" ]]; then
+        echo "$preferred_liric"
+        return 0
+    fi
     if [[ -n "$first" ]]; then
         echo "$first"
         return 0

@@ -41,6 +41,21 @@ set(LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST "")
 set(LIRIC_BACKEND_LLVM_VERSION "")
 set(LIRIC_BACKEND_LLVM_VERSION_MAJOR "0")
 
+set(LIRIC_LFORTRAN_ROOT "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran"
+    CACHE PATH "Path to lfortran checkout used by liric tooling")
+set(LIRIC_LFORTRAN_BUILD_LLVM "${LIRIC_LFORTRAN_ROOT}/build-llvm"
+    CACHE PATH "Path to lfortran baseline LLVM build directory")
+set(LIRIC_LFORTRAN_BUILD_LIRIC "${LIRIC_LFORTRAN_ROOT}/build-liric"
+    CACHE PATH "Path to lfortran WITH_LIRIC build directory")
+set(LIRIC_LFORTRAN_API_OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out"
+    CACHE PATH "Path to lfortran API compatibility output artifacts")
+set(LIRIC_LFORTRAN_REPO "https://github.com/krystophny/lfortran.git"
+    CACHE STRING "LFortran repository URL for CMake-managed checkout")
+set(LIRIC_LFORTRAN_REF "origin/liric-aot"
+    CACHE STRING "LFortran git ref for CMake-managed checkout")
+set(LIRIC_LFORTRAN_REMOTE "origin"
+    CACHE STRING "Remote name used for LFortran ref policy")
+
 if(WITH_REAL_LLVM_BACKEND)
     if(LIRIC_LLVM_CONFIG_EXE)
         set(LLVM_BACKEND_CONFIG_EXE "${LIRIC_LLVM_CONFIG_EXE}")
@@ -319,6 +334,85 @@ else()
         message(STATUS "bench_lli_phases target disabled (WITH_BENCH_LLI_PHASES=OFF)")
     endif()
 endif()
+
+if(CMAKE_CONFIGURATION_TYPES)
+    set(LIRIC_EXTERNAL_BUILD_TYPE "Release")
+else()
+    set(LIRIC_EXTERNAL_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+endif()
+
+add_custom_target(
+    lfortran_prepare
+    COMMAND ${CMAKE_COMMAND}
+        -DLFORTRAN_ROOT=${LIRIC_LFORTRAN_ROOT}
+        -DLFORTRAN_REPO=${LIRIC_LFORTRAN_REPO}
+        -DLFORTRAN_REF=${LIRIC_LFORTRAN_REF}
+        -DLFORTRAN_REMOTE=${LIRIC_LFORTRAN_REMOTE}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepare_lfortran_checkout.cmake
+    COMMENT "Prepare LFortran checkout in ${LIRIC_LFORTRAN_ROOT}"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    lfortran_build_llvm
+    COMMAND ${CMAKE_COMMAND}
+        -S ${LIRIC_LFORTRAN_ROOT}
+        -B ${LIRIC_LFORTRAN_BUILD_LLVM}
+        -G Ninja
+        -DCMAKE_BUILD_TYPE=${LIRIC_EXTERNAL_BUILD_TYPE}
+    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM} --parallel
+    DEPENDS lfortran_prepare
+    COMMENT "Configure/build LFortran baseline LLVM in ${LIRIC_LFORTRAN_BUILD_LLVM}"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    lfortran_build_liric
+    COMMAND ${CMAKE_COMMAND}
+        -S ${LIRIC_LFORTRAN_ROOT}
+        -B ${LIRIC_LFORTRAN_BUILD_LIRIC}
+        -G Ninja
+        -DCMAKE_BUILD_TYPE=${LIRIC_EXTERNAL_BUILD_TYPE}
+        -DWITH_LIRIC=yes
+        -DLIRIC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DWITH_RUNTIME_STACKTRACE=yes
+        -DWITH_LLVM=OFF
+    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC} --parallel
+    DEPENDS lfortran_prepare liric_probe_runner
+    COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    lfortran_build_all
+    DEPENDS lfortran_build_llvm lfortran_build_liric
+)
+
+add_custom_target(
+    lfortran_api_compat
+    COMMAND ${CMAKE_COMMAND} -E env
+        LIRIC_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+        --workspace ${CMAKE_CURRENT_BINARY_DIR}/deps
+        --output-root ${LIRIC_LFORTRAN_API_OUTPUT_ROOT}
+        --lfortran-dir ${LIRIC_LFORTRAN_ROOT}
+        --skip-checkout
+        --skip-lfortran-build
+        --run-ref-tests yes
+        --run-itests yes
+    DEPENDS lfortran_build_all
+    COMMENT "Run LFortran API compatibility suite using CMake-managed builds"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    source_tree_purge_generated ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DROOT=${CMAKE_CURRENT_SOURCE_DIR}
+        -DMODE=purge
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_source_tree_generated_artifacts.cmake
+    COMMENT "Purge generated artifacts leaked into source tree"
+)
 
 enable_testing()
 set(LIRIC_CTEST_WORK_ROOT "${CMAKE_CURRENT_BINARY_DIR}/ctest_work")

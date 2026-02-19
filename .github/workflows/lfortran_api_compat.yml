@@ -26,6 +26,10 @@ jobs:
             label: macos-arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
+    env:
+      LIRIC_BUILD: ${{ github.workspace }}/build
+      LFORTRAN_REPO: https://github.com/lfortran/lfortran.git
+      LFORTRAN_REF: origin/main
 
     steps:
       - name: Checkout liric
@@ -42,18 +46,18 @@ jobs:
         run: |
           brew install ninja cmake bison re2c zstd jq
 
+      - name: Configure liric + LFortran dependency roots
+        run: |
+          cmake -S . -B "${LIRIC_BUILD}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIRIC_LFORTRAN_REPO="${LFORTRAN_REPO}" \
+            -DLIRIC_LFORTRAN_REF="${LFORTRAN_REF}" \
+            -DLIRIC_LFORTRAN_REMOTE=origin
+
       - name: Run LFortran full suites with WITH_LIRIC
         run: |
           set -euo pipefail
-          chmod +x ./tools/lfortran_mass/lfortran_api_compat.sh
-          ./tools/lfortran_mass/lfortran_api_compat.sh \
-            --workspace "${RUNNER_TEMP}/lfortran_api_compat_work" \
-            --output-root "${RUNNER_TEMP}/lfortran_api_compat_out" \
-            --fresh-workspace \
-            --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
-            --lfortran-ref upstream/main \
-            --run-ref-tests yes \
-            --run-itests yes
+          cmake --build "${LIRIC_BUILD}" --target lfortran_api_compat -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Upload API compat artifacts
         if: always()
@@ -63,5 +67,5 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
           path: |
-            ${{ runner.temp }}/lfortran_api_compat_out/summary.json
-            ${{ runner.temp }}/lfortran_api_compat_out/logs/*.log
+            ${{ github.workspace }}/build/deps/lfortran_api_compat_out/summary.json
+            ${{ github.workspace }}/build/deps/lfortran_api_compat_out/logs/*.log

@@ -1567,8 +1567,8 @@ static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
 
 static void usage(void) {
     printf("usage: bench_api [options]\n");
-    printf("  --lfortran PATH      path to lfortran+LLVM binary (default: ../lfortran/build/src/bin/lfortran)\n");
-    printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: ../lfortran/build-liric/src/bin/lfortran, fallback: ../lfortran/build_liric/src/bin/lfortran)\n");
+    printf("  --lfortran PATH      path to lfortran+LLVM binary (default: build/deps/lfortran/build-llvm/src/bin/lfortran)\n");
+    printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: build/deps/lfortran/build-liric/src/bin/lfortran)\n");
     printf("  --lfortran-exec-mode MODE  lfortran execution mode: aot|jit (default: aot)\n");
     printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
@@ -1591,15 +1591,12 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
-    const char *default_lfortran_liric_hyphen = "../lfortran/build-liric/src/bin/lfortran";
-    const char *default_lfortran_liric_underscore = "../lfortran/build_liric/src/bin/lfortran";
+    const char *default_lfortran_liric = "build/deps/lfortran/build-liric/src/bin/lfortran";
 
-    cfg.lfortran = "../lfortran/build/src/bin/lfortran";
-    cfg.lfortran_liric = file_exists(default_lfortran_liric_hyphen)
-                             ? default_lfortran_liric_hyphen
-                             : (file_exists(default_lfortran_liric_underscore)
-                                    ? default_lfortran_liric_underscore
-                                    : NULL);
+    cfg.lfortran = "build/deps/lfortran/build-llvm/src/bin/lfortran";
+    cfg.lfortran_liric = file_exists(default_lfortran_liric)
+                             ? default_lfortran_liric
+                             : NULL;
     cfg.lfortran_exec_mode = "aot";
     cfg.runtime_lib = NULL;
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
@@ -1608,7 +1605,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.liric_policy = getenv("LIRIC_POLICY");
     if (!cfg.liric_policy || !cfg.liric_policy[0])
         cfg.liric_policy = "direct";
-    cfg.test_dir = "../lfortran/integration_tests";
+    cfg.test_dir = "build/deps/lfortran/integration_tests";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.compat_list = NULL;
     cfg.options_jsonl = NULL;

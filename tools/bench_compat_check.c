@@ -643,14 +643,14 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
-    const char *default_runtime_dylib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
-    const char *default_runtime_so = "../lfortran/build/src/runtime/liblfortran_runtime.so";
+    const char *default_runtime_dylib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
+    const char *default_runtime_so = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
 
-    cfg.lfortran = "../lfortran/build/src/bin/lfortran";
+    cfg.lfortran = "build/deps/lfortran/build-llvm/src/bin/lfortran";
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.runtime_lib = file_exists(default_runtime_dylib) ? default_runtime_dylib : default_runtime_so;
     cfg.lli = "lli";
-    cfg.cmake = "../lfortran/integration_tests/CMakeLists.txt";
+    cfg.cmake = "build/deps/lfortran/integration_tests/CMakeLists.txt";
     cfg.bench_dir = "/tmp/liric_bench";
     cfg.timeout_sec = 15;
     cfg.limit = 0;

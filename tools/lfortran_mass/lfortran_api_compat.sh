@@ -4,8 +4,9 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 usage: lfortran_api_compat.sh [options]
-  --workspace PATH        workspace root for lfortran clone/build (default: /tmp/liric_lfortran_api_compat)
-  --output-root PATH      output root for logs/artifacts (default: /tmp/liric_lfortran_api_compat_out)
+  --workspace PATH        workspace root for lfortran clone/build (default: <liric-build>/deps)
+  --output-root PATH      output root for logs/artifacts (default: <liric-build>/deps/lfortran_api_compat_out)
+  --liric-build-dir PATH  liric build dir for artifacts and defaults (default: $LIRIC_BUILD_DIR or <liric-root>/build)
   --fresh-workspace       remove existing workspace checkout/build and output root before running
   --lfortran-dir PATH     use an existing lfortran checkout (skip clone if present)
   --lfortran-repo URL     lfortran git URL (default: https://github.com/krystophny/lfortran.git)
@@ -18,7 +19,7 @@ usage: lfortran_api_compat.sh [options]
   --run-itests yes|no     run lfortran integration tests (default: yes)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
   --itest-args "ARGS..."  extra args passed to integration_tests/run_tests.py
-  --skip-lfortran-build   do not rebuild lfortran/build-liric
+  --skip-lfortran-build   do not rebuild lfortran/build-llvm and lfortran/build-liric
   -h, --help              show this help
 
 This lane validates compile-time API compatibility:
@@ -129,6 +130,7 @@ write_summary_json() {
         if jq -n \
             --arg lfortran_dir "$lfortran_dir" \
             --arg lfortran_ref "$lfortran_ref" \
+            --arg lfortran_llvm_bin "$lfortran_llvm_bin" \
             --arg lfortran_bin "$lfortran_liric_bin" \
             --arg run_ref_tests "$run_ref_tests" \
             --arg run_itests "$run_itests" \
@@ -137,6 +139,7 @@ write_summary_json() {
             '{
               lfortran_dir: $lfortran_dir,
               lfortran_ref: $lfortran_ref,
+              lfortran_llvm_bin: $lfortran_llvm_bin,
               lfortran_liric_bin: $lfortran_bin,
               run_ref_tests: $run_ref_tests,
               run_itests: $run_itests,
@@ -151,6 +154,7 @@ write_summary_json() {
 
     local esc_lfortran_dir
     local esc_lfortran_ref
+    local esc_lfortran_llvm_bin
     local esc_lfortran_bin
     local esc_run_ref_tests
     local esc_run_itests
@@ -160,6 +164,7 @@ write_summary_json() {
     fi
     esc_lfortran_dir="$(json_escape "$lfortran_dir")"
     esc_lfortran_ref="$(json_escape "$lfortran_ref")"
+    esc_lfortran_llvm_bin="$(json_escape "$lfortran_llvm_bin")"
     esc_lfortran_bin="$(json_escape "$lfortran_liric_bin")"
     esc_run_ref_tests="$(json_escape "$run_ref_tests")"
     esc_run_itests="$(json_escape "$run_itests")"
@@ -168,6 +173,7 @@ write_summary_json() {
 {
   "lfortran_dir": "${esc_lfortran_dir}",
   "lfortran_ref": "${esc_lfortran_ref}",
+  "lfortran_llvm_bin": "${esc_lfortran_llvm_bin}",
   "lfortran_liric_bin": "${esc_lfortran_bin}",
   "run_ref_tests": "${esc_run_ref_tests}",
   "run_itests": "${esc_run_itests}",
@@ -211,8 +217,9 @@ check_no_llvm_runtime_deps() {
     return 0
 }
 
-workspace="/tmp/liric_lfortran_api_compat"
-output_root="/tmp/liric_lfortran_api_compat_out"
+workspace=""
+output_root=""
+liric_build=""
 lfortran_dir=""
 lfortran_repo="https://github.com/krystophny/lfortran.git"
 lfortran_ref="origin/liric-aot"
@@ -237,6 +244,11 @@ while [[ $# -gt 0 ]]; do
         --output-root)
             [[ $# -ge 2 ]] || die "missing value for $1"
             output_root="$2"
+            shift 2
+            ;;
+        --liric-build-dir)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            liric_build="$2"
             shift 2
             ;;
         --fresh-workspace)
@@ -328,7 +340,25 @@ fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 liric_root="$(cd "${script_dir}/../.." && pwd)"
-liric_build="${liric_root}/build"
+
+if [[ -z "$liric_build" ]]; then
+    if [[ -n "${LIRIC_BUILD_DIR:-}" ]]; then
+        liric_build="${LIRIC_BUILD_DIR}"
+    else
+        liric_build="${liric_root}/build"
+    fi
+fi
+if [[ "$liric_build" != /* ]]; then
+    liric_build="${liric_root}/${liric_build}"
+fi
+liric_build="$(normalize_path "$liric_build")"
+
+if [[ -z "$workspace" ]]; then
+    workspace="${liric_build}/deps"
+fi
+if [[ -z "$output_root" ]]; then
+    output_root="${liric_build}/deps/lfortran_api_compat_out"
+fi
 
 mkdir -p "$workspace" "$output_root"
 workspace="$(normalize_path "$workspace")"
@@ -378,8 +408,15 @@ if [[ ! -x "${liric_build}/liric_probe_runner" || ! -f "${liric_build}/libliric.
         2>&1 | tee "${log_root}/build_liric_build.log"
 fi
 
+lfortran_build_llvm="${lfortran_dir}/build-llvm"
 lfortran_build_liric="${lfortran_dir}/build-liric"
 if [[ "$skip_lfortran_build" != "yes" ]]; then
+    cmake -S "$lfortran_dir" -B "$lfortran_build_llvm" -G Ninja \
+        -DCMAKE_BUILD_TYPE="$build_type" \
+        2>&1 | tee "${log_root}/build_lfortran_llvm_configure.log"
+    cmake --build "$lfortran_build_llvm" -j"$workers" \
+        2>&1 | tee "${log_root}/build_lfortran_llvm_build.log"
+
     cmake -S "$lfortran_dir" -B "$lfortran_build_liric" -G Ninja \
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DWITH_LIRIC=yes \
@@ -391,7 +428,9 @@ if [[ "$skip_lfortran_build" != "yes" ]]; then
         2>&1 | tee "${log_root}/build_lfortran_liric_build.log"
 fi
 
+lfortran_llvm_bin="${lfortran_build_llvm}/src/bin/lfortran"
 lfortran_liric_bin="${lfortran_build_liric}/src/bin/lfortran"
+[[ -x "$lfortran_llvm_bin" ]] || die "lfortran baseline binary not found: $lfortran_llvm_bin"
 [[ -x "$lfortran_liric_bin" ]] || die "lfortran binary not found: $lfortran_liric_bin"
 
 check_no_llvm_runtime_deps "$lfortran_liric_bin" \

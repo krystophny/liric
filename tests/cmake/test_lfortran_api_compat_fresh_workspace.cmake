@@ -58,12 +58,17 @@ exit 127
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_jq}")
 
 file(MAKE_DIRECTORY "${upstream_repo}/integration_tests")
+file(MAKE_DIRECTORY "${upstream_repo}/build-llvm/src/bin")
 file(MAKE_DIRECTORY "${upstream_repo}/build-liric/src/bin")
 file(WRITE "${upstream_repo}/run_tests.py" "print('stub')\n")
 file(WRITE "${upstream_repo}/integration_tests/run_tests.py" "print('stub')\n")
+file(WRITE "${upstream_repo}/build-llvm/src/bin/lfortran" "#!/usr/bin/env bash
+exit 0
+")
 file(WRITE "${upstream_repo}/build-liric/src/bin/lfortran" "#!/usr/bin/env bash
 exit 0
 ")
+execute_process(COMMAND "${CHMOD_EXE}" +x "${upstream_repo}/build-llvm/src/bin/lfortran")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${upstream_repo}/build-liric/src/bin/lfortran")
 
 execute_process(

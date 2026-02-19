@@ -22,9 +22,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     env:
-      LFORTRAN_ROOT: ${{ github.workspace }}/lfortran
-      LFORTRAN_BUILD: ${{ github.workspace }}/lfortran/build
-      LFORTRAN_BUILD_LIRIC: ${{ github.workspace }}/lfortran/build-liric
+      LFORTRAN_ROOT: ${{ github.workspace }}/build/deps/lfortran
+      LFORTRAN_BUILD_LLVM: ${{ github.workspace }}/build/deps/lfortran/build-llvm
+      LFORTRAN_BUILD_LIRIC: ${{ github.workspace }}/build/deps/lfortran/build-liric
+      LFORTRAN_REPO: https://github.com/lfortran/lfortran.git
+      LFORTRAN_REF: origin/main
       LIRIC_BUILD: ${{ github.workspace }}/build
       MASS_OUT: ${{ runner.temp }}/liric_lfortran_mass
       BASELINE_DIR: ${{ runner.temp }}/liric_lfortran_mass_baseline/${{ matrix.os }}
@@ -33,13 +35,6 @@ jobs:
       - name: Checkout liric
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
-      - name: Checkout lfortran
-        uses: actions/checkout@v4
-        with:
-          repository: lfortran/lfortran
-          path: lfortran
           fetch-depth: 0
 
       - name: Install Linux deps
@@ -62,24 +57,23 @@ jobs:
           restore-keys: |
             nightly-mass-${{ matrix.os }}-
 
-      - name: Build lfortran
-        run: |
-          cmake -S "${LFORTRAN_ROOT}" -B "${LFORTRAN_BUILD}" -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build "${LFORTRAN_BUILD}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
-
       - name: Build liric
         run: |
-          cmake -S . -B "${LIRIC_BUILD}" -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B "${LIRIC_BUILD}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLIRIC_LFORTRAN_REPO="${LFORTRAN_REPO}" \
+            -DLIRIC_LFORTRAN_REF="${LFORTRAN_REF}" \
+            -DLIRIC_LFORTRAN_REMOTE=origin
           cmake --build "${LIRIC_BUILD}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+
+      - name: Build lfortran
+        run: |
+          cmake --build "${LIRIC_BUILD}" --target lfortran_build_llvm -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Build lfortran WITH_LIRIC
         if: runner.os == 'Linux'
         run: |
-          cmake -S "${LFORTRAN_ROOT}" -B "${LFORTRAN_BUILD_LIRIC}" -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DWITH_LIRIC=yes \
-            -DLIRIC_DIR="${GITHUB_WORKSPACE}"
-          cmake --build "${LFORTRAN_BUILD_LIRIC}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
+          cmake --build "${LIRIC_BUILD}" --target lfortran_build_liric -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 
       - name: Run full mass campaign with regression gate
         run: |
@@ -91,7 +85,7 @@ jobs:
           fi
           ./tools/lfortran_mass/nightly_mass.sh \
             --lfortran-root "${LFORTRAN_ROOT}" \
-            --lfortran-bin "${LFORTRAN_BUILD}/src/bin/lfortran" \
+            --lfortran-bin "${LFORTRAN_BUILD_LLVM}/src/bin/lfortran" \
             --probe-runner "${LIRIC_BUILD}/liric_probe_runner" \
             --output-root "${MASS_OUT}" \
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
@@ -107,11 +101,11 @@ jobs:
             --bench-dir "${MASS_OUT}/bench_api_clean_gate" \
             --timeout-ms 3000 \
             --compat-timeout 15 \
-            --lfortran "${LFORTRAN_BUILD}/src/bin/lfortran" \
+            --lfortran "${LFORTRAN_BUILD_LLVM}/src/bin/lfortran" \
             --lfortran-liric "${LFORTRAN_BUILD_LIRIC}/src/bin/lfortran" \
             --test-dir "${LFORTRAN_ROOT}/integration_tests" \
             --probe-runner "${LIRIC_BUILD}/liric_probe_runner" \
-            --runtime-lib "${LFORTRAN_BUILD}/src/runtime/liblfortran_runtime.so" \
+            --runtime-lib "${LFORTRAN_BUILD_LLVM}/src/runtime/liblfortran_runtime.so" \
             --cmake "${LFORTRAN_ROOT}/integration_tests/CMakeLists.txt" \
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
 

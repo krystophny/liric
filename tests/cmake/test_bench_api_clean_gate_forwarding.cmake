@@ -52,8 +52,8 @@ done
 [[ \"$bench_dir\" == \"${bench_dir}\" ]] || { echo \"bad bench_dir: $bench_dir\" >&2; exit 92; }
 [[ \"$lfortran\" == \"/opt/lfortran-llvm/bin/lfortran\" ]] || { echo \"bad lfortran: $lfortran\" >&2; exit 93; }
 [[ \"$probe\" == \"/opt/liric/bin/liric_probe_runner\" ]] || { echo \"bad probe: $probe\" >&2; exit 94; }
-[[ \"$runtime\" == \"/opt/lfortran/lib/liblfortran_runtime.so\" ]] || { echo \"bad runtime: $runtime\" >&2; exit 95; }
-[[ \"$cmake_path\" == \"/opt/lfortran/integration_tests/CMakeLists.txt\" ]] || { echo \"bad cmake: $cmake_path\" >&2; exit 99; }
+[[ \"$runtime\" == \"/opt/build/deps/lfortran/lib/liblfortran_runtime.so\" ]] || { echo \"bad runtime: $runtime\" >&2; exit 95; }
+[[ \"$cmake_path\" == \"/opt/build/deps/lfortran/integration_tests/CMakeLists.txt\" ]] || { echo \"bad cmake: $cmake_path\" >&2; exit 99; }
 [[ \"$workers\" == \"11\" ]] || { echo \"bad workers: $workers\" >&2; exit 98; }
 echo \"ok\" > \"${compat_log}\"
 ")
@@ -85,7 +85,7 @@ done
 [[ \"$require_zero\" == \"1\" ]] || { echo \"missing --require-zero-skips\" >&2; exit 114; }
 [[ \"$lfortran\" == \"/opt/lfortran-llvm/bin/lfortran\" ]] || { echo \"bad lfortran: $lfortran\" >&2; exit 115; }
 [[ \"$lfortran_liric\" == \"/opt/lfortran-liric/bin/lfortran\" ]] || { echo \"bad lfortran_liric: $lfortran_liric\" >&2; exit 116; }
-[[ \"$test_dir\" == \"/opt/lfortran/integration_tests\" ]] || { echo \"bad test_dir: $test_dir\" >&2; exit 117; }
+[[ \"$test_dir\" == \"/opt/build/deps/lfortran/integration_tests\" ]] || { echo \"bad test_dir: $test_dir\" >&2; exit 117; }
 mkdir -p \"$bench_dir\"
 cat > \"$bench_dir/bench_api_summary.json\" <<'JSON'
 {
@@ -121,10 +121,10 @@ execute_process(
         --compat-timeout 17
         --lfortran /opt/lfortran-llvm/bin/lfortran
         --lfortran-liric /opt/lfortran-liric/bin/lfortran
-        --test-dir /opt/lfortran/integration_tests
+        --test-dir /opt/build/deps/lfortran/integration_tests
         --probe-runner /opt/liric/bin/liric_probe_runner
-        --runtime-lib /opt/lfortran/lib/liblfortran_runtime.so
-        --cmake /opt/lfortran/integration_tests/CMakeLists.txt
+        --runtime-lib /opt/build/deps/lfortran/lib/liblfortran_runtime.so
+        --cmake /opt/build/deps/lfortran/integration_tests/CMakeLists.txt
         --workers 11
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out

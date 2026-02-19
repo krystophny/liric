@@ -9,6 +9,7 @@ endif()
 get_filename_component(ROOT "${ROOT}" ABSOLUTE)
 
 set(_patterns
+    "*.out"
     "*.mod"
     "*.MOD"
     "*.smod"
@@ -30,10 +31,7 @@ foreach(_pat IN LISTS _patterns)
         if(_rel MATCHES "^\\.git/")
             continue()
         endif()
-        if(_rel MATCHES "^build/")
-            continue()
-        endif()
-        if(_rel MATCHES "^build-[^/]+/")
+        if(_rel MATCHES "^build[^/]*/")
             continue()
         endif()
         if(_rel MATCHES "^Testing/")

@@ -524,7 +524,7 @@ static void usage(void) {
     printf("  --cache-dir PATH         corpus cache directory\n");
     printf("  --lfortran PATH          lfortran LLVM binary (bench_api/compat)\n");
     printf("  --lfortran-liric PATH    lfortran WITH_LIRIC binary (bench_api)\n");
-    printf("  --lfortran-build-dir PATH rebuild dir for lfortran LLVM binary (default: ../lfortran/build)\n");
+    printf("  --lfortran-build-dir PATH rebuild dir for lfortran LLVM binary (default: build/deps/lfortran/build-llvm)\n");
     printf("  --lfortran-liric-build-dir PATH rebuild dir for lfortran WITH_LIRIC binary (only needed for split builds)\n");
     printf("  --cmake PATH             cmake executable for lfortran rebuild preflight (default: cmake)\n");
     printf("  --skip-lfortran-rebuild  disable lfortran rebuild preflight\n");
@@ -541,13 +541,11 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
-    const char *default_lfortran_llvm = "../lfortran/build/src/bin/lfortran";
-    const char *default_lfortran_liric_hyphen = "../lfortran/build-liric/src/bin/lfortran";
-    const char *default_lfortran_liric_underscore = "../lfortran/build_liric/src/bin/lfortran";
-    const char *default_lfortran_build_liric_hyphen = "../lfortran/build-liric";
-    const char *default_lfortran_build_liric_underscore = "../lfortran/build_liric";
-    const char *default_runtime_dylib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
-    const char *default_runtime_so = "../lfortran/build/src/runtime/liblfortran_runtime.so";
+    const char *default_lfortran_llvm = "build/deps/lfortran/build-llvm/src/bin/lfortran";
+    const char *default_lfortran_liric = "build/deps/lfortran/build-liric/src/bin/lfortran";
+    const char *default_lfortran_build_liric = "build/deps/lfortran/build-liric";
+    const char *default_runtime_dylib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
+    const char *default_runtime_so = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.bench_dir = "/tmp/liric_bench";
@@ -562,17 +560,13 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.cmake = "cmake";
 
     cfg.lfortran = file_exists(default_lfortran_llvm) ? default_lfortran_llvm : NULL;
-    cfg.lfortran_liric = file_exists(default_lfortran_liric_hyphen)
-                             ? default_lfortran_liric_hyphen
-                             : (file_exists(default_lfortran_liric_underscore)
-                                    ? default_lfortran_liric_underscore
-                                    : NULL);
-    cfg.lfortran_build_dir = "../lfortran/build";
-    cfg.lfortran_liric_build_dir = dir_exists(default_lfortran_build_liric_hyphen)
-                                       ? default_lfortran_build_liric_hyphen
-                                       : (dir_exists(default_lfortran_build_liric_underscore)
-                                              ? default_lfortran_build_liric_underscore
-                                              : NULL);
+    cfg.lfortran_liric = file_exists(default_lfortran_liric)
+                             ? default_lfortran_liric
+                             : NULL;
+    cfg.lfortran_build_dir = "build/deps/lfortran/build-llvm";
+    cfg.lfortran_liric_build_dir = dir_exists(default_lfortran_build_liric)
+                                       ? default_lfortran_build_liric
+                                       : NULL;
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
@@ -894,7 +888,7 @@ static int tcc_can_compile(const char *c_path) {
     char *cmd[] = {
         "tcc", "-c", "-o", "/dev/null",
         "-D_Complex= ",
-        "-I../lfortran/src/libasr/runtime",
+        "-Ibuild/deps/lfortran/src/libasr/runtime",
         (char *)c_path,
         NULL
     };
@@ -919,7 +913,7 @@ static void try_generate_c_source(const cfg_t *cfg,
 
     test_dir = cfg->test_dir
                    ? (char *)cfg->test_dir
-                   : (char *)"../lfortran/integration_tests";
+                   : (char *)"build/deps/lfortran/integration_tests";
     if (!dir_exists(test_dir)) return;
 
     {

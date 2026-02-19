@@ -10,7 +10,7 @@ Canonical track: corpus_canonical (OK; completed 95/95)
 Artifacts:
 - /tmp/liric_bench/bench_corpus_compare_summary.json
 - /tmp/liric_bench/bench_corpus_compare.jsonl
-- /home/ert/code/lfortran-dev/liric/docs/benchmarks/readme_perf_snapshot.json
+- docs/benchmarks/readme_perf_snapshot.json
 
 Legend: canonical corpus lane only; no duplicate tracks.
 

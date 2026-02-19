@@ -16,7 +16,7 @@ usage: bench_readme_perf_snapshot.sh [options]
   --corpus PATH          corpus TSV (default: tools/corpus_100.tsv)
   --cache-dir PATH       corpus cache dir (default: /tmp/liric_lfortran_mass/cache)
   --runtime-lib PATH     runtime shared library path for core track (auto-detect by default)
-  --lfortran-src PATH    lfortran source root for runtime-lib auto-detect (default: ../lfortran)
+  --lfortran-src PATH    lfortran source root for runtime-lib auto-detect (default: build/deps/lfortran)
   --no-run               do not execute benchmarks; consume existing comparator artifacts
   -h, --help             show this help
 
@@ -36,7 +36,7 @@ timeout_sec="30"
 corpus_tsv="tools/corpus_100.tsv"
 cache_dir="/tmp/liric_lfortran_mass/cache"
 runtime_lib=""
-lfortran_src="../lfortran"
+lfortran_src="build/deps/lfortran"
 no_run="0"
 
 while [[ $# -gt 0 ]]; do

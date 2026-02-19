@@ -402,16 +402,16 @@ int main(int argc, char **argv) {
 
     /* runtime lib auto-detect */
     if (!runtime_lib) {
-        if (file_exists("../lfortran/build/src/runtime/liblfortran_runtime.so"))
-            runtime_lib = "../lfortran/build/src/runtime/liblfortran_runtime.so";
-        else if (file_exists("../lfortran/build/src/runtime/liblfortran_runtime.dylib"))
-            runtime_lib = "../lfortran/build/src/runtime/liblfortran_runtime.dylib";
+        if (file_exists("build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so"))
+            runtime_lib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
+        else if (file_exists("build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib"))
+            runtime_lib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
     }
 
     /* lfortran include dir auto-detect */
     if (!lfortran_include_dir) {
-        if (file_exists("../lfortran/src/libasr/runtime/lfortran_intrinsics.h"))
-            lfortran_include_dir = "../lfortran/src/libasr/runtime";
+        if (file_exists("build/deps/lfortran/src/libasr/runtime/lfortran_intrinsics.h"))
+            lfortran_include_dir = "build/deps/lfortran/src/libasr/runtime";
     }
 
     /* backend from env */
