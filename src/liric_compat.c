@@ -3470,9 +3470,10 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         void *addr = NULL;
         if (!f->name || !f->name[0])
             continue;
-        addr = lr_session_lookup(mod->session, f->name);
-        if (session_jit->mode == LR_COMPILE_LLVM && !addr)
+        if (session_jit->mode == LR_COMPILE_LLVM)
             addr = lr_jit_get_function(session_jit, f->name);
+        else
+            addr = lr_session_lookup(mod->session, f->name);
         if (!f->is_decl && !addr)
             return -1;
         if (addr)
@@ -3483,9 +3484,10 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         void *addr = NULL;
         if (!g->name || !g->name[0])
             continue;
-        addr = lr_session_lookup(mod->session, g->name);
-        if (session_jit->mode == LR_COMPILE_LLVM && !addr)
+        if (session_jit->mode == LR_COMPILE_LLVM)
             addr = lr_jit_get_function(session_jit, g->name);
+        else
+            addr = lr_session_lookup(mod->session, g->name);
         if (!g->is_external && !addr)
             return -1;
         if (addr)
