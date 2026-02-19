@@ -366,8 +366,10 @@ fi
 
 ensure_lfortran_version_file "$lfortran_dir" \
     2>&1 | tee "${log_root}/prepare_lfortran_version.log"
-ensure_lfortran_generated_sources "$lfortran_dir" \
-    2>&1 | tee "${log_root}/prepare_lfortran_generated_sources.log"
+if [[ "$skip_lfortran_build" != "yes" ]]; then
+    ensure_lfortran_generated_sources "$lfortran_dir" \
+        2>&1 | tee "${log_root}/prepare_lfortran_generated_sources.log"
+fi
 
 if [[ ! -x "${liric_build}/liric_probe_runner" || ! -f "${liric_build}/libliric.a" ]]; then
     cmake -S "$liric_root" -B "$liric_build" -G Ninja -DCMAKE_BUILD_TYPE="$build_type" \
