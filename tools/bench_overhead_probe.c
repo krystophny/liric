@@ -1,5 +1,6 @@
 #include "bench_common.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,20 @@ static void usage(void) {
     printf("usage: bench_overhead_probe --lfortran PATH\n");
     printf("  Measures subprocess overhead of a trivial lfortran --jit invocation.\n");
     printf("  Output: JSON lines to stdout (10 iterations + summary).\n");
+}
+
+static int write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t wrote = write(fd, buf + off, len - off);
+        if (wrote < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (wrote == 0) return -1;
+        off += (size_t)wrote;
+    }
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -68,8 +83,17 @@ int main(int argc, char **argv) {
         perror("mkstemps");
         return 1;
     }
-    write(src_fd, trivial_src, strlen(trivial_src));
-    close(src_fd);
+    if (write_all(src_fd, trivial_src, strlen(trivial_src)) != 0) {
+        perror("write");
+        (void)close(src_fd);
+        (void)unlink(src_path);
+        return 1;
+    }
+    if (close(src_fd) != 0) {
+        perror("close");
+        (void)unlink(src_path);
+        return 1;
+    }
 
     wall_arr = (double *)calloc((size_t)iters, sizeof(double));
     total_arr = (double *)calloc((size_t)iters, sizeof(double));
