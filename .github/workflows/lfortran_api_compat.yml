@@ -49,6 +49,7 @@ jobs:
           ./tools/lfortran_mass/lfortran_api_compat.sh \
             --workspace "${RUNNER_TEMP}/lfortran_api_compat_work" \
             --output-root "${RUNNER_TEMP}/lfortran_api_compat_out" \
+            --fresh-workspace \
             --workers "$(nproc 2>/dev/null || sysctl -n hw.ncpu)" \
             --lfortran-ref upstream/main \
             --run-ref-tests yes \
