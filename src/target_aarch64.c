@@ -1042,8 +1042,12 @@ static int aarch64_compile_emit(void *compile_ctx,
     if (desc->num_indices > 0 && !desc->indices)
         return -1;
 
-    if (desc->op != LR_OP_PHI && desc->op != LR_OP_ALLOCA) {
-        if (ctx->deferred.pending) {
+    /* Keep same-block allocas before the deferred terminator so entry-block
+       stack setup is not split by an inserted branch. */
+    if (desc->op != LR_OP_PHI) {
+        if (ctx->deferred.pending &&
+            (desc->op != LR_OP_ALLOCA ||
+             ctx->deferred.block_id != ctx->current_block_id)) {
             if (a64_flush_deferred_terminator(ctx) != 0)
                 return -1;
         }

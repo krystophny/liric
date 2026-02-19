@@ -732,6 +732,16 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         return -1;
     }
     should_close_update = s->compile_opened_update;
+    /* Reassert writable state even if update_active is already true.
+       MAP_JIT write protection is thread-local, so this can drift. */
+    lr_jit_begin_update(s->jit);
+    if (!s->jit->update_active) {
+        err_set(err, S_ERR_BACKEND, "jit code buffer not writable");
+        s->module->obj_ctx = NULL;
+        if (should_close_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return -1;
+    }
 
     rc = s->jit->target->compile_end(s->compile_ctx, &code_len);
     s->compile_ctx = NULL;

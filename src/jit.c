@@ -1500,6 +1500,11 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
         }
         if (rc != 0)
             break;
+        if (j->update_active) {
+            j->update_dirty = true;
+            if ((size_t)rel->offset < j->update_begin_code_size)
+                j->update_begin_code_size = rel->offset;
+        }
     }
 
     free(got_slots);
@@ -2425,13 +2430,15 @@ done:
 }
 
 void lr_jit_begin_update(lr_jit_t *j) {
-    if (!j || j->update_active)
+    if (!j)
         return;
     if (make_writable(j) != 0)
         return;
-    j->update_active = true;
-    j->update_dirty = false;
-    j->update_begin_code_size = j->code_size;
+    if (!j->update_active) {
+        j->update_active = true;
+        j->update_dirty = false;
+        j->update_begin_code_size = j->code_size;
+    }
 }
 
 void lr_jit_end_update(lr_jit_t *j) {
