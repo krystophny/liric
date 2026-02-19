@@ -35,26 +35,47 @@ class APFloat {
     double val_;
     bool is_single_;
 
+    static bool isSingleSemantics(const fltSemantics &sem) {
+        return &sem == &fltSemantics::IEEEsingle();
+    }
+
+    static bool isDoubleSemantics(const fltSemantics &sem) {
+        return &sem == &fltSemantics::IEEEdouble();
+    }
+
+    static double decodeBits(uint64_t raw, unsigned bit_width) {
+        if (bit_width <= 32) {
+            float f;
+            uint32_t raw32 = static_cast<uint32_t>(raw);
+            std::memcpy(&f, &raw32, sizeof(f));
+            return static_cast<double>(f);
+        }
+        double d;
+        std::memcpy(&d, &raw, sizeof(d));
+        return d;
+    }
+
+    static double decodeBits(const fltSemantics &sem, uint64_t raw,
+                             unsigned fallback_bit_width) {
+        if (isSingleSemantics(sem)) {
+            return decodeBits(raw, 32);
+        }
+        if (isDoubleSemantics(sem)) {
+            return decodeBits(raw, 64);
+        }
+        return decodeBits(raw, fallback_bit_width);
+    }
+
 public:
     APFloat() : val_(0.0), is_single_(false) {}
     explicit APFloat(double v) : val_(v), is_single_(false) {}
     explicit APFloat(float v) : val_(static_cast<double>(v)), is_single_(true) {}
-    APFloat(const fltSemantics &sem, uint64_t bits) : val_(0.0),
-        is_single_(&sem == &fltSemantics::IEEEsingle()) {
-        (void)bits;
-    }
-    APFloat(const fltSemantics &sem, const APInt &bits) : val_(0.0),
-        is_single_(&sem == &fltSemantics::IEEEsingle()) {
-        uint64_t raw = bits.getZExtValue();
-        if (bits.getBitWidth() <= 32) {
-            float f;
-            uint32_t raw32 = static_cast<uint32_t>(raw);
-            std::memcpy(&f, &raw32, sizeof(f));
-            val_ = f;
-        } else {
-            std::memcpy(&val_, &raw, sizeof(val_));
-        }
-    }
+    APFloat(const fltSemantics &sem, uint64_t bits)
+        : val_(decodeBits(sem, bits, 64)),
+          is_single_(isSingleSemantics(sem)) {}
+    APFloat(const fltSemantics &sem, const APInt &bits)
+        : val_(decodeBits(sem, bits.getZExtValue(), bits.getBitWidth())),
+          is_single_(isSingleSemantics(sem)) {}
 
     double convertToDouble() const { return val_; }
     float convertToFloat() const { return static_cast<float>(val_); }

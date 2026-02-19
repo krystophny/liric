@@ -1110,6 +1110,17 @@ static int test_casting_helpers() {
 }
 
 static int test_apint_apfloat() {
+    auto bits_from_float = [](float v) -> uint32_t {
+        uint32_t raw = 0;
+        std::memcpy(&raw, &v, sizeof(raw));
+        return raw;
+    };
+    auto bits_from_double = [](double v) -> uint64_t {
+        uint64_t raw = 0;
+        std::memcpy(&raw, &v, sizeof(raw));
+        return raw;
+    };
+
     llvm::APInt a(32, 42);
     TEST_ASSERT_EQ(a.getBitWidth(), 32, "apint width");
     TEST_ASSERT_EQ(a.getZExtValue(), 42, "apint value");
@@ -1120,6 +1131,70 @@ static int test_apint_apfloat() {
     llvm::APFloat f(3.14);
     double d = f.convertToDouble();
     TEST_ASSERT(d > 3.13 && d < 3.15, "apfloat value");
+
+    const llvm::fltSemantics &single = llvm::fltSemantics::IEEEsingle();
+    const llvm::fltSemantics &dbl = llvm::fltSemantics::IEEEdouble();
+
+    llvm::APFloat spz(single, 0x00000000ULL);
+    llvm::APFloat snz(single, 0x80000000ULL);
+    llvm::APFloat sone(single, 0x3f800000ULL);
+    llvm::APFloat smin_normal(single, 0x00800000ULL);
+    llvm::APFloat ssubnormal(single, 0x00000001ULL);
+    llvm::APFloat sinf(single, 0x7f800000ULL);
+    llvm::APFloat snan(single, 0x7fc00001ULL);
+
+    TEST_ASSERT(bits_from_float(spz.convertToFloat()) == 0x00000000U, "single +0 bit pattern");
+    TEST_ASSERT(bits_from_float(snz.convertToFloat()) == 0x80000000U, "single -0 bit pattern");
+    TEST_ASSERT(bits_from_float(sone.convertToFloat()) == 0x3f800000U, "single 1.0 bit pattern");
+    TEST_ASSERT(bits_from_float(smin_normal.convertToFloat()) == 0x00800000U, "single min normal bit pattern");
+    TEST_ASSERT(bits_from_float(ssubnormal.convertToFloat()) == 0x00000001U, "single subnormal bit pattern");
+    TEST_ASSERT(std::isinf(sinf.convertToFloat()), "single inf");
+    TEST_ASSERT(std::isnan(snan.convertToFloat()), "single nan");
+
+    llvm::APFloat dpz(dbl, 0x0000000000000000ULL);
+    llvm::APFloat dnz(dbl, 0x8000000000000000ULL);
+    llvm::APFloat done(dbl, 0x3ff0000000000000ULL);
+    llvm::APFloat dmin_normal(dbl, 0x0010000000000000ULL);
+    llvm::APFloat dsubnormal(dbl, 0x0000000000000001ULL);
+    llvm::APFloat dinf(dbl, 0x7ff0000000000000ULL);
+    llvm::APFloat dnan(dbl, 0x7ff8000000000001ULL);
+
+    TEST_ASSERT(bits_from_double(dpz.convertToDouble()) == 0x0000000000000000ULL, "double +0 bit pattern");
+    TEST_ASSERT(bits_from_double(dnz.convertToDouble()) == 0x8000000000000000ULL, "double -0 bit pattern");
+    TEST_ASSERT(bits_from_double(done.convertToDouble()) == 0x3ff0000000000000ULL, "double 1.0 bit pattern");
+    TEST_ASSERT(bits_from_double(dmin_normal.convertToDouble()) == 0x0010000000000000ULL, "double min normal bit pattern");
+    TEST_ASSERT(bits_from_double(dsubnormal.convertToDouble()) == 0x0000000000000001ULL, "double subnormal bit pattern");
+    TEST_ASSERT(std::isinf(dinf.convertToDouble()), "double inf");
+    TEST_ASSERT(std::isnan(dnan.convertToDouble()), "double nan");
+
+    llvm::APFloat sone_apint(single, llvm::APInt(32, 0x3f800000ULL));
+    llvm::APFloat done_apint(dbl, llvm::APInt(64, 0x3ff0000000000000ULL));
+    TEST_ASSERT(bits_from_float(sone_apint.convertToFloat()) == 0x3f800000U,
+                "single APInt constructor parity");
+    TEST_ASSERT(bits_from_double(done_apint.convertToDouble()) == 0x3ff0000000000000ULL,
+                "double APInt constructor parity");
+
+    llvm::LLVMContext ctx;
+    llvm::Module mod("apfloat_constfp", ctx);
+    llvm::Type *flt_ty = llvm::Type::getFloatTy(ctx);
+    llvm::Type *dbl_ty = llvm::Type::getDoubleTy(ctx);
+    llvm::ConstantFP *cf_single = llvm::ConstantFP::get(flt_ty, sone);
+    llvm::ConstantFP *cf_double = llvm::ConstantFP::get(dbl_ty, done);
+    TEST_ASSERT(cf_single != nullptr, "ConstantFP::get(float, APFloat)");
+    TEST_ASSERT(cf_double != nullptr, "ConstantFP::get(double, APFloat)");
+    TEST_ASSERT(!cf_single->impl()->const_fp.is_double, "ConstantFP float keeps single lane");
+    TEST_ASSERT(cf_double->impl()->const_fp.is_double, "ConstantFP double keeps double lane");
+    TEST_ASSERT(bits_from_float(static_cast<float>(cf_single->impl()->const_fp.val)) == 0x3f800000U,
+                "ConstantFP float value");
+    TEST_ASSERT(bits_from_double(cf_double->impl()->const_fp.val) == 0x3ff0000000000000ULL,
+                "ConstantFP double value");
+
+    llvm::ConstantFP *cf_single_ctx = llvm::ConstantFP::get(ctx, sone);
+    llvm::ConstantFP *cf_double_ctx = llvm::ConstantFP::get(ctx, done);
+    TEST_ASSERT(cf_single_ctx != nullptr, "ConstantFP::get(ctx, single APFloat)");
+    TEST_ASSERT(cf_double_ctx != nullptr, "ConstantFP::get(ctx, double APFloat)");
+    TEST_ASSERT(!cf_single_ctx->impl()->const_fp.is_double, "ctx single lane");
+    TEST_ASSERT(cf_double_ctx->impl()->const_fp.is_double, "ctx double lane");
 
     return 0;
 }
