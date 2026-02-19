@@ -131,6 +131,15 @@ Runtime artifacts:
 - `/tmp/liric_bench/matrix_failures.jsonl`
 - `/tmp/liric_bench/matrix_summary.json`
 
+## Compatibility Guardrails
+
+- Compatibility closure must stay clean in direct policy (`--policy direct`, `--liric-policy direct`) without relying on IR-policy fallback for pass claims.
+- Performance updates must always be published against LLVM baseline (LFortran LLVM/API and LLVM materialization metrics).
+- When performance-relevant changes land, regenerate and commit:
+  - `docs/benchmarks/readme_perf_snapshot.json`
+  - `docs/benchmarks/readme_perf_table.md`
+  - using `./tools/bench_readme_perf_snapshot.sh --build-dir ./build --bench-dir /tmp/liric_bench --out-dir docs/benchmarks`
+
 ## Speedup Tables (2026-02-18)
 
 100-case corpus, 3 iterations, median ms.

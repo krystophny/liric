@@ -16,6 +16,8 @@ usage: bench_readme_perf_gate.sh [options]
 
 Gate conditions (must all be true):
   - README references published benchmark artifacts and regeneration command.
+  - README documents direct-policy compatibility closure commands.
+  - README frames published performance numbers against LLVM baseline.
   - Snapshot JSON uses corpus_100 dataset and canonical corpus_canonical track.
   - Canonical track completion equals expected_tests (full real-corpus publish).
   - Published table includes canonical-track row and real-corpus metadata.
@@ -107,6 +109,10 @@ bench_require_pattern "$readme" 'docs/benchmarks/readme_perf_snapshot\.json' "RE
 bench_require_pattern "$readme" 'docs/benchmarks/readme_perf_table\.md' "README missing table artifact path"
 bench_require_pattern "$readme" '\./tools/bench_readme_perf_snapshot\.sh' "README missing snapshot regeneration command"
 bench_require_pattern "$readme" '\./build/bench_corpus_compare --policy' "README missing corpus comparator benchmark command"
+bench_require_pattern "$readme" '\./build/bench_corpus_compare --policy direct' "README missing direct-policy corpus comparator command"
+bench_require_pattern "$readme" '\./build/bench_api --liric-policy direct' "README missing direct-policy API benchmark command"
+bench_require_pattern "$readme" 'Compatibility closure must stay clean in direct policy' "README missing direct-policy closure guardrail text"
+bench_require_pattern "$readme" 'against LLVM baseline' "README missing LLVM-baseline guardrail text"
 
 bench_forbid_pattern "$snapshot" '"published_table"[[:space:]]*:' "snapshot contains obsolete published_table object"
 bench_forbid_pattern "$snapshot" '"bench_ll_summary_json"[[:space:]]*:' "snapshot contains obsolete bench_ll artifact reference"
