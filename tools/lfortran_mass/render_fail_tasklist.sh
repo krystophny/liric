@@ -68,11 +68,14 @@ mkdir -p "$(dirname "$out_path")"
       "- mismatch: \(.classification_counts.mismatch // 0)\n" +
       "- lfortran_emit_fail: \(.classification_counts.lfortran_emit_fail // 0)\n" +
       "- unsupported_abi: \(.classification_counts.unsupported_abi // 0)\n" +
+      "- unsupported_feature: \(.classification_counts.unsupported_feature // 0)\n" +
+      "- compile_blockers: \(.lfortran_emit_fail_count // (.classification_counts.lfortran_emit_fail // 0))\n" +
+      "- liric_compat_failures: \(.liric_compat_failure_count // ((.classification_counts.unsupported_abi // 0) + (.classification_counts.unsupported_feature // 0) + (.classification_counts.mismatch // 0)))\n" +
       "- gate_fail: \(.gate_fail)"
     ' "$summary_json"
     echo
 
-    for cls in mismatch lfortran_emit_fail unsupported_abi; do
+    for cls in mismatch lfortran_emit_fail unsupported_abi unsupported_feature; do
         count="$(jq -r --arg cls "$cls" '.classification_counts[$cls] // 0' "$summary_json")"
         echo "## ${cls} (${count})"
         echo

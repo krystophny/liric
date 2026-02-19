@@ -28,6 +28,7 @@ file(MAKE_DIRECTORY "${TEST_ROOT}")
 
 set(COMPAT_PASS "${TEST_ROOT}/compat_pass.jsonl")
 set(COMPAT_FAIL "${TEST_ROOT}/compat_fail.jsonl")
+set(COMPAT_EMIT_FAIL "${TEST_ROOT}/compat_emit_fail.jsonl")
 set(BASELINE_FAIL "${TEST_ROOT}/baseline_fail.jsonl")
 
 file(WRITE "${COMPAT_PASS}"
@@ -71,6 +72,15 @@ endif()
 if(NOT summary_pass MATCHES "\"mismatch_count\"[ \t]*:[ \t]*0")
     message(FATAL_ERROR "expected mismatch_count=0 in pass summary")
 endif()
+if(NOT summary_pass MATCHES "\"lfortran_emit_fail_count\"[ \t]*:[ \t]*0")
+    message(FATAL_ERROR "expected lfortran_emit_fail_count=0 in pass summary")
+endif()
+if(NOT summary_pass MATCHES "\"liric_compat_failure_count\"[ \t]*:[ \t]*0")
+    message(FATAL_ERROR "expected liric_compat_failure_count=0 in pass summary")
+endif()
+if(NOT summary_pass MATCHES "\"gate_fail_reasons\"[ \t]*:[ \t]*\\[[ \t\n\r]*\\]")
+    message(FATAL_ERROR "expected empty gate_fail_reasons in pass summary")
+endif()
 if(NOT summary_pass MATCHES "\"gate_fail\"[ \t]*:[ \t]*false")
     message(FATAL_ERROR "expected gate_fail=false in pass summary")
 endif()
@@ -105,11 +115,23 @@ file(READ "${OUT_FAIL}/summary.json" summary_fail)
 if(NOT summary_fail MATCHES "\"mismatch_count\"[ \t]*:[ \t]*2")
     message(FATAL_ERROR "expected mismatch_count=2 in fail summary")
 endif()
+if(NOT summary_fail MATCHES "\"lfortran_emit_fail_count\"[ \t]*:[ \t]*0")
+    message(FATAL_ERROR "expected lfortran_emit_fail_count=0 in fail summary")
+endif()
+if(NOT summary_fail MATCHES "\"liric_compat_failure_count\"[ \t]*:[ \t]*4")
+    message(FATAL_ERROR "expected liric_compat_failure_count=4 in fail summary")
+endif()
 if(NOT summary_fail MATCHES "\"new_supported_regressions\"[ \t]*:[ \t]*1")
     message(FATAL_ERROR "expected new_supported_regressions=1 in fail summary")
 endif()
 if(NOT summary_fail MATCHES "\"gate_fail\"[ \t]*:[ \t]*true")
     message(FATAL_ERROR "expected gate_fail=true in fail summary")
+endif()
+if(NOT summary_fail MATCHES "\"gate_fail_reasons\"[ \t]*:[ \t]*\\[[^]]*\"mismatch\"")
+    message(FATAL_ERROR "expected mismatch gate reason in fail summary")
+endif()
+if(NOT summary_fail MATCHES "\"gate_fail_reasons\"[ \t]*:[ \t]*\\[[^]]*\"new_supported_regressions\"")
+    message(FATAL_ERROR "expected new_supported_regressions gate reason in fail summary")
 endif()
 if(NOT summary_fail MATCHES "\"unsupported_abi\"[ \t]*:[ \t]*1")
     message(FATAL_ERROR "expected unsupported_abi=1 in fail summary")
@@ -142,4 +164,40 @@ if(NOT summary_fail_md MATCHES "output-format\\|rc-mismatch\\|general")
 endif()
 if(NOT summary_fail_md MATCHES "runtime\\|unsupported-feature\\|general")
     message(FATAL_ERROR "expected runtime unsupported-feature entry in fail summary markdown")
+endif()
+
+file(WRITE "${COMPAT_EMIT_FAIL}"
+    "{\"name\":\"case_emit_fail\",\"source\":\"/tmp/g.f90\",\"options\":\"\",\"llvm_ok\":false,\"liric_ok\":false,\"lli_ok\":false,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":1,\"liric_rc\":1,\"lli_rc\":1,\"error\":\"lfortran codegen failure\"}\n"
+)
+
+set(OUT_EMIT_FAIL "${TEST_ROOT}/out_emit_fail")
+execute_process(
+    COMMAND "${BASH_EXE}" "${RUNNER}"
+        --compat-jsonl "${COMPAT_EMIT_FAIL}"
+        --output-root "${OUT_EMIT_FAIL}"
+    RESULT_VARIABLE emit_fail_rc
+    OUTPUT_VARIABLE emit_fail_out
+    ERROR_VARIABLE emit_fail_err
+)
+if(emit_fail_rc EQUAL 0)
+    message(FATAL_ERROR
+        "nightly_mass emit-fail run unexpectedly passed\nstdout:\n${emit_fail_out}\nstderr:\n${emit_fail_err}"
+    )
+endif()
+
+file(READ "${OUT_EMIT_FAIL}/summary.json" summary_emit_fail)
+if(NOT summary_emit_fail MATCHES "\"mismatch_count\"[ \t]*:[ \t]*0")
+    message(FATAL_ERROR "expected mismatch_count=0 in emit-fail summary")
+endif()
+if(NOT summary_emit_fail MATCHES "\"lfortran_emit_fail_count\"[ \t]*:[ \t]*1")
+    message(FATAL_ERROR "expected lfortran_emit_fail_count=1 in emit-fail summary")
+endif()
+if(NOT summary_emit_fail MATCHES "\"liric_compat_failure_count\"[ \t]*:[ \t]*0")
+    message(FATAL_ERROR "expected liric_compat_failure_count=0 in emit-fail summary")
+endif()
+if(NOT summary_emit_fail MATCHES "\"gate_fail_reasons\"[ \t]*:[ \t]*\\[[^]]*\"lfortran_emit_fail\"")
+    message(FATAL_ERROR "expected lfortran_emit_fail gate reason in emit-fail summary")
+endif()
+if(NOT summary_emit_fail MATCHES "\"gate_fail\"[ \t]*:[ \t]*true")
+    message(FATAL_ERROR "expected gate_fail=true in emit-fail summary")
 endif()

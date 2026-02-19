@@ -319,6 +319,10 @@ def bucket_coverage($counts; $map):
 ($baseline) as $baseline_rows |
 ($bucket_map[0] // {}) as $bucket_map_obj |
 ($baseline_rows | map({key: .case_id, value: .classification}) | from_entries) as $baseline_map |
+($rows | counts(.)) as $classification_counts |
+($classification_counts.lfortran_emit_fail // 0) as $lfortran_emit_fail_count |
+($classification_counts.unsupported_abi // 0) as $unsupported_abi_count |
+($classification_counts.unsupported_feature // 0) as $unsupported_feature_count |
 ($rows | taxonomy_counts(.; null)) as $all_taxonomy_counts |
 ($rows | taxonomy_counts(.; ["mismatch"])) as $mismatch_taxonomy_counts |
 ($rows | taxonomy_counts(.; ["unsupported_feature", "unsupported_abi"])) as $unsupported_taxonomy_counts |
@@ -380,6 +384,15 @@ def bucket_coverage($counts; $map):
 ) as $regressed_case_ids |
 ($runnable_selected_executable - $diff_attempted_executable) as $diff_missing_attempts |
 ($diff_attempted_executable - $diff_match) as $mismatch_count |
+(
+  [
+    (if $lfortran_emit_fail_count > 0 then "lfortran_emit_fail" else empty end),
+    (if $mismatch_count > 0 then "mismatch" else empty end),
+    (if (($regressed_case_ids | length) > 0) then "new_supported_regressions" else empty end),
+    (if $diff_missing_attempts > 0 then "differential_missing_attempts" else empty end)
+  ]
+) as $gate_fail_reasons |
+($unsupported_abi_count + $unsupported_feature_count + $mismatch_count) as $liric_compat_failure_count |
 {
   "manifest_total": $manifest_total,
   "processed_total": $manifest_total,
@@ -397,7 +410,7 @@ def bucket_coverage($counts; $map):
   "differential_match": $diff_match,
   "differential_missing_attempts": $diff_missing_attempts,
   "differential_parity_ok": ($diff_missing_attempts == 0),
-  "classification_counts": counts($rows),
+  "classification_counts": $classification_counts,
   "taxonomy_counts": $all_taxonomy_counts,
   "mismatch_taxonomy_counts": $mismatch_taxonomy_counts,
   "mismatch_bucket_issue_coverage": $mismatch_bucket_issue_coverage,
@@ -415,9 +428,12 @@ def bucket_coverage($counts; $map):
      end),
   "unsupported_taxonomy_delta": $unsupported_taxonomy_delta,
   "mismatch_count": $mismatch_count,
+  "lfortran_emit_fail_count": $lfortran_emit_fail_count,
+  "liric_compat_failure_count": $liric_compat_failure_count,
   "new_supported_regressions": ($regressed_case_ids | length),
   "regressed_case_ids": $regressed_case_ids,
-  "gate_fail": (($mismatch_count > 0) or (($regressed_case_ids | length) > 0) or ($diff_missing_attempts > 0))
+  "gate_fail_reasons": $gate_fail_reasons,
+  "gate_fail": (($gate_fail_reasons | length) > 0)
 }
 ' > "$summary_json_path"
 
@@ -438,11 +454,14 @@ def bucket_coverage($counts; $map):
       "- Differential exact matches: \(.differential_match)\n" +
       "- Differential missing attempts: \(.differential_missing_attempts)\n" +
       "- Mismatches: \(.mismatch_count)\n" +
+      "- LFortran emit blockers: \(.lfortran_emit_fail_count)\n" +
+      "- Liric compatibility failures: \(.liric_compat_failure_count)\n" +
       "- Unsupported total baseline: \(.unsupported_total_baseline)\n" +
       "- Unsupported total current: \(.unsupported_total_current)\n" +
       "- Unsupported total delta: \(.unsupported_total_delta)\n" +
       "- Unsupported total trend: \(.unsupported_total_trend)\n" +
       "- New supported regressions: \(.new_supported_regressions)\n" +
+      "- Gate fail reasons: \((.gate_fail_reasons // []) | if length == 0 then "none" else join(", ") end)\n" +
       "- Gate fail: \(.gate_fail)"
     ' "$summary_json_path"
     echo
@@ -600,9 +619,10 @@ if [[ "$cleanup_baseline_tmp" == "1" ]]; then
     rm -f "$baseline_for_jq"
 fi
 
+gate_reasons="$(jq -r '(.gate_fail_reasons // []) | if length == 0 then "none" else join(", ") end' "$summary_json_path")"
 if [[ "$(jq -r '.gate_fail' "$summary_json_path")" == "true" ]]; then
-    echo "gate: fail (mismatch or new supported regressions detected)"
+    echo "gate: fail (${gate_reasons})"
     exit 1
 fi
 
-echo "gate: pass (no mismatches and no new supported regressions)"
+echo "gate: pass (no lfortran emit blockers, mismatches, missing attempts, or new supported regressions)"
