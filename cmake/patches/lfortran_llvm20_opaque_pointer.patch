@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index f57b531da..8c89fccf6 100644
+index f57b531da..40eab82d8 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -151,6 +151,8 @@ endif()
@@ -11,21 +11,38 @@ index f57b531da..8c89fccf6 100644
  set(WITH_TARGET_AARCH64 no CACHE BOOL "Enable target AARCH64")
  set(WITH_TARGET_X86 no CACHE BOOL "Enable target X86")
  set(WITH_TARGET_WASM no CACHE BOOL "Enable target WebAssembly")
-@@ -235,8 +237,22 @@ if (WITH_LIRIC)
+@@ -235,8 +237,39 @@ if (WITH_LIRIC)
          "${LIRIC_DIR}/include")
      set_property(TARGET p::llvm PROPERTY INTERFACE_COMPILE_OPTIONS
          $<$<COMPILE_LANGUAGE:CXX>:${LFORTRAN_CXX_NO_RTTI_FLAG}>)
 +    set(_lfortran_liric_link_libs "${LIRIC_LIB}" stdc++)
 +    if (LIRIC_REQUIRE_REAL_LLVM_LINK)
-+        set(_lfortran_liric_llvm_components core support mcjit orcjit native asmparser asmprinter)
 +        find_package(LLVM REQUIRED)
 +        message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION} for WITH_LIRIC linkage")
 +        message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-+        if (TARGET LLVMCore)
-+            llvm_map_components_to_libnames(_lfortran_liric_llvm_libs
-+                ${_lfortran_liric_llvm_components})
++        set(_lfortran_liric_saved_suffixes "${CMAKE_FIND_LIBRARY_SUFFIXES}")
++        if (APPLE)
++            set(CMAKE_FIND_LIBRARY_SUFFIXES .dylib .tbd)
++        elseif(UNIX)
++            set(CMAKE_FIND_LIBRARY_SUFFIXES .so)
++        endif()
++        find_library(_lfortran_liric_llvm_c_lib
++            NAMES LLVM-C libLLVM-C LLVM
++            PATHS ${LLVM_LIBRARY_DIRS})
++        set(CMAKE_FIND_LIBRARY_SUFFIXES "${_lfortran_liric_saved_suffixes}")
++        if (_lfortran_liric_llvm_c_lib)
++            set(_lfortran_liric_llvm_libs "${_lfortran_liric_llvm_c_lib}")
 +        else()
-+            set(_lfortran_liric_llvm_libs "LLVM")
++            message(WARNING
++                "Could not find shared LLVM C API library; falling back to LLVM C++ components")
++            set(_lfortran_liric_llvm_components
++                core support mcjit orcjit native asmparser asmprinter)
++            if (TARGET LLVMCore)
++                llvm_map_components_to_libnames(_lfortran_liric_llvm_libs
++                    ${_lfortran_liric_llvm_components})
++            else()
++                set(_lfortran_liric_llvm_libs "LLVM")
++            endif()
 +        endif()
 +        list(APPEND _lfortran_liric_link_libs ${_lfortran_liric_llvm_libs})
 +    endif()

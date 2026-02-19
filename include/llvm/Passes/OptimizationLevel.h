@@ -7,7 +7,7 @@ class OptimizationLevel {
     unsigned SpeedLevel;
     unsigned SizeLevel;
 
-    OptimizationLevel(unsigned Speed, unsigned Size)
+    constexpr OptimizationLevel(unsigned Speed, unsigned Size)
         : SpeedLevel(Speed), SizeLevel(Size) {}
 
 public:
@@ -18,26 +18,26 @@ public:
     static const OptimizationLevel Os;
     static const OptimizationLevel Oz;
 
-    unsigned getSpeedupLevel() const { return SpeedLevel; }
-    unsigned getSizeLevel() const { return SizeLevel; }
+    constexpr unsigned getSpeedupLevel() const { return SpeedLevel; }
+    constexpr unsigned getSizeLevel() const { return SizeLevel; }
 
-    bool isOptimizingForSpeed() const { return SpeedLevel > 0; }
-    bool isOptimizingForSize() const { return SizeLevel > 0; }
+    constexpr bool isOptimizingForSpeed() const { return SpeedLevel > 0; }
+    constexpr bool isOptimizingForSize() const { return SizeLevel > 0; }
 
-    bool operator==(const OptimizationLevel &Other) const {
+    constexpr bool operator==(const OptimizationLevel &Other) const {
         return SpeedLevel == Other.SpeedLevel && SizeLevel == Other.SizeLevel;
     }
-    bool operator!=(const OptimizationLevel &Other) const {
+    constexpr bool operator!=(const OptimizationLevel &Other) const {
         return !(*this == Other);
     }
 };
 
-inline const OptimizationLevel OptimizationLevel::O0 = {0, 0};
-inline const OptimizationLevel OptimizationLevel::O1 = {1, 0};
-inline const OptimizationLevel OptimizationLevel::O2 = {2, 0};
-inline const OptimizationLevel OptimizationLevel::O3 = {3, 0};
-inline const OptimizationLevel OptimizationLevel::Os = {2, 1};
-inline const OptimizationLevel OptimizationLevel::Oz = {2, 2};
+inline constexpr OptimizationLevel OptimizationLevel::O0 = {0, 0};
+inline constexpr OptimizationLevel OptimizationLevel::O1 = {1, 0};
+inline constexpr OptimizationLevel OptimizationLevel::O2 = {2, 0};
+inline constexpr OptimizationLevel OptimizationLevel::O3 = {3, 0};
+inline constexpr OptimizationLevel OptimizationLevel::Os = {2, 1};
+inline constexpr OptimizationLevel OptimizationLevel::Oz = {2, 2};
 
 } // namespace llvm
 
