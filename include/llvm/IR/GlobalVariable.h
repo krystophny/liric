@@ -26,6 +26,7 @@ public:
     GlobalVariable() = default;
     ~GlobalVariable() {
         detail::unregister_value_wrapper(this);
+        detail::unregister_global_value_state(this);
     }
 
     GlobalVariable(Module &M, Type *Ty, bool isConstant,

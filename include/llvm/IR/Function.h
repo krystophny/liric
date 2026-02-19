@@ -82,6 +82,9 @@ private:
 
 public:
     Function() : func_val_(nullptr), compat_mod_(nullptr), block_list_(this) {}
+    ~Function() {
+        detail::unregister_global_value_state(this);
+    }
 
     void setFuncVal(lc_value_t *fv) { func_val_ = fv; }
     lc_value_t *getFuncVal() const { return func_val_; }
