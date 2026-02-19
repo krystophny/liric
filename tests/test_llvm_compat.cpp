@@ -346,6 +346,40 @@ static int test_constant_struct_and_array_bytes() {
     return 0;
 }
 
+static int test_constant_array_single_aggregate_payload_preserved() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("const_array_single_aggregate_payload", ctx);
+
+    llvm::Type *i16 = llvm::Type::getInt16Ty(ctx);
+    llvm::ArrayType *aty = llvm::ArrayType::get(i16, 3);
+    llvm::Constant *elems[] = {
+        llvm::ConstantInt::get(i16, 7),
+        llvm::ConstantInt::get(i16, 8),
+        llvm::ConstantInt::get(i16, 9),
+    };
+    llvm::Constant *src = llvm::ConstantArray::get(aty, elems);
+    TEST_ASSERT(src != nullptr, "source constant array created");
+    TEST_ASSERT(src->impl()->kind == LC_VAL_CONST_AGGREGATE, "source aggregate kind");
+    TEST_ASSERT_EQ(src->impl()->aggregate.size, 6, "source aggregate size");
+
+    llvm::Constant *single_value[] = {src};
+    llvm::Constant *wrapped = llvm::ConstantArray::get(aty, single_value);
+    TEST_ASSERT(wrapped != nullptr, "wrapped constant array created");
+    TEST_ASSERT(wrapped->impl()->kind == LC_VAL_CONST_AGGREGATE, "wrapped aggregate kind");
+    TEST_ASSERT_EQ(wrapped->impl()->aggregate.size, 6, "wrapped aggregate size");
+
+    const uint8_t *src_bytes = static_cast<const uint8_t *>(src->impl()->aggregate.data);
+    const uint8_t *wrapped_bytes = static_cast<const uint8_t *>(wrapped->impl()->aggregate.data);
+    TEST_ASSERT(src_bytes != nullptr, "source aggregate bytes");
+    TEST_ASSERT(wrapped_bytes != nullptr, "wrapped aggregate bytes");
+    TEST_ASSERT(std::memcmp(src_bytes, wrapped_bytes, 6) == 0,
+                "single aggregate array payload must be preserved");
+    TEST_ASSERT_EQ(wrapped_bytes[0], 7, "wrapped element0 byte0");
+    TEST_ASSERT_EQ(wrapped_bytes[2], 8, "wrapped element1 byte0");
+    TEST_ASSERT_EQ(wrapped_bytes[4], 9, "wrapped element2 byte0");
+    return 0;
+}
+
 static int test_parse_assembly_wrapper_fast_path() {
     llvm::LLVMContext ctx;
     llvm::SMDiagnostic err;
@@ -1742,6 +1776,7 @@ int main() {
     RUN_TEST(test_constants);
     RUN_TEST(test_constant_data_array_addnull);
     RUN_TEST(test_constant_struct_and_array_bytes);
+    RUN_TEST(test_constant_array_single_aggregate_payload_preserved);
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
     RUN_TEST(test_create_global_without_initializer_is_declaration);
     RUN_TEST(test_duplicate_global_names_are_uniquified);
