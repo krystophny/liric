@@ -77,6 +77,7 @@ endif()
 
 file(WRITE "${COMPAT_FAIL}"
     "{\"name\":\"case_mismatch\",\"source\":\"/tmp/c.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":true,\"lli_ok\":true,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":0,\"lli_rc\":0,\"error\":\"\"}\n"
+    "{\"name\":\"case_rc_mismatch\",\"source\":\"/tmp/e.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":true,\"lli_ok\":true,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":1,\"lli_rc\":1,\"error\":\"\"}\n"
     "{\"name\":\"case_unresolved_symbol\",\"source\":\"/tmp/d.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":false,\"lli_ok\":false,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":-1,\"lli_rc\":-1,\"error\":\"unresolved symbol: _lfortran_printf\"}\n"
 )
 file(WRITE "${BASELINE_FAIL}"
@@ -100,8 +101,8 @@ if(fail_rc EQUAL 0)
 endif()
 
 file(READ "${OUT_FAIL}/summary.json" summary_fail)
-if(NOT summary_fail MATCHES "\"mismatch_count\"[ \t]*:[ \t]*1")
-    message(FATAL_ERROR "expected mismatch_count=1 in fail summary")
+if(NOT summary_fail MATCHES "\"mismatch_count\"[ \t]*:[ \t]*2")
+    message(FATAL_ERROR "expected mismatch_count=2 in fail summary")
 endif()
 if(NOT summary_fail MATCHES "\"new_supported_regressions\"[ \t]*:[ \t]*1")
     message(FATAL_ERROR "expected new_supported_regressions=1 in fail summary")
@@ -112,6 +113,9 @@ endif()
 if(NOT summary_fail MATCHES "\"unsupported_abi\"[ \t]*:[ \t]*1")
     message(FATAL_ERROR "expected unsupported_abi=1 in fail summary")
 endif()
+if(NOT summary_fail MATCHES "output-format\\|rc-mismatch\\|general")
+    message(FATAL_ERROR "expected rc-mismatch taxonomy bucket in fail summary")
+endif()
 if(NOT summary_fail MATCHES "jit-link\\|unresolved-symbol\\|runtime-api")
     message(FATAL_ERROR "expected unresolved-symbol taxonomy bucket in fail summary")
 endif()
@@ -120,4 +124,12 @@ if(NOT summary_fail MATCHES "\"mapped\"[ \t]*:[ \t]*true")
 endif()
 if(NOT summary_fail MATCHES "\"#[0-9][0-9]*\"")
     message(FATAL_ERROR "expected unsupported bucket issue mapping to include an issue reference")
+endif()
+
+file(READ "${OUT_FAIL}/summary.md" summary_fail_md)
+if(NOT summary_fail_md MATCHES "## Taxonomy Counts \\(Mismatch\\)")
+    message(FATAL_ERROR "expected mismatch taxonomy section in fail summary markdown")
+endif()
+if(NOT summary_fail_md MATCHES "output-format\\|rc-mismatch\\|general")
+    message(FATAL_ERROR "expected rc-mismatch entry in fail summary markdown")
 endif()
