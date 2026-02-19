@@ -602,6 +602,74 @@ static int test_builder_syncs_module_from_insert_block() {
     return 0;
 }
 
+static int test_basicblock_mutation_ops() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("bb_mutation", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = mod.createFunction("bb_mutation_fn", ft, false);
+    TEST_ASSERT(fn != nullptr, "function created");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::BasicBlock *dead = llvm::BasicBlock::Create(ctx, "dead", fn);
+    llvm::BasicBlock *mid = llvm::BasicBlock::Create(ctx, "mid", fn);
+    llvm::BasicBlock *tail = llvm::BasicBlock::Create(ctx, "tail", fn);
+    TEST_ASSERT(entry != nullptr && dead != nullptr
+                && mid != nullptr && tail != nullptr, "blocks created");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(fn);
+
+    builder.SetInsertPoint(entry);
+    builder.CreateBr(mid);
+    builder.SetInsertPoint(dead);
+    builder.CreateBr(tail);
+    builder.SetInsertPoint(mid);
+    builder.CreateBr(tail);
+    builder.SetInsertPoint(tail);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+
+    lr_func_t *irf = fn->getIRFunc();
+    TEST_ASSERT(irf != nullptr, "function has IR backing");
+    TEST_ASSERT_EQ(irf->num_blocks, 4, "initial number of blocks");
+
+    dead->moveAfter(tail);
+    TEST_ASSERT(std::strcmp(irf->first_block->name, "entry") == 0, "entry stays first");
+    TEST_ASSERT(std::strcmp(irf->first_block->next->name, "mid") == 0,
+                "mid follows entry after moveAfter");
+    TEST_ASSERT(std::strcmp(irf->last_block->name, "dead") == 0,
+                "dead moved to the end");
+
+    dead->moveBefore(mid);
+    TEST_ASSERT(std::strcmp(irf->first_block->next->name, "dead") == 0,
+                "dead moved before mid");
+    TEST_ASSERT(std::strcmp(irf->first_block->next->next->name, "mid") == 0,
+                "mid follows dead after moveBefore");
+
+    dead->eraseFromParent();
+    TEST_ASSERT(dead->getParent() == nullptr, "erased block parent cleared");
+    TEST_ASSERT_EQ(irf->num_blocks, 3, "block count decremented after erase");
+    TEST_ASSERT(std::strcmp(irf->first_block->name, "entry") == 0, "entry still first");
+    TEST_ASSERT(std::strcmp(irf->first_block->next->name, "mid") == 0,
+                "mid now second");
+    TEST_ASSERT(std::strcmp(irf->last_block->name, "tail") == 0, "tail remains last");
+    TEST_ASSERT_EQ(irf->first_block->id, 0, "entry id unchanged");
+    TEST_ASSERT_EQ(irf->first_block->next->id, 1, "mid id compacted");
+    TEST_ASSERT_EQ(irf->last_block->id, 2, "tail id compacted");
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule succeeds after block erase");
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("bb_mutation_fn");
+    TEST_ASSERT(fp != nullptr, "lookup mutated function");
+    TEST_ASSERT_EQ(fp(), 0, "mutated CFG still executes correctly");
+
+    return 0;
+}
+
 static int test_irbuilder_arithmetic() {
     llvm::LLVMContext ctx;
     llvm::Module mod("arith", ctx);
@@ -1578,6 +1646,7 @@ int main() {
     RUN_TEST(test_block_parent_tracking_across_decls);
     RUN_TEST(test_block_parent_recovery_from_ir_func_link);
     RUN_TEST(test_builder_syncs_module_from_insert_block);
+    RUN_TEST(test_basicblock_mutation_ops);
 
     fprintf(stderr, "\nIRBuilder tests:\n");
     RUN_TEST(test_irbuilder_arithmetic);

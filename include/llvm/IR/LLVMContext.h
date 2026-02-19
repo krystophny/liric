@@ -72,6 +72,10 @@ namespace detail {
         return it == block_parents.end() ? nullptr : it->second;
     }
 
+    inline void unregister_block_parent(const lr_block_t *b) {
+        if (b) block_parents.erase(b);
+    }
+
     inline void unregister_blocks_for_function(Function *fn) {
         for (auto it = block_parents.begin(); it != block_parents.end();) {
             if (it->second == fn) {
