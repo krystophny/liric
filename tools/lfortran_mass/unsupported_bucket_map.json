@@ -1,7 +1,7 @@
 {
   "jit-link|unresolved-symbol|runtime-api": {
-    "issues": [79],
-    "rationale": "Runtime symbol/ABI integration gap tracked in runtime ABI lane."
+    "issues": [448],
+    "rationale": "Current nightly unresolved runtime ABI/symbol gaps."
   },
   "runtime|segfault|general": {
     "issues": [78],
@@ -28,23 +28,23 @@
     "rationale": "LLVM IR parser feature coverage gaps."
   },
   "output-format|wrong-stdout|general": {
-    "issues": [54],
-    "rationale": "Differential output mismatch tracking."
+    "issues": [445],
+    "rationale": "Current nightly wrong-stdout mismatch class."
   },
   "output-format|wrong-stderr|general": {
     "issues": [55],
     "rationale": "Differential stderr mismatch tracking."
   },
   "output-format|rc-mismatch|general": {
-    "issues": [16],
-    "rationale": "Differential return-code parity lane."
+    "issues": [446],
+    "rationale": "Current nightly return-code mismatch class."
   },
   "output-format|wrong-stdout+stderr|general": {
-    "issues": [16],
-    "rationale": "Differential combined output parity lane."
+    "issues": [445, 446],
+    "rationale": "Combined output parity references stdout and RC class lanes."
   },
   "codegen|compiler-error|general": {
-    "issues": [81, 102],
-    "rationale": "Emission/codegen failures require decomposition into focused child issues."
+    "issues": [447, 443],
+    "rationale": "Current nightly emit-fail class and concrete WITH_LIRIC compile-path reproducer."
   }
 }

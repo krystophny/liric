@@ -35,6 +35,27 @@ need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
 
+abs_path() {
+    local p="$1"
+    if [[ "$p" == /* ]]; then
+        printf '%s\n' "$p"
+        return 0
+    fi
+    printf '%s/%s\n' "$(pwd)" "$p"
+}
+
+normalize_path() {
+    local p="$1"
+    local parent
+    local base
+
+    p="$(abs_path "$p")"
+    parent="$(dirname "$p")"
+    base="$(basename "$p")"
+    parent="$(cd "$parent" && pwd)"
+    printf '%s/%s\n' "$parent" "$base"
+}
+
 detect_workers() {
     if command -v nproc >/dev/null 2>&1; then
         nproc
@@ -184,12 +205,15 @@ liric_root="$(cd "${script_dir}/../.." && pwd)"
 liric_build="${liric_root}/build"
 
 mkdir -p "$workspace" "$output_root"
+workspace="$(normalize_path "$workspace")"
+output_root="$(normalize_path "$output_root")"
 log_root="${output_root}/logs"
 mkdir -p "$log_root"
 
 if [[ -z "$lfortran_dir" ]]; then
     lfortran_dir="${workspace}/lfortran"
 fi
+lfortran_dir="$(normalize_path "$lfortran_dir")"
 
 if [[ ! -d "$lfortran_dir/.git" ]]; then
     git clone "$lfortran_repo" "$lfortran_dir" \
@@ -237,6 +261,12 @@ check_no_llvm_runtime_deps "$lfortran_liric_bin" \
 status=0
 
 export PATH="${lfortran_build_liric}/src/bin:${PATH}"
+resolved_lfortran="$(command -v lfortran || true)"
+[[ -n "$resolved_lfortran" ]] || die "lfortran not found in PATH after WITH_LIRIC setup"
+resolved_lfortran="$(normalize_path "$resolved_lfortran")"
+if [[ "$resolved_lfortran" != "$lfortran_liric_bin" ]]; then
+    die "PATH resolves lfortran to ${resolved_lfortran}; expected ${lfortran_liric_bin}"
+fi
 
 if [[ "$run_ref_tests" == "yes" ]]; then
     (
