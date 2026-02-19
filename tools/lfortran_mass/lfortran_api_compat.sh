@@ -7,9 +7,9 @@ usage: lfortran_api_compat.sh [options]
   --workspace PATH        workspace root for lfortran clone/build (default: /tmp/liric_lfortran_api_compat)
   --output-root PATH      output root for logs/artifacts (default: /tmp/liric_lfortran_api_compat_out)
   --lfortran-dir PATH     use an existing lfortran checkout (skip clone if present)
-  --lfortran-repo URL     lfortran git URL (default: https://github.com/lfortran/lfortran.git)
-  --lfortran-ref REF      lfortran git ref to checkout (default: upstream/main)
-  --lfortran-remote NAME  remote name for --lfortran-ref (default: upstream)
+  --lfortran-repo URL     lfortran git URL (default: https://github.com/krystophny/lfortran.git)
+  --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot)
+  --lfortran-remote NAME  remote name for --lfortran-ref (default: origin)
   --skip-checkout         keep current lfortran checkout/ref
   --build-type TYPE       CMake build type (default: Release)
   --workers N             parallel build/test workers (default: nproc/sysctl)
@@ -170,9 +170,9 @@ check_no_llvm_runtime_deps() {
 workspace="/tmp/liric_lfortran_api_compat"
 output_root="/tmp/liric_lfortran_api_compat_out"
 lfortran_dir=""
-lfortran_repo="https://github.com/lfortran/lfortran.git"
-lfortran_ref="upstream/main"
-lfortran_remote="upstream"
+lfortran_repo="https://github.com/krystophny/lfortran.git"
+lfortran_ref="origin/liric-aot"
+lfortran_remote="origin"
 build_type="Release"
 workers="$(detect_workers)"
 run_ref_tests="yes"
@@ -298,7 +298,7 @@ if [[ ! -d "$lfortran_dir/.git" ]]; then
 fi
 
 if [[ "$skip_checkout" != "yes" ]]; then
-    if [[ "$lfortran_ref" == "${lfortran_remote}/main" ]]; then
+    if [[ "$lfortran_ref" == "${lfortran_remote}/"* ]]; then
         if ! git -C "$lfortran_dir" remote | grep -qx "$lfortran_remote"; then
             git -C "$lfortran_dir" remote add "$lfortran_remote" "$lfortran_repo"
         fi

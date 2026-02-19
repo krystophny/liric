@@ -26,6 +26,7 @@ Run LFortran's own suites using a compile-time `WITH_LIRIC` build:
 
 ```bash
 ./tools/lfortran_mass/lfortran_api_compat.sh \
+  --lfortran-ref origin/liric-aot \
   --workspace /tmp/liric_lfortran_api_compat \
   --output-root /tmp/liric_lfortran_api_compat_out
 ```
