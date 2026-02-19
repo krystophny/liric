@@ -79,6 +79,7 @@ file(WRITE "${COMPAT_FAIL}"
     "{\"name\":\"case_mismatch\",\"source\":\"/tmp/c.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":true,\"lli_ok\":true,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":0,\"lli_rc\":0,\"error\":\"\"}\n"
     "{\"name\":\"case_rc_mismatch\",\"source\":\"/tmp/e.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":true,\"lli_ok\":true,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":1,\"lli_rc\":1,\"error\":\"\"}\n"
     "{\"name\":\"case_unresolved_symbol\",\"source\":\"/tmp/d.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":false,\"lli_ok\":false,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":-1,\"lli_rc\":-1,\"error\":\"unresolved symbol: _lfortran_printf\"}\n"
+    "{\"name\":\"case_runtime_failure\",\"source\":\"/tmp/f.f90\",\"options\":\"\",\"llvm_ok\":true,\"liric_ok\":false,\"lli_ok\":false,\"liric_match\":false,\"lli_match\":false,\"llvm_rc\":0,\"liric_rc\":-11,\"lli_rc\":-11,\"error\":\"segmentation fault\"}\n"
 )
 file(WRITE "${BASELINE_FAIL}"
     "{\"case_id\":\"case_mismatch\",\"classification\":\"pass\"}\n"
@@ -113,11 +114,17 @@ endif()
 if(NOT summary_fail MATCHES "\"unsupported_abi\"[ \t]*:[ \t]*1")
     message(FATAL_ERROR "expected unsupported_abi=1 in fail summary")
 endif()
+if(NOT summary_fail MATCHES "\"unsupported_feature\"[ \t]*:[ \t]*1")
+    message(FATAL_ERROR "expected unsupported_feature=1 in fail summary")
+endif()
 if(NOT summary_fail MATCHES "output-format\\|rc-mismatch\\|general")
     message(FATAL_ERROR "expected rc-mismatch taxonomy bucket in fail summary")
 endif()
 if(NOT summary_fail MATCHES "jit-link\\|unresolved-symbol\\|runtime-api")
     message(FATAL_ERROR "expected unresolved-symbol taxonomy bucket in fail summary")
+endif()
+if(NOT summary_fail MATCHES "runtime\\|unsupported-feature\\|general")
+    message(FATAL_ERROR "expected runtime unsupported-feature taxonomy bucket in fail summary")
 endif()
 if(NOT summary_fail MATCHES "\"mapped\"[ \t]*:[ \t]*true")
     message(FATAL_ERROR "expected unsupported bucket coverage entry to be mapped")
@@ -132,4 +139,7 @@ if(NOT summary_fail_md MATCHES "## Taxonomy Counts \\(Mismatch\\)")
 endif()
 if(NOT summary_fail_md MATCHES "output-format\\|rc-mismatch\\|general")
     message(FATAL_ERROR "expected rc-mismatch entry in fail summary markdown")
+endif()
+if(NOT summary_fail_md MATCHES "runtime\\|unsupported-feature\\|general")
+    message(FATAL_ERROR "expected runtime unsupported-feature entry in fail summary markdown")
 endif()
