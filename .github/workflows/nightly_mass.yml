@@ -28,8 +28,8 @@ jobs:
       LFORTRAN_REPO: https://github.com/krystophny/lfortran.git
       LFORTRAN_REF: origin/liric-aot
       LIRIC_BUILD: ${{ github.workspace }}/build
-      MASS_OUT: ${{ runner.temp }}/liric_lfortran_mass
-      BASELINE_DIR: ${{ runner.temp }}/liric_lfortran_mass_baseline/${{ matrix.os }}
+      MASS_OUT: ${{ github.workspace }}/.nightly_mass/${{ matrix.os }}/out
+      BASELINE_DIR: ${{ github.workspace }}/.nightly_mass/${{ matrix.os }}/baseline
 
     steps:
       - name: Checkout liric
