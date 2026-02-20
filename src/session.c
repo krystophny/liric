@@ -804,14 +804,42 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
             s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
     }
 
-    /* Apply JIT relocations on the live code copy for immediate execution */
+    /* Apply JIT relocations on the live code copy for immediate execution.
+       For resumed functions, only patch the function's own reloc ranges
+       (before suspension and after resume), skipping relocs from other
+       functions compiled during the suspension gap. */
     s->jit->code_size = s->compile_start + code_len;
     if (s->jit->update_active && code_len > 0)
         s->jit->update_dirty = true;
     {
         const char *missing_symbol = NULL;
-        int patch_rc = patch_direct_relocs(s, s->direct_reloc_base,
+        int patch_rc;
+        if (s->compile_resumed) {
+            uint32_t saved_num = s->direct_obj_ctx.num_relocs;
+            /* Patch pre-suspension relocs */
+            patch_rc = 0;
+            if (s->direct_reloc_base < s->direct_reloc_suspend_end) {
+                s->direct_obj_ctx.num_relocs = s->direct_reloc_suspend_end;
+                patch_rc = patch_direct_relocs(s, s->direct_reloc_base,
+                                               &missing_symbol);
+                s->direct_obj_ctx.num_relocs = saved_num;
+            }
+            /* Patch post-resume relocs */
+            if (patch_rc >= 0 && s->direct_reloc_resume_base < saved_num) {
+                const char *missing2 = NULL;
+                int rc2 = patch_direct_relocs(s, s->direct_reloc_resume_base,
+                                              &missing2);
+                if (rc2 < 0)
+                    patch_rc = rc2;
+                else if (rc2 > 0 && patch_rc == 0) {
+                    patch_rc = rc2;
+                    missing_symbol = missing2;
+                }
+            }
+        } else {
+            patch_rc = patch_direct_relocs(s, s->direct_reloc_base,
                                            &missing_symbol);
+        }
         if (patch_rc < 0) {
             err_set(err, S_ERR_BACKEND, "direct relocation patching failed");
             s->module->obj_ctx = NULL;
