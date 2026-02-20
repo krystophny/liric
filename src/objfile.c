@@ -484,6 +484,10 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
         size_t galign = lr_type_align(g->type);
         if (galign == 0)
             galign = 8;
+        /* Globals with pointer relocations must be at least
+           pointer-aligned so the linker can patch 8-byte addresses. */
+        if (g->relocs && galign < 8)
+            galign = 8;
 
         out->data_pos = obj_align_up(out->data_pos, galign);
 
@@ -628,6 +632,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
             gsize = 8;
         size_t galign = lr_type_align(g->type);
         if (galign == 0)
+            galign = 8;
+        if (g->relocs && galign < 8)
             galign = 8;
         out->data_pos = obj_align_up(out->data_pos, galign);
         if (out->data_pos + gsize > OBJ_DATA_BUF_SIZE) {
