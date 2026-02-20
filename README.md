@@ -51,9 +51,9 @@ ctest --test-dir build --output-on-failure
                               -> MIR   templates to LLVM
                               -> x86   -> x86   ORC JIT
                                 |        |        |
-                              ~43x     ~44x     ~1x
-                              faster   faster   (baseline
-                              (LL)     (LL)     validation)
+                              ~71-77x  ~71-77x  optional
+                              LL speed LL speed baseline
+                              (latest) (latest) mode
 
                               Lanes:
                               api_full_liric
@@ -61,23 +61,24 @@ ctest --test-dir build --output-on-failure
 
   STANDALONE LANES (no lfortran involved)
 
-  LL corpus    100 .ll files (same corpus as API lanes)
-               ll_jit:  liric parses+compiles each .ll   ~0.27ms
-               ll_llvm: lli (LLVM) runs each .ll         ~11.0ms
-               Speedup: ~43x (isel/copy_patch)
+  LL corpus    compat-derived corpus (latest: 31 .ll files)
+               ll_jit:  liric compile median    ~0.029-0.031ms
+               ll_llvm: lli compile median      ~2.22-2.23ms
+               Speedup: ~71-77x (isel/copy_patch)
 
   Micro C      same corpus, lfortran --show-c output, liric vs TCC
-               Speedup: ~4.5x in-process (isel/copy_patch)
+               optional lane (requires `bench_tcc` / libtcc)
 ```
 
 ### Matrix axes
 
-The full matrix is **3 modes x 2 policies x 7 lanes = 42 cells**.
-`bench_matrix` always skips LL and micro_c lanes for `mode=llvm` (minus 6)
-because standalone JIT does not support LLVM backend mode. If liric is built
-without real LLVM backend support (`WITH_REAL_LLVM_BACKEND=OFF`), `mode=llvm`
-API lanes are also skipped (minus 8).
-All lanes use the same 100-case corpus (first 100 from `compat_ll.txt`).
+Default matrix run executes **24 cells**:
+`2 modes (isel, copy_patch) x 2 policies x 6 default lanes`.
+
+- Default command: `./build/bench_matrix --timeout 15`
+- Default modes: `isel,copy_patch` (`llvm` is opt-in via `--modes all` or `--modes llvm`)
+- Default lanes: `api_full_llvm,api_full_liric,api_backend_llvm,api_backend_liric,ll_jit,ll_llvm`
+- `micro_c` is optional (`--lanes all` or explicit `micro_c`) and requires `bench_tcc`/libtcc. If unavailable, `micro_c` cells are skipped.
 
 - **Mode** (compilation backend): `isel`, `copy_patch`, `llvm`
 - **Policy** (how the compat layer routes IR): `direct`, `ir`
@@ -100,13 +101,13 @@ LL and micro_c lanes are standalone (no lfortran subprocess).
 ## Run Matrix
 
 ```bash
-./build/bench_matrix \
-  --bench-dir /tmp/liric_bench \
-  --modes all \
-  --policies all \
-  --lanes all \
-  --timeout 15 \
-  --timeout-ms 5000
+./build/bench_matrix --timeout 15
+```
+
+Full matrix (includes optional lanes/modes):
+
+```bash
+./build/bench_matrix --modes all --policies all --lanes all --timeout 15
 ```
 
 Published benchmark artifacts:
@@ -144,26 +145,28 @@ Runtime artifacts:
   - `docs/benchmarks/readme_perf_table.md`
   - using `./tools/bench_readme_perf_snapshot.sh --build-dir ./build --bench-dir /tmp/liric_bench --out-dir docs/benchmarks`
 
-## Speedup Tables (2026-02-18)
+## Speedup Tables (2026-02-20)
 
-100-case corpus, 3 iterations, median ms.
+Source: `/tmp/liric_bench/matrix_rows.jsonl` and `/tmp/liric_bench/matrix_summary.json` from:
+`./build/bench_matrix --modes all --policies all --lanes all --timeout 15`
 
-### API AOT (lfortran + liric vs lfortran + LLVM, 100 integration tests)
+Matrix summary: `status=OK`, `cells_attempted=24`, `cells_ok=24`, `cells_failed=0`.
+(`micro_c` skipped because `bench_tcc` is unavailable in this environment.)
+
+### API AOT (lfortran + liric vs lfortran + LLVM, compat corpus)
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 100/100 | **1.14x** | **1.00x** |
-| isel | ir | 100/100 | **1.14x** | **1.00x** |
-| copy_patch | direct | 100/100 | **1.14x** | **1.01x** |
-| copy_patch | ir | 100/100 | **1.14x** | **1.01x** |
-| llvm | direct | 100/100 | **1.16x** | **1.02x** |
-| llvm | ir | 100/100 | **1.16x** | **1.00x** |
+| isel | direct | 22/31 (9 skipped) | **0.54x** | **0.53x** |
+| isel | ir | 25/31 (6 skipped) | **0.54x** | **0.54x** |
+| copy_patch | direct | 22/31 (9 skipped) | **0.99x** | **0.99x** |
+| copy_patch | ir | 25/31 (6 skipped) | **0.53x** | **0.53x** |
 
-### LL Corpus (compile-only, 99/100 .ll files, 3 iterations)
+### LL Corpus (compile-only, compat corpus: 30/31 completed)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 6.11 | 0.121 | **51x** |
-| isel | ir | 5.99 | 0.117 | **51x** |
-| copy_patch | direct | 6.27 | 0.112 | **56x** |
-| copy_patch | ir | 5.73 | 0.120 | **48x** |
+| isel | direct | 2.222 | 0.030 | **73x** |
+| isel | ir | 2.224 | 0.029 | **77x** |
+| copy_patch | direct | 2.217 | 0.031 | **71x** |
+| copy_patch | ir | 2.230 | 0.031 | **73x** |

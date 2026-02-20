@@ -2218,11 +2218,6 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
         return 0;
     }
 
-    if (direct_mode_enabled(s)) {
-        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
-        return -1;
-    }
-
     if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
                                         s->jit ? s->jit->mode : LR_COMPILE_ISEL,
                                         path, backend_err,
@@ -2250,11 +2245,6 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
         }
         return lr_emit_object_from_blobs(s->blobs, s->blob_count,
                                          s->module, target, out);
-    }
-
-    if (direct_mode_enabled(s)) {
-        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
-        return -1;
     }
 
     /* IR mode: compile from IR using session's compile mode */
@@ -2344,11 +2334,6 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         return 0;
     }
 
-    if (direct_mode_enabled(s)) {
-        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
-        return -1;
-    }
-
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
             s->jit ? s->jit->mode : LR_COMPILE_ISEL,
@@ -2393,11 +2378,6 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
             return -1;
         }
         return 0;
-    }
-
-    if (direct_mode_enabled(s)) {
-        err_set(err, S_ERR_STATE, "direct mode has no blobs to emit");
-        return -1;
     }
 
     if (lr_emit_module_executable_path_mode(

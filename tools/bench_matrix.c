@@ -459,6 +459,12 @@ static void set_all_modes(cfg_t *cfg, int v) {
     for (int i = 0; i < MODE_COUNT; i++) cfg->modes[i] = v;
 }
 
+static void set_default_modes(cfg_t *cfg) {
+    set_all_modes(cfg, 0);
+    cfg->modes[MODE_ISEL] = 1;
+    cfg->modes[MODE_COPY_PATCH] = 1;
+}
+
 static void set_all_policies(cfg_t *cfg, int v) {
     for (int i = 0; i < POLICY_COUNT; i++) cfg->policies[i] = v;
 }
@@ -531,7 +537,7 @@ static void usage(void) {
     printf("  --bench-dir PATH         output root (default: /tmp/liric_bench)\n");
     printf("  --build-dir PATH         build dir for benchmark binaries (default: build)\n");
     printf("  --manifest PATH          manifest path recorded in summary (default: tools/bench_manifest.json)\n");
-    printf("  --modes LIST             comma list or 'all': isel,copy_patch,llvm\n");
+    printf("  --modes LIST             comma list or 'all': isel,copy_patch,llvm (default: isel,copy_patch)\n");
     printf("  --policies LIST          comma list or 'all': direct,ir\n");
     printf("  --lanes LIST             comma list or 'all': ");
     printf("api_full_llvm,api_full_liric,");
@@ -592,7 +598,7 @@ static cfg_t parse_args(int argc, char **argv) {
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
 
-    set_all_modes(&cfg, 1);
+    set_default_modes(&cfg);
     set_all_policies(&cfg, 1);
     set_default_lanes(&cfg);
 
@@ -1639,6 +1645,7 @@ static void kill_stale_benchmark_processes(void) {
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
+    int bench_tcc_available = file_executable(cfg.bench_tcc);
 
     kill_stale_benchmark_processes();
 
@@ -1828,6 +1835,12 @@ int main(int argc, char **argv) {
         }
     }
 
+    if (any_micro_lane_selected(&cfg) && !bench_tcc_available) {
+        fprintf(stderr,
+                "[matrix] micro_c lanes skipped: bench_tcc not found at %s\n",
+                cfg.bench_tcc ? cfg.bench_tcc : "(null)");
+    }
+
     for (int mi = 0; mi < MODE_COUNT; mi++) {
         const char *mode;
         if (!cfg.modes[mi]) continue;
@@ -1889,7 +1902,7 @@ int main(int argc, char **argv) {
                 run_ll_provider(&cfg, mode, policy, policy_dir, &ll);
             }
 
-            if (want_micro && !is_llvm_mode) {
+            if (want_micro && !is_llvm_mode && bench_tcc_available) {
                 run_micro_provider(&cfg, mode, policy, policy_dir, &micro);
             }
 
@@ -1906,6 +1919,11 @@ int main(int argc, char **argv) {
                 }
                 if (is_llvm_mode &&
                     (li == LANE_LL_JIT || li == LANE_LL_LLVM || li == LANE_MICRO_C)) {
+                    continue;
+                }
+                if (!bench_tcc_available && li == LANE_MICRO_C) {
+                    printf("[matrix] mode=%s policy=%s lane=%s skipped (bench_tcc missing)\n",
+                           mode, policy, lane);
                     continue;
                 }
 

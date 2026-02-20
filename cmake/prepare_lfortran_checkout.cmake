@@ -105,3 +105,74 @@ if(EXISTS "${_lfortran_compat_patch}")
         endif()
     endif()
 endif()
+
+set(_lfortran_version_file "${LFORTRAN_ROOT}/version")
+if(NOT EXISTS "${_lfortran_version_file}")
+    execute_process(
+        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" describe --tags --always --dirty
+        RESULT_VARIABLE describe_rc
+        OUTPUT_VARIABLE lfortran_version
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(NOT describe_rc EQUAL 0 OR "${lfortran_version}" STREQUAL "")
+        set(lfortran_version "0.0.0-unknown")
+    else()
+        string(REGEX REPLACE "^v" "" lfortran_version "${lfortran_version}")
+    endif()
+    file(WRITE "${_lfortran_version_file}" "${lfortran_version}\n")
+    message(STATUS "Generated missing LFortran version file: ${lfortran_version}")
+endif()
+
+set(_lfortran_generated_preprocessor
+    "${LFORTRAN_ROOT}/src/lfortran/parser/preprocessor.cpp")
+if(NOT EXISTS "${_lfortran_generated_preprocessor}")
+    find_program(BASH_EXE bash)
+    find_program(RE2C_EXE re2c)
+    find_program(BISON_EXE bison)
+    if(NOT BASH_EXE OR NOT RE2C_EXE OR NOT BISON_EXE)
+        message(FATAL_ERROR
+            "missing required tools for LFortran generated sources: bash/re2c/bison")
+    endif()
+
+    execute_process(
+        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" tag --list
+        RESULT_VARIABLE tag_list_rc
+        OUTPUT_VARIABLE tag_list
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT tag_list_rc EQUAL 0)
+        message(FATAL_ERROR "failed to list lfortran tags")
+    endif()
+
+    if("${tag_list}" STREQUAL "")
+        set(_fallback_tag "v0.0.0-liric-aot")
+        execute_process(
+            COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" rev-parse "${_fallback_tag}"
+            RESULT_VARIABLE fallback_tag_exists_rc
+            OUTPUT_QUIET
+            ERROR_QUIET
+        )
+        if(NOT fallback_tag_exists_rc EQUAL 0)
+            execute_process(
+                COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" tag "${_fallback_tag}" HEAD
+                RESULT_VARIABLE fallback_tag_create_rc
+            )
+            if(NOT fallback_tag_create_rc EQUAL 0)
+                message(FATAL_ERROR "failed to create fallback lfortran tag")
+            endif()
+        endif()
+    endif()
+
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+            RE2C=${RE2C_EXE}
+            BISON=${BISON_EXE}
+            "${BASH_EXE}" -e build0.sh
+        WORKING_DIRECTORY "${LFORTRAN_ROOT}"
+        RESULT_VARIABLE build0_rc
+    )
+    if(NOT build0_rc EQUAL 0)
+        message(FATAL_ERROR "failed to generate lfortran parser sources with build0.sh")
+    endif()
+endif()

@@ -196,6 +196,7 @@ check_no_llvm_runtime_deps() {
     local bin="$1"
     local dep_out=""
     local lower=""
+    local offending=""
 
     if [[ "$(uname)" == "Linux" ]]; then
         need_cmd ldd
@@ -209,7 +210,9 @@ check_no_llvm_runtime_deps() {
     fi
 
     lower="$(printf '%s\n' "$dep_out" | tr '[:upper:]' '[:lower:]')"
-    if printf '%s\n' "$lower" | grep -Eq 'libllvm|/llvm[^[:space:]]*'; then
+    offending="$(printf '%s\n' "$lower" \
+        | grep -E 'libllvm|/llvm[^[:space:]]*' || true)"
+    if [[ -n "$offending" ]]; then
         echo "ERROR: detected LLVM runtime dependency in WITH_LIRIC binary: $bin" >&2
         printf '%s\n' "$dep_out" >&2
         return 1
@@ -444,6 +447,18 @@ resolved_lfortran="$(command -v lfortran || true)"
 resolved_lfortran="$(normalize_path "$resolved_lfortran")"
 if [[ "$resolved_lfortran" != "$lfortran_liric_bin" ]]; then
     die "PATH resolves lfortran to ${resolved_lfortran}; expected ${lfortran_liric_bin}"
+fi
+
+if [[ -z "${LIRIC_COMPILE_MODE:-}" ]]; then
+    export LIRIC_COMPILE_MODE="isel"
+    echo "lfortran_api_compat: applying WITH_LIRIC compile policy: LIRIC_COMPILE_MODE=${LIRIC_COMPILE_MODE}" >&2
+fi
+if [[ "${LIRIC_COMPILE_MODE}" == "llvm" ]]; then
+    die "LIRIC_COMPILE_MODE=llvm is disallowed in WITH_LIRIC API compatibility lane"
+fi
+if [[ -z "${LIRIC_POLICY:-}" ]]; then
+    export LIRIC_POLICY="direct"
+    echo "lfortran_api_compat: applying WITH_LIRIC policy: LIRIC_POLICY=${LIRIC_POLICY}" >&2
 fi
 
 if [[ "$run_ref_tests" == "yes" ]]; then
