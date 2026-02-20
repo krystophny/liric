@@ -162,6 +162,157 @@ int test_builder_compat_direct_sparse_block_ids_finalize(void) {
     return 0;
 }
 
+int test_builder_compat_direct_multi_suspend_reloc_ranges(void) {
+#if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
+    return 0;
+#else
+    int result = 1;
+    const char *old_policy = getenv("LIRIC_POLICY");
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    char *old_policy_copy = old_policy ? strdup(old_policy) : NULL;
+    char *old_mode_copy = old_mode ? strdup(old_mode) : NULL;
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    FILE *tmp = NULL;
+
+    lr_module_t *ir = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *fn_ty = NULL;
+    lc_value_t *ext_val = NULL;
+    lc_value_t *a_val = NULL;
+    lc_value_t *b_val = NULL;
+    lc_value_t *c_val = NULL;
+    lr_func_t *a_fn = NULL;
+    lr_func_t *b_fn = NULL;
+    lr_func_t *c_fn = NULL;
+    lr_block_t *a_entry = NULL;
+    lr_block_t *b_entry = NULL;
+    lr_block_t *c_entry = NULL;
+    lc_value_t *ret1 = NULL;
+    lc_value_t *ret2 = NULL;
+    lc_value_t *ret3 = NULL;
+
+    if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
+        goto cleanup;
+    }
+    if (setenv("LIRIC_COMPILE_MODE", "isel", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_COMPILE_MODE=isel\n");
+        goto cleanup;
+    }
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
+    mod = lc_module_create(ctx, "compat_multi_suspend_reloc");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+
+    ir = lc_module_get_ir(mod);
+    i32 = lc_get_int_type(mod, 32);
+    if (!ir || !i32) {
+        fprintf(stderr, "  FAIL: missing IR/i32 type\n");
+        goto cleanup;
+    }
+    fn_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+    if (!fn_ty) {
+        fprintf(stderr, "  FAIL: function type\n");
+        goto cleanup;
+    }
+
+    ext_val = lc_func_create(mod, "compat_ext_decl_multi_suspend", fn_ty);
+    a_val = lc_func_create(mod, "compat_multi_suspend_a", fn_ty);
+    b_val = lc_func_create(mod, "compat_multi_suspend_b", fn_ty);
+    c_val = lc_func_create(mod, "compat_multi_suspend_c", fn_ty);
+    if (!ext_val || !a_val || !b_val || !c_val) {
+        fprintf(stderr, "  FAIL: function create\n");
+        goto cleanup;
+    }
+
+    a_fn = lc_value_get_func(a_val);
+    b_fn = lc_value_get_func(b_val);
+    c_fn = lc_value_get_func(c_val);
+    a_entry = lc_value_get_block(lc_block_create(mod, a_fn, "entry"));
+    b_entry = lc_value_get_block(lc_block_create(mod, b_fn, "entry"));
+    c_entry = lc_value_get_block(lc_block_create(mod, c_fn, "entry"));
+    ret1 = lc_value_const_int(mod, i32, 1, 32);
+    ret2 = lc_value_const_int(mod, i32, 2, 32);
+    ret3 = lc_value_const_int(mod, i32, 3, 32);
+    if (!a_fn || !b_fn || !c_fn || !a_entry || !b_entry || !c_entry ||
+        !ret1 || !ret2 || !ret3) {
+        fprintf(stderr, "  FAIL: function/block setup\n");
+        goto cleanup;
+    }
+
+    /* Force A to suspend/resume repeatedly while all functions emit relocs. */
+    if (!lc_create_call(mod, a_entry, a_fn, fn_ty, ext_val, NULL, 0, "a_call_0")) {
+        fprintf(stderr, "  FAIL: a_call_0\n");
+        goto cleanup;
+    }
+    if (!lc_create_call(mod, b_entry, b_fn, fn_ty, ext_val, NULL, 0, "b_call")) {
+        fprintf(stderr, "  FAIL: b_call\n");
+        goto cleanup;
+    }
+    lc_create_ret(mod, b_entry, ret2);
+    if (!lc_create_call(mod, a_entry, a_fn, fn_ty, ext_val, NULL, 0, "a_call_1")) {
+        fprintf(stderr, "  FAIL: a_call_1\n");
+        goto cleanup;
+    }
+    if (!lc_create_call(mod, c_entry, c_fn, fn_ty, ext_val, NULL, 0, "c_call")) {
+        fprintf(stderr, "  FAIL: c_call\n");
+        goto cleanup;
+    }
+    lc_create_ret(mod, c_entry, ret3);
+    if (!lc_create_call(mod, a_entry, a_fn, fn_ty, ext_val, NULL, 0, "a_call_2")) {
+        fprintf(stderr, "  FAIL: a_call_2\n");
+        goto cleanup;
+    }
+    lc_create_ret(mod, a_entry, ret1);
+
+    tmp = tmpfile();
+    if (!tmp) {
+        fprintf(stderr, "  FAIL: tmpfile create\n");
+        goto cleanup;
+    }
+    if (lc_module_emit_object_to_file(mod, tmp) != 0) {
+        fprintf(stderr, "  FAIL: lc_module_emit_object_to_file\n");
+        goto cleanup;
+    }
+    if (fseek(tmp, 0, SEEK_END) != 0 || ftell(tmp) <= 0) {
+        fprintf(stderr, "  FAIL: emitted object size\n");
+        goto cleanup;
+    }
+
+    result = 0;
+
+cleanup:
+    if (tmp)
+        fclose(tmp);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    if (old_policy_copy) {
+        setenv("LIRIC_POLICY", old_policy_copy, 1);
+        free(old_policy_copy);
+    } else {
+        unsetenv("LIRIC_POLICY");
+    }
+    if (old_mode_copy) {
+        setenv("LIRIC_COMPILE_MODE", old_mode_copy, 1);
+        free(old_mode_copy);
+    } else {
+        unsetenv("LIRIC_COMPILE_MODE");
+    }
+    return result;
+#endif
+}
+
 int test_builder_compat_add_to_jit_null_args(void) {
     lc_context_t *ctx = lc_context_create();
     TEST_ASSERT(ctx != NULL, "context create");

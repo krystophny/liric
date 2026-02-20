@@ -79,6 +79,11 @@ typedef struct session_phi_copy_entry {
     lr_phi_copy_desc_t copy;
 } session_phi_copy_entry_t;
 
+typedef struct direct_reloc_range {
+    uint32_t start;
+    uint32_t end;
+} direct_reloc_range_t;
+
 /* Saved state for a suspended direct-mode function compilation.
    When the compat layer switches from function A to function B mid-build,
    A's compile state is saved here so it can be resumed later. */
@@ -97,7 +102,9 @@ typedef struct suspended_compile {
     uint8_t *func_buf;
     size_t func_buf_cap;
     uint32_t direct_reloc_base;
-    uint32_t direct_reloc_count_at_suspend;
+    direct_reloc_range_t *direct_reloc_ranges;
+    uint32_t direct_reloc_range_count;
+    uint32_t direct_reloc_range_cap;
     bool compile_active;
     bool compile_opened_update;
     uint32_t emitted_count;
@@ -130,13 +137,15 @@ struct lr_session {
     uint8_t *func_compile_buf;
     size_t func_compile_buf_cap;
 
-    /* For resumed functions: the end of this function's relocs from before
-       suspension. Relocs in [direct_reloc_base, direct_reloc_suspend_end)
-       belong to this function; any in [direct_reloc_suspend_end,
-       direct_reloc_resume_base) belong to other functions already adjusted. */
-    uint32_t direct_reloc_suspend_end;
-    uint32_t direct_reloc_resume_base;
-    bool compile_resumed;
+    /* Relocation ranges owned by the currently compiling function.
+       A function can be suspended/resumed multiple times while other
+       functions emit relocs into the shared obj_ctx. We capture each
+       active [start,end) range so finalize/patch only touches owned relocs. */
+    direct_reloc_range_t *direct_reloc_ranges;
+    uint32_t direct_reloc_range_count;
+    uint32_t direct_reloc_range_cap;
+    uint32_t direct_reloc_active_start;
+    bool direct_reloc_active;
 
     /* Suspended function compilations for interleaved generation */
     suspended_compile_t *suspended;
@@ -396,6 +405,63 @@ static int ensure_blob_capacity(struct lr_session *s, uint32_t need) {
     return 0;
 }
 
+static int ensure_direct_reloc_range_capacity(struct lr_session *s,
+                                              uint32_t need) {
+    direct_reloc_range_t *new_ranges;
+    uint32_t new_cap;
+    if (!s)
+        return -1;
+    if (need <= s->direct_reloc_range_cap)
+        return 0;
+    new_cap = s->direct_reloc_range_cap == 0 ? 4u : s->direct_reloc_range_cap;
+    while (new_cap < need)
+        new_cap *= 2u;
+    new_ranges = (direct_reloc_range_t *)realloc(
+        s->direct_reloc_ranges, sizeof(*new_ranges) * new_cap);
+    if (!new_ranges)
+        return -1;
+    s->direct_reloc_ranges = new_ranges;
+    s->direct_reloc_range_cap = new_cap;
+    return 0;
+}
+
+static int append_direct_reloc_range(struct lr_session *s,
+                                     uint32_t start, uint32_t end) {
+    if (!s)
+        return -1;
+    if (end <= start)
+        return 0;
+    if (ensure_direct_reloc_range_capacity(s, s->direct_reloc_range_count + 1u) != 0)
+        return -1;
+    s->direct_reloc_ranges[s->direct_reloc_range_count].start = start;
+    s->direct_reloc_ranges[s->direct_reloc_range_count].end = end;
+    s->direct_reloc_range_count++;
+    return 0;
+}
+
+static int close_active_direct_reloc_range(struct lr_session *s) {
+    uint32_t end;
+    if (!s || !s->direct_reloc_active)
+        return 0;
+    end = s->direct_obj_ctx_active ? s->direct_obj_ctx.num_relocs : s->direct_reloc_active_start;
+    if (append_direct_reloc_range(s, s->direct_reloc_active_start, end) != 0)
+        return -1;
+    s->direct_reloc_active = false;
+    return 0;
+}
+
+static uint32_t direct_reloc_range_reloc_count(const struct lr_session *s) {
+    uint32_t total = 0;
+    if (!s || !s->direct_reloc_ranges)
+        return 0;
+    for (uint32_t i = 0; i < s->direct_reloc_range_count; i++) {
+        const direct_reloc_range_t *rr = &s->direct_reloc_ranges[i];
+        if (rr->end > rr->start)
+            total += rr->end - rr->start;
+    }
+    return total;
+}
+
 static int init_direct_obj_ctx(struct lr_session *s) {
     if (s->direct_obj_ctx_active)
         return 0;
@@ -495,6 +561,22 @@ static int patch_direct_relocs(struct lr_session *s, uint32_t reloc_start,
     return -1;
 }
 
+/* Patch relocations in [range_start, range_end). */
+static int patch_direct_reloc_range(struct lr_session *s,
+                                    uint32_t range_start,
+                                    uint32_t range_end,
+                                    const char **missing_symbol) {
+    uint32_t saved_num;
+    int rc;
+    if (!s || range_end <= range_start)
+        return 0;
+    saved_num = s->direct_obj_ctx.num_relocs;
+    s->direct_obj_ctx.num_relocs = range_end;
+    rc = patch_direct_relocs(s, range_start, missing_symbol);
+    s->direct_obj_ctx.num_relocs = saved_num;
+    return rc;
+}
+
 static void try_patch_pending_direct_relocs(struct lr_session *s) {
     const char *missing_symbol = NULL;
     int patch_rc;
@@ -549,6 +631,9 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     /* Install obj_ctx so the backend emits relocatable code */
     s->module->obj_ctx = &s->direct_obj_ctx;
     s->direct_reloc_base = s->direct_obj_ctx.num_relocs;
+    s->direct_reloc_range_count = 0;
+    s->direct_reloc_active_start = s->direct_obj_ctx.num_relocs;
+    s->direct_reloc_active = true;
 
     memset(&meta, 0, sizeof(meta));
     meta.func = s->cur_func;
@@ -629,28 +714,13 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     }
 
     s->compile_active = true;
-    s->compile_resumed = false;
-    s->direct_reloc_suspend_end = 0;
-    s->direct_reloc_resume_base = 0;
     return 0;
-}
-
-/* Count the relocs belonging to the current function, accounting for any
-   gap caused by other functions compiled during a suspension. */
-static uint32_t count_func_relocs(const struct lr_session *s) {
-    uint32_t count;
-    if (!s->compile_resumed) {
-        return s->direct_obj_ctx.num_relocs - s->direct_reloc_base;
-    }
-    count = s->direct_reloc_suspend_end - s->direct_reloc_base;
-    count += s->direct_obj_ctx.num_relocs - s->direct_reloc_resume_base;
-    return count;
 }
 
 static int capture_blob(struct lr_session *s, const uint8_t *code,
                         size_t code_len) {
     lr_objfile_ctx_t *oc = &s->direct_obj_ctx;
-    uint32_t num_relocs = count_func_relocs(s);
+    uint32_t num_relocs = direct_reloc_range_reloc_count(s);
 
     if (ensure_blob_capacity(s, s->blob_count + 1u) != 0)
         return -1;
@@ -670,8 +740,7 @@ static int capture_blob(struct lr_session *s, const uint8_t *code,
 
     /* Convert obj relocs (index-based) to cached relocs (name-based).
        At this point reloc offsets are function-relative (not yet adjusted
-       to absolute), so they can be stored directly in the blob.
-       For resumed functions, iterate over two ranges to skip the gap. */
+       to absolute), so they can be stored directly in the blob. */
     if (num_relocs > 0) {
         lr_cached_reloc_t *cached = (lr_cached_reloc_t *)calloc(
             num_relocs, sizeof(*cached));
@@ -680,39 +749,20 @@ static int capture_blob(struct lr_session *s, const uint8_t *code,
             return -1;
         }
         uint32_t ci = 0;
-        uint32_t end1, start2, end2;
-        if (s->compile_resumed) {
-            end1 = s->direct_reloc_suspend_end;
-            start2 = s->direct_reloc_resume_base;
-            end2 = oc->num_relocs;
-        } else {
-            end1 = oc->num_relocs;
-            start2 = end1;
-            end2 = end1;
-        }
-        for (uint32_t ri = s->direct_reloc_base; ri < end1; ri++) {
-            const lr_obj_reloc_t *rel = &oc->relocs[ri];
-            if (rel->symbol_idx >= oc->num_symbols) {
-                free(cached);
-                free(code_copy);
-                return -1;
+        for (uint32_t rgi = 0; rgi < s->direct_reloc_range_count; rgi++) {
+            const direct_reloc_range_t *rr = &s->direct_reloc_ranges[rgi];
+            for (uint32_t ri = rr->start; ri < rr->end; ri++) {
+                const lr_obj_reloc_t *rel = &oc->relocs[ri];
+                if (rel->symbol_idx >= oc->num_symbols) {
+                    free(cached);
+                    free(code_copy);
+                    return -1;
+                }
+                cached[ci].offset = rel->offset;
+                cached[ci].type = rel->type;
+                cached[ci].symbol_name = oc->symbols[rel->symbol_idx].name;
+                ci++;
             }
-            cached[ci].offset = rel->offset;
-            cached[ci].type = rel->type;
-            cached[ci].symbol_name = oc->symbols[rel->symbol_idx].name;
-            ci++;
-        }
-        for (uint32_t ri = start2; ri < end2; ri++) {
-            const lr_obj_reloc_t *rel = &oc->relocs[ri];
-            if (rel->symbol_idx >= oc->num_symbols) {
-                free(cached);
-                free(code_copy);
-                return -1;
-            }
-            cached[ci].offset = rel->offset;
-            cached[ci].type = rel->type;
-            cached[ci].symbol_name = oc->symbols[rel->symbol_idx].name;
-            ci++;
         }
         blob->relocs = cached;
         blob->num_relocs = num_relocs;
@@ -767,6 +817,13 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
             lr_jit_end_update(s->jit);
         return -1;
     }
+    if (close_active_direct_reloc_range(s) != 0) {
+        err_set(err, S_ERR_BACKEND, "relocation range tracking failed");
+        s->module->obj_ctx = NULL;
+        if (should_close_update && s->jit->update_active)
+            lr_jit_end_update(s->jit);
+        return -1;
+    }
 
     /* Assign final JIT offset now that compile_end has produced the code
        in the per-function temp buffer. */
@@ -804,54 +861,44 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     }
 
     /* Adjust reloc offsets from function-relative to absolute within the
-       JIT code buffer, matching the pattern in jit.c:compile_one_function.
-       For resumed functions, skip relocs belonging to other functions that
-       were compiled during the suspension gap. */
-    if (s->compile_resumed) {
-        for (uint32_t ri = s->direct_reloc_base; ri < s->direct_reloc_suspend_end; ri++)
-            s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
-        for (uint32_t ri = s->direct_reloc_resume_base; ri < s->direct_obj_ctx.num_relocs; ri++)
-            s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
-    } else {
-        for (uint32_t ri = s->direct_reloc_base; ri < s->direct_obj_ctx.num_relocs; ri++)
+       JIT code buffer, but only for relocation ranges owned by this function. */
+    for (uint32_t rgi = 0; rgi < s->direct_reloc_range_count; rgi++) {
+        const direct_reloc_range_t *rr = &s->direct_reloc_ranges[rgi];
+        for (uint32_t ri = rr->start; ri < rr->end; ri++)
             s->direct_obj_ctx.relocs[ri].offset += (uint32_t)s->compile_start;
     }
 
-    /* Apply JIT relocations on the live code copy for immediate execution.
-       For resumed functions, only patch the function's own reloc ranges
-       (before suspension and after resume), skipping relocs from other
-       functions compiled during the suspension gap. */
+    /* Apply JIT relocations on the live code copy for immediate execution,
+       restricted to the current function's relocation ranges. */
     s->jit->code_size = s->compile_start + code_len;
     if (s->jit->update_active && code_len > 0)
         s->jit->update_dirty = true;
     {
+        int patch_rc = 0;
         const char *missing_symbol = NULL;
-        int patch_rc;
-        if (s->compile_resumed) {
-            uint32_t saved_num = s->direct_obj_ctx.num_relocs;
-            /* Patch pre-suspension relocs */
-            patch_rc = 0;
-            if (s->direct_reloc_base < s->direct_reloc_suspend_end) {
-                s->direct_obj_ctx.num_relocs = s->direct_reloc_suspend_end;
-                patch_rc = patch_direct_relocs(s, s->direct_reloc_base,
-                                               &missing_symbol);
-                s->direct_obj_ctx.num_relocs = saved_num;
+        for (uint32_t rgi = 0; rgi < s->direct_reloc_range_count; rgi++) {
+            const direct_reloc_range_t *rr = &s->direct_reloc_ranges[rgi];
+            const char *range_missing = NULL;
+            int rc2 = patch_direct_reloc_range(s, rr->start, rr->end,
+                                               &range_missing);
+            if (rc2 < 0) {
+                patch_rc = rc2;
+                break;
             }
-            /* Patch post-resume relocs */
-            if (patch_rc >= 0 && s->direct_reloc_resume_base < saved_num) {
-                const char *missing2 = NULL;
-                int rc2 = patch_direct_relocs(s, s->direct_reloc_resume_base,
-                                              &missing2);
-                if (rc2 < 0)
+            if (rc2 > 0) {
+                if (patch_rc == 0) {
                     patch_rc = rc2;
-                else if (rc2 > 0 && patch_rc == 0) {
-                    patch_rc = rc2;
-                    missing_symbol = missing2;
+                    missing_symbol = range_missing;
                 }
+                /* In DIRECT mode, unresolved relocations are deferred until
+                   lookup/execution time so forward references and late-bound
+                   externals do not fail function emission. */
+                if (!s->direct_pending_relocs ||
+                    rr->start < s->direct_pending_reloc_start) {
+                    s->direct_pending_reloc_start = rr->start;
+                }
+                s->direct_pending_relocs = true;
             }
-        } else {
-            patch_rc = patch_direct_relocs(s, s->direct_reloc_base,
-                                           &missing_symbol);
         }
         if (patch_rc < 0) {
             err_set(err, S_ERR_BACKEND, "direct relocation patching failed");
@@ -860,17 +907,7 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
                 lr_jit_end_update(s->jit);
             return -1;
         }
-        if (patch_rc > 0) {
-            /* In DIRECT mode, unresolved relocations are deferred until
-               lookup/execution time so forward references and late-bound
-               externals do not fail function emission. */
-            if (!s->direct_pending_relocs ||
-                s->direct_reloc_base < s->direct_pending_reloc_start) {
-                s->direct_pending_reloc_start = s->direct_reloc_base;
-            }
-            s->direct_pending_relocs = true;
-            (void)missing_symbol;
-        }
+        (void)missing_symbol;
     }
 
     lr_jit_add_symbol(s->jit, s->cur_func->name,
@@ -1053,9 +1090,8 @@ static void finish_function_state(struct lr_session *s) {
     s->direct_llvm_stream = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
-    s->compile_resumed = false;
-    s->direct_reloc_suspend_end = 0;
-    s->direct_reloc_resume_base = 0;
+    s->direct_reloc_range_count = 0;
+    s->direct_reloc_active = false;
 }
 
 /* ---- Suspend / resume for interleaved function generation -------------- */
@@ -1083,6 +1119,8 @@ int lr_session_suspend_func(struct lr_session *s) {
         return -1;
     if (ensure_suspended_capacity(s, s->suspended_count + 1u) != 0)
         return -1;
+    if (close_active_direct_reloc_range(s) != 0)
+        return -1;
 
     slot = &s->suspended[s->suspended_count];
     memset(slot, 0, sizeof(*slot));
@@ -1098,8 +1136,9 @@ int lr_session_suspend_func(struct lr_session *s) {
     slot->phi_copy_cap = s->phi_copy_cap;
     slot->compile_ctx = s->compile_ctx;
     slot->direct_reloc_base = s->direct_reloc_base;
-    slot->direct_reloc_count_at_suspend = s->direct_obj_ctx_active ?
-        s->direct_obj_ctx.num_relocs : 0;
+    slot->direct_reloc_ranges = s->direct_reloc_ranges;
+    slot->direct_reloc_range_count = s->direct_reloc_range_count;
+    slot->direct_reloc_range_cap = s->direct_reloc_range_cap;
     slot->compile_active = s->compile_active;
     slot->compile_opened_update = s->compile_opened_update;
     slot->emitted_count = s->emitted_count;
@@ -1133,6 +1172,10 @@ int lr_session_suspend_func(struct lr_session *s) {
     s->compile_active = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
+    s->direct_reloc_ranges = NULL;
+    s->direct_reloc_range_count = 0;
+    s->direct_reloc_range_cap = 0;
+    s->direct_reloc_active = false;
     if (s->module)
         s->module->obj_ctx = NULL;
 
@@ -1154,6 +1197,7 @@ int lr_session_resume_func(struct lr_session *s, uint32_t suspended_idx) {
     free(s->block_seen);
     free(s->block_terminated);
     free(s->phi_copies);
+    free(s->direct_reloc_ranges);
 
     /* Restore all compile state from the suspended slot */
     s->cur_func = slot->func;
@@ -1168,16 +1212,15 @@ int lr_session_resume_func(struct lr_session *s, uint32_t suspended_idx) {
     s->phi_copy_cap = slot->phi_copy_cap;
     s->compile_ctx = slot->compile_ctx;
     s->direct_reloc_base = slot->direct_reloc_base;
+    s->direct_reloc_ranges = slot->direct_reloc_ranges;
+    s->direct_reloc_range_count = slot->direct_reloc_range_count;
+    s->direct_reloc_range_cap = slot->direct_reloc_range_cap;
     s->compile_active = slot->compile_active;
     s->compile_opened_update = slot->compile_opened_update;
     s->emitted_count = slot->emitted_count;
-
-    /* Track reloc gap: relocs in [suspend_end, current_num_relocs) belong
-       to other functions compiled between suspend and resume. */
-    s->compile_resumed = true;
-    s->direct_reloc_suspend_end = slot->direct_reloc_count_at_suspend;
-    s->direct_reloc_resume_base = s->direct_obj_ctx_active ?
-        s->direct_obj_ctx.num_relocs : 0;
+    s->direct_reloc_active_start = s->direct_obj_ctx_active ?
+        s->direct_obj_ctx.num_relocs : s->direct_reloc_base;
+    s->direct_reloc_active = true;
 
     /* Restore the per-function temp buffer */
     free(s->func_compile_buf);
@@ -1228,6 +1271,7 @@ static void free_suspended_list(struct lr_session *s) {
         free(s->suspended[i].block_seen);
         free(s->suspended[i].block_terminated);
         free(s->suspended[i].phi_copies);
+        free(s->suspended[i].direct_reloc_ranges);
         free(s->suspended[i].func_buf);
     }
     free(s->suspended);
@@ -1458,6 +1502,7 @@ void lr_session_destroy(struct lr_session *s) {
         free((void *)s->blobs[i].relocs);
     }
     free(s->blobs);
+    free(s->direct_reloc_ranges);
     if (s->direct_obj_ctx_active)
         lr_objfile_ctx_destroy(&s->direct_obj_ctx);
     free_suspended_list(s);
