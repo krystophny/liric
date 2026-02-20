@@ -51,7 +51,7 @@ ctest --test-dir build --output-on-failure
                               -> MIR   templates to LLVM
                               -> x86   -> x86   ORC JIT
                                 |        |        |
-                              ~67-76x  ~67-76x  optional
+                              ~31-33x  ~31-33x  optional
                               LL speed LL speed baseline
                               (latest) (latest) mode
 
@@ -61,10 +61,10 @@ ctest --test-dir build --output-on-failure
 
   STANDALONE LANES (no lfortran involved)
 
-  LL corpus    compat-derived corpus (latest: 31 .ll files)
-               ll_jit:  liric compile median    ~0.031-0.033ms
-               ll_llvm: lli compile median      ~2.20-2.30ms
-               Speedup: ~67-76x (isel/copy_patch)
+  LL corpus    compat-derived corpus (latest: 33 .ll files)
+               ll_jit:  liric compile median    ~0.074-0.077ms
+               ll_llvm: lli compile median      ~2.35-2.56ms
+               Speedup: ~31-33x (isel/copy_patch)
 
   Micro C      same corpus, lfortran --show-c output, liric vs TCC
                optional lane (requires `bench_tcc` / libtcc)
@@ -157,16 +157,16 @@ Matrix summary: `status=OK`, `cells_attempted=24`, `cells_ok=24`, `cells_failed=
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 22/31 (9 skipped) | **0.97x** | **0.97x** |
-| isel | ir | 25/31 (6 skipped) | **0.55x** | **0.55x** |
-| copy_patch | direct | 22/31 (9 skipped) | **0.55x** | **0.55x** |
-| copy_patch | ir | 25/31 (6 skipped) | **0.55x** | **0.55x** |
+| isel | direct | 29/33 (4 skipped) | **0.97x** | **0.97x** |
+| isel | ir | 33/33 (0 skipped) | **0.54x** | **0.54x** |
+| copy_patch | direct | 29/33 (4 skipped) | **0.54x** | **0.54x** |
+| copy_patch | ir | 33/33 (0 skipped) | **0.54x** | **0.54x** |
 
-### LL Corpus (compile-only, compat corpus: 30/31 completed)
+### LL Corpus (compile-only, compat corpus: 33/33 completed)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 2.303 | 0.031 | **76x** |
-| isel | ir | 2.228 | 0.031 | **72x** |
-| copy_patch | direct | 2.218 | 0.033 | **67x** |
-| copy_patch | ir | 2.197 | 0.031 | **71x** |
+| isel | direct | 2.555 | 0.077 | **33x** |
+| isel | ir | 2.351 | 0.076 | **31x** |
+| copy_patch | direct | 2.358 | 0.076 | **31x** |
+| copy_patch | ir | 2.347 | 0.074 | **32x** |
