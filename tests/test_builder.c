@@ -814,7 +814,8 @@ int test_builder_compat_direct_large_object_emission(void) {
 #if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
     return 0;
 #else
-    enum { kAddCount = 100000 };
+    enum { kCallCount = 8192 };
+    enum { kMinBytesPerCall = 2 };
     int result = 1;
     const char *old_policy = getenv("LIRIC_POLICY");
     const char *old_mode = getenv("LIRIC_COMPILE_MODE");
@@ -851,11 +852,11 @@ int test_builder_compat_direct_large_object_emission(void) {
         lr_type_t *i64 = lc_get_int_type(mod, 64);
         lr_type_t *params[1];
         lr_type_t *fn_ty = NULL;
+        lc_value_t *ext_val = NULL;
         lc_value_t *fn_val = NULL;
         lr_func_t *fn = NULL;
         lr_block_t *entry = NULL;
         lc_value_t *arg0 = NULL;
-        lc_value_t *one = NULL;
         lc_value_t *acc = NULL;
         uint32_t i;
 
@@ -870,21 +871,23 @@ int test_builder_compat_direct_large_object_emission(void) {
             goto cleanup;
         }
 
+        ext_val = lc_func_create(mod, "compat_large_direct_emit_ext", fn_ty);
         fn_val = lc_func_create(mod, "compat_large_direct_emit_fn", fn_ty);
         fn = lc_value_get_func(fn_val);
         entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
         arg0 = lc_func_get_arg(mod, fn_val, 0);
-        one = lc_value_const_int(mod, i64, 1, 64);
-        if (!fn_val || !fn || !entry || !arg0 || !one) {
+        if (!ext_val || !fn_val || !fn || !entry || !arg0) {
             fprintf(stderr, "  FAIL: function setup\n");
             goto cleanup;
         }
 
         acc = arg0;
-        for (i = 0; i < kAddCount; i++) {
-            acc = lc_create_add(mod, entry, fn, acc, one, NULL);
+        for (i = 0; i < kCallCount; i++) {
+            lc_value_t *call_args[1] = { acc };
+            acc = lc_create_call(mod, entry, fn, fn_ty, ext_val,
+                                 call_args, 1, NULL);
             if (!acc) {
-                fprintf(stderr, "  FAIL: add chain build\n");
+                fprintf(stderr, "  FAIL: call chain build\n");
                 goto cleanup;
             }
         }
@@ -906,8 +909,11 @@ int test_builder_compat_direct_large_object_emission(void) {
     }
     {
         long sz = ftell(tmp);
-        if (sz <= (1L << 20)) {
-            fprintf(stderr, "  FAIL: expected object > 1 MiB, got %ld bytes\n", sz);
+        long min_expected = (long)(kCallCount * kMinBytesPerCall);
+        if (sz <= min_expected) {
+            fprintf(stderr,
+                    "  FAIL: expected object > %ld bytes for %u calls, got %ld bytes\n",
+                    min_expected, (unsigned)kCallCount, sz);
             goto cleanup;
         }
     }

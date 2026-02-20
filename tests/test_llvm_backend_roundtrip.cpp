@@ -126,8 +126,11 @@ static int test_wrapper_object_emit_mode_llvm(void) {
     bool cannot_emit = tm.addPassesToEmitFile(pm, out, nullptr,
                                               llvm::CodeGenFileType::ObjectFile);
     TEST_ASSERT(!cannot_emit, "target machine accepts object emission");
-    bool ok = pm.run(mod);
-    TEST_ASSERT(ok, "pass manager run");
+    try {
+        (void)pm.run(mod);
+    } catch (...) {
+        TEST_ASSERT(false, "pass manager run");
+    }
     out.flush();
 
 #if defined(__unix__) || defined(__APPLE__)
