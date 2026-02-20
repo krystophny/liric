@@ -85,6 +85,11 @@ void lr_session_destroy(lr_session_t *s);
 void lr_session_add_symbol(lr_session_t *s, const char *name, void *addr);
 void *lr_session_lookup(lr_session_t *s, const char *name);
 
+/* ---- Libraries --------------------------------------------------------- */
+
+int lr_session_load_library(lr_session_t *s, const char *path,
+                            lr_error_t *err);
+
 /* ---- Types (session-scoped singletons) --------------------------------- */
 
 lr_type_t *lr_type_void_s(lr_session_t *s);

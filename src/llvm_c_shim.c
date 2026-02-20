@@ -54,6 +54,13 @@ void LLVMLiricSessionAddSymbol(LLVMLiricSessionStateRef state,
     lr_jit_add_symbol(state->jit, name, addr);
 }
 
+int LLVMLiricSessionLoadLibrary(LLVMLiricSessionStateRef state,
+                                const char *path) {
+    if (!state || !state->jit || !path || !path[0])
+        return -1;
+    return lr_jit_load_library(state->jit, path);
+}
+
 void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
     if (!state || !state->jit || !name || !name[0])
         return NULL;

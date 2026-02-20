@@ -69,3 +69,18 @@ int test_llvm_c_shim_add_and_lookup(void) {
     lc_context_destroy(ctx);
     return 0;
 }
+
+int test_llvm_c_shim_load_library_rejects_null(void) {
+    LLVMLiricSessionStateRef state = LLVMLiricSessionCreate();
+    TEST_ASSERT(state != NULL, "shim state create");
+
+    TEST_ASSERT(LLVMLiricSessionLoadLibrary(NULL, "/tmp/no.so") == -1,
+                "null state rejected");
+    TEST_ASSERT(LLVMLiricSessionLoadLibrary(state, NULL) == -1,
+                "null path rejected");
+    TEST_ASSERT(LLVMLiricSessionLoadLibrary(state, "") == -1,
+                "empty path rejected");
+
+    LLVMLiricSessionDispose(state);
+    return 0;
+}
