@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>
 
 namespace llvm {
 
@@ -608,20 +609,30 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
 inline bool legacy::PassManager::run(Module &M) {
     if (!detail::obj_emit_state.out)
         return false;
-    if (detail::obj_emit_state.file_type != CodeGenFileType::ObjectFile)
+    if (detail::obj_emit_state.file_type != CodeGenFileType::ObjectFile) {
+        detail::obj_emit_state.out = nullptr;
         return false;
+    }
 
     lc_module_compat_t *compat = M.getCompat();
-    if (!compat)
+    if (!compat) {
+        detail::obj_emit_state.out = nullptr;
         return false;
+    }
 
     FILE *f = detail::obj_emit_state.out->getFileOrNull();
-    if (!f)
+    if (!f) {
+        detail::obj_emit_state.out = nullptr;
         return false;
+    }
 
     int rc = lc_module_emit_object_to_file(compat, f);
     detail::obj_emit_state.out = nullptr;
-    return rc == 0;
+    if (rc != 0) {
+        throw std::runtime_error(
+            "liric llvm-compat object emission failed");
+    }
+    return false;
 }
 
 } // namespace llvm
