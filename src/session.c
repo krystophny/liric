@@ -79,11 +79,6 @@ typedef struct session_phi_copy_entry {
     lr_phi_copy_desc_t copy;
 } session_phi_copy_entry_t;
 
-/* Per-function temp buffer capacity for direct mode compilation.
-   Each function compiles into its own malloc'd buffer to prevent
-   buffer overlap when lfortran interleaves function generation. */
-#define FUNC_COMPILE_BUF_CAP (1u << 20)
-
 /* Saved state for a suspended direct-mode function compilation.
    When the compat layer switches from function A to function B mid-build,
    A's compile state is saved here so it can be resumed later. */
@@ -159,6 +154,14 @@ struct lr_session {
     uint32_t blob_cap;
     bool ir_module_jit_ready;
 };
+
+/* Derive the direct per-function compile buffer capacity from remaining JIT
+   code space, so we do not rely on fixed compile-time buffer limits. */
+static size_t direct_compile_buf_capacity(const struct lr_session *s) {
+    if (!s || !s->jit || s->jit->code_cap <= s->jit->code_size)
+        return 0;
+    return s->jit->code_cap - s->jit->code_size;
+}
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
                         session_error_t *err);
@@ -558,18 +561,28 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     meta.mode = s->jit->mode;
     meta.jit = s->jit;
 
-    /* Allocate a per-function temp buffer so interleaved function
-       generation does not corrupt the JIT code buffer. The backend
-       writes into this temp buffer; finish_direct_compile copies
-       the result to the final JIT location. */
-    if (!s->func_compile_buf) {
-        s->func_compile_buf = (uint8_t *)malloc(FUNC_COMPILE_BUF_CAP);
-        if (!s->func_compile_buf) {
-            err_set(err, S_ERR_BACKEND, "function compile buffer alloc failed");
+    /* Allocate (or grow) the per-function temp buffer from available JIT
+       code capacity so large functions do not hit fixed-size temp limits. */
+    {
+        size_t desired_cap = direct_compile_buf_capacity(s);
+        uint8_t *new_buf;
+        if (desired_cap == 0) {
+            err_set(err, S_ERR_BACKEND, "no available JIT code capacity");
             s->module->obj_ctx = NULL;
             return -1;
         }
-        s->func_compile_buf_cap = FUNC_COMPILE_BUF_CAP;
+        if (s->func_compile_buf && s->func_compile_buf_cap >= desired_cap) {
+            /* Reuse existing allocation when already large enough. */
+        } else {
+            new_buf = (uint8_t *)realloc(s->func_compile_buf, desired_cap);
+            if (!new_buf) {
+                err_set(err, S_ERR_BACKEND, "function compile buffer alloc failed");
+                s->module->obj_ctx = NULL;
+                return -1;
+            }
+            s->func_compile_buf = new_buf;
+            s->func_compile_buf_cap = desired_cap;
+        }
     }
 
     /* Ensure the function symbol exists in the obj_ctx symbol table so the

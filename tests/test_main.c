@@ -254,6 +254,7 @@ int test_builder_compat_jit_exec(void);
 int test_builder_compat_jit_exec_with_call(void);
 int test_builder_compat_load_library_null_rejects(void);
 int test_builder_compat_emit_executable_llvm_mode_contract(void);
+int test_builder_compat_direct_large_object_emission(void);
 int test_llvm_c_shim_add_and_lookup(void);
 int test_llvm_c_shim_load_library_rejects_null(void);
 #if !defined(__APPLE__)
@@ -575,6 +576,7 @@ int main(void) {
     RUN_TEST(test_builder_compat_jit_exec_with_call);
     RUN_TEST(test_builder_compat_load_library_null_rejects);
     RUN_TEST(test_builder_compat_emit_executable_llvm_mode_contract);
+    RUN_TEST(test_builder_compat_direct_large_object_emission);
     RUN_TEST(test_llvm_c_shim_add_and_lookup);
     RUN_TEST(test_llvm_c_shim_load_library_rejects_null);
 

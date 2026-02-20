@@ -658,3 +658,130 @@ cleanup:
         lc_context_destroy(ctx);
     return result;
 }
+
+int test_builder_compat_direct_large_object_emission(void) {
+#if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
+    return 0;
+#else
+    enum { kAddCount = 100000 };
+    int result = 1;
+    const char *old_policy = getenv("LIRIC_POLICY");
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    char *old_policy_copy = old_policy ? strdup(old_policy) : NULL;
+    char *old_mode_copy = old_mode ? strdup(old_mode) : NULL;
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    FILE *tmp = NULL;
+
+    if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
+        goto cleanup;
+    }
+    if (setenv("LIRIC_COMPILE_MODE", "isel", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_COMPILE_MODE=isel\n");
+        goto cleanup;
+    }
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
+
+    mod = lc_module_create(ctx, "compat_large_direct_emit");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+
+    {
+        lr_module_t *ir = lc_module_get_ir(mod);
+        lr_type_t *i64 = lc_get_int_type(mod, 64);
+        lr_type_t *params[1];
+        lr_type_t *fn_ty = NULL;
+        lc_value_t *fn_val = NULL;
+        lr_func_t *fn = NULL;
+        lr_block_t *entry = NULL;
+        lc_value_t *arg0 = NULL;
+        lc_value_t *one = NULL;
+        lc_value_t *acc = NULL;
+        uint32_t i;
+
+        if (!ir || !i64) {
+            fprintf(stderr, "  FAIL: missing i64 type\n");
+            goto cleanup;
+        }
+        params[0] = i64;
+        fn_ty = lr_type_func_new(ir, i64, params, 1, false);
+        if (!fn_ty) {
+            fprintf(stderr, "  FAIL: function type\n");
+            goto cleanup;
+        }
+
+        fn_val = lc_func_create(mod, "compat_large_direct_emit_fn", fn_ty);
+        fn = lc_value_get_func(fn_val);
+        entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
+        arg0 = lc_func_get_arg(mod, fn_val, 0);
+        one = lc_value_const_int(mod, i64, 1, 64);
+        if (!fn_val || !fn || !entry || !arg0 || !one) {
+            fprintf(stderr, "  FAIL: function setup\n");
+            goto cleanup;
+        }
+
+        acc = arg0;
+        for (i = 0; i < kAddCount; i++) {
+            acc = lc_create_add(mod, entry, fn, acc, one, NULL);
+            if (!acc) {
+                fprintf(stderr, "  FAIL: add chain build\n");
+                goto cleanup;
+            }
+        }
+        lc_create_ret(mod, entry, acc);
+    }
+
+    tmp = tmpfile();
+    if (!tmp) {
+        fprintf(stderr, "  FAIL: tmpfile create\n");
+        goto cleanup;
+    }
+    if (lc_module_emit_object_to_file(mod, tmp) != 0) {
+        fprintf(stderr, "  FAIL: lc_module_emit_object_to_file\n");
+        goto cleanup;
+    }
+    if (fseek(tmp, 0, SEEK_END) != 0) {
+        fprintf(stderr, "  FAIL: seek end\n");
+        goto cleanup;
+    }
+    {
+        long sz = ftell(tmp);
+        if (sz <= (1L << 20)) {
+            fprintf(stderr, "  FAIL: expected object > 1 MiB, got %ld bytes\n", sz);
+            goto cleanup;
+        }
+    }
+
+    result = 0;
+
+cleanup:
+    if (tmp)
+        fclose(tmp);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    if (old_policy_copy) {
+        setenv("LIRIC_POLICY", old_policy_copy, 1);
+        free(old_policy_copy);
+    } else {
+        unsetenv("LIRIC_POLICY");
+    }
+    if (old_mode_copy) {
+        setenv("LIRIC_COMPILE_MODE", old_mode_copy, 1);
+        free(old_mode_copy);
+    } else {
+        unsetenv("LIRIC_COMPILE_MODE");
+    }
+    return result;
+#endif
+}
