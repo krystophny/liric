@@ -504,7 +504,7 @@ add_custom_target(
         -DWITH_LLVM=yes
         -DUSE_DYNAMIC_ZSTD=yes
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM}
-        --target lfortran lfortran_runtime --parallel
+        --target lfortran lfortran_runtime build_runtime --parallel
     DEPENDS lfortran_prepare
     COMMENT "Configure/build LFortran baseline LLVM in ${LIRIC_LFORTRAN_BUILD_LLVM}"
     USES_TERMINAL
@@ -527,7 +527,7 @@ add_custom_target(
         -DWITH_RUNTIME_STACKTRACE=yes
         -DWITH_LLVM=OFF
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
-        --target lfortran lfortran_runtime --parallel
+        --target lfortran lfortran_runtime build_runtime --parallel
     DEPENDS lfortran_prepare liric_probe_runner
     COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
     USES_TERMINAL
