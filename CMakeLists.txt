@@ -460,7 +460,7 @@ if(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE)
         -DLLVM_DIR=${LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE})
 endif()
 
-set(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM no CACHE BOOL
+set(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM "${WITH_REAL_LLVM_BACKEND}" CACHE BOOL
     "Allow WITH_LIRIC LFortran build to link real LLVM libraries")
 
 set(LIRIC_LFORTRAN_LIRIC_COMPILER_ARGS "")
@@ -499,6 +499,7 @@ add_custom_target(
         ${LIRIC_LFORTRAN_LLVM_ARGS}
         -DBUILD_TESTING=OFF
         -DWITH_LLVM=yes
+        -DUSE_DYNAMIC_ZSTD=yes
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM}
         --target lfortran lfortran_runtime --parallel
     DEPENDS lfortran_prepare

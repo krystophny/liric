@@ -735,6 +735,11 @@ static int run_lfortran_rebuild_step(const cfg_t *cfg,
     if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
         char *e_lane = json_escape(lane_name);
         char *e_build = json_escape(build_dir);
+        fprintf(stderr, "[matrix] rebuild failed (rc=%d): %s\n", r.rc, build_dir);
+        if (r.stderr_text && r.stderr_text[0])
+            fprintf(stderr, "[matrix] rebuild stderr:\n%s\n", r.stderr_text);
+        if (r.stdout_text && r.stdout_text[0])
+            fprintf(stderr, "[matrix] rebuild stdout:\n%s\n", r.stdout_text);
         fprintf(fails,
                 "{\"lane\":\"%s\",\"mode\":\"all\",\"policy\":\"all\",\"baseline\":\"lfortran_llvm\","
                 "\"reason\":\"%s\",\"rc\":%d,\"summary\":\"%s\"}\n",
@@ -1735,11 +1740,15 @@ int main(int argc, char **argv) {
         }
 
         if (!cfg.lfortran || !cfg.lfortran[0] || !file_exists(cfg.lfortran)) {
+            fprintf(stderr, "[matrix] lfortran binary missing: %s\n",
+                    cfg.lfortran ? cfg.lfortran : "(null)");
             write_failure_row(fails, api_lane, "all", "all", "lfortran_llvm", "lfortran_binary_missing", 127,
                               cfg.lfortran ? cfg.lfortran : "");
             compat_ok = 0;
         }
         if (!cfg.lfortran_liric || !cfg.lfortran_liric[0] || !file_exists(cfg.lfortran_liric)) {
+            fprintf(stderr, "[matrix] lfortran_liric binary missing: %s\n",
+                    cfg.lfortran_liric ? cfg.lfortran_liric : "(null)");
             write_failure_row(fails, api_lane, "all", "all", "lfortran_llvm", "lfortran_liric_binary_missing", 127,
                               cfg.lfortran_liric ? cfg.lfortran_liric : "");
             compat_ok = 0;
@@ -1756,6 +1765,8 @@ int main(int argc, char **argv) {
                 write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
                 ran_compat = 1;
             } else if (!file_executable(cfg.bench_compat_check)) {
+                fprintf(stderr, "[matrix] bench_compat_check not executable: %s\n",
+                        cfg.bench_compat_check ? cfg.bench_compat_check : "(null)");
                 compat_ok = 0;
                 write_failure_row(fails,
                                   api_lane,
@@ -1789,6 +1800,9 @@ int main(int argc, char **argv) {
 
                 printf("[matrix] compat_check\n");
                 if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
+                    fprintf(stderr, "[matrix] compat_check failed (rc=%d)\n", r.rc);
+                    if (r.stderr_text && r.stderr_text[0])
+                        fprintf(stderr, "[matrix] compat_check stderr:\n%s\n", r.stderr_text);
                     compat_ok = 0;
                     write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
                     write_failure_row(fails,

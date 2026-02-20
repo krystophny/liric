@@ -28,8 +28,8 @@ jobs:
     timeout-minutes: 360
     env:
       LIRIC_BUILD: ${{ github.workspace }}/build
-      LFORTRAN_REPO: https://github.com/lfortran/lfortran.git
-      LFORTRAN_REF: origin/main
+      LFORTRAN_REPO: https://github.com/krystophny/lfortran.git
+      LFORTRAN_REF: origin/liric-aot
 
     steps:
       - name: Checkout liric
