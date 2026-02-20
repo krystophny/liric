@@ -55,27 +55,36 @@ static size_t append_uleb128(uint8_t *buf, size_t cap, uint64_t value) {
 
 lr_reloc_mapped_t macho_reloc_arm64(uint8_t liric_type) {
     lr_reloc_mapped_t m = {0};
-    m.native_type = liric_type;
     switch (liric_type) {
+    case LR_RELOC_ARM64_ABS64:
+        m.native_type = 0; /* ARM64_RELOC_UNSIGNED */
+        m.is_pcrel = false;
+        break;
     case LR_RELOC_ARM64_BRANCH26:
     case LR_RELOC_ARM64_PAGE21:
     case LR_RELOC_ARM64_GOT_LOAD_PAGE21:
+        m.native_type = liric_type;
         m.is_pcrel = true;
         break;
     default:
+        m.native_type = liric_type;
         m.is_pcrel = false;
         break;
     }
     return m;
 }
 
+/* Compute r_length for a Mach-O relocation from the native type. */
+static uint32_t macho_reloc_length(uint8_t liric_type) {
+    if (liric_type == LR_RELOC_ARM64_ABS64)
+        return 3; /* 8-byte */
+    return 2; /* 4-byte (default for code relocs) */
+}
+
 int write_macho(FILE *out, const uint8_t *code, size_t code_size,
                 const uint8_t *data, size_t data_size,
                 const lr_objfile_ctx_t *oc,
                 uint32_t cpu_type, lr_reloc_mapper_fn reloc_mapper) {
-    if (oc->num_data_relocs > 0)
-        return -1;
-
     uint32_t n_defined = 0;
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
         if (oc->symbols[i].is_defined)
@@ -149,10 +158,13 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
     size_t data_pad = data_file_off - (text_file_off + text_size);
     size_t data_vmaddr = has_data ? obj_align_up(text_size, data_align) : 0;
 
-    size_t reloc_off = data_file_off + (has_data ? data_size : 0);
-    size_t reloc_size = oc->num_relocs * 8;
+    size_t text_reloc_off = data_file_off + (has_data ? data_size : 0);
+    size_t text_reloc_size = oc->num_relocs * 8;
 
-    size_t symtab_off = reloc_off + reloc_size;
+    size_t data_reloc_off = text_reloc_off + text_reloc_size;
+    size_t data_reloc_size = oc->num_data_relocs * 8;
+
+    size_t symtab_off = data_reloc_off + data_reloc_size;
     size_t symtab_entries_size = oc->num_symbols * 16;
 
     size_t strtab_off = symtab_off + symtab_entries_size;
@@ -206,7 +218,7 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
         w64(&p, text_size);
         w32(&p, (uint32_t)text_file_off);
         w32(&p, 2);
-        w32(&p, (uint32_t)reloc_off);
+        w32(&p, (uint32_t)text_reloc_off);
         w32(&p, oc->num_relocs);
         w32(&p, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS
                | S_ATTR_SOME_INSTRUCTIONS);
@@ -227,8 +239,9 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
         w64(&p, data_size);
         w32(&p, (uint32_t)data_file_off);
         w32(&p, 3);
-        w32(&p, 0);
-        w32(&p, 0);
+        w32(&p, oc->num_data_relocs > 0
+                ? (uint32_t)data_reloc_off : 0);
+        w32(&p, oc->num_data_relocs);
         w32(&p, S_REGULAR);
         w32(&p, 0);
         w32(&p, 0);
@@ -258,19 +271,42 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
     if (has_data && data)
         memcpy(buf + data_file_off, data, data_size);
 
-    /* Relocation entries (Mach-O relocation_info: 8 bytes) */
+    /* Text relocation entries (Mach-O relocation_info: 8 bytes) */
     {
-        uint8_t *rp = buf + reloc_off;
+        uint8_t *rp = buf + text_reloc_off;
         for (uint32_t i = 0; i < oc->num_relocs; i++) {
             const lr_obj_reloc_t *r = &oc->relocs[i];
             uint32_t r_address = r->offset;
             uint32_t mapped_sym = sym_remap[r->symbol_idx];
 
             lr_reloc_mapped_t mapped = reloc_mapper(r->type);
+            uint32_t r_length = macho_reloc_length(r->type);
 
             uint32_t packed = (mapped_sym & 0x00FFFFFFu)
                             | ((mapped.is_pcrel ? 1u : 0u) << 24)
-                            | (2u << 25)
+                            | (r_length << 25)
+                            | (1u << 27)
+                            | ((mapped.native_type & 0xFu) << 28);
+
+            w32(&rp, r_address);
+            w32(&rp, packed);
+        }
+    }
+
+    /* Data relocation entries */
+    {
+        uint8_t *rp = buf + data_reloc_off;
+        for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
+            const lr_obj_reloc_t *r = &oc->data_relocs[i];
+            uint32_t r_address = r->offset;
+            uint32_t mapped_sym = sym_remap[r->symbol_idx];
+
+            lr_reloc_mapped_t mapped = reloc_mapper(r->type);
+            uint32_t r_length = macho_reloc_length(r->type);
+
+            uint32_t packed = (mapped_sym & 0x00FFFFFFu)
+                            | ((mapped.is_pcrel ? 1u : 0u) << 24)
+                            | (r_length << 25)
                             | (1u << 27)
                             | ((mapped.native_type & 0xFu) << 28);
 
@@ -289,7 +325,7 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
             w32(&sp, str_offsets[orig_idx]);
 
             if (sym->is_defined) {
-                w8(&sp, N_SECT | N_EXT);
+                w8(&sp, sym->is_local ? N_SECT : (N_SECT | N_EXT));
                 w8(&sp, sym->section);
             } else {
                 w8(&sp, N_EXT);
