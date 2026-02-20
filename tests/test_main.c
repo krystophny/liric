@@ -250,8 +250,12 @@ int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
 int test_builder_compat_direct_llvm_phi_incoming_sync(void);
 int test_builder_compat_emit_object_to_file(void);
 int test_builder_compat_emit_object_llvm_mode_contract(void);
+int test_builder_compat_jit_exec(void);
+int test_builder_compat_jit_exec_with_call(void);
+int test_builder_compat_load_library_null_rejects(void);
 int test_builder_compat_emit_executable_llvm_mode_contract(void);
 int test_llvm_c_shim_add_and_lookup(void);
+int test_llvm_c_shim_load_library_rejects_null(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
 int test_objfile_elf_symbols(void);
@@ -567,8 +571,12 @@ int main(void) {
     RUN_TEST(test_builder_compat_direct_llvm_phi_incoming_sync);
     RUN_TEST(test_builder_compat_emit_object_to_file);
     RUN_TEST(test_builder_compat_emit_object_llvm_mode_contract);
+    RUN_TEST(test_builder_compat_jit_exec);
+    RUN_TEST(test_builder_compat_jit_exec_with_call);
+    RUN_TEST(test_builder_compat_load_library_null_rejects);
     RUN_TEST(test_builder_compat_emit_executable_llvm_mode_contract);
     RUN_TEST(test_llvm_c_shim_add_and_lookup);
+    RUN_TEST(test_llvm_c_shim_load_library_rejects_null);
 
     fprintf(stderr, "\nObject file tests:\n");
 #if !defined(__APPLE__)

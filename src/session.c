@@ -1465,6 +1465,21 @@ void lr_session_add_symbol(struct lr_session *s, const char *name, void *addr) {
     try_patch_pending_direct_relocs(s);
 }
 
+int lr_session_load_library(struct lr_session *s, const char *path,
+                            session_error_t *err) {
+    err_clear(err);
+    if (!s || !s->jit || !path || !path[0]) {
+        err_set(err, S_ERR_ARGUMENT, "invalid load_library arguments");
+        return -1;
+    }
+    if (lr_jit_load_library(s->jit, path) != 0) {
+        err_set(err, S_ERR_BACKEND, "failed to dlopen: %s", path);
+        return -1;
+    }
+    try_patch_pending_direct_relocs(s);
+    return 0;
+}
+
 void *lr_session_lookup(struct lr_session *s, const char *name) {
     void *addr;
     if (!s || !s->jit || !name || !name[0])

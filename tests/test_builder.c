@@ -533,6 +533,81 @@ cleanup:
     return result;
 }
 
+int test_builder_compat_jit_exec(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_jit_exec");
+    TEST_ASSERT(mod != NULL, "compat module create");
+
+    int rc = build_compat_ret_module(mod, "main", 42);
+    TEST_ASSERT_EQ(rc, 0, "build module");
+
+    int result = lc_module_jit_exec(mod, "main");
+    TEST_ASSERT_EQ(result, 42, "jit_exec returns 42");
+
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
+int test_builder_compat_jit_exec_with_call(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_jit_exec_call");
+    TEST_ASSERT(mod != NULL, "compat module create");
+
+    lr_module_t *ir = lc_module_get_ir(mod);
+    lr_type_t *i32 = lc_get_int_type(mod, 32);
+    TEST_ASSERT(ir != NULL && i32 != NULL, "types");
+
+    lr_type_t *fn_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+    lc_value_t *helper_val = lc_func_create(mod, "get_ten", fn_ty);
+    lr_func_t *helper = lc_value_get_func(helper_val);
+    lc_value_t *hbb = lc_block_create(mod, helper, "entry");
+    lc_value_t *c10 = lc_value_const_int(mod, i32, 10, 32);
+    lc_create_ret(mod, lc_value_get_block(hbb), c10);
+
+    lc_value_t *main_val = lc_func_create(mod, "main", fn_ty);
+    lr_func_t *main_fn = lc_value_get_func(main_val);
+    lc_value_t *mbb = lc_block_create(mod, main_fn, "entry");
+    lr_block_t *mblk = lc_value_get_block(mbb);
+
+    lc_value_t *call_res = lc_create_call(mod, mblk, main_fn, fn_ty,
+        helper_val, NULL, 0, "res");
+    TEST_ASSERT(call_res != NULL, "call result");
+
+    lc_value_t *c3 = lc_value_const_int(mod, i32, 3, 32);
+    lc_value_t *sum = lc_create_add(mod, mblk, main_fn, call_res, c3, "sum");
+    lc_create_ret(mod, mblk, sum);
+
+    int result = lc_module_jit_exec(mod, "main");
+    TEST_ASSERT_EQ(result, 13, "jit_exec with call returns 13");
+
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
+int test_builder_compat_load_library_null_rejects(void) {
+    lc_context_t *ctx = lc_context_create();
+    TEST_ASSERT(ctx != NULL, "context create");
+    lc_module_compat_t *mod = lc_module_create(ctx, "compat_load_lib");
+    TEST_ASSERT(mod != NULL, "compat module create");
+
+    TEST_ASSERT(lc_module_load_library(NULL, "/tmp/no.so") == -1,
+                "null mod rejected");
+    TEST_ASSERT(lc_module_load_library(mod, NULL) == -1,
+                "null path rejected");
+    TEST_ASSERT(lc_module_load_library(mod, "") == -1,
+                "empty path rejected");
+
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
 int test_builder_compat_emit_executable_llvm_mode_contract(void) {
     int rc = -1;
     int result = 1;

@@ -478,6 +478,16 @@ int lc_module_finalize_for_execution(lc_module_compat_t *mod);
 void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name);
 void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
                                    void *addr);
+int lc_module_load_library(lc_module_compat_t *mod, const char *path);
+
+/* ---- In-process JIT execution ---- */
+
+/* JIT-compile the module and execute the named function (typically "main")
+   via function pointer. Resolves runtime symbols from libraries loaded via
+   lc_module_load_library or LIRIC_RUNTIME_LIB.  Eliminates all disk I/O,
+   object emission, and system linker invocation.
+   Returns the integer result of the called function, or -1 on error. */
+int lc_module_jit_exec(lc_module_compat_t *mod, const char *entry_name);
 
 /* ---- Object file emission ---- */
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);
@@ -496,6 +506,8 @@ int LLVMLiricSessionAddCompatModule(LLVMLiricSessionStateRef state,
                                     lc_module_compat_t *mod);
 void LLVMLiricSessionAddSymbol(LLVMLiricSessionStateRef state,
                                const char *name, void *addr);
+int LLVMLiricSessionLoadLibrary(LLVMLiricSessionStateRef state,
+                                const char *path);
 void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name);
 const char *LLVMLiricHostTargetName(void);
 

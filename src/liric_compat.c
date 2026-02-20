@@ -3572,6 +3572,27 @@ void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
     lr_session_add_symbol(mod->session, name, addr);
 }
 
+int lc_module_load_library(lc_module_compat_t *mod, const char *path) {
+    lr_error_t err = {0};
+    if (!mod || !mod->session || !path || !path[0])
+        return -1;
+    return lr_session_load_library(mod->session, path, &err);
+}
+
+int lc_module_jit_exec(lc_module_compat_t *mod, const char *entry_name) {
+    void *addr;
+    typedef int (*entry_fn_t)(void);
+    entry_fn_t fn;
+
+    if (!mod || !entry_name || !entry_name[0])
+        return -1;
+    addr = lc_module_lookup_in_session(mod, entry_name);
+    if (!addr)
+        return -1;
+    memcpy(&fn, &addr, sizeof(addr));
+    return fn();
+}
+
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
     lr_error_t err = {0};
     if (!mod || !out) return -1;
