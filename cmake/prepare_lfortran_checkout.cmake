@@ -75,51 +75,6 @@ if(NOT reset_rc EQUAL 0)
     message(FATAL_ERROR "failed to reset lfortran checkout to ref: ${LFORTRAN_REF}")
 endif()
 
-file(GLOB _lfortran_compat_patches
-    "${CMAKE_CURRENT_LIST_DIR}/patches/*.patch")
-set(_lfortran_patches_applied 0)
-set(_lfortran_patches_skipped 0)
-foreach(_patch IN LISTS _lfortran_compat_patches)
-    get_filename_component(_patch_name "${_patch}" NAME)
-    execute_process(
-        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" apply --check "${_patch}"
-        RESULT_VARIABLE _patch_check_rc
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
-    if(_patch_check_rc EQUAL 0)
-        execute_process(
-            COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" apply "${_patch}"
-            RESULT_VARIABLE _patch_apply_rc
-        )
-        if(NOT _patch_apply_rc EQUAL 0)
-            message(FATAL_ERROR "failed to apply patch: ${_patch_name}")
-        endif()
-        message(STATUS "Applied patch: ${_patch_name}")
-        math(EXPR _lfortran_patches_applied "${_lfortran_patches_applied} + 1")
-    else()
-        execute_process(
-            COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}"
-                apply --reverse --check "${_patch}"
-            RESULT_VARIABLE _patch_reverse_rc
-            OUTPUT_QUIET
-            ERROR_QUIET
-        )
-        if(_patch_reverse_rc EQUAL 0)
-            message(STATUS "Patch already applied: ${_patch_name}")
-        else()
-            message(STATUS "Patch not applicable (skipped): ${_patch_name}")
-            math(EXPR _lfortran_patches_skipped
-                "${_lfortran_patches_skipped} + 1")
-        endif()
-    endif()
-endforeach()
-if(_lfortran_patches_applied EQUAL 0 AND _lfortran_patches_skipped GREATER 0)
-    message(WARNING
-        "No patches applied and ${_lfortran_patches_skipped} skipped; "
-        "patches may need regeneration for ${LFORTRAN_REF}")
-endif()
-
 set(_lfortran_version_file "${LFORTRAN_ROOT}/version")
 if(NOT EXISTS "${_lfortran_version_file}")
     execute_process(

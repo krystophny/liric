@@ -34,6 +34,15 @@ cmake --build build --target lfortran_api_compat
 This checks that LFortran can run its native test runners while using Liric's
 LLVM-compat API internally (not just `.ll` replay).
 
+### LFortran branch policy
+
+We always work on the `liric-aot` branch of the fork
+(`krystophny/lfortran`), never on upstream `lfortran/lfortran` main.
+All liric-specific changes (WITH_LIRIC CMake support, opaque pointer
+fixes, etc.) are committed and pushed directly to `liric-aot`.
+No patch files -- if something needs changing in LFortran for liric
+compatibility, edit the branch and push.
+
 ## Benchmarking (Canonical)
 
 Use only `bench_matrix`:
