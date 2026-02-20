@@ -9,3 +9,7 @@ dependencies:
   - c-compiler
   - cxx-compiler
   - zlib
+  - zstd
+  - libunwind
+  - re2c
+  - bison

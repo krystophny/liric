@@ -499,6 +499,7 @@ add_custom_target(
         ${LIRIC_LFORTRAN_LLVM_ARGS}
         -DBUILD_TESTING=OFF
         -DWITH_LLVM=yes
+        -DUSE_DYNAMIC_ZSTD=yes
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM}
         --target lfortran lfortran_runtime --parallel
     DEPENDS lfortran_prepare
