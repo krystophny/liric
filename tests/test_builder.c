@@ -162,6 +162,157 @@ int test_builder_compat_direct_sparse_block_ids_finalize(void) {
     return 0;
 }
 
+int test_builder_compat_direct_multi_suspend_reloc_ranges(void) {
+#if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
+    return 0;
+#else
+    int result = 1;
+    const char *old_policy = getenv("LIRIC_POLICY");
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    char *old_policy_copy = old_policy ? strdup(old_policy) : NULL;
+    char *old_mode_copy = old_mode ? strdup(old_mode) : NULL;
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    FILE *tmp = NULL;
+
+    lr_module_t *ir = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *fn_ty = NULL;
+    lc_value_t *ext_val = NULL;
+    lc_value_t *a_val = NULL;
+    lc_value_t *b_val = NULL;
+    lc_value_t *c_val = NULL;
+    lr_func_t *a_fn = NULL;
+    lr_func_t *b_fn = NULL;
+    lr_func_t *c_fn = NULL;
+    lr_block_t *a_entry = NULL;
+    lr_block_t *b_entry = NULL;
+    lr_block_t *c_entry = NULL;
+    lc_value_t *ret1 = NULL;
+    lc_value_t *ret2 = NULL;
+    lc_value_t *ret3 = NULL;
+
+    if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
+        goto cleanup;
+    }
+    if (setenv("LIRIC_COMPILE_MODE", "isel", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_COMPILE_MODE=isel\n");
+        goto cleanup;
+    }
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
+    mod = lc_module_create(ctx, "compat_multi_suspend_reloc");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+
+    ir = lc_module_get_ir(mod);
+    i32 = lc_get_int_type(mod, 32);
+    if (!ir || !i32) {
+        fprintf(stderr, "  FAIL: missing IR/i32 type\n");
+        goto cleanup;
+    }
+    fn_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+    if (!fn_ty) {
+        fprintf(stderr, "  FAIL: function type\n");
+        goto cleanup;
+    }
+
+    ext_val = lc_func_create(mod, "compat_ext_decl_multi_suspend", fn_ty);
+    a_val = lc_func_create(mod, "compat_multi_suspend_a", fn_ty);
+    b_val = lc_func_create(mod, "compat_multi_suspend_b", fn_ty);
+    c_val = lc_func_create(mod, "compat_multi_suspend_c", fn_ty);
+    if (!ext_val || !a_val || !b_val || !c_val) {
+        fprintf(stderr, "  FAIL: function create\n");
+        goto cleanup;
+    }
+
+    a_fn = lc_value_get_func(a_val);
+    b_fn = lc_value_get_func(b_val);
+    c_fn = lc_value_get_func(c_val);
+    a_entry = lc_value_get_block(lc_block_create(mod, a_fn, "entry"));
+    b_entry = lc_value_get_block(lc_block_create(mod, b_fn, "entry"));
+    c_entry = lc_value_get_block(lc_block_create(mod, c_fn, "entry"));
+    ret1 = lc_value_const_int(mod, i32, 1, 32);
+    ret2 = lc_value_const_int(mod, i32, 2, 32);
+    ret3 = lc_value_const_int(mod, i32, 3, 32);
+    if (!a_fn || !b_fn || !c_fn || !a_entry || !b_entry || !c_entry ||
+        !ret1 || !ret2 || !ret3) {
+        fprintf(stderr, "  FAIL: function/block setup\n");
+        goto cleanup;
+    }
+
+    /* Force A to suspend/resume repeatedly while all functions emit relocs. */
+    if (!lc_create_call(mod, a_entry, a_fn, fn_ty, ext_val, NULL, 0, "a_call_0")) {
+        fprintf(stderr, "  FAIL: a_call_0\n");
+        goto cleanup;
+    }
+    if (!lc_create_call(mod, b_entry, b_fn, fn_ty, ext_val, NULL, 0, "b_call")) {
+        fprintf(stderr, "  FAIL: b_call\n");
+        goto cleanup;
+    }
+    lc_create_ret(mod, b_entry, ret2);
+    if (!lc_create_call(mod, a_entry, a_fn, fn_ty, ext_val, NULL, 0, "a_call_1")) {
+        fprintf(stderr, "  FAIL: a_call_1\n");
+        goto cleanup;
+    }
+    if (!lc_create_call(mod, c_entry, c_fn, fn_ty, ext_val, NULL, 0, "c_call")) {
+        fprintf(stderr, "  FAIL: c_call\n");
+        goto cleanup;
+    }
+    lc_create_ret(mod, c_entry, ret3);
+    if (!lc_create_call(mod, a_entry, a_fn, fn_ty, ext_val, NULL, 0, "a_call_2")) {
+        fprintf(stderr, "  FAIL: a_call_2\n");
+        goto cleanup;
+    }
+    lc_create_ret(mod, a_entry, ret1);
+
+    tmp = tmpfile();
+    if (!tmp) {
+        fprintf(stderr, "  FAIL: tmpfile create\n");
+        goto cleanup;
+    }
+    if (lc_module_emit_object_to_file(mod, tmp) != 0) {
+        fprintf(stderr, "  FAIL: lc_module_emit_object_to_file\n");
+        goto cleanup;
+    }
+    if (fseek(tmp, 0, SEEK_END) != 0 || ftell(tmp) <= 0) {
+        fprintf(stderr, "  FAIL: emitted object size\n");
+        goto cleanup;
+    }
+
+    result = 0;
+
+cleanup:
+    if (tmp)
+        fclose(tmp);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    if (old_policy_copy) {
+        setenv("LIRIC_POLICY", old_policy_copy, 1);
+        free(old_policy_copy);
+    } else {
+        unsetenv("LIRIC_POLICY");
+    }
+    if (old_mode_copy) {
+        setenv("LIRIC_COMPILE_MODE", old_mode_copy, 1);
+        free(old_mode_copy);
+    } else {
+        unsetenv("LIRIC_COMPILE_MODE");
+    }
+    return result;
+#endif
+}
+
 int test_builder_compat_add_to_jit_null_args(void) {
     lc_context_t *ctx = lc_context_create();
     TEST_ASSERT(ctx != NULL, "context create");
@@ -663,7 +814,7 @@ int test_builder_compat_direct_large_object_emission(void) {
 #if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
     return 0;
 #else
-    enum { kAddCount = 100000 };
+    enum { kPayloadBytes = 256 * 1024 };
     int result = 1;
     const char *old_policy = getenv("LIRIC_POLICY");
     const char *old_mode = getenv("LIRIC_COMPILE_MODE");
@@ -672,6 +823,7 @@ int test_builder_compat_direct_large_object_emission(void) {
     lc_context_t *ctx = NULL;
     lc_module_compat_t *mod = NULL;
     FILE *tmp = NULL;
+    uint8_t *payload = NULL;
 
     if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
         fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
@@ -695,49 +847,56 @@ int test_builder_compat_direct_large_object_emission(void) {
         goto cleanup;
     }
 
+    /* Large initialized data keeps this test backend-agnostic and fast:
+       object size scales with payload bytes independent of optimizer/version. */
     {
         lr_module_t *ir = lc_module_get_ir(mod);
-        lr_type_t *i64 = lc_get_int_type(mod, 64);
-        lr_type_t *params[1];
-        lr_type_t *fn_ty = NULL;
-        lc_value_t *fn_val = NULL;
-        lr_func_t *fn = NULL;
-        lr_block_t *entry = NULL;
-        lc_value_t *arg0 = NULL;
-        lc_value_t *one = NULL;
-        lc_value_t *acc = NULL;
-        uint32_t i;
+        lr_type_t *i8 = lc_get_int_type(mod, 8);
+        lr_type_t *i32 = lc_get_int_type(mod, 32);
+        lr_type_t *anchor_ty = NULL;
+        lc_value_t *anchor_fn_val = NULL;
+        lr_func_t *anchor_fn = NULL;
+        lr_block_t *anchor_entry = NULL;
+        lc_value_t *anchor_ret = NULL;
+        lr_type_t *arr_ty = NULL;
+        lc_value_t *g = NULL;
+        size_t i;
 
-        if (!ir || !i64) {
-            fprintf(stderr, "  FAIL: missing i64 type\n");
+        if (!ir || !i8 || !i32) {
+            fprintf(stderr, "  FAIL: missing module scalar types\n");
             goto cleanup;
         }
-        params[0] = i64;
-        fn_ty = lr_type_func_new(ir, i64, params, 1, false);
-        if (!fn_ty) {
-            fprintf(stderr, "  FAIL: function type\n");
+        /* Ensure compat session binds to this module before stream emission. */
+        anchor_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+        anchor_fn_val = lc_func_create(mod, "compat_large_direct_emit_anchor", anchor_ty);
+        anchor_fn = lc_value_get_func(anchor_fn_val);
+        anchor_entry = lc_value_get_block(lc_block_create(mod, anchor_fn, "entry"));
+        anchor_ret = lc_value_const_int(mod, i32, 0, 32);
+        if (!anchor_ty || !anchor_fn_val || !anchor_fn || !anchor_entry || !anchor_ret) {
+            fprintf(stderr, "  FAIL: anchor function setup\n");
             goto cleanup;
         }
+        lc_create_ret(mod, anchor_entry, anchor_ret);
 
-        fn_val = lc_func_create(mod, "compat_large_direct_emit_fn", fn_ty);
-        fn = lc_value_get_func(fn_val);
-        entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
-        arg0 = lc_func_get_arg(mod, fn_val, 0);
-        one = lc_value_const_int(mod, i64, 1, 64);
-        if (!fn_val || !fn || !entry || !arg0 || !one) {
-            fprintf(stderr, "  FAIL: function setup\n");
+        arr_ty = lr_type_array_new(ir, i8, (uint64_t)kPayloadBytes);
+        if (!arr_ty) {
+            fprintf(stderr, "  FAIL: payload array type\n");
             goto cleanup;
         }
-
-        acc = arg0;
-        for (i = 0; i < kAddCount; i++) {
-            acc = lc_create_add(mod, entry, fn, acc, one, NULL);
-            if (!acc) {
-                fprintf(stderr, "  FAIL: add chain build\n");
-                goto cleanup;
-            }
+        payload = (uint8_t *)malloc((size_t)kPayloadBytes);
+        if (!payload) {
+            fprintf(stderr, "  FAIL: payload alloc\n");
+            goto cleanup;
         }
-        lc_create_ret(mod, entry, acc);
+        for (i = 0; i < (size_t)kPayloadBytes; i++)
+            payload[i] = (uint8_t)((i * 131u + 17u) & 0xFFu);
+
+        g = lc_global_create(mod, "compat_large_direct_emit_blob",
+                             arr_ty, true, payload, (size_t)kPayloadBytes);
+        if (!g) {
+            fprintf(stderr, "  FAIL: payload global create\n");
+            goto cleanup;
+        }
     }
 
     tmp = tmpfile();
@@ -755,8 +914,10 @@ int test_builder_compat_direct_large_object_emission(void) {
     }
     {
         long sz = ftell(tmp);
-        if (sz <= (1L << 20)) {
-            fprintf(stderr, "  FAIL: expected object > 1 MiB, got %ld bytes\n", sz);
+        if (sz <= (long)kPayloadBytes) {
+            fprintf(stderr,
+                    "  FAIL: expected object > %d bytes payload, got %ld bytes\n",
+                    kPayloadBytes, sz);
             goto cleanup;
         }
     }
@@ -764,6 +925,7 @@ int test_builder_compat_direct_large_object_emission(void) {
     result = 0;
 
 cleanup:
+    free(payload);
     if (tmp)
         fclose(tmp);
     if (mod)
