@@ -40,7 +40,7 @@ jobs:
             -DWITH_BENCH_TCC=OFF \
             -DWITH_BENCH_LLI_PHASES=OFF \
             -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
-          cmake --build build -j"$(nproc)" --target bench_matrix lfortran_build_all
+          cmake --build build -j"$(nproc)" --target bench_matrix bench_compat_check bench_api liric_probe_runner lfortran_build_all
 
       - name: Run bench_matrix llvm API lanes
         shell: bash -e -l {0}

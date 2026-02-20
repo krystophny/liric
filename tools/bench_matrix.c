@@ -1765,6 +1765,8 @@ int main(int argc, char **argv) {
                 write_row_compat(rows, "FAILED", 0, 0, cfg.bench_dir);
                 ran_compat = 1;
             } else if (!file_executable(cfg.bench_compat_check)) {
+                fprintf(stderr, "[matrix] bench_compat_check not executable: %s\n",
+                        cfg.bench_compat_check ? cfg.bench_compat_check : "(null)");
                 compat_ok = 0;
                 write_failure_row(fails,
                                   api_lane,
