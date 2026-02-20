@@ -2172,9 +2172,6 @@ int test_jit_const_gep_vtable_function_ptr(void) {
 }
 
 int test_jit_llvm_intrinsic_fabs_f32(void) {
-    if (!require_intrinsic_blob("llvm.fabs.f32"))
-        return 0;
-
     const char *src =
         "declare float @llvm.fabs.f32(float)\n"
         "define i32 @call_fabs_bits() {\n"

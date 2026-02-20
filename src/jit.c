@@ -1054,18 +1054,26 @@ static void register_builtin_symbols(lr_jit_t *j) {
     for (size_t i = 0; i < n; i++) {
         const char *name = lr_platform_intrinsic_name(i);
         const uint8_t *blob_begin, *blob_end;
-        if (!lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end))
+        if (lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end)) {
+            size_t blob_size = (size_t)(blob_end - blob_begin);
+            size_t dest = align_up(j->code_size, 16);
+            if (dest + blob_size > j->code_cap)
+                continue;
+            if (make_writable(j) != 0)
+                continue;
+            memcpy(j->code_buf + dest, blob_begin, blob_size);
+            j->code_size = dest + blob_size;
+            make_executable_from(j, dest);
+            lr_jit_add_symbol(j, name, (void *)(j->code_buf + dest));
             continue;
-        size_t blob_size = (size_t)(blob_end - blob_begin);
-        size_t dest = align_up(j->code_size, 16);
-        if (dest + blob_size > j->code_cap)
-            continue;
-        if (make_writable(j) != 0)
-            continue;
-        memcpy(j->code_buf + dest, blob_begin, blob_size);
-        j->code_size = dest + blob_size;
-        make_executable_from(j, dest);
-        lr_jit_add_symbol(j, name, (void *)(j->code_buf + dest));
+        }
+        /* No blob available (e.g. macOS): resolve via libc equivalent. */
+        const char *libc_name = lr_platform_intrinsic_libc_name(name);
+        if (libc_name != name) {
+            void *addr = lr_platform_dlsym_default(libc_name);
+            if (addr)
+                lr_jit_add_symbol(j, name, addr);
+        }
     }
 }
 

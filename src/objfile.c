@@ -97,60 +97,7 @@ int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
 }
 
 static const char *remap_intrinsic(const char *name) {
-    if (!name || strncmp(name, "llvm.", 5) != 0) return name;
-    if (strcmp(name, "llvm.pow.f32") == 0) return "powf";
-    if (strcmp(name, "llvm.pow.f64") == 0) return "pow";
-    if (strcmp(name, "llvm.sqrt.f32") == 0) return "sqrtf";
-    if (strcmp(name, "llvm.sqrt.f64") == 0) return "sqrt";
-    if (strcmp(name, "llvm.copysign.f32") == 0) return "copysignf";
-    if (strcmp(name, "llvm.copysign.f64") == 0) return "copysign";
-    /* Keep llvm.powi.* unmapped: libc pow/powf take floating exponents and
-       are ABI-incompatible with powi's integer exponent signatures. */
-    if (strcmp(name, "llvm.fabs.f32") == 0) return "fabsf";
-    if (strcmp(name, "llvm.fabs.f64") == 0) return "fabs";
-    if (strcmp(name, "llvm.sin.f32") == 0) return "sinf";
-    if (strcmp(name, "llvm.sin.f64") == 0) return "sin";
-    if (strcmp(name, "llvm.cos.f32") == 0) return "cosf";
-    if (strcmp(name, "llvm.cos.f64") == 0) return "cos";
-    if (strcmp(name, "llvm.exp.f32") == 0) return "expf";
-    if (strcmp(name, "llvm.exp.f64") == 0) return "exp";
-    if (strcmp(name, "llvm.exp2.f32") == 0) return "exp2f";
-    if (strcmp(name, "llvm.exp2.f64") == 0) return "exp2";
-    if (strcmp(name, "llvm.log.f32") == 0) return "logf";
-    if (strcmp(name, "llvm.log.f64") == 0) return "log";
-    if (strcmp(name, "llvm.log2.f32") == 0) return "log2f";
-    if (strcmp(name, "llvm.log2.f64") == 0) return "log2";
-    if (strcmp(name, "llvm.log10.f32") == 0) return "log10f";
-    if (strcmp(name, "llvm.log10.f64") == 0) return "log10";
-    if (strcmp(name, "llvm.floor.f32") == 0) return "floorf";
-    if (strcmp(name, "llvm.floor.f64") == 0) return "floor";
-    if (strcmp(name, "llvm.ceil.f32") == 0) return "ceilf";
-    if (strcmp(name, "llvm.ceil.f64") == 0) return "ceil";
-    if (strcmp(name, "llvm.trunc.f32") == 0) return "truncf";
-    if (strcmp(name, "llvm.trunc.f64") == 0) return "trunc";
-    if (strcmp(name, "llvm.round.f32") == 0) return "roundf";
-    if (strcmp(name, "llvm.round.f64") == 0) return "round";
-    if (strcmp(name, "llvm.fma.f32") == 0) return "fmaf";
-    if (strcmp(name, "llvm.fma.f64") == 0) return "fma";
-    if (strcmp(name, "llvm.minnum.f32") == 0) return "fminf";
-    if (strcmp(name, "llvm.minnum.f64") == 0) return "fmin";
-    if (strcmp(name, "llvm.maxnum.f32") == 0) return "fmaxf";
-    if (strcmp(name, "llvm.maxnum.f64") == 0) return "fmax";
-    if (strcmp(name, "llvm.rint.f32") == 0) return "rintf";
-    if (strcmp(name, "llvm.rint.f64") == 0) return "rint";
-    if (strcmp(name, "llvm.nearbyint.f32") == 0) return "nearbyintf";
-    if (strcmp(name, "llvm.nearbyint.f64") == 0) return "nearbyint";
-    if (strcmp(name, "llvm.memcpy.p0.p0.i64") == 0) return "memcpy";
-    if (strcmp(name, "llvm.memcpy.p0.p0.i32") == 0) return "memcpy";
-    if (strcmp(name, "llvm.memmove.p0.p0.i64") == 0) return "memmove";
-    if (strcmp(name, "llvm.memmove.p0.p0.i32") == 0) return "memmove";
-    if (strcmp(name, "llvm.memset.p0.i64") == 0) return "memset";
-    if (strcmp(name, "llvm.memset.p0.i32") == 0) return "memset";
-    if (strcmp(name, "llvm.abs.i64") == 0) return "llabs";
-    if (strcmp(name, "llvm.abs.i32") == 0) return "abs";
-    if (strcmp(name, "llvm.fmuladd.f32") == 0) return "fmaf";
-    if (strcmp(name, "llvm.fmuladd.f64") == 0) return "fma";
-    return name;
+    return lr_platform_intrinsic_libc_name(name);
 }
 
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
