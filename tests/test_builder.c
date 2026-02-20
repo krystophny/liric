@@ -814,8 +814,7 @@ int test_builder_compat_direct_large_object_emission(void) {
 #if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
     return 0;
 #else
-    enum { kCallCount = 8192 };
-    enum { kMinBytesPerCall = 2 };
+    enum { kPayloadBytes = 256 * 1024 };
     int result = 1;
     const char *old_policy = getenv("LIRIC_POLICY");
     const char *old_mode = getenv("LIRIC_COMPILE_MODE");
@@ -824,6 +823,7 @@ int test_builder_compat_direct_large_object_emission(void) {
     lc_context_t *ctx = NULL;
     lc_module_compat_t *mod = NULL;
     FILE *tmp = NULL;
+    uint8_t *payload = NULL;
 
     if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
         fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
@@ -847,51 +847,38 @@ int test_builder_compat_direct_large_object_emission(void) {
         goto cleanup;
     }
 
+    /* Large initialized data keeps this test backend-agnostic and fast:
+       object size scales with payload bytes independent of optimizer/version. */
     {
         lr_module_t *ir = lc_module_get_ir(mod);
-        lr_type_t *i64 = lc_get_int_type(mod, 64);
-        lr_type_t *params[1];
-        lr_type_t *fn_ty = NULL;
-        lc_value_t *ext_val = NULL;
-        lc_value_t *fn_val = NULL;
-        lr_func_t *fn = NULL;
-        lr_block_t *entry = NULL;
-        lc_value_t *arg0 = NULL;
-        lc_value_t *acc = NULL;
-        uint32_t i;
+        lr_type_t *i8 = lc_get_int_type(mod, 8);
+        lr_type_t *arr_ty = NULL;
+        lc_value_t *g = NULL;
+        size_t i;
 
-        if (!ir || !i64) {
-            fprintf(stderr, "  FAIL: missing i64 type\n");
+        if (!ir || !i8) {
+            fprintf(stderr, "  FAIL: missing module/i8 type\n");
             goto cleanup;
         }
-        params[0] = i64;
-        fn_ty = lr_type_func_new(ir, i64, params, 1, false);
-        if (!fn_ty) {
-            fprintf(stderr, "  FAIL: function type\n");
+        arr_ty = lr_type_array_new(ir, i8, (uint64_t)kPayloadBytes);
+        if (!arr_ty) {
+            fprintf(stderr, "  FAIL: payload array type\n");
             goto cleanup;
         }
-
-        ext_val = lc_func_create(mod, "compat_large_direct_emit_ext", fn_ty);
-        fn_val = lc_func_create(mod, "compat_large_direct_emit_fn", fn_ty);
-        fn = lc_value_get_func(fn_val);
-        entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
-        arg0 = lc_func_get_arg(mod, fn_val, 0);
-        if (!ext_val || !fn_val || !fn || !entry || !arg0) {
-            fprintf(stderr, "  FAIL: function setup\n");
+        payload = (uint8_t *)malloc((size_t)kPayloadBytes);
+        if (!payload) {
+            fprintf(stderr, "  FAIL: payload alloc\n");
             goto cleanup;
         }
+        for (i = 0; i < (size_t)kPayloadBytes; i++)
+            payload[i] = (uint8_t)((i * 131u + 17u) & 0xFFu);
 
-        acc = arg0;
-        for (i = 0; i < kCallCount; i++) {
-            lc_value_t *call_args[1] = { acc };
-            acc = lc_create_call(mod, entry, fn, fn_ty, ext_val,
-                                 call_args, 1, NULL);
-            if (!acc) {
-                fprintf(stderr, "  FAIL: call chain build\n");
-                goto cleanup;
-            }
+        g = lc_global_create(mod, "compat_large_direct_emit_blob",
+                             arr_ty, true, payload, (size_t)kPayloadBytes);
+        if (!g) {
+            fprintf(stderr, "  FAIL: payload global create\n");
+            goto cleanup;
         }
-        lc_create_ret(mod, entry, acc);
     }
 
     tmp = tmpfile();
@@ -909,11 +896,10 @@ int test_builder_compat_direct_large_object_emission(void) {
     }
     {
         long sz = ftell(tmp);
-        long min_expected = (long)(kCallCount * kMinBytesPerCall);
-        if (sz <= min_expected) {
+        if (sz <= (long)kPayloadBytes) {
             fprintf(stderr,
-                    "  FAIL: expected object > %ld bytes for %u calls, got %ld bytes\n",
-                    min_expected, (unsigned)kCallCount, sz);
+                    "  FAIL: expected object > %d bytes payload, got %ld bytes\n",
+                    kPayloadBytes, sz);
             goto cleanup;
         }
     }
@@ -921,6 +907,7 @@ int test_builder_compat_direct_large_object_emission(void) {
     result = 0;
 
 cleanup:
+    free(payload);
     if (tmp)
         fclose(tmp);
     if (mod)
