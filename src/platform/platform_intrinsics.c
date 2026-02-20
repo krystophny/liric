@@ -8,7 +8,8 @@ typedef struct {
     const uint8_t *blob_end;
 } lr_platform_intrinsic_desc_t;
 
-#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#if (defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))) || \
+    (defined(__APPLE__) && defined(__aarch64__))
 #define LR_PLATFORM_HAS_INTRINSIC_BLOBS 1
 extern const uint8_t lr_stub_llvm_fabs_f32_begin[];
 extern const uint8_t lr_stub_llvm_fabs_f32_end[];
