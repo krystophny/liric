@@ -852,14 +852,32 @@ int test_builder_compat_direct_large_object_emission(void) {
     {
         lr_module_t *ir = lc_module_get_ir(mod);
         lr_type_t *i8 = lc_get_int_type(mod, 8);
+        lr_type_t *i32 = lc_get_int_type(mod, 32);
+        lr_type_t *anchor_ty = NULL;
+        lc_value_t *anchor_fn_val = NULL;
+        lr_func_t *anchor_fn = NULL;
+        lr_block_t *anchor_entry = NULL;
+        lc_value_t *anchor_ret = NULL;
         lr_type_t *arr_ty = NULL;
         lc_value_t *g = NULL;
         size_t i;
 
-        if (!ir || !i8) {
-            fprintf(stderr, "  FAIL: missing module/i8 type\n");
+        if (!ir || !i8 || !i32) {
+            fprintf(stderr, "  FAIL: missing module scalar types\n");
             goto cleanup;
         }
+        /* Ensure compat session binds to this module before stream emission. */
+        anchor_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+        anchor_fn_val = lc_func_create(mod, "compat_large_direct_emit_anchor", anchor_ty);
+        anchor_fn = lc_value_get_func(anchor_fn_val);
+        anchor_entry = lc_value_get_block(lc_block_create(mod, anchor_fn, "entry"));
+        anchor_ret = lc_value_const_int(mod, i32, 0, 32);
+        if (!anchor_ty || !anchor_fn_val || !anchor_fn || !anchor_entry || !anchor_ret) {
+            fprintf(stderr, "  FAIL: anchor function setup\n");
+            goto cleanup;
+        }
+        lc_create_ret(mod, anchor_entry, anchor_ret);
+
         arr_ty = lr_type_array_new(ir, i8, (uint64_t)kPayloadBytes);
         if (!arr_ty) {
             fprintf(stderr, "  FAIL: payload array type\n");
