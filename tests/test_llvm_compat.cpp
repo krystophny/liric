@@ -1088,6 +1088,19 @@ static int test_irbuilder_memory() {
     TEST_ASSERT(loaded != nullptr, "load created");
 
     builder.CreateRet(loaded);
+
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    mod.print(os, nullptr);
+    TEST_ASSERT(ir.find("alloca i64") != std::string::npos,
+                "printed IR keeps alloca");
+    TEST_ASSERT(ir.find("store i64 42") != std::string::npos,
+                "printed IR keeps store");
+    TEST_ASSERT(ir.find("load i64") != std::string::npos,
+                "printed IR keeps load");
+    TEST_ASSERT(ir.find("ret i64") != std::string::npos,
+                "printed IR keeps return");
+
     return 0;
 }
 

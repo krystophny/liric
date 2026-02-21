@@ -2242,6 +2242,15 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
                 }
             }
         }
+        /*
+         * Keep the IR module in sync even in DIRECT mode so textual dumps
+         * (for example --show-llvm in WITH_LIRIC lanes) preserve instruction
+         * semantics instead of CFG-only skeletons.
+         */
+        if (emit_ir_instruction(s, &normalized, err, NULL) != 0) {
+            free(resolved_call_ops);
+            return 0;
+        }
     } else {
         if (emit_ir_instruction(s, &normalized, err, NULL) != 0) {
             free(resolved_call_ops);
