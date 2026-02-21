@@ -57,6 +57,13 @@ exit 127
 ")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_jq}")
 
+set(fake_llvm_dwarfdump "${fake_bin}/llvm-dwarfdump")
+file(WRITE "${fake_llvm_dwarfdump}" "#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+")
+execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_llvm_dwarfdump}")
+
 file(MAKE_DIRECTORY "${upstream_repo}/integration_tests")
 file(MAKE_DIRECTORY "${upstream_repo}/build-llvm/src/bin")
 file(MAKE_DIRECTORY "${upstream_repo}/build-liric/src/bin")
