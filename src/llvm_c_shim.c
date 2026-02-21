@@ -244,7 +244,7 @@ static liric_lookup_wrapper_entry_t *find_lookup_wrapper(
     return NULL;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 static bool emit_u8(uint8_t *buf, size_t cap, size_t *pos, uint8_t byte) {
     if (!buf || !pos || *pos >= cap)
         return false;
@@ -252,7 +252,9 @@ static bool emit_u8(uint8_t *buf, size_t cap, size_t *pos, uint8_t byte) {
     (*pos)++;
     return true;
 }
+#endif
 
+#if defined(__x86_64__) || defined(_M_X64)
 static bool emit_u64_le(uint8_t *buf, size_t cap, size_t *pos, uint64_t v) {
     for (int i = 0; i < 8; i++) {
         if (!emit_u8(buf, cap, pos, (uint8_t)(v & 0xFFu)))
