@@ -151,27 +151,27 @@ Source: `/tmp/liric_bench/matrix_rows.jsonl` and `/tmp/liric_bench/matrix_summar
 `./build/bench_matrix --timeout 15` (default modes: isel, copy_patch; default policies: direct, ir).
 
 Matrix summary: `status=OK`, `cells_attempted=24`, `cells_ok=24`, `cells_failed=0`.
-(`micro_c` skipped because `bench_tcc` is unavailable in this environment.)
+(`micro_c` is optional and not part of the default lane set.)
 
 Canonical corpus snapshot (`docs/benchmarks/readme_perf_snapshot.json`):
-- `corpus_100` attempted/completed: `97/97`
-- liric vs LLVM compile materialized speedup: **59.63x median** (**9.63x aggregate**)
-- liric vs LLVM total materialized speedup: **22.73x median** (**7.48x aggregate**)
+- `corpus_100` attempted/completed: `95/95`
+- liric vs LLVM compile materialized speedup: **21.79x median** (**30.05x aggregate**)
+- liric vs LLVM total materialized speedup: **11.38x median** (**12.56x aggregate**)
 
 ### API AOT (lfortran + liric vs lfortran + LLVM, compat corpus)
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 29/33 (4 skipped) | **0.98x** | **0.98x** |
-| isel | ir | 33/33 (0 skipped) | **0.54x** | **0.54x** |
-| copy_patch | direct | 29/33 (4 skipped) | **0.54x** | **0.54x** |
-| copy_patch | ir | 33/33 (0 skipped) | **0.54x** | **0.54x** |
+| isel | direct | 95/95 (0 skipped) | **1.05x** | **1.10x** |
+| isel | ir | 95/95 (0 skipped) | **1.08x** | **1.11x** |
+| copy_patch | direct | 95/95 (0 skipped) | **1.06x** | **1.09x** |
+| copy_patch | ir | 95/95 (0 skipped) | **1.06x** | **1.10x** |
 
-### LL Corpus (compile-only, compat corpus: 33/33 completed)
+### LL Corpus (compile-only, compat corpus: 95/95 completed)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 2.549 | 0.080 | **32x** |
-| isel | ir | 2.350 | 0.074 | **32x** |
-| copy_patch | direct | 2.344 | 0.078 | **30x** |
-| copy_patch | ir | 2.330 | 0.076 | **31x** |
+| isel | direct | 3.245 | 0.152 | **21.33x** |
+| isel | ir | 3.395 | 0.144 | **23.58x** |
+| copy_patch | direct | 3.272 | 0.154 | **21.32x** |
+| copy_patch | ir | 3.272 | 0.152 | **21.52x** |

@@ -1,35 +1,35 @@
 {
   "schema_version": 3,
-  "generated_at_utc": "2026-02-21T00:18:56Z",
-  "benchmark_commit": "d70f02c58571cad57e30165a55f67d3e28d9e6a6",
+  "generated_at_utc": "2026-02-21T12:35:16Z",
+  "benchmark_commit": "2d1b689f24951af124309315c774e88963fdc006",
   "host": {
-    "kernel": "Darwin 25.2.0 arm64",
-    "cpu": "Apple M3 Ultra"
+    "kernel": "Linux 6.19.3-2-cachyos x86_64 GNU/Linux",
+    "cpu": "AMD Ryzen 9 5950X 16-Core Processor"
   },
   "toolchain": {
-    "cc": "gcc-15 (Homebrew GCC 15.2.0) 15.2.0",
-    "lli": "unavailable"
+    "cc": "cc (GCC) 15.2.1 20260209",
+    "lli": "LLVM version 21.1.8"
   },
   "status": "OK",
   "dataset_name": "corpus_100",
   "expected_tests": 100,
-  "attempted_tests": 97,
+  "attempted_tests": 95,
   "canonical_track": "corpus_canonical",
-  "completed_tests": 97,
-  "liric_parse_median_ms": 0.118300,
-  "liric_compile_materialized_median_ms": 0.065300,
-  "liric_total_materialized_median_ms": 0.191500,
-  "llvm_parse_median_ms": 0.235375,
-  "llvm_compile_materialized_median_ms": 3.966750,
-  "llvm_total_materialized_median_ms": 4.210209,
-  "compile_materialized_speedup_median": 59.633752,
-  "compile_materialized_speedup_aggregate": 9.632428,
-  "total_materialized_speedup_median": 22.730969,
-  "total_materialized_speedup_aggregate": 7.484654,
+  "completed_tests": 95,
+  "liric_parse_median_ms": 0.154400,
+  "liric_compile_materialized_median_ms": 0.150200,
+  "liric_total_materialized_median_ms": 0.305200,
+  "llvm_parse_median_ms": 0.204635,
+  "llvm_compile_materialized_median_ms": 3.333063,
+  "llvm_total_materialized_median_ms": 3.501039,
+  "compile_materialized_speedup_median": 21.787715,
+  "compile_materialized_speedup_aggregate": 30.051551,
+  "total_materialized_speedup_median": 11.382802,
+  "total_materialized_speedup_aggregate": 12.562284,
   "artifacts": {
-    "bench_corpus_compare_summary_json": "/private/tmp/liric_bench/bench_corpus_compare_summary.json",
-    "bench_corpus_compare_jsonl": "/private/tmp/liric_bench/bench_corpus_compare.jsonl",
-    "published_snapshot_json": "/Users/ert/code/liric/docs/benchmarks/readme_perf_snapshot.json",
-    "published_table_md": "/Users/ert/code/liric/docs/benchmarks/readme_perf_table.md"
+    "bench_corpus_compare_summary_json": "/tmp/liric_bench/bench_corpus_compare_summary.json",
+    "bench_corpus_compare_jsonl": "/tmp/liric_bench/bench_corpus_compare.jsonl",
+    "published_snapshot_json": "/home/ert/code/liric/docs/benchmarks/readme_perf_snapshot.json",
+    "published_table_md": "/home/ert/code/liric/docs/benchmarks/readme_perf_table.md"
   }
 }
