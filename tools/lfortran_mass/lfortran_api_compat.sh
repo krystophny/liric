@@ -17,6 +17,8 @@ usage: lfortran_api_compat.sh [options]
   --workers N             parallel build/test workers (default: nproc/sysctl)
   --run-ref-tests yes|no  run lfortran reference tests (default: yes)
   --run-itests yes|no     run lfortran integration tests (default: yes)
+  --env-name NAME         run test suites via conda/mamba env NAME (lf.sh style)
+  --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
   --itest-args "ARGS..."  extra args passed to integration_tests/run_tests.py
   --skip-lfortran-build   do not rebuild lfortran/build-llvm and lfortran/build-liric
@@ -37,6 +39,42 @@ die() {
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+find_env_runner() {
+    if command -v conda >/dev/null 2>&1; then
+        printf '%s\n' "conda"
+    elif command -v micromamba >/dev/null 2>&1; then
+        printf '%s\n' "micromamba"
+    elif command -v mamba >/dev/null 2>&1; then
+        printf '%s\n' "mamba"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+run_in_selected_env() {
+    if [[ -n "$env_name" ]]; then
+        local extra_args=()
+        if [[ "$env_runner" == "conda" ]]; then
+            extra_args+=(--no-capture-output)
+        fi
+        "$env_runner" run "${extra_args[@]}" -n "$env_name" "$@"
+    else
+        "$@"
+    fi
+}
+
+require_tool_for_integration() {
+    local tool="$1"
+    if [[ -n "$env_name" ]]; then
+        if ! run_in_selected_env bash -lc "command -v \"$tool\" >/dev/null 2>&1"; then
+            die "missing required command in env '${env_name}': ${tool}; run ../lfortran-dev/scripts/lf.sh setup-env --llvm <version> or install LLVM tools in that env"
+        fi
+        return 0
+    fi
+    command -v "$tool" >/dev/null 2>&1 \
+        || die "missing required command: ${tool}; set --env-name lf-llvm<version> (lf.sh style) or install LLVM tools in PATH"
 }
 
 ensure_lfortran_version_file() {
@@ -231,6 +269,8 @@ build_type="Release"
 workers="$(detect_workers)"
 run_ref_tests="yes"
 run_itests="yes"
+env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
+env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
 itest_args=""
 skip_lfortran_build="no"
@@ -298,6 +338,16 @@ while [[ $# -gt 0 ]]; do
             run_itests="$2"
             shift 2
             ;;
+        --env-name)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            env_name="$2"
+            shift 2
+            ;;
+        --env-runner)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            env_runner="$2"
+            shift 2
+            ;;
         --ref-args)
             [[ $# -ge 2 ]] || die "missing value for $1"
             ref_args="$2"
@@ -331,6 +381,18 @@ done
 
 need_cmd git
 need_cmd cmake
+
+if [[ -n "$env_name" ]]; then
+    if [[ -z "$env_runner" ]]; then
+        env_runner="$(find_env_runner)"
+    fi
+    [[ -n "$env_runner" ]] \
+        || die "no conda/mamba/micromamba runner found for --env-name ${env_name}"
+    need_cmd "$env_runner"
+    if ! run_in_selected_env bash -lc "true" >/dev/null 2>&1; then
+        die "unable to run commands in env '${env_name}' via ${env_runner}; run ../lfortran-dev/scripts/lf.sh setup-env --llvm <version>"
+    fi
+fi
 
 PYTHON_BIN=""
 if command -v python >/dev/null 2>&1; then
@@ -461,6 +523,10 @@ if [[ -z "${LIRIC_POLICY:-}" ]]; then
     echo "lfortran_api_compat: applying WITH_LIRIC policy: LIRIC_POLICY=${LIRIC_POLICY}" >&2
 fi
 
+if [[ "$run_itests" == "yes" ]]; then
+    require_tool_for_integration "llvm-dwarfdump"
+fi
+
 if [[ "$run_ref_tests" == "yes" ]]; then
     ref_default_args=""
     if ! ref_args_has_backend_policy "$ref_args"; then
@@ -471,15 +537,15 @@ if [[ "$run_ref_tests" == "yes" ]]; then
         cd "$lfortran_dir"
         if [[ -n "$ref_default_args" && -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
-            "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
+            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
         elif [[ -n "$ref_default_args" ]]; then
             # shellcheck disable=SC2086
-            "$PYTHON_BIN" ./run_tests.py $ref_default_args
+            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args
         elif [[ -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
-            "$PYTHON_BIN" ./run_tests.py $ref_args
+            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_args
         else
-            "$PYTHON_BIN" ./run_tests.py
+            run_in_selected_env "$PYTHON_BIN" ./run_tests.py
         fi
     ) 2>&1 | tee "${log_root}/lfortran_reference_tests.log" || status=1
 fi
@@ -493,9 +559,9 @@ if [[ "$run_itests" == "yes" ]]; then
         fi
         if [[ -n "$itest_args" ]]; then
             # shellcheck disable=SC2086
-            "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers" $itest_args
+            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers" $itest_args
         else
-            "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers"
+            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers"
         fi
     ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api.log" || status=1
 fi
