@@ -368,6 +368,16 @@ static uint32_t enc_a64_fp_ldur(uint8_t fsize, uint8_t ft, uint8_t rn,
     return base | ((uint32_t)(imm9 & 0x1FF) << 12) | ((uint32_t)rn << 5) | ft;
 }
 
+static uint32_t enc_a64_ldur_u64(uint8_t rt, uint8_t rn, int32_t imm9) {
+    return 0xF8400000u | ((uint32_t)(imm9 & 0x1FF) << 12) |
+           ((uint32_t)rn << 5) | rt;
+}
+
+static uint32_t enc_a64_stur_u64(uint8_t rt, uint8_t rn, int32_t imm9) {
+    return 0xF8000000u | ((uint32_t)(imm9 & 0x1FF) << 12) |
+           ((uint32_t)rn << 5) | rt;
+}
+
 static bool emit_a64_movabs_x16(uint8_t *buf, size_t cap, size_t *pos,
                                 uintptr_t addr) {
     uint64_t v = (uint64_t)addr;
@@ -411,6 +421,14 @@ static bool emit_a64_add_x0_sp_imm12(uint8_t *buf, size_t cap, size_t *pos,
 static bool emit_a64_ldur_d_sp(uint8_t *buf, size_t cap, size_t *pos, uint8_t fd,
                                int32_t off) {
     return emit_u32_le(buf, cap, pos, enc_a64_fp_ldur(8u, fd, 31u, off));
+}
+
+static bool emit_a64_stur_x30_sp(uint8_t *buf, size_t cap, size_t *pos, int32_t off) {
+    return emit_u32_le(buf, cap, pos, enc_a64_stur_u64(30u, 31u, off));
+}
+
+static bool emit_a64_ldur_x30_sp(uint8_t *buf, size_t cap, size_t *pos, int32_t off) {
+    return emit_u32_le(buf, cap, pos, enc_a64_ldur_u64(30u, 31u, off));
 }
 #endif
 
@@ -487,26 +505,36 @@ static int build_lookup_wrapper_code(liric_lookup_ret_kind_t ret_kind, void *tar
 
     switch (ret_kind) {
     case LIRIC_LOOKUP_RET_F32:
-        ok = emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
+        ok = emit_a64_sub_sp_imm12(code, cap, &pos, 16u) &&
+             emit_a64_stur_x30_sp(code, cap, &pos, 8) &&
+             emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
              emit_a64_blr_x16(code, cap, &pos) &&
              emit_a64_fmov_s0_w0(code, cap, &pos) &&
+             emit_a64_ldur_x30_sp(code, cap, &pos, 8) &&
+             emit_a64_add_sp_imm12(code, cap, &pos, 16u) &&
              emit_a64_ret(code, cap, &pos);
         break;
     case LIRIC_LOOKUP_RET_F64:
     case LIRIC_LOOKUP_RET_C32:
-        ok = emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
+        ok = emit_a64_sub_sp_imm12(code, cap, &pos, 16u) &&
+             emit_a64_stur_x30_sp(code, cap, &pos, 8) &&
+             emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
              emit_a64_blr_x16(code, cap, &pos) &&
              emit_a64_fmov_d0_x0(code, cap, &pos) &&
+             emit_a64_ldur_x30_sp(code, cap, &pos, 8) &&
+             emit_a64_add_sp_imm12(code, cap, &pos, 16u) &&
              emit_a64_ret(code, cap, &pos);
         break;
     case LIRIC_LOOKUP_RET_C64:
-        ok = emit_a64_sub_sp_imm12(code, cap, &pos, 16u) &&
+        ok = emit_a64_sub_sp_imm12(code, cap, &pos, 32u) &&
+             emit_a64_stur_x30_sp(code, cap, &pos, 24) &&
              emit_a64_add_x0_sp_imm12(code, cap, &pos, 0u) &&
              emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
              emit_a64_blr_x16(code, cap, &pos) &&
              emit_a64_ldur_d_sp(code, cap, &pos, 0u, 0) &&
              emit_a64_ldur_d_sp(code, cap, &pos, 1u, 8) &&
-             emit_a64_add_sp_imm12(code, cap, &pos, 16u) &&
+             emit_a64_ldur_x30_sp(code, cap, &pos, 24) &&
+             emit_a64_add_sp_imm12(code, cap, &pos, 32u) &&
              emit_a64_ret(code, cap, &pos);
         break;
     default:
