@@ -100,6 +100,32 @@ static built_module_t build_call_module(void) {
     return result;
 }
 
+static built_module_t build_module_init_symbol_module(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *v = lr_type_void_s(s);
+    if (lr_session_func_begin(s, "__lfortran_module_init_demo", v,
+                              NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret_void(s);
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
 int test_objfile_elf_header(void) {
     built_module_t bm = build_ret42_module();
     TEST_ASSERT(bm.module != NULL, "module create");
@@ -217,6 +243,83 @@ int test_objfile_elf_symbols(void) {
         }
     }
     TEST_ASSERT(found_f, "symbol 'f' found in .symtab");
+
+    free(buf);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+int test_objfile_elf_lfortran_module_init_symbol_is_weak(void) {
+    built_module_t bm = build_module_init_symbol_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+
+    FILE *fp = tmpfile();
+    TEST_ASSERT(fp != NULL, "tmpfile");
+
+    int rc = lr_emit_object(bm.module, target, fp);
+    TEST_ASSERT_EQ(rc, 0, "emit object");
+
+    fseek(fp, 0, SEEK_END);
+    long fsize = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    uint8_t *buf = malloc((size_t)fsize);
+    TEST_ASSERT(buf != NULL, "alloc buffer");
+    size_t nread = fread(buf, 1, (size_t)fsize, fp);
+    TEST_ASSERT(nread == (size_t)fsize, "read full object buffer");
+    fclose(fp);
+
+    uint64_t e_shoff = 0;
+    memcpy(&e_shoff, buf + 40, 8);
+    uint16_t e_shentsize = 0;
+    memcpy(&e_shentsize, buf + 58, 2);
+    uint16_t e_shnum = 0;
+    memcpy(&e_shnum, buf + 60, 2);
+
+    uint64_t symtab_off = 0;
+    uint64_t symtab_size = 0;
+    uint32_t symtab_link = 0;
+    for (uint16_t i = 0; i < e_shnum; i++) {
+        uint8_t *sh = buf + e_shoff + i * e_shentsize;
+        uint32_t sh_type = 0;
+        memcpy(&sh_type, sh + 4, 4);
+        if (sh_type == 2) { /* SHT_SYMTAB */
+            memcpy(&symtab_off, sh + 24, 8);
+            memcpy(&symtab_size, sh + 32, 8);
+            memcpy(&symtab_link, sh + 40, 4);
+            break;
+        }
+    }
+    TEST_ASSERT(symtab_off > 0, "found .symtab");
+    TEST_ASSERT(symtab_size > 0, "symtab not empty");
+
+    uint8_t *strtab_sh = buf + e_shoff + symtab_link * e_shentsize;
+    uint64_t strtab_off = 0;
+    memcpy(&strtab_off, strtab_sh + 24, 8);
+
+    bool found = false;
+    uint32_t num_syms = (uint32_t)(symtab_size / 24);
+    for (uint32_t i = 0; i < num_syms; i++) {
+        uint8_t *sym = buf + symtab_off + i * 24;
+        uint32_t st_name = 0;
+        memcpy(&st_name, sym, 4);
+        if (st_name == 0)
+            continue;
+        const char *name = (const char *)(buf + strtab_off + st_name);
+        if (strcmp(name, "__lfortran_module_init_demo") != 0)
+            continue;
+        found = true;
+        uint8_t st_info = sym[4];
+        TEST_ASSERT_EQ((st_info >> 4), 2, "module init is STB_WEAK");
+        uint16_t st_shndx = 0;
+        memcpy(&st_shndx, sym + 6, 2);
+        TEST_ASSERT(st_shndx != 0, "module init is defined");
+        break;
+    }
+    TEST_ASSERT(found, "module init symbol found in .symtab");
 
     free(buf);
     lr_session_destroy(bm.session);

@@ -38,6 +38,7 @@ typedef struct lr_obj_symbol {
     uint8_t section;
     bool is_defined;
     bool is_local;
+    bool is_weak;
 } lr_obj_symbol_t;
 
 typedef struct lr_objfile_ctx {
