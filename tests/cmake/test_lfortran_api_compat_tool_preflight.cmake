@@ -29,11 +29,13 @@ endif()
 
 set(root "${WORKDIR}/lfortran_api_compat_tool_preflight_sandbox")
 set(fake_bin "${root}/fake_bin")
+set(fake_env_bin "${root}/fake_env_bin")
 set(fake_lfortran "${root}/lfortran")
 set(py_log "${root}/python_invocations.log")
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${fake_bin}")
+file(MAKE_DIRECTORY "${fake_env_bin}")
 
 set(fake_python "${fake_bin}/python")
 file(WRITE "${fake_python}" "#!/usr/bin/env bash
@@ -50,6 +52,47 @@ file(WRITE "${fake_jq}" "#!/usr/bin/env bash
 exit 127
 ")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_jq}")
+
+set(fake_env_runner "${fake_bin}/fake_env_runner")
+file(WRITE "${fake_env_runner}" [=[#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -lt 4 || "$1" != "run" ]]; then
+    exit 2
+fi
+shift
+if [[ "${1:-}" == "--no-capture-output" ]]; then
+    shift
+fi
+if [[ $# -lt 3 || "$1" != "-n" ]]; then
+    exit 2
+fi
+shift 2
+if [[ -z "${LIRIC_TEST_ENV_PATH:-}" ]]; then
+    echo "LIRIC_TEST_ENV_PATH is required" >&2
+    exit 2
+fi
+if [[ "$1" == "bash" ]]; then
+    if [[ -z "${LIRIC_TEST_BASH_EXE:-}" ]]; then
+        echo "LIRIC_TEST_BASH_EXE is required for bash passthrough" >&2
+        exit 2
+    fi
+    shift
+    if [[ "${1:-}" == "-lc" ]]; then
+        shift
+        if [[ $# -lt 1 ]]; then
+            echo "bash -lc requires a command string" >&2
+            exit 2
+        fi
+        cmd="$1"
+        shift
+        set -- "${LIRIC_TEST_BASH_EXE}" -c "$cmd" "$@"
+    else
+        set -- "${LIRIC_TEST_BASH_EXE}" "$@"
+    fi
+fi
+PATH="${LIRIC_TEST_ENV_PATH}" "$@"
+]=])
+execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_env_runner}")
 
 file(MAKE_DIRECTORY "${fake_lfortran}/.git")
 file(MAKE_DIRECTORY "${fake_lfortran}/build-llvm/src/bin")
@@ -69,11 +112,15 @@ execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_lfortran}/build-liric/src/bin/
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_bin}:$ENV{PATH}"
+        "LIRIC_TEST_ENV_PATH=${fake_env_bin}"
+        "LIRIC_TEST_BASH_EXE=${BASH_EXE}"
         "LIRIC_TEST_PY_LOG=${py_log}"
         "${BASH_EXE}" "${API_SCRIPT}"
         --workspace "${root}/ws"
         --output-root "${root}/out"
         --lfortran-dir "${fake_lfortran}"
+        --env-name test-env
+        --env-runner "${fake_env_runner}"
         --skip-checkout
         --skip-lfortran-build
         --run-ref-tests no
@@ -88,7 +135,7 @@ if(rc EQUAL 0)
         "tool preflight run should fail when llvm-dwarfdump is unavailable\nstdout:\n${out}\nstderr:\n${err}"
     )
 endif()
-if(NOT err MATCHES "missing required command: llvm-dwarfdump")
+if(NOT err MATCHES "missing required command in env 'test-env': llvm-dwarfdump")
     message(FATAL_ERROR
         "expected explicit llvm-dwarfdump preflight failure\nstdout:\n${out}\nstderr:\n${err}"
     )
