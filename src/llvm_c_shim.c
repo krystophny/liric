@@ -244,6 +244,7 @@ static liric_lookup_wrapper_entry_t *find_lookup_wrapper(
     return NULL;
 }
 
+#if defined(__x86_64__) || defined(_M_X64)
 static bool emit_u8(uint8_t *buf, size_t cap, size_t *pos, uint8_t byte) {
     if (!buf || !pos || *pos >= cap)
         return false;
@@ -324,6 +325,7 @@ static bool emit_movsd_xmm_rsp_offset(uint8_t *buf, size_t cap, size_t *pos,
            emit_u8(buf, cap, pos, 0x24) &&
            emit_u8(buf, cap, pos, off);
 }
+#endif
 
 static int build_lookup_wrapper_code(liric_lookup_ret_kind_t ret_kind, void *target,
                                      void **out_code, size_t *out_len) {
