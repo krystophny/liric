@@ -42,6 +42,7 @@ int test_parser_ret_i32(void);
 int test_parser_function_decl(void);
 int test_parser_typed_pointer_decl_params(void);
 int test_parser_add(void);
+int test_parser_rejects_mismatched_vreg_types(void);
 int test_parser_typed_call_and_dot_label(void);
 int test_parser_named_type_operand(void);
 int test_parser_forward_named_type_by_value(void);
@@ -257,6 +258,8 @@ int test_builder_compat_load_library_null_rejects(void);
 int test_builder_compat_emit_executable_llvm_mode_contract(void);
 int test_builder_compat_direct_large_object_emission(void);
 int test_llvm_c_shim_add_and_lookup(void);
+int test_llvm_c_shim_lookup_float_return_uses_host_abi(void);
+int test_llvm_c_shim_rejects_undeclared_data_global(void);
 int test_llvm_c_shim_load_library_rejects_null(void);
 #if !defined(__APPLE__)
 int test_objfile_elf_header(void);
@@ -328,6 +331,7 @@ int main(void) {
     RUN_TEST(test_parser_function_decl);
     RUN_TEST(test_parser_typed_pointer_decl_params);
     RUN_TEST(test_parser_add);
+    RUN_TEST(test_parser_rejects_mismatched_vreg_types);
     RUN_TEST(test_parser_typed_call_and_dot_label);
     RUN_TEST(test_parser_named_type_operand);
     RUN_TEST(test_parser_forward_named_type_by_value);
@@ -581,6 +585,8 @@ int main(void) {
     RUN_TEST(test_builder_compat_emit_executable_llvm_mode_contract);
     RUN_TEST(test_builder_compat_direct_large_object_emission);
     RUN_TEST(test_llvm_c_shim_add_and_lookup);
+    RUN_TEST(test_llvm_c_shim_lookup_float_return_uses_host_abi);
+    RUN_TEST(test_llvm_c_shim_rejects_undeclared_data_global);
     RUN_TEST(test_llvm_c_shim_load_library_rejects_null);
 
     fprintf(stderr, "\nObject file tests:\n");

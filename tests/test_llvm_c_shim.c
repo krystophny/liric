@@ -70,6 +70,97 @@ int test_llvm_c_shim_add_and_lookup(void) {
     return 0;
 }
 
+int test_llvm_c_shim_lookup_float_return_uses_host_abi(void) {
+    lc_context_t *ctx = lc_context_create();
+    lc_module_compat_t *mod = NULL;
+    LLVMLiricSessionStateRef state = NULL;
+    lr_type_t *f32 = NULL;
+    lr_type_t *fn_ty = NULL;
+    lc_value_t *fnv = NULL;
+    lr_func_t *f = NULL;
+    lc_value_t *bb = NULL;
+    lc_value_t *c3 = NULL;
+    int rc = 0;
+    void *addr = NULL;
+    typedef float (*fn_t)(void);
+    fn_t fn = NULL;
+
+    TEST_ASSERT(ctx != NULL, "context create");
+    mod = lc_module_create(ctx, "llvm_c_shim_float_ret");
+    TEST_ASSERT(mod != NULL, "module create");
+
+    f32 = lc_get_float_type(mod);
+    TEST_ASSERT(f32 != NULL, "f32 type");
+    fn_ty = lr_type_func_new(lc_module_get_ir(mod), f32, NULL, 0, false);
+    TEST_ASSERT(fn_ty != NULL, "function type");
+
+    fnv = lc_func_create(mod, "retf", fn_ty);
+    TEST_ASSERT(fnv != NULL, "function create");
+    f = lc_value_get_func(fnv);
+    TEST_ASSERT(f != NULL, "function unwrap");
+    bb = lc_block_create(mod, f, "entry");
+    TEST_ASSERT(bb != NULL, "block create");
+    c3 = lc_value_const_fp(mod, f32, 3.0, false);
+    TEST_ASSERT(c3 != NULL, "float const create");
+    lc_create_ret(mod, lc_value_get_block(bb), c3);
+
+    state = LLVMLiricSessionCreate();
+    TEST_ASSERT(state != NULL, "shim state create");
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    TEST_ASSERT_EQ(rc, 0, "add module");
+
+    addr = LLVMLiricSessionLookup(state, "retf");
+    TEST_ASSERT(addr != NULL, "lookup retf");
+    memcpy(&fn, &addr, sizeof(addr));
+    TEST_ASSERT(fn != NULL, "cast function");
+    TEST_ASSERT(fn() > 2.99f && fn() < 3.01f, "retf() returns 3.0f");
+
+    LLVMLiricSessionDispose(state);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
+int test_llvm_c_shim_rejects_undeclared_data_global(void) {
+    const char *src =
+        "define i64 @f3() {\n"
+        "entry:\n"
+        "  %1 = load i64, i64* @count\n"
+        "  ret i64 %1\n"
+        "}\n";
+    char err[256] = {0};
+    lr_module_t *parsed = NULL;
+    lr_module_t *old_ir = NULL;
+    lc_context_t *ctx = lc_context_create();
+    lc_module_compat_t *mod = NULL;
+    LLVMLiricSessionStateRef state = NULL;
+    int rc = 0;
+
+    TEST_ASSERT(ctx != NULL, "context create");
+    mod = lc_module_create(ctx, "llvm_c_shim_undeclared_global");
+    TEST_ASSERT(mod != NULL, "module create");
+
+    parsed = lr_parse_ll(src, strlen(src), err, sizeof(err));
+    TEST_ASSERT(parsed != NULL, "parser accepts unresolved data global IR");
+
+    old_ir = lc_module_get_ir(mod);
+    TEST_ASSERT(old_ir != NULL, "module ir");
+    mod->mod = parsed;
+    if (mod->ctx)
+        mod->ctx->mod = parsed;
+    lr_module_free(old_ir);
+
+    state = LLVMLiricSessionCreate();
+    TEST_ASSERT(state != NULL, "shim state create");
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    TEST_ASSERT(rc != 0, "add module rejects undeclared data global");
+
+    LLVMLiricSessionDispose(state);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
 int test_llvm_c_shim_load_library_rejects_null(void) {
     LLVMLiricSessionStateRef state = LLVMLiricSessionCreate();
     TEST_ASSERT(state != NULL, "shim state create");

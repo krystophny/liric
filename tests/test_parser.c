@@ -209,6 +209,26 @@ int test_parser_add(void) {
     return 0;
 }
 
+int test_parser_rejects_mismatched_vreg_types(void) {
+    const char *src =
+        "define i32 @bad() {\n"
+        "entry:\n"
+        "  %a = add i32 0, 1\n"
+        "  %b = add i64 0, 2\n"
+        "  %c = add i32 %a, %b\n"
+        "  ret i32 %c\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m == NULL, "type-mismatched IR must fail to parse");
+    TEST_ASSERT(strstr(err, "type mismatch") != NULL, "error reports type mismatch");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_typed_call_and_dot_label(void) {
     const char *src =
         "declare i32 @g(i32)\n"
