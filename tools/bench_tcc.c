@@ -326,6 +326,7 @@ static void usage(void) {
     printf("  --corpus PATH              corpus TSV file\n");
     printf("  --cache-dir PATH           corpus cache directory\n");
     printf("  --probe-runner PATH        liric_probe_runner binary\n");
+    printf("  --runtime-bc PATH          runtime bitcode for probe_runner\n");
     printf("  --runtime-lib PATH         runtime library for probe_runner\n");
     printf("  --policy direct|ir         liric policy (default: direct)\n");
     printf("  --lfortran-include-dir PATH  include dir for lfortran_intrinsics.h\n");
@@ -336,6 +337,7 @@ int main(int argc, char **argv) {
     const char *corpus_path = NULL;
     const char *cache_dir = NULL;
     const char *probe_runner_path = NULL;
+    const char *runtime_bc = NULL;
     const char *runtime_lib = NULL;
     const char *policy = "direct";
     const char *lfortran_include_dir = NULL;
@@ -361,6 +363,8 @@ int main(int argc, char **argv) {
             cache_dir = argv[++i];
         } else if (strcmp(argv[i], "--probe-runner") == 0 && i + 1 < argc) {
             probe_runner_path = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
@@ -401,6 +405,10 @@ int main(int argc, char **argv) {
     }
 
     /* runtime lib auto-detect */
+    if (!runtime_bc && !runtime_lib) {
+        if (file_exists("build/deps/lfortran/build-llvm/src/runtime/lfortran_intrinsics.bc"))
+            runtime_bc = "build/deps/lfortran/build-llvm/src/runtime/lfortran_intrinsics.bc";
+    }
     if (!runtime_lib) {
         if (file_exists("build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so"))
             runtime_lib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
@@ -532,7 +540,10 @@ int main(int argc, char **argv) {
             liric_argv[n++] = "main";
             liric_argv[n++] = "--sig";
             liric_argv[n++] = "i32";
-            if (runtime_lib) {
+            if (runtime_bc) {
+                liric_argv[n++] = "--runtime-bc";
+                liric_argv[n++] = (char *)runtime_bc;
+            } else if (runtime_lib) {
                 liric_argv[n++] = "--load-lib";
                 liric_argv[n++] = (char *)runtime_lib;
             }

@@ -1,4 +1,5 @@
 #include "jit.h"
+#include "bc_decode.h"
 #include "compile_mode.h"
 #include "ir.h"
 #include "llvm_backend.h"
@@ -1090,6 +1091,53 @@ int lr_jit_load_library(lr_jit_t *j, const char *path) {
     if (j->miss_buckets && j->miss_bucket_count > 0) {
         memset(j->miss_buckets, 0, j->miss_bucket_count * sizeof(*j->miss_buckets));
     }
+    return 0;
+}
+
+int lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len) {
+    uint8_t *owned = NULL;
+    if (!j || !bc_data || bc_len == 0)
+        return -1;
+    owned = (uint8_t *)malloc(bc_len);
+    if (!owned)
+        return -1;
+    memcpy(owned, bc_data, bc_len);
+    free(j->runtime_bc_owned);
+    j->runtime_bc_owned = owned;
+    j->runtime_bc_data = owned;
+    j->runtime_bc_len = bc_len;
+    j->runtime_bc_loaded = false;
+    return 0;
+}
+
+int lr_jit_ensure_runtime_bc_loaded(lr_jit_t *j, lr_module_t *m,
+                                    char *err, size_t err_len) {
+    char rt_err[256] = {0};
+    lr_module_t *rt = NULL;
+    if (err && err_len > 0)
+        err[0] = '\0';
+    if (!j || !m) {
+        if (err && err_len > 0)
+            (void)snprintf(err, err_len, "invalid runtime module load arguments");
+        return -1;
+    }
+    if (!j->runtime_bc_data || j->runtime_bc_loaded)
+        return 0;
+    rt = lr_parse_bc_with_arena(j->runtime_bc_data, j->runtime_bc_len,
+                                m->arena, rt_err, sizeof(rt_err));
+    if (!rt) {
+        if (err && err_len > 0) {
+            (void)snprintf(err, err_len, "runtime bitcode parse failed: %s",
+                           rt_err[0] ? rt_err : "unknown parse error");
+        }
+        return -1;
+    }
+    if (lr_module_merge(m, rt) != 0) {
+        if (err && err_len > 0)
+            (void)snprintf(err, err_len, "runtime bitcode merge failed");
+        return -1;
+    }
+    j->runtime_bc_loaded = true;
     return 0;
 }
 
@@ -2291,7 +2339,15 @@ done:
 }
 
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
+    char runtime_err[256] = {0};
     if (!j || !j->target || !m) return -1;
+
+    if (lr_jit_ensure_runtime_bc_loaded(j, m, runtime_err,
+                                        sizeof(runtime_err)) != 0) {
+        if (runtime_err[0])
+            fprintf(stderr, "%s\n", runtime_err);
+        return -1;
+    }
 
     if (j->mode == LR_COMPILE_LLVM) {
         char llvm_err[256] = {0};
@@ -2303,7 +2359,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
 
     bool own_wx_transition = !j->update_active;
-    bool lazy_mode = jit_lazy_materialization_enabled();
+    bool lazy_mode = jit_lazy_materialization_enabled() ||
+                     (j->runtime_bc_data && j->runtime_bc_len > 0);
     int rc = -1;
     size_t code_size_before = j->code_size;
     lr_objfile_ctx_t fixup_ctx;
@@ -2507,6 +2564,7 @@ void lr_jit_destroy(lr_jit_t *j) {
     free(j->lazy_func_buckets);
     free(j->miss_buckets);
     free(j->sym_buckets);
+    free(j->runtime_bc_owned);
     lr_arena_destroy(j->arena);
     free(j);
 }

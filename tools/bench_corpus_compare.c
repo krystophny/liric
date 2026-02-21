@@ -54,6 +54,7 @@ typedef struct {
 typedef struct {
     const char *probe_runner;
     const char *lli_phases;
+    const char *runtime_bc;
     const char *runtime_lib;
     const char *policy;
     const char *corpus_tsv;
@@ -344,6 +345,7 @@ static void usage(void) {
     printf("  --probe-runner PATH   path to liric_probe_runner\n");
     printf("  --lli-phases PATH     path to bench_lli_phases\n");
     printf("  --policy MODE         liric session policy: direct|ir (default: direct)\n");
+    printf("  --runtime-bc PATH     runtime bitcode for liric track (preferred)\n");
     printf("  --runtime-lib PATH    runtime shared library (required for runtime-dependent cases)\n");
     printf("  --corpus PATH         corpus TSV (default: tools/corpus_100.tsv)\n");
     printf("  --cache-dir PATH      corpus cache dir (default: /tmp/liric_lfortran_mass/cache)\n");
@@ -354,6 +356,8 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
+    const char *default_runtime_bc =
+        "build/deps/lfortran/build-llvm/src/runtime/lfortran_intrinsics.bc";
     const char *default_runtime_dylib =
         "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
     const char *default_runtime_so =
@@ -362,6 +366,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";
     cfg.policy = "direct";
+    cfg.runtime_bc = file_exists(default_runtime_bc) ? default_runtime_bc : NULL;
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so)
@@ -384,6 +389,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.probe_runner = argv[++i];
         } else if (strcmp(argv[i], "--lli-phases") == 0 && i + 1 < argc) {
             cfg.lli_phases = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--policy") == 0 && i + 1 < argc) {
@@ -408,6 +415,11 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
+    if (cfg.runtime_bc && cfg.runtime_bc[0]) {
+        if (!file_exists(cfg.runtime_bc))
+            die("runtime bitcode not found", cfg.runtime_bc);
+        cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
+    }
     if (cfg.runtime_lib && cfg.runtime_lib[0]) {
         if (!file_exists(cfg.runtime_lib))
             die("runtime library not found", cfg.runtime_lib);
@@ -571,7 +583,10 @@ static int run_suite(const cfg_t *cfg,
             probe_argv[pk++] = "main";
             probe_argv[pk++] = "--sig";
             probe_argv[pk++] = "i32_argc_argv";
-            if (cfg->runtime_lib && cfg->runtime_lib[0]) {
+            if (cfg->runtime_bc && cfg->runtime_bc[0]) {
+                probe_argv[pk++] = "--runtime-bc";
+                probe_argv[pk++] = (char *)cfg->runtime_bc;
+            } else if (cfg->runtime_lib && cfg->runtime_lib[0]) {
                 probe_argv[pk++] = "--load-lib";
                 probe_argv[pk++] = (char *)cfg->runtime_lib;
             }

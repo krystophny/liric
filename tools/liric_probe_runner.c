@@ -161,6 +161,7 @@ int main(int argc, char **argv) {
     int timing = 0;
     int no_exec = 0;
     int parse_only = 0;
+    const char *runtime_bc_path = NULL;
     const char *load_libs[64];
     int num_load_libs = 0;
 
@@ -171,6 +172,7 @@ int main(int argc, char **argv) {
                     "  --func NAME            function to lookup (default: main)\n"
                     "  --sig SIG              signature tag (default: i32)\n"
                     "  --load-lib PATH        runtime library to dlopen (repeatable)\n"
+                    "  --runtime-bc PATH      runtime bitcode to preload into JIT\n"
                     "  --policy MODE          set LIRIC_POLICY (direct|ir)\n"
                     "  --ignore-retcode       force zero process rc on execution\n"
                     "  --timing               print TIMING line to stderr\n"
@@ -200,6 +202,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "too many --load-lib options\n");
                 return 1;
             }
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            runtime_bc_path = argv[++i];
         } else if (argv[i][0] != '-') {
             input_file = argv[i];
         } else {
@@ -241,6 +245,8 @@ int main(int argc, char **argv) {
 
     lr_jit_t *jit = NULL;
     int run_rc = 0;
+    file_buf_t runtime_bc = {0};
+    int have_runtime_bc = 0;
 
     if (policy && policy[0] != '\0') {
         if (setenv("LIRIC_POLICY", policy, 1) != 0) {
@@ -264,10 +270,34 @@ int main(int argc, char **argv) {
         }
         if (timing) t_jit_create_end = now_us();
 
+        if (runtime_bc_path && runtime_bc_path[0]) {
+            if (read_file(runtime_bc_path, &runtime_bc) != 0) {
+                fprintf(stderr, "failed to read runtime bitcode: %s\n", runtime_bc_path);
+                lr_jit_destroy(jit);
+                lr_module_free(m);
+                free_file(&src);
+                return 1;
+            }
+            have_runtime_bc = 1;
+            if (!getenv("LIRIC_JIT_LAZY"))
+                setenv("LIRIC_JIT_LAZY", "1", 0);
+            if (lr_jit_set_runtime_bc(jit, (const uint8_t *)runtime_bc.data,
+                                      runtime_bc.len) != 0) {
+                fprintf(stderr, "failed to configure runtime bitcode\n");
+                free_file(&runtime_bc);
+                lr_jit_destroy(jit);
+                lr_module_free(m);
+                free_file(&src);
+                return 1;
+            }
+        }
+
         if (timing) t_load_lib_start = now_us();
         for (int i = 0; i < num_load_libs; i++) {
             if (lr_jit_load_library(jit, load_libs[i]) != 0) {
                 fprintf(stderr, "failed to load library: %s\n", load_libs[i]);
+                if (have_runtime_bc)
+                    free_file(&runtime_bc);
                 lr_jit_destroy(jit);
                 lr_module_free(m);
                 free_file(&src);
@@ -280,6 +310,8 @@ int main(int argc, char **argv) {
         int rc = lr_jit_add_module(jit, m);
         if (rc != 0) {
             fprintf(stderr, "JIT compilation failed\n");
+            if (have_runtime_bc)
+                free_file(&runtime_bc);
             lr_jit_destroy(jit);
             lr_module_free(m);
             free_file(&src);
@@ -292,6 +324,8 @@ int main(int argc, char **argv) {
         if (timing) t_lookup_end = now_us();
         if (!sym) {
             fprintf(stderr, "function '%s' not found\n", func_name);
+            if (have_runtime_bc)
+                free_file(&runtime_bc);
             lr_jit_destroy(jit);
             lr_module_free(m);
             free_file(&src);
@@ -321,6 +355,8 @@ int main(int argc, char **argv) {
 
     if (jit) lr_jit_destroy(jit);
     lr_module_free(m);
+    if (have_runtime_bc)
+        free_file(&runtime_bc);
     free_file(&src);
     return run_rc;
 }

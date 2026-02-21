@@ -68,6 +68,10 @@ typedef struct lr_jit {
     lr_symbol_provider_t *symbol_providers;
     lr_symbol_provider_t *symbol_providers_tail;
     lr_arena_t *arena;
+    const uint8_t *runtime_bc_data;
+    size_t runtime_bc_len;
+    bool runtime_bc_loaded;
+    uint8_t *runtime_bc_owned;
     void *llvm_orc_jit;
 } lr_jit_t;
 
@@ -77,6 +81,9 @@ const char *lr_jit_host_target_name(void);
 const char *lr_jit_target_name(const lr_jit_t *j);
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr);
 int lr_jit_load_library(lr_jit_t *j, const char *path);
+int lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len);
+int lr_jit_ensure_runtime_bc_loaded(lr_jit_t *j, lr_module_t *m,
+                                    char *err, size_t err_len);
 void lr_jit_begin_update(lr_jit_t *j);
 int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m);
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);

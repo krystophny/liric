@@ -162,6 +162,10 @@ struct lr_session {
     uint32_t blob_count;
     uint32_t blob_cap;
     bool ir_module_jit_ready;
+    uint8_t *runtime_bc_data;
+    size_t runtime_bc_len;
+    bool runtime_bc_registered_with_jit;
+    bool runtime_bc_merged_into_main_module;
 };
 
 /* Derive the direct per-function compile buffer capacity from remaining JIT
@@ -174,6 +178,9 @@ static size_t direct_compile_buf_capacity(const struct lr_session *s) {
 
 static int ensure_block(struct lr_session *s, uint32_t block_id,
                         session_error_t *err);
+
+static int register_owned_module(struct lr_session *s, lr_module_t *m,
+                                 session_error_t *err);
 
 /* ---- Error helpers ----------------------------------------------------- */
 
@@ -192,6 +199,24 @@ static void err_set(session_error_t *err, int code, const char *fmt, ...) {
     va_start(args, fmt);
     (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
     va_end(args);
+}
+
+static int register_owned_module(struct lr_session *s, lr_module_t *m,
+                                 session_error_t *err) {
+    lr_owned_module_t *node = NULL;
+    if (!s || !m) {
+        err_set(err, S_ERR_ARGUMENT, "invalid module ownership registration");
+        return -1;
+    }
+    node = (lr_owned_module_t *)calloc(1, sizeof(*node));
+    if (!node) {
+        err_set(err, S_ERR_BACKEND, "module ownership registration failed");
+        return -1;
+    }
+    node->module = m;
+    node->next = s->owned_modules;
+    s->owned_modules = node;
+    return 0;
 }
 
 /* ---- Internal helpers -------------------------------------------------- */
@@ -261,10 +286,85 @@ static size_t align_up_size(size_t value, size_t alignment) {
     return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
+static int merge_runtime_bc_into_module(struct lr_session *s, lr_module_t *m,
+                                        bool *merged_flag,
+                                        session_error_t *err) {
+    char parse_err[256] = {0};
+    lr_module_t *rt = NULL;
+    if (!s || !m || !s->runtime_bc_data || s->runtime_bc_len == 0)
+        return 0;
+    if (merged_flag && *merged_flag)
+        return 0;
+    rt = lr_parse_bc_with_arena(s->runtime_bc_data, s->runtime_bc_len,
+                                m->arena, parse_err, sizeof(parse_err));
+    if (!rt) {
+        err_set(err, S_ERR_PARSE, "runtime bc parse failed: %s",
+                parse_err[0] ? parse_err : "unknown parse error");
+        return -1;
+    }
+    if (lr_module_merge(m, rt) != 0) {
+        err_set(err, S_ERR_BACKEND, "runtime bc merge failed");
+        return -1;
+    }
+    if (merged_flag)
+        *merged_flag = true;
+    return 0;
+}
+
+static int preload_runtime_bc_into_jit(struct lr_session *s,
+                                       session_error_t *err) {
+    lr_arena_t *arena = NULL;
+    lr_module_t *rt = NULL;
+    lr_owned_module_t *node = NULL;
+    char parse_err[256] = {0};
+    if (!s || !s->jit || !s->runtime_bc_data || s->runtime_bc_len == 0)
+        return 0;
+    if (s->runtime_bc_registered_with_jit)
+        return 0;
+
+    arena = lr_arena_create(0);
+    if (!arena) {
+        err_set(err, S_ERR_BACKEND, "runtime arena allocation failed");
+        return -1;
+    }
+    rt = lr_parse_bc_streaming(s->runtime_bc_data, s->runtime_bc_len, arena,
+                               NULL, NULL, parse_err, sizeof(parse_err));
+    if (!rt) {
+        lr_arena_destroy(arena);
+        err_set(err, S_ERR_PARSE, "runtime bc parse failed: %s",
+                parse_err[0] ? parse_err : "unknown parse error");
+        return -1;
+    }
+
+    /* Avoid merging runtime into itself via jit add-module bootstrap. */
+    s->jit->runtime_bc_loaded = true;
+    if (lr_jit_add_module(s->jit, rt) != 0) {
+        lr_module_free(rt);
+        err_set(err, S_ERR_BACKEND, "runtime bc jit preload failed");
+        return -1;
+    }
+
+    node = (lr_owned_module_t *)calloc(1, sizeof(*node));
+    if (!node) {
+        lr_module_free(rt);
+        err_set(err, S_ERR_BACKEND, "runtime ownership registration failed");
+        return -1;
+    }
+    node->module = rt;
+    node->next = s->owned_modules;
+    s->owned_modules = node;
+
+    s->runtime_bc_registered_with_jit = true;
+    return 0;
+}
+
 static int ensure_runtime_and_globals_ready(struct lr_session *s,
                                             session_error_t *err) {
     if (!s || !s->jit || !s->module)
         return 0;
+
+    if (preload_runtime_bc_into_jit(s, err) != 0)
+        return -1;
 
     if (s->module->first_global) {
         if (lr_jit_materialize_globals(s->jit, s->module) != 0) {
@@ -1511,6 +1611,7 @@ void lr_session_destroy(struct lr_session *s) {
     free(s->block_terminated);
     free(s->block_seen);
     free(s->blocks);
+    free(s->runtime_bc_data);
     free(s);
 }
 
@@ -1538,9 +1639,47 @@ int lr_session_load_library(struct lr_session *s, const char *path,
     return 0;
 }
 
+int lr_session_set_runtime_bc(struct lr_session *s, const uint8_t *bc_data,
+                              size_t bc_len, session_error_t *err) {
+    uint8_t *owned = NULL;
+    err_clear(err);
+    if (!s || !s->jit || !bc_data || bc_len == 0) {
+        err_set(err, S_ERR_ARGUMENT, "invalid runtime bc arguments");
+        return -1;
+    }
+    if (s->runtime_bc_data) {
+        err_set(err, S_ERR_STATE, "runtime bc already configured");
+        return -1;
+    }
+    owned = (uint8_t *)malloc(bc_len);
+    if (!owned) {
+        err_set(err, S_ERR_BACKEND, "runtime bc allocation failed");
+        return -1;
+    }
+    memcpy(owned, bc_data, bc_len);
+    s->runtime_bc_data = owned;
+    s->runtime_bc_len = bc_len;
+    s->runtime_bc_registered_with_jit = false;
+    s->runtime_bc_merged_into_main_module = false;
+
+    if (lr_jit_set_runtime_bc(s->jit, bc_data, bc_len) != 0) {
+        free(s->runtime_bc_data);
+        s->runtime_bc_data = NULL;
+        s->runtime_bc_len = 0;
+        err_set(err, S_ERR_BACKEND, "jit runtime bc configuration failed");
+        return -1;
+    }
+
+    if (preload_runtime_bc_into_jit(s, err) != 0)
+        return -1;
+    return 0;
+}
+
 void *lr_session_lookup(struct lr_session *s, const char *name) {
     void *addr;
     if (!s || !s->jit || !name || !name[0])
+        return NULL;
+    if (preload_runtime_bc_into_jit(s, NULL) != 0)
         return NULL;
     if (module_jit_deferred_until_lookup(s) && !s->ir_module_jit_ready) {
         if (lr_jit_add_module(s->jit, s->module) != 0)
@@ -2144,11 +2283,15 @@ static int session_compile_parsed_module(struct lr_session *s, lr_module_t *m,
                                          void **out_addr,
                                          session_error_t *err) {
     lr_func_t *last_def = NULL;
-    lr_owned_module_t *node = NULL;
     int rc;
 
     if (!s || !s->jit || !m) {
         err_set(err, S_ERR_ARGUMENT, "invalid compiled module arguments");
+        return -1;
+    }
+
+    if (preload_runtime_bc_into_jit(s, err) != 0) {
+        lr_module_free(m);
         return -1;
     }
 
@@ -2160,15 +2303,10 @@ static int session_compile_parsed_module(struct lr_session *s, lr_module_t *m,
         return -1;
     }
 
-    node = (lr_owned_module_t *)calloc(1, sizeof(*node));
-    if (!node) {
+    if (register_owned_module(s, m, err) != 0) {
         lr_module_free(m);
-        err_set(err, S_ERR_BACKEND, "module ownership registration failed");
         return -1;
     }
-    node->module = m;
-    node->next = s->owned_modules;
-    s->owned_modules = node;
 
     if (!out_addr)
         return 0;
@@ -2291,14 +2429,22 @@ static const lr_target_t *session_resolve_target(struct lr_session *s) {
 int lr_session_emit_object(struct lr_session *s, const char *path,
                             session_error_t *err) {
     char backend_err[256] = {0};
+    bool has_runtime_bc;
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_object arguments");
         return -1;
     }
+    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
+    if (has_runtime_bc) {
+        if (merge_runtime_bc_into_module(s, s->module,
+                                         &s->runtime_bc_merged_into_main_module,
+                                         err) != 0)
+            return -1;
+    }
 
-    if (s->blob_count > 0) {
+    if (s->blob_count > 0 && !has_runtime_bc) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2332,13 +2478,21 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
 
 int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
                                   session_error_t *err) {
+    bool has_runtime_bc;
     err_clear(err);
     if (!s || !s->module || !out) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_object_stream arguments");
         return -1;
     }
+    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
+    if (has_runtime_bc) {
+        if (merge_runtime_bc_into_module(s, s->module,
+                                         &s->runtime_bc_merged_into_main_module,
+                                         err) != 0)
+            return -1;
+    }
 
-    if (s->blob_count > 0) {
+    if (s->blob_count > 0 && !has_runtime_bc) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2406,14 +2560,22 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
 int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
     char backend_err[256] = {0};
+    bool has_runtime_bc;
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
+    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
+    if (has_runtime_bc) {
+        if (merge_runtime_bc_into_module(s, s->module,
+                                         &s->runtime_bc_merged_into_main_module,
+                                         err) != 0)
+            return -1;
+    }
 
-    if (s->blob_count > 0) {
+    if (s->blob_count > 0 && !has_runtime_bc) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2451,9 +2613,18 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
                                       const char *runtime_ll, size_t runtime_len,
                                       session_error_t *err) {
     char backend_err[256] = {0};
+    bool has_runtime_bc;
 
     err_clear(err);
-    if (!s || !s->module || !path || !runtime_ll || runtime_len == 0) {
+    if (!s || !s->module || !path) {
+        err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
+        return -1;
+    }
+    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
+    if (has_runtime_bc) {
+        return lr_session_emit_exe(s, path, err);
+    }
+    if (!runtime_ll || runtime_len == 0) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
         return -1;
     }

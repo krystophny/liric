@@ -139,3 +139,40 @@ bench_find_runtime_lib() {
     fi
     return 1
 }
+
+bench_find_runtime_bc() {
+    local lfortran_src="$1"
+    local first=""
+    local preferred_llvm=""
+    local preferred_liric=""
+    local cand=""
+    if [[ ! -d "$lfortran_src" ]]; then
+        return 1
+    fi
+    while IFS= read -r cand; do
+        if [[ -z "$first" ]]; then
+            first="$cand"
+        fi
+        case "$cand" in
+            */build-llvm/*)
+                preferred_llvm="$cand"
+                ;;
+            */build-liric/*)
+                preferred_liric="$cand"
+                ;;
+        esac
+    done < <(find "$lfortran_src" -maxdepth 6 -type f -name 'lfortran_intrinsics.bc' | sort)
+    if [[ -n "$preferred_llvm" ]]; then
+        echo "$preferred_llvm"
+        return 0
+    fi
+    if [[ -n "$preferred_liric" ]]; then
+        echo "$preferred_liric"
+        return 0
+    fi
+    if [[ -n "$first" ]]; then
+        echo "$first"
+        return 0
+    fi
+    return 1
+}

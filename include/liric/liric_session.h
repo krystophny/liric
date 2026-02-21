@@ -89,6 +89,8 @@ void *lr_session_lookup(lr_session_t *s, const char *name);
 
 int lr_session_load_library(lr_session_t *s, const char *path,
                             lr_error_t *err);
+int lr_session_set_runtime_bc(lr_session_t *s, const uint8_t *bc_data,
+                              size_t bc_len, lr_error_t *err);
 
 /* ---- Types (session-scoped singletons) --------------------------------- */
 

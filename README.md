@@ -145,7 +145,7 @@ Runtime artifacts:
   - `docs/benchmarks/readme_perf_table.md`
   - using `./tools/bench_readme_perf_snapshot.sh --build-dir ./build --bench-dir /tmp/liric_bench --out-dir docs/benchmarks`
 
-## Speedup Tables (2026-02-20)
+## Speedup Tables (2026-02-21)
 
 Source: `/tmp/liric_bench/matrix_rows.jsonl` and `/tmp/liric_bench/matrix_summary.json` from
 `./build/bench_matrix --timeout 15` (default modes: isel, copy_patch; default policies: direct, ir).
@@ -153,11 +153,16 @@ Source: `/tmp/liric_bench/matrix_rows.jsonl` and `/tmp/liric_bench/matrix_summar
 Matrix summary: `status=OK`, `cells_attempted=24`, `cells_ok=24`, `cells_failed=0`.
 (`micro_c` skipped because `bench_tcc` is unavailable in this environment.)
 
+Canonical corpus snapshot (`docs/benchmarks/readme_perf_snapshot.json`):
+- `corpus_100` attempted/completed: `97/97`
+- liric vs LLVM compile materialized speedup: **59.63x median** (**9.63x aggregate**)
+- liric vs LLVM total materialized speedup: **22.73x median** (**7.48x aggregate**)
+
 ### API AOT (lfortran + liric vs lfortran + LLVM, compat corpus)
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 29/33 (4 skipped) | **0.97x** | **0.97x** |
+| isel | direct | 29/33 (4 skipped) | **0.98x** | **0.98x** |
 | isel | ir | 33/33 (0 skipped) | **0.54x** | **0.54x** |
 | copy_patch | direct | 29/33 (4 skipped) | **0.54x** | **0.54x** |
 | copy_patch | ir | 33/33 (0 skipped) | **0.54x** | **0.54x** |
@@ -166,7 +171,7 @@ Matrix summary: `status=OK`, `cells_attempted=24`, `cells_ok=24`, `cells_failed=
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 2.555 | 0.077 | **33x** |
-| isel | ir | 2.351 | 0.076 | **31x** |
-| copy_patch | direct | 2.358 | 0.076 | **31x** |
-| copy_patch | ir | 2.347 | 0.074 | **32x** |
+| isel | direct | 2.549 | 0.080 | **32x** |
+| isel | ir | 2.350 | 0.074 | **32x** |
+| copy_patch | direct | 2.344 | 0.078 | **30x** |
+| copy_patch | ir | 2.330 | 0.076 | **31x** |

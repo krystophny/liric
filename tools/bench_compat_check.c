@@ -43,6 +43,7 @@ typedef struct {
 typedef struct {
     const char *lfortran;
     const char *probe_runner;
+    const char *runtime_bc;
     const char *runtime_lib;
     const char *lli;
     const char *cmake;
@@ -635,7 +636,8 @@ static void usage(void) {
     printf("  --freeze-api N         frozen compat corpus size (default: 100)\n");
     printf("  --lfortran PATH        path to lfortran binary\n");
     printf("  --probe-runner PATH    path to liric_probe_runner\n");
-    printf("  --runtime-lib PATH     path to liblfortran_runtime (used by lli and liric)\n");
+    printf("  --runtime-bc PATH      path to runtime bitcode (used by liric)\n");
+    printf("  --runtime-lib PATH     path to liblfortran_runtime (used by lli)\n");
     printf("  --lli PATH             path to lli (default: lli)\n");
     printf("  --cmake PATH           path to integration_tests/CMakeLists.txt\n");
 }
@@ -643,11 +645,13 @@ static void usage(void) {
 static cfg_t parse_args(int argc, char **argv) {
     cfg_t cfg;
     int i;
+    const char *default_runtime_bc = "build/deps/lfortran/build-llvm/src/runtime/lfortran_intrinsics.bc";
     const char *default_runtime_dylib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
     const char *default_runtime_so = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
 
     cfg.lfortran = "build/deps/lfortran/build-llvm/src/bin/lfortran";
     cfg.probe_runner = "build/liric_probe_runner";
+    cfg.runtime_bc = file_exists(default_runtime_bc) ? default_runtime_bc : NULL;
     cfg.runtime_lib = file_exists(default_runtime_dylib) ? default_runtime_dylib : default_runtime_so;
     cfg.lli = "lli";
     cfg.cmake = "build/deps/lfortran/integration_tests/CMakeLists.txt";
@@ -677,6 +681,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran = argv[++i];
         } else if (strcmp(argv[i], "--probe-runner") == 0 && i + 1 < argc) {
             cfg.probe_runner = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--lli") == 0 && i + 1 < argc) {
@@ -690,11 +696,17 @@ static cfg_t parse_args(int argc, char **argv) {
 
     if (!file_exists(cfg.lfortran)) die("lfortran not found: %s", cfg.lfortran);
     if (!file_exists(cfg.probe_runner)) die("probe runner not found: %s", cfg.probe_runner);
-    if (!file_exists(cfg.runtime_lib)) die("runtime lib not found: %s", cfg.runtime_lib);
+    if (!cfg.runtime_lib || !cfg.runtime_lib[0] || !file_exists(cfg.runtime_lib)) {
+        die("runtime lib not found: %s", cfg.runtime_lib ? cfg.runtime_lib : "(null)");
+    }
     if (!file_exists(cfg.cmake)) die("cmake file not found: %s", cfg.cmake);
 
     cfg.lfortran = to_abs_path(cfg.lfortran);
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
+    if (cfg.runtime_bc && cfg.runtime_bc[0]) {
+        if (!file_exists(cfg.runtime_bc)) die("runtime bc not found: %s", cfg.runtime_bc);
+        cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
+    }
     cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
     cfg.cmake = to_abs_path(cfg.cmake);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
@@ -915,14 +927,21 @@ int main(int argc, char **argv) {
 
         {
             char *jitv[9];
+            int jk = 0;
             jitv[0] = (char *)cfg.probe_runner;
             jitv[1] = "--sig";
             jitv[2] = "i32_argc_argv";
-            jitv[3] = "--load-lib";
-            jitv[4] = (char *)cfg.runtime_lib;
-            jitv[5] = ll_path;
-            jitv[6] = NULL;
-            jit_argv = jitv;
+            jk = 3;
+            if (cfg.runtime_bc && cfg.runtime_bc[0]) {
+                jitv[jk++] = "--runtime-bc";
+                jitv[jk++] = (char *)cfg.runtime_bc;
+            } else {
+                jitv[jk++] = "--load-lib";
+                jitv[jk++] = (char *)cfg.runtime_lib;
+            }
+            jitv[jk++] = ll_path;
+            jitv[jk] = NULL;
+            jit_argv = (char *const *)jitv;
             jit_r = run_cmd((char *const *)jit_argv, cfg.timeout_sec, NULL, NULL, work_dir);
         }
         liric_rc = jit_r.rc;

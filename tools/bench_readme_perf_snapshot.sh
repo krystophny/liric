@@ -15,8 +15,9 @@ usage: bench_readme_perf_snapshot.sh [options]
   --timeout N            timeout seconds per command (default: 30)
   --corpus PATH          corpus TSV (default: tools/corpus_100.tsv)
   --cache-dir PATH       corpus cache dir (default: /tmp/liric_lfortran_mass/cache)
+  --runtime-bc PATH      runtime bitcode path for liric track (auto-detect by default)
   --runtime-lib PATH     runtime shared library path for core track (auto-detect by default)
-  --lfortran-src PATH    lfortran source root for runtime-lib auto-detect (default: build/deps/lfortran)
+  --lfortran-src PATH    lfortran source root for runtime auto-detect (default: build/deps/lfortran)
   --no-run               do not execute benchmarks; consume existing comparator artifacts
   -h, --help             show this help
 
@@ -35,6 +36,7 @@ out_dir="docs/benchmarks"
 timeout_sec="30"
 corpus_tsv="tools/corpus_100.tsv"
 cache_dir="/tmp/liric_lfortran_mass/cache"
+runtime_bc=""
 runtime_lib=""
 lfortran_src="build/deps/lfortran"
 no_run="0"
@@ -76,6 +78,11 @@ while [[ $# -gt 0 ]]; do
             runtime_lib="$2"
             shift 2
             ;;
+        --runtime-bc)
+            [[ $# -ge 2 ]] || bench_die "missing value for $1"
+            runtime_bc="$2"
+            shift 2
+            ;;
         --lfortran-src)
             [[ $# -ge 2 ]] || bench_die "missing value for $1"
             lfortran_src="$2"
@@ -97,6 +104,9 @@ done
 
 repo_root="$(cd "${script_dir}/.." && pwd)"
 
+if [[ -z "$runtime_bc" ]]; then
+    runtime_bc="$(bench_find_runtime_bc "$lfortran_src" || true)"
+fi
 if [[ -z "$runtime_lib" ]]; then
     runtime_lib="$(bench_find_runtime_lib "$lfortran_src" || true)"
 fi
@@ -115,6 +125,9 @@ if [[ "$no_run" == "0" ]]; then
         --bench-dir "$bench_dir"
         --timeout "$timeout_sec"
     )
+    if [[ -n "$runtime_bc" ]]; then
+        run_cmd+=(--runtime-bc "$runtime_bc")
+    fi
     if [[ -n "$runtime_lib" ]]; then
         run_cmd+=(--runtime-lib "$runtime_lib")
     fi

@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <stdint.h>
 
 static int compat_policy_from_env(lr_session_mode_t *out_mode) {
     const char *p;
@@ -25,6 +26,45 @@ static int compat_policy_from_env(lr_session_mode_t *out_mode) {
         return 0;
     }
     return -1;
+}
+
+static int read_file_bytes(const char *path, uint8_t **out_data, size_t *out_len) {
+    FILE *f = NULL;
+    long len = 0;
+    uint8_t *buf = NULL;
+    size_t nread = 0;
+    if (!path || !path[0] || !out_data || !out_len)
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    len = ftell(f);
+    if (len <= 0) {
+        fclose(f);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+    buf = (uint8_t *)malloc((size_t)len);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+    nread = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    if (nread != (size_t)len) {
+        free(buf);
+        return -1;
+    }
+    *out_data = buf;
+    *out_len = nread;
+    return 0;
 }
 
 /* ---- Compat types (must match the public header exactly) ---- */
@@ -822,6 +862,24 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
         lr_arena_destroy(arena);
         free(cm);
         return NULL;
+    }
+    {
+        const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
+        if (runtime_bc && runtime_bc[0]) {
+            lr_error_t rt_err = {0};
+            uint8_t *bc_data = NULL;
+            size_t bc_len = 0;
+            if (read_file_bytes(runtime_bc, &bc_data, &bc_len) != 0 ||
+                lr_session_set_runtime_bc(cm->session, bc_data, bc_len,
+                                          &rt_err) != 0) {
+                free(bc_data);
+                lr_session_destroy(cm->session);
+                lr_arena_destroy(arena);
+                free(cm);
+                return NULL;
+            }
+            free(bc_data);
+        }
     }
     cm->cache_owner_mod = cm->mod;
 
@@ -3623,8 +3681,18 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
     lr_error_t err = {0};
-    if (!mod || !filename || !runtime_ll || runtime_len == 0) return -1;
+    const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
+    if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (runtime_bc && runtime_bc[0]) {
+        if (lr_session_emit_exe(mod->session, filename, &err) != 0) {
+            if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+                fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
+            return -1;
+        }
+        return 0;
+    }
+    if (!runtime_ll || runtime_len == 0) return -1;
     if (lr_session_emit_exe_with_runtime(mod->session, filename,
                                          runtime_ll, runtime_len,
                                          &err) != 0) {

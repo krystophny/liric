@@ -67,6 +67,7 @@ typedef struct {
     const char *lfortran_liric_build_dir;
     const char *cmake;
     const char *test_dir;
+    const char *runtime_bc;
     const char *runtime_lib;
     const char *corpus;
     const char *cache_dir;
@@ -548,6 +549,7 @@ static void usage(void) {
     printf("  --timeout-ms N           timeout ms for bench_api (default: 3000)\n");
     printf("  --skip-compat-check      do not regenerate compat artifacts\n");
     printf("  --allow-partial          report failures but return 0\n");
+    printf("  --runtime-bc PATH        runtime bitcode\n");
     printf("  --runtime-lib PATH       runtime shared library\n");
     printf("  --corpus PATH            corpus TSV\n");
     printf("  --cache-dir PATH         corpus cache directory\n");
@@ -574,6 +576,7 @@ static cfg_t parse_args(int argc, char **argv) {
     const char *default_lfortran_llvm = "build/deps/lfortran/build-llvm/src/bin/lfortran";
     const char *default_lfortran_liric = "build/deps/lfortran/build-liric/src/bin/lfortran";
     const char *default_lfortran_build_liric = "build/deps/lfortran/build-liric";
+    const char *default_runtime_bc = "build/deps/lfortran/build-llvm/src/runtime/lfortran_intrinsics.bc";
     const char *default_runtime_dylib = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.dylib";
     const char *default_runtime_so = "build/deps/lfortran/build-llvm/src/runtime/liblfortran_runtime.so";
 
@@ -594,6 +597,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.lfortran_liric = default_lfortran_liric;
     cfg.lfortran_build_dir = "build/deps/lfortran/build-llvm";
     cfg.lfortran_liric_build_dir = default_lfortran_build_liric;
+    cfg.runtime_bc = file_exists(default_runtime_bc) ? default_runtime_bc : NULL;
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
@@ -637,6 +641,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.run_compat_check = 0;
         } else if (strcmp(argv[i], "--allow-partial") == 0) {
             cfg.allow_partial = 1;
+        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
+            cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
@@ -1333,6 +1339,10 @@ static void run_api_provider(const cfg_t *cfg,
         cmd[n++] = "--test-dir";
         cmd[n++] = (char *)cfg->test_dir;
     }
+    if (cfg->runtime_bc) {
+        cmd[n++] = "--runtime-bc";
+        cmd[n++] = (char *)cfg->runtime_bc;
+    }
     if (cfg->runtime_lib) {
         cmd[n++] = "--runtime-lib";
         cmd[n++] = (char *)cfg->runtime_lib;
@@ -1473,6 +1483,10 @@ static void run_ll_provider(const cfg_t *cfg,
     cmd[n++] = "--lli-phases";
     cmd[n++] = (char *)cfg->lli_phases;
 
+    if (cfg->runtime_bc) {
+        cmd[n++] = "--runtime-bc";
+        cmd[n++] = (char *)cfg->runtime_bc;
+    }
     if (cfg->runtime_lib) {
         cmd[n++] = "--runtime-lib";
         cmd[n++] = (char *)cfg->runtime_lib;
@@ -1582,6 +1596,10 @@ static void run_micro_provider(const cfg_t *cfg,
     if (cfg->probe_runner) {
         cmd[n++] = "--probe-runner";
         cmd[n++] = (char *)cfg->probe_runner;
+    }
+    if (cfg->runtime_bc) {
+        cmd[n++] = "--runtime-bc";
+        cmd[n++] = (char *)cfg->runtime_bc;
     }
     if (cfg->runtime_lib) {
         cmd[n++] = "--runtime-lib";
@@ -1787,6 +1805,10 @@ int main(int argc, char **argv) {
                     snprintf(api_limit_buf, sizeof(api_limit_buf), "%d", cfg.api_cases);
                     cmd[n++] = "--limit";
                     cmd[n++] = api_limit_buf;
+                }
+                if (cfg.runtime_bc) {
+                    cmd[n++] = "--runtime-bc";
+                    cmd[n++] = (char *)cfg.runtime_bc;
                 }
                 if (cfg.runtime_lib) {
                     cmd[n++] = "--runtime-lib";
