@@ -44,6 +44,28 @@ static lr_func_t *find_func_by_name(lr_module_t *m, const char *name) {
     return NULL;
 }
 
+static uint32_t count_block_insts(const lr_block_t *b) {
+    const lr_inst_t *inst;
+    uint32_t count = 0;
+
+    if (!b)
+        return 0;
+    for (inst = b->first; inst; inst = inst->next)
+        count++;
+    return count;
+}
+
+static uint32_t count_func_insts(const lr_func_t *f) {
+    const lr_block_t *b;
+    uint32_t count = 0;
+
+    if (!f)
+        return 0;
+    for (b = f->first_block; b; b = b->next)
+        count += count_block_insts(b);
+    return count;
+}
+
 static void set_compile_mode_env(const char *value) {
 #if defined(_WIN32)
     if (value) {
@@ -214,7 +236,9 @@ int test_session_stream_stencil_fast_path(void) {
     TEST_ASSERT(f != NULL, "function exists in module");
     TEST_ASSERT(f->is_decl, "direct mode marks function declared after JIT");
     TEST_ASSERT(f->first_block != NULL, "function block exists");
-    TEST_ASSERT(f->first_block->first == NULL, "fast path skips IR instruction construction");
+    TEST_ASSERT(f->first_block->first != NULL, "fast path mirrors emitted IR instructions");
+    TEST_ASSERT_EQ(count_block_insts(f->first_block), 2,
+                   "fast path block captures add+ret in IR");
 
     lr_session_destroy(s);
     if (prev_mode) {
@@ -275,7 +299,9 @@ int test_session_stream_isel_fast_path(void) {
     TEST_ASSERT(f != NULL, "function exists in module");
     TEST_ASSERT(f->is_decl, "direct mode marks function declared after JIT");
     TEST_ASSERT(f->first_block != NULL, "function block exists");
-    TEST_ASSERT(f->first_block->first == NULL, "isel fast path skips IR instruction construction");
+    TEST_ASSERT(f->first_block->first != NULL, "isel fast path mirrors emitted IR instructions");
+    TEST_ASSERT_EQ(count_block_insts(f->first_block), 2,
+                   "isel fast path block captures add+ret in IR");
 
     lr_session_destroy(s);
     if (prev_mode) {
@@ -662,6 +688,7 @@ int test_session_stream_stencil_no_ir_fallback(void) {
     const char *prev_mode = getenv("LIRIC_COMPILE_MODE");
     lr_module_t *m;
     lr_func_t *f;
+    lr_block_t *b;
     lr_session_t *s;
     lr_type_t *i32;
     lr_type_t *i1;
@@ -717,9 +744,10 @@ int test_session_stream_stencil_no_ir_fallback(void) {
     m = lr_session_module(s);
     f = find_func_by_name(m, "session_stream_no_fallback");
     TEST_ASSERT(f != NULL, "function exists in module");
-    for (lr_block_t *b = f->first_block; b; b = b->next) {
-        TEST_ASSERT(b->first == NULL, "DIRECT mode emits no IR instructions");
-    }
+    TEST_ASSERT(f->first_block != NULL, "function has blocks");
+    for (b = f->first_block; b; b = b->next)
+        TEST_ASSERT(b->first != NULL, "DIRECT mode mirrors emitted IR instructions");
+    TEST_ASSERT_EQ(count_func_insts(f), 4, "branch function records 4 IR instructions");
 
     lr_session_destroy(s);
     if (prev_mode) {
