@@ -327,6 +327,95 @@ static bool emit_movsd_xmm_rsp_offset(uint8_t *buf, size_t cap, size_t *pos,
 }
 #endif
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+static bool emit_u32_le(uint8_t *buf, size_t cap, size_t *pos, uint32_t v) {
+    return emit_u8(buf, cap, pos, (uint8_t)(v & 0xFFu)) &&
+           emit_u8(buf, cap, pos, (uint8_t)((v >> 8) & 0xFFu)) &&
+           emit_u8(buf, cap, pos, (uint8_t)((v >> 16) & 0xFFu)) &&
+           emit_u8(buf, cap, pos, (uint8_t)((v >> 24) & 0xFFu));
+}
+
+static uint32_t enc_a64_movz(uint8_t rd, uint16_t imm16, uint8_t shift16) {
+    return 0xD2800000u | ((uint32_t)(shift16 & 3u) << 21) |
+           ((uint32_t)imm16 << 5) | rd;
+}
+
+static uint32_t enc_a64_movk(uint8_t rd, uint16_t imm16, uint8_t shift16) {
+    return 0xF2800000u | ((uint32_t)(shift16 & 3u) << 21) |
+           ((uint32_t)imm16 << 5) | rd;
+}
+
+static uint32_t enc_a64_sub_imm(uint8_t rd, uint8_t rn, uint16_t imm12) {
+    return 0xD1000000u | ((uint32_t)(imm12 & 0x0FFFu) << 10) |
+           ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_a64_add_imm(uint8_t rd, uint8_t rn, uint16_t imm12) {
+    return 0x91000000u | ((uint32_t)(imm12 & 0x0FFFu) << 10) |
+           ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_a64_fmov_from_gpr(uint8_t fsize, uint8_t fd, uint8_t xn) {
+    uint32_t base = (fsize == 8u) ? 0x9E670000u : 0x1E270000u;
+    return base | ((uint32_t)xn << 5) | fd;
+}
+
+static uint32_t enc_a64_fp_ldur(uint8_t fsize, uint8_t ft, uint8_t rn,
+                                int32_t imm9) {
+    uint32_t base = (fsize == 4u) ? 0xBC400000u : 0xFC400000u;
+    return base | ((uint32_t)(imm9 & 0x1FF) << 12) | ((uint32_t)rn << 5) | ft;
+}
+
+static bool emit_a64_movabs_x16(uint8_t *buf, size_t cap, size_t *pos,
+                                uintptr_t addr) {
+    uint64_t v = (uint64_t)addr;
+    return emit_u32_le(buf, cap, pos, enc_a64_movz(16u, (uint16_t)(v & 0xFFFFu), 0u)) &&
+           emit_u32_le(buf, cap, pos, enc_a64_movk(16u, (uint16_t)((v >> 16) & 0xFFFFu), 1u)) &&
+           emit_u32_le(buf, cap, pos, enc_a64_movk(16u, (uint16_t)((v >> 32) & 0xFFFFu), 2u)) &&
+           emit_u32_le(buf, cap, pos, enc_a64_movk(16u, (uint16_t)((v >> 48) & 0xFFFFu), 3u));
+}
+
+static bool emit_a64_blr_x16(uint8_t *buf, size_t cap, size_t *pos) {
+    return emit_u32_le(buf, cap, pos, 0xD63F0200u);
+}
+
+static bool emit_a64_ret(uint8_t *buf, size_t cap, size_t *pos) {
+    return emit_u32_le(buf, cap, pos, 0xD65F03C0u);
+}
+
+static bool emit_a64_fmov_s0_w0(uint8_t *buf, size_t cap, size_t *pos) {
+    return emit_u32_le(buf, cap, pos, enc_a64_fmov_from_gpr(4u, 0u, 0u));
+}
+
+static bool emit_a64_fmov_d0_x0(uint8_t *buf, size_t cap, size_t *pos) {
+    return emit_u32_le(buf, cap, pos, enc_a64_fmov_from_gpr(8u, 0u, 0u));
+}
+
+static bool emit_a64_fmov_d1_x1(uint8_t *buf, size_t cap, size_t *pos) {
+    return emit_u32_le(buf, cap, pos, enc_a64_fmov_from_gpr(8u, 1u, 1u));
+}
+
+static bool emit_a64_sub_sp_imm12(uint8_t *buf, size_t cap, size_t *pos,
+                                  uint16_t imm12) {
+    return emit_u32_le(buf, cap, pos, enc_a64_sub_imm(31u, 31u, imm12));
+}
+
+static bool emit_a64_add_sp_imm12(uint8_t *buf, size_t cap, size_t *pos,
+                                  uint16_t imm12) {
+    return emit_u32_le(buf, cap, pos, enc_a64_add_imm(31u, 31u, imm12));
+}
+
+static bool emit_a64_add_x0_sp_imm12(uint8_t *buf, size_t cap, size_t *pos,
+                                     uint16_t imm12) {
+    return emit_u32_le(buf, cap, pos, enc_a64_add_imm(0u, 31u, imm12));
+}
+
+static bool emit_a64_ldur_d_sp(uint8_t *buf, size_t cap, size_t *pos, uint8_t fd,
+                               int32_t off) {
+    return emit_u32_le(buf, cap, pos, enc_a64_fp_ldur(8u, fd, 31u, off));
+}
+#endif
+
 static int build_lookup_wrapper_code(liric_lookup_ret_kind_t ret_kind, void *target,
                                      void **out_code, size_t *out_len) {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -370,6 +459,57 @@ static int build_lookup_wrapper_code(liric_lookup_ret_kind_t ret_kind, void *tar
              emit_movsd_xmm_rsp_offset(code, cap, &pos, 1, 16) &&
              emit_add_rsp_imm8(code, cap, &pos, 24) &&
              emit_ret(code, cap, &pos);
+        break;
+    default:
+        break;
+    }
+
+    if (!ok || lr_platform_jit_make_executable(code, cap, map_jit_enabled,
+                                               NULL, NULL) != 0) {
+        (void)lr_platform_free_pages(code, cap);
+        return -1;
+    }
+
+    *out_code = code;
+    *out_len = cap;
+    return 0;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    bool map_jit_enabled = false;
+    uint8_t *code = NULL;
+    size_t pos = 0;
+    size_t cap = 64;
+    bool ok = false;
+
+    if (!target || !out_code || !out_len)
+        return -1;
+
+    code = (uint8_t *)lr_platform_alloc_jit_code(cap, &map_jit_enabled);
+    if (!code)
+        return -1;
+
+    switch (ret_kind) {
+    case LIRIC_LOOKUP_RET_F32:
+        ok = emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
+             emit_a64_blr_x16(code, cap, &pos) &&
+             emit_a64_fmov_s0_w0(code, cap, &pos) &&
+             emit_a64_ret(code, cap, &pos);
+        break;
+    case LIRIC_LOOKUP_RET_F64:
+    case LIRIC_LOOKUP_RET_C32:
+        ok = emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
+             emit_a64_blr_x16(code, cap, &pos) &&
+             emit_a64_fmov_d0_x0(code, cap, &pos) &&
+             emit_a64_ret(code, cap, &pos);
+        break;
+    case LIRIC_LOOKUP_RET_C64:
+        ok = emit_a64_sub_sp_imm12(code, cap, &pos, 16u) &&
+             emit_a64_add_x0_sp_imm12(code, cap, &pos, 0u) &&
+             emit_a64_movabs_x16(code, cap, &pos, (uintptr_t)target) &&
+             emit_a64_blr_x16(code, cap, &pos) &&
+             emit_a64_ldur_d_sp(code, cap, &pos, 0u, 0) &&
+             emit_a64_ldur_d_sp(code, cap, &pos, 1u, 8) &&
+             emit_a64_add_sp_imm12(code, cap, &pos, 16u) &&
+             emit_a64_ret(code, cap, &pos);
         break;
     default:
         break;
