@@ -33,6 +33,7 @@ set(default_lfortran "${root}/lfortran_default")
 set(override_lfortran "${root}/lfortran_override")
 set(default_log "${root}/python_default_args.log")
 set(override_log "${root}/python_override_args.log")
+set(ctest_log "${root}/ctest_args.log")
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${fake_bin}")
@@ -52,6 +53,16 @@ file(WRITE "${fake_jq}" "#!/usr/bin/env bash
 exit 127
 ")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_jq}")
+
+set(fake_ctest "${fake_bin}/ctest")
+file(WRITE "${fake_ctest}" "#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n \"\${LIRIC_TEST_CTEST_LOG:-}\" ]]; then
+    printf '%s\\n' \"\$*\" >> \"\${LIRIC_TEST_CTEST_LOG}\"
+fi
+exit 0
+")
+execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_ctest}")
 
 function(make_fake_lfortran_tree path)
     file(MAKE_DIRECTORY "${path}/.git")
@@ -74,10 +85,12 @@ make_fake_lfortran_tree("${default_lfortran}")
 make_fake_lfortran_tree("${override_lfortran}")
 
 file(REMOVE "${default_log}")
+file(REMOVE "${ctest_log}")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_bin}:$ENV{PATH}"
         "LIRIC_TEST_PY_LOG=${default_log}"
+        "LIRIC_TEST_CTEST_LOG=${ctest_log}"
         "${BASH_EXE}" "${API_SCRIPT}"
         --workspace "${root}/ws_default"
         --output-root "${root}/out_default"
@@ -119,6 +132,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_bin}:$ENV{PATH}"
         "LIRIC_TEST_PY_LOG=${override_log}"
+        "LIRIC_TEST_CTEST_LOG=${ctest_log}"
         "${BASH_EXE}" "${API_SCRIPT}"
         --workspace "${root}/ws_override"
         --output-root "${root}/out_override"
@@ -148,5 +162,19 @@ endif()
 if(override_args_text MATCHES "--exclude-backend[ \t]+llvm")
     message(FATAL_ERROR
         "override run must not inject default llvm exclusion when backend policy is explicit\nargs:\n${override_args_text}"
+    )
+endif()
+if(NOT EXISTS "${ctest_log}")
+    message(FATAL_ERROR "reference policy runs must invoke ctest for build-liric unit suites")
+endif()
+file(READ "${ctest_log}" ctest_args_text)
+if(NOT ctest_args_text MATCHES "--test-dir[ \t]+${default_lfortran}/build-liric")
+    message(FATAL_ERROR
+        "default reference policy run must execute ctest against build-liric\nargs:\n${ctest_args_text}"
+    )
+endif()
+if(NOT ctest_args_text MATCHES "--test-dir[ \t]+${override_lfortran}/build-liric")
+    message(FATAL_ERROR
+        "override reference policy run must execute ctest against build-liric\nargs:\n${ctest_args_text}"
     )
 endif()

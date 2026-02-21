@@ -40,6 +40,8 @@ set(lfortran_dir "${workspace}/lfortran")
 set(output_root "${root}/out")
 set(stale_marker_lfortran "${lfortran_dir}/stale.marker")
 set(stale_marker_output "${output_root}/stale.marker")
+set(py_log "${root}/python_args.log")
+set(ctest_log "${root}/ctest_args.log")
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${fake_bin}")
@@ -47,6 +49,9 @@ file(MAKE_DIRECTORY "${fake_bin}")
 set(fake_python "${fake_bin}/python")
 file(WRITE "${fake_python}" "#!/usr/bin/env bash
 set -euo pipefail
+if [[ -n \"\${LIRIC_TEST_PY_LOG:-}\" ]]; then
+    printf '%s\\n' \"\$*\" >> \"\${LIRIC_TEST_PY_LOG}\"
+fi
 exit 0
 ")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_python}")
@@ -63,6 +68,16 @@ set -euo pipefail
 exit 0
 ")
 execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_llvm_dwarfdump}")
+
+set(fake_ctest "${fake_bin}/ctest")
+file(WRITE "${fake_ctest}" "#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n \"\${LIRIC_TEST_CTEST_LOG:-}\" ]]; then
+    printf '%s\\n' \"\$*\" >> \"\${LIRIC_TEST_CTEST_LOG}\"
+fi
+exit 0
+")
+execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_ctest}")
 
 file(MAKE_DIRECTORY "${upstream_repo}/integration_tests")
 file(MAKE_DIRECTORY "${upstream_repo}/build-llvm/src/bin")
@@ -125,6 +140,8 @@ file(WRITE "${stale_marker_output}" "stale\n")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_bin}:$ENV{PATH}"
+        "LIRIC_TEST_PY_LOG=${py_log}"
+        "LIRIC_TEST_CTEST_LOG=${ctest_log}"
         "${BASH_EXE}" "${API_SCRIPT}"
         --workspace "${workspace}"
         --output-root "${output_root}"
@@ -160,6 +177,29 @@ if(NOT EXISTS "${output_root}/logs/clone.log")
 endif()
 if(NOT EXISTS "${output_root}/summary.json")
     message(FATAL_ERROR "fresh workspace run did not produce summary.json")
+endif()
+if(NOT EXISTS "${py_log}")
+    message(FATAL_ERROR "fresh workspace run should execute integration python runner")
+endif()
+file(READ "${py_log}" py_args_text)
+if(NOT py_args_text MATCHES "run_tests.py[ \t]+-b[ \t]+llvm[ \t]+--ninja[ \t]+-j1")
+    message(FATAL_ERROR
+        "fresh workspace run must execute default integration suite\nargs:\n${py_args_text}"
+    )
+endif()
+if(NOT py_args_text MATCHES "run_tests.py[ \t]+-b[ \t]+llvm[ \t]+-f[ \t]+-nf16[ \t]+--ninja[ \t]+-j1")
+    message(FATAL_ERROR
+        "fresh workspace run must execute -f -nf16 integration suite\nargs:\n${py_args_text}"
+    )
+endif()
+if(NOT EXISTS "${ctest_log}")
+    message(FATAL_ERROR "fresh workspace run should execute ctest for WITH_LIRIC unit suite")
+endif()
+file(READ "${ctest_log}" ctest_args_text)
+if(NOT ctest_args_text MATCHES "--test-dir[ \t]+${lfortran_dir}/build-liric[ \t]+--output-on-failure")
+    message(FATAL_ERROR
+        "fresh workspace run must execute build-liric ctest lane\nargs:\n${ctest_args_text}"
+    )
 endif()
 file(READ "${output_root}/summary.json" summary_text)
 if(NOT summary_text MATCHES "\"pass\"[ \t]*:[ \t]*true")
