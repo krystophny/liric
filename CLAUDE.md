@@ -34,6 +34,13 @@ cmake --build build --target lfortran_api_compat
 This checks that LFortran can run its native test runners while using Liric's
 LLVM-compat API internally (not just `.ll` replay).
 
+## LFortran Execution Mode Policy (Mandatory)
+
+- LFortran benchmarking and compatibility work in this repository is **AOT-only** right now.
+- Do **not** use LFortran JIT mode for performance conclusions, regressions, or reporting.
+- Treat `bench_api` data as valid only when `lfortran_exec_mode` is `aot`.
+- If JIT mode appears in local experiments, mark it non-authoritative and continue with AOT.
+
 ### LFortran branch policy
 
 We always work on the `liric-aot` branch of the fork
