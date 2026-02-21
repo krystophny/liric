@@ -20,13 +20,17 @@ usage: lfortran_api_compat.sh [options]
   --env-name NAME         run test suites via conda/mamba env NAME (lf.sh style)
   --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
-  --itest-args "ARGS..."  extra args passed to integration_tests/run_tests.py
+  --itest-args "ARGS..."  extra args passed to each integration_tests/run_tests.py invocation
   --skip-lfortran-build   do not rebuild lfortran/build-llvm and lfortran/build-liric
   -h, --help              show this help
 
 This lane validates compile-time API compatibility:
   LFortran built with -DWITH_LIRIC=yes uses Liric's LLVM C++ compatibility
   API internally, then runs LFortran's own test runners.
+  Unit tests run via: ctest --test-dir <build-liric> --output-on-failure
+  Integration tests run in both modes:
+    run_tests.py -b llvm --ninja -jN
+    run_tests.py -b llvm -f -nf16 --ninja -jN
   Reference tests default to "--exclude-backend llvm" in WITH_LIRIC lane
   unless backend selection is explicitly set via --ref-args.
 EOF
@@ -381,6 +385,7 @@ done
 
 need_cmd git
 need_cmd cmake
+need_cmd ctest
 
 if [[ -n "$env_name" ]]; then
     if [[ -z "$env_runner" ]]; then
@@ -527,6 +532,9 @@ if [[ "$run_itests" == "yes" ]]; then
     require_tool_for_integration "llvm-dwarfdump"
 fi
 
+ctest --test-dir "$lfortran_build_liric" --output-on-failure \
+    2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+
 if [[ "$run_ref_tests" == "yes" ]]; then
     ref_default_args=""
     if ! ref_args_has_backend_policy "$ref_args"; then
@@ -557,6 +565,7 @@ if [[ "$run_itests" == "yes" ]]; then
             export LFORTRAN_LINKER="gcc"
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
         fi
+        echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
         if [[ -n "$itest_args" ]]; then
             # shellcheck disable=SC2086
             run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers" $itest_args
@@ -564,6 +573,21 @@ if [[ "$run_itests" == "yes" ]]; then
             run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers"
         fi
     ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api.log" || status=1
+
+    (
+        cd "$lfortran_dir/integration_tests"
+        if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
+            export LFORTRAN_LINKER="gcc"
+            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+        fi
+        echo "lfortran_api_compat: running WITH_LIRIC integration suite (-f -nf16 mode)" >&2
+        if [[ -n "$itest_args" ]]; then
+            # shellcheck disable=SC2086
+            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$workers" $itest_args
+        else
+            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$workers"
+        fi
+    ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api_fast.log" || status=1
 fi
 
 summary_json="${output_root}/summary.json"
