@@ -101,11 +101,25 @@ static const char *remap_intrinsic(const char *name) {
 }
 
 static bool obj_symbol_should_be_weak(const char *name) {
-    static const char k_module_init_prefix[] = "__lfortran_module_init_";
+    static const char *k_weak_prefixes[] = {
+        "__lfortran_module_init_",
+        "_copy_",
+        "_deepcopy_",
+        "_allocate_struct_",
+        "_deallocate_struct_",
+        "_Type_Info_",
+        "_VTable_",
+        "__module_file_common_block_",
+    };
     if (!name || !name[0])
         return false;
-    return strncmp(name, k_module_init_prefix,
-                   sizeof(k_module_init_prefix) - 1u) == 0;
+    for (size_t i = 0; i < sizeof(k_weak_prefixes) / sizeof(k_weak_prefixes[0]); i++) {
+        const char *prefix = k_weak_prefixes[i];
+        size_t prefix_len = strlen(prefix);
+        if (strncmp(name, prefix, prefix_len) == 0)
+            return true;
+    }
+    return false;
 }
 
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
