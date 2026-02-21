@@ -49,6 +49,7 @@
 /* Symbol binding/type */
 #define STB_LOCAL       0
 #define STB_GLOBAL      1
+#define STB_WEAK        2
 #define STT_NOTYPE      0
 #define STT_FUNC        2
 #define STT_SECTION     3
@@ -495,9 +496,12 @@ int write_elf(FILE *out, const uint8_t *code, size_t code_size,
         for (uint32_t oi = 0; oi < oc->num_symbols; oi++) {
             uint32_t i = sym_order[oi];
             const lr_obj_symbol_t *sym = &oc->symbols[i];
-            uint8_t bind = (sym->is_defined && sym->is_local)
-                ? STB_LOCAL
-                : STB_GLOBAL;
+            uint8_t bind = STB_GLOBAL;
+            if (sym->is_defined && sym->is_local) {
+                bind = STB_LOCAL;
+            } else if (sym->is_weak) {
+                bind = STB_WEAK;
+            }
             w32(&sp, str_offsets[i]);
             uint8_t stt = (sym->is_defined && sym->section == 1) ? STT_FUNC : STT_NOTYPE;
             w8(&sp, ELF64_ST_INFO(bind, stt));

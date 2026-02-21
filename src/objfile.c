@@ -100,6 +100,28 @@ static const char *remap_intrinsic(const char *name) {
     return lr_platform_intrinsic_libc_name(name);
 }
 
+static bool obj_symbol_should_be_weak(const char *name) {
+    static const char *k_weak_prefixes[] = {
+        "__lfortran_module_init_",
+        "_copy_",
+        "_deepcopy_",
+        "_allocate_struct_",
+        "_deallocate_struct_",
+        "_Type_Info_",
+        "_VTable_",
+        "__module_file_common_block_",
+    };
+    if (!name || !name[0])
+        return false;
+    for (size_t i = 0; i < sizeof(k_weak_prefixes) / sizeof(k_weak_prefixes[0]); i++) {
+        const char *prefix = k_weak_prefixes[i];
+        size_t prefix_len = strlen(prefix);
+        if (strncmp(name, prefix, prefix_len) == 0)
+            return true;
+    }
+    return false;
+}
+
 uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
                                bool is_defined, uint8_t section,
                                uint32_t offset) {
@@ -122,6 +144,8 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
         uint32_t i = stored - 1u;
         if (oc->symbols[i].hash == hash &&
             strcmp(oc->symbols[i].name, name) == 0) {
+            if (is_defined && obj_symbol_should_be_weak(name))
+                oc->symbols[i].is_weak = true;
             if (is_defined && !oc->symbols[i].is_defined) {
                 oc->symbols[i].is_defined = true;
                 oc->symbols[i].section = section;
@@ -155,6 +179,7 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
     oc->symbols[idx].section = section;
     oc->symbols[idx].is_defined = is_defined;
     oc->symbols[idx].is_local = false;
+    oc->symbols[idx].is_weak = is_defined && obj_symbol_should_be_weak(name);
 
     slot = hash & (oc->symbol_index_cap - 1u);
     while (oc->symbol_index[slot] != 0)
