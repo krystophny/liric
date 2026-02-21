@@ -410,6 +410,26 @@ static int test_parse_assembly_wrapper_fast_path() {
     return 0;
 }
 
+static int test_parse_assembly_rejects_type_mismatch() {
+    llvm::LLVMContext ctx;
+    llvm::SMDiagnostic err;
+    const char *invalid_ir =
+        "define i32 @bad() {\n"
+        "entry:\n"
+        "  %a = add i32 0, 1\n"
+        "  %b = add i64 0, 2\n"
+        "  %c = add i32 %a, %b\n"
+        "  ret i32 %c\n"
+        "}\n";
+    std::unique_ptr<llvm::Module> mod = llvm::parseAssemblyString(
+        llvm::StringRef(invalid_ir), err, ctx);
+    TEST_ASSERT(mod == nullptr, "invalid IR must fail parseAssemblyString");
+    TEST_ASSERT(!err.getMessage().empty(), "invalid IR reports parse error");
+    TEST_ASSERT(err.getMessage().find("type mismatch") != std::string::npos,
+                "error reports type mismatch");
+    return 0;
+}
+
 static int test_global_lookup_set_initializer_and_jit() {
     llvm::LLVMContext ctx;
     llvm::Module mod("global_init", ctx);
@@ -2043,6 +2063,7 @@ int main() {
     RUN_TEST(test_private_global_strings_are_module_scoped);
     RUN_TEST(test_set_linkage_updates_object_symbol_binding);
     RUN_TEST(test_parse_assembly_wrapper_fast_path);
+    RUN_TEST(test_parse_assembly_rejects_type_mismatch);
 
     fprintf(stderr, "\nFunction tests:\n");
     RUN_TEST(test_function_creation);

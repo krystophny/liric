@@ -16,6 +16,7 @@
 #define BLOCK_INDEX_INIT_CAP 2048u
 #define GLOBAL_INDEX_INIT_CAP 2048u
 #define VREG_NUMERIC_INIT_CAP 4096u
+#define VREG_TYPE_INIT_CAP 8192u
 
 #define INDEX_MAX_LOAD_NUM 7u
 #define INDEX_MAX_LOAD_DEN 10u
@@ -71,6 +72,8 @@ typedef struct lr_parser {
     uint32_t vreg_index_cap;
     uint32_t *vreg_numeric;
     uint32_t vreg_numeric_cap;
+    lr_type_t **vreg_types;
+    uint32_t vreg_types_cap;
 
     /* block name -> id mapping for current function */
     block_map_entry_t *block_map;
@@ -212,6 +215,11 @@ static void clear_u32_map(uint32_t *map, size_t n) {
         map[i] = UINT32_MAX;
 }
 
+static void clear_type_map(lr_type_t **map, size_t n) {
+    for (size_t i = 0; i < n; i++)
+        map[i] = NULL;
+}
+
 static uint32_t next_pow2_u32(uint32_t v) {
     uint32_t p2 = 1u;
     if (v <= 1u)
@@ -249,6 +257,17 @@ static bool ensure_array_capacity(lr_parser_t *p, void **arr, uint32_t *cap,
 static bool ensure_vreg_map_capacity(lr_parser_t *p, uint32_t min_cap) {
     return ensure_array_capacity(p, (void **)&p->vreg_map, &p->vreg_map_cap, min_cap,
                                  VREG_MAP_INIT_CAP, sizeof(*p->vreg_map), "vreg map");
+}
+
+static bool ensure_vreg_type_capacity(lr_parser_t *p, uint32_t min_cap) {
+    uint32_t old_cap = p->vreg_types_cap;
+    if (!ensure_array_capacity(p, (void **)&p->vreg_types, &p->vreg_types_cap,
+                               min_cap, VREG_TYPE_INIT_CAP,
+                               sizeof(*p->vreg_types), "vreg type map"))
+        return false;
+    for (uint32_t i = old_cap; i < p->vreg_types_cap; i++)
+        p->vreg_types[i] = NULL;
+    return true;
 }
 
 static bool ensure_block_map_capacity(lr_parser_t *p, uint32_t min_cap) {
@@ -492,6 +511,8 @@ static bool parser_init_work_buffers(lr_parser_t *p) {
         return false;
     if (!ensure_vreg_numeric_capacity(p, VREG_NUMERIC_INIT_CAP))
         return false;
+    if (!ensure_vreg_type_capacity(p, VREG_TYPE_INIT_CAP))
+        return false;
     if (!rehash_vreg_index(p, VREG_INDEX_INIT_CAP))
         return false;
     if (!rehash_block_index(p, BLOCK_INDEX_INIT_CAP))
@@ -503,6 +524,7 @@ static bool parser_init_work_buffers(lr_parser_t *p) {
     clear_index(p->block_index, p->block_index_cap);
     clear_index(p->global_index, p->global_index_cap);
     clear_u32_map(p->vreg_numeric, p->vreg_numeric_cap);
+    clear_type_map(p->vreg_types, p->vreg_types_cap);
     return true;
 }
 
@@ -510,6 +532,7 @@ static void parser_free_work_buffers(lr_parser_t *p) {
     free(p->vreg_map);
     free(p->vreg_index);
     free(p->vreg_numeric);
+    free(p->vreg_types);
     free(p->block_map);
     free(p->block_index);
     free(p->global_map);
@@ -724,6 +747,9 @@ static lr_type_t *resolve_or_create_forward_type(lr_parser_t *p, const char *nam
 
 static lr_type_t *parse_type(lr_parser_t *p);
 static lr_operand_t parse_typed_operand(lr_parser_t *p);
+static bool bind_vreg_type(lr_parser_t *p, uint32_t vreg,
+                           lr_type_t *expected_type, const char *name,
+                           size_t name_len);
 
 static lr_type_t *call_result_type(lr_type_t *ty, bool *is_vararg_out,
                                    uint32_t *fixed_args_out) {
@@ -1125,6 +1151,8 @@ static lr_operand_t parse_operand(lr_parser_t *p, lr_type_t *type) {
         name_view_t name = tok_name_view(&p->cur);
         next(p);
         uint32_t vreg = resolve_vreg_n(p, name.s, name.len);
+        if (!bind_vreg_type(p, vreg, type, name.s, name.len))
+            return lr_op_imm_i64(0, type);
         return lr_op_vreg(vreg, type);
     }
     if (check(p, LR_TOK_GLOBAL_ID)) {
@@ -1311,6 +1339,88 @@ static bool is_integer_type(const lr_type_t *ty) {
            ty->kind == LR_TYPE_I64;
 }
 
+static const char *type_kind_name(const lr_type_t *ty) {
+    if (!ty)
+        return "null";
+    switch (ty->kind) {
+    case LR_TYPE_VOID:   return "void";
+    case LR_TYPE_I1:     return "i1";
+    case LR_TYPE_I8:     return "i8";
+    case LR_TYPE_I16:    return "i16";
+    case LR_TYPE_I32:    return "i32";
+    case LR_TYPE_I64:    return "i64";
+    case LR_TYPE_FLOAT:  return "float";
+    case LR_TYPE_DOUBLE: return "double";
+    case LR_TYPE_PTR:    return "ptr";
+    case LR_TYPE_ARRAY:  return "array";
+    case LR_TYPE_VECTOR: return "vector";
+    case LR_TYPE_STRUCT: return "struct";
+    case LR_TYPE_FUNC:   return "func";
+    default:             return "unknown";
+    }
+}
+
+static bool type_equals_recursive(const lr_type_t *a, const lr_type_t *b) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != b->kind)
+        return false;
+    switch (a->kind) {
+    case LR_TYPE_ARRAY:
+    case LR_TYPE_VECTOR:
+        return a->array.count == b->array.count &&
+               type_equals_recursive(a->array.elem, b->array.elem);
+    case LR_TYPE_STRUCT:
+        if (a->struc.packed != b->struc.packed ||
+            a->struc.num_fields != b->struc.num_fields)
+            return false;
+        for (uint32_t i = 0; i < a->struc.num_fields; i++) {
+            if (!type_equals_recursive(a->struc.fields[i], b->struc.fields[i]))
+                return false;
+        }
+        return true;
+    case LR_TYPE_FUNC:
+        if (!type_equals_recursive(a->func.ret, b->func.ret) ||
+            a->func.num_params != b->func.num_params ||
+            a->func.vararg != b->func.vararg)
+            return false;
+        for (uint32_t i = 0; i < a->func.num_params; i++) {
+            if (!type_equals_recursive(a->func.params[i], b->func.params[i]))
+                return false;
+        }
+        return true;
+    default:
+        return true;
+    }
+}
+
+static bool bind_vreg_type(lr_parser_t *p, uint32_t vreg, lr_type_t *expected_type,
+                           const char *name, size_t name_len) {
+    lr_type_t *known_type;
+    if (!expected_type)
+        return true;
+    if (!ensure_vreg_type_capacity(p, vreg + 1u))
+        return false;
+    known_type = p->vreg_types[vreg];
+    if (!known_type) {
+        p->vreg_types[vreg] = expected_type;
+        return true;
+    }
+    if (type_equals_recursive(known_type, expected_type))
+        return true;
+
+    if (name && name_len > 0) {
+        error(p,
+              "type mismatch for value '%%%.*s': expected %s, got %s",
+              (int)name_len, name, type_kind_name(expected_type),
+              type_kind_name(known_type));
+    } else {
+        error(p, "type mismatch for value %u: expected %s, got %s",
+              vreg, type_kind_name(expected_type), type_kind_name(known_type));
+    }
+    return false;
+}
+
 static void operand_to_desc(const lr_operand_t *op, lr_operand_desc_t *out) {
     out->kind = (int)op->kind;
     out->type = op->type;
@@ -1354,9 +1464,23 @@ static uint32_t stream_emit(lr_parser_t *p, lr_opcode_t op, lr_type_t *type,
     return lr_session_emit(p->session, &desc, NULL);
 }
 
+static void record_dest_type(lr_parser_t *p, uint32_t dest, lr_type_t *type) {
+    if (!type || dest == 0)
+        return;
+    (void)bind_vreg_type(p, dest, type, NULL, 0);
+}
+
+static lr_type_t *inst_result_type(lr_parser_t *p, lr_opcode_t op,
+                                   lr_type_t *inst_type) {
+    if (op == LR_OP_ALLOCA || op == LR_OP_GEP)
+        return p->module->type_ptr;
+    return inst_type;
+}
+
 static void emit_inst(lr_parser_t *p, lr_block_t *block, lr_opcode_t op,
                        lr_type_t *type, uint32_t dest,
                        lr_operand_t *ops, uint32_t nops) {
+    record_dest_type(p, dest, inst_result_type(p, op, type));
     if (p->session) {
         stream_emit(p, op, type, dest, ops, nops, NULL, 0, 0, 0,
                     false, false, 0);
@@ -1369,6 +1493,7 @@ static void emit_inst(lr_parser_t *p, lr_block_t *block, lr_opcode_t op,
 static void emit_icmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
                        uint32_t dest, lr_operand_t *ops, uint32_t nops,
                        int pred) {
+    record_dest_type(p, dest, type);
     if (p->session) {
         stream_emit(p, LR_OP_ICMP, type, dest, ops, nops, NULL, 0,
                     pred, 0, false, false, 0);
@@ -1383,6 +1508,7 @@ static void emit_icmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
 static void emit_fcmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
                        uint32_t dest, lr_operand_t *ops, uint32_t nops,
                        int pred) {
+    record_dest_type(p, dest, type);
     if (p->session) {
         stream_emit(p, LR_OP_FCMP, type, dest, ops, nops, NULL, 0,
                     0, pred, false, false, 0);
@@ -1398,6 +1524,7 @@ static void emit_call(lr_parser_t *p, lr_block_t *block, lr_type_t *ret_ty,
                        uint32_t dest, lr_operand_t *ops, uint32_t nops,
                        bool vararg, uint32_t fixed_args,
                        bool external_abi) {
+    record_dest_type(p, dest, ret_ty);
     if (p->session) {
         stream_emit(p, LR_OP_CALL, ret_ty, dest, ops, nops, NULL, 0,
                     0, 0, external_abi, vararg, fixed_args);
@@ -1416,6 +1543,7 @@ static void emit_with_indices(lr_parser_t *p, lr_block_t *block,
                                uint32_t dest, lr_operand_t *ops,
                                uint32_t nops, const uint32_t *indices,
                                uint32_t num_indices) {
+    record_dest_type(p, dest, type);
     if (p->session) {
         stream_emit(p, op, type, dest, ops, nops, indices, num_indices,
                     0, 0, false, false, 0);
@@ -2315,6 +2443,7 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
     clear_index(p->vreg_index, p->vreg_index_cap);
     clear_index(p->block_index, p->block_index_cap);
     clear_u32_map(p->vreg_numeric, p->vreg_numeric_cap);
+    clear_type_map(p->vreg_types, p->vreg_types_cap);
 
     /* register parameter vregs: named params get only name, unnamed get numeric alias */
     for (uint32_t i = 0; i < func->num_params; i++) {
@@ -2325,6 +2454,8 @@ static void parse_function_body(lr_parser_t *p, lr_func_t *func, char **param_na
             /* unnamed parameter: register numeric alias */
             register_vreg_number(p, i, func->param_vregs[i]);
         }
+        (void)bind_vreg_type(p, func->param_vregs[i], func->param_types[i],
+                             NULL, 0);
     }
 
     expect(p, LR_TOK_LBRACE);

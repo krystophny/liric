@@ -3604,8 +3604,11 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
             }
         }
     }
-    if (lr_session_is_direct(mod->session))
-        return compat_add_to_jit_direct(mod, jit);
+    if (lr_session_is_direct(mod->session)) {
+        lr_module_t *session_mod = lr_session_module(mod->session);
+        if (session_mod == mod->mod)
+            return compat_add_to_jit_direct(mod, jit);
+    }
     return lr_jit_add_module(jit, mod->mod);
 }
 
