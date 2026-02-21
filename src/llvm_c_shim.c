@@ -393,10 +393,6 @@ static bool emit_a64_fmov_d0_x0(uint8_t *buf, size_t cap, size_t *pos) {
     return emit_u32_le(buf, cap, pos, enc_a64_fmov_from_gpr(8u, 0u, 0u));
 }
 
-static bool emit_a64_fmov_d1_x1(uint8_t *buf, size_t cap, size_t *pos) {
-    return emit_u32_le(buf, cap, pos, enc_a64_fmov_from_gpr(8u, 1u, 1u));
-}
-
 static bool emit_a64_sub_sp_imm12(uint8_t *buf, size_t cap, size_t *pos,
                                   uint16_t imm12) {
     return emit_u32_le(buf, cap, pos, enc_a64_sub_imm(31u, 31u, imm12));
