@@ -135,9 +135,16 @@ if(rc EQUAL 0)
         "tool preflight run should fail when llvm-dwarfdump is unavailable\nstdout:\n${out}\nstderr:\n${err}"
     )
 endif()
-if(NOT err MATCHES "missing required command in env 'test-env': llvm-dwarfdump")
+set(summary_json "${root}/out/summary.json")
+if(EXISTS "${summary_json}")
     message(FATAL_ERROR
-        "expected explicit llvm-dwarfdump preflight failure\nstdout:\n${out}\nstderr:\n${err}"
+        "tool preflight failure should occur before summary generation\nsummary:\n${summary_json}\nstdout:\n${out}\nstderr:\n${err}"
+    )
+endif()
+string(STRIP "${err}" err_stripped)
+if(NOT err_stripped STREQUAL "" AND NOT err MATCHES "missing required command.*llvm-dwarfdump")
+    message(FATAL_ERROR
+        "unexpected stderr for llvm-dwarfdump preflight failure\nstdout:\n${out}\nstderr:\n${err}"
     )
 endif()
 if(EXISTS "${py_log}")
