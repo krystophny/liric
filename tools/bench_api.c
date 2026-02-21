@@ -1,6 +1,9 @@
 // API benchmark: compare lfortran AOT compilation between LLVM build and
-// WITH_LIRIC build. Default mode is "aot" (compile+link via --backend=llvm).
-// Legacy "jit" mode (--jit flag) is still accepted.
+// WITH_LIRIC build.
+//
+// Repository policy: AOT only. Measurements are compile-only object emission
+// (`-c -o`) to remove per-test executable linking noise from backend timings.
+// Runnability/behavior parity is validated by bench_compat_check.
 
 #include <dirent.h>
 #include <ctype.h>
@@ -255,10 +258,8 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_ms, const char *env_
 
 static int resolve_lfortran_exec_mode(const cfg_t *cfg, int *use_jit_flag_out) {
     if (!cfg || !use_jit_flag_out) return -1;
-    if (strcmp(cfg->lfortran_exec_mode, "jit") == 0) {
-        *use_jit_flag_out = 1;
-        return 0;
-    }
+    if (strcmp(cfg->lfortran_exec_mode, "jit") == 0)
+        return -1;
     *use_jit_flag_out = 0;
     return 0;
 }
@@ -267,6 +268,7 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
                                          const strlist_t *opt_toks,
                                          const char *extra_opt,
                                          const char *source_path,
+                                         const char *object_path,
                                          const char *runtime_bc,
                                          const char *runtime_lib,
                                          const char *liric_compile_mode,
@@ -279,8 +281,9 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
     size_t extra_n = (extra_opt && extra_opt[0] != '\0') ? 1 : 0;
     size_t time_report_n = with_time_report ? 1 : 0;
     size_t jit_flag_n = use_jit_flag ? 1 : 0;
-    size_t argc_jit = 3 + jit_flag_n + time_report_n + opt_toks->n + extra_n + 1;
-    char **argv = (char **)calloc(argc_jit + 1, sizeof(char *));
+    size_t compile_only_n = use_jit_flag ? 0 : 3; /* -c -o <obj> */
+    size_t argc = 4 + jit_flag_n + time_report_n + opt_toks->n + extra_n + compile_only_n;
+    char **argv = (char **)calloc(argc + 1, sizeof(char *));
     size_t k = 0;
     cmd_result_t r;
     const char *saved_runtime_bc = NULL;
@@ -302,6 +305,15 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
     if (use_jit_flag) argv[k++] = "--jit";
     if (with_time_report) argv[k++] = "--time-report";
     argv[k++] = "--no-color";
+    if (!use_jit_flag) {
+        if (!object_path || !object_path[0]) {
+            free(argv);
+            die("missing object output path for AOT compile-only run", NULL);
+        }
+        argv[k++] = "-c";
+        argv[k++] = "-o";
+        argv[k++] = (char *)object_path;
+    }
     for (j = 0; j < opt_toks->n; j++)
         argv[k++] = opt_toks->items[j];
     if (extra_n) argv[k++] = (char *)extra_opt;
@@ -1561,8 +1573,7 @@ static int is_valid_liric_policy(const char *policy) {
 
 static int is_valid_lfortran_exec_mode(const char *mode) {
     if (!mode || !mode[0]) return 0;
-    return strcmp(mode, "aot") == 0 ||
-           strcmp(mode, "jit") == 0;
+    return strcmp(mode, "aot") == 0;
 }
 
 static const char *classify_llvm_failure_from_output(const cmd_result_t *r) {
@@ -1589,9 +1600,9 @@ static void usage(void) {
     printf("usage: bench_api [options]\n");
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: build/deps/lfortran/build-llvm/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: build/deps/lfortran/build-liric/src/bin/lfortran)\n");
-    printf("  --lfortran-exec-mode MODE  lfortran execution mode: aot|jit (default: aot)\n");
+    printf("  --lfortran-exec-mode MODE  lfortran execution mode: aot (default; compile-only, no link)\n");
     printf("  --runtime-bc PATH    runtime bitcode to preload in liric sessions\n");
-    printf("  --runtime-lib PATH   runtime shared library to load in liric JIT sessions\n");
+    printf("  --runtime-lib PATH   runtime shared library to preload in liric sessions\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --liric-policy MODE  liric session policy: direct|ir\n");
     printf("  --test-dir PATH      path to integration_tests/ dir\n");
@@ -1702,7 +1713,7 @@ static cfg_t parse_args(int argc, char **argv) {
     if (!is_valid_liric_policy(cfg.liric_policy))
         die("invalid --liric-policy (expected direct|ir)", cfg.liric_policy);
     if (!is_valid_lfortran_exec_mode(cfg.lfortran_exec_mode))
-        die("invalid --lfortran-exec-mode (expected aot|jit)", cfg.lfortran_exec_mode);
+        die("invalid --lfortran-exec-mode (expected aot)", cfg.lfortran_exec_mode);
 
     if (!file_exists(cfg.lfortran)) die("lfortran (LLVM) not found", cfg.lfortran);
     if (!cfg.lfortran_liric || !cfg.lfortran_liric[0]) {
@@ -1733,9 +1744,8 @@ int main(int argc, char **argv) {
 
     setvbuf(stdout, NULL, _IOLBF, 0);
 
-    if (resolve_lfortran_exec_mode(&cfg, &use_jit_flag) != 0) {
-        die("requested --lfortran-exec-mode=jit but one or both binaries do not support --jit", NULL);
-    }
+    if (resolve_lfortran_exec_mode(&cfg, &use_jit_flag) != 0)
+        die("requested --lfortran-exec-mode=jit but repository policy requires AOT-only", NULL);
     resolved_exec_mode = use_jit_flag ? "jit" : "aot";
 
     if (cfg.compat_list) compat_path = xstrdup(cfg.compat_list);
@@ -1877,7 +1887,7 @@ int main(int argc, char **argv) {
 
             strlist_init(&opt_toks);
             {
-                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_jit_XXXXXX");
+                int n = snprintf(work_tpl, sizeof(work_tpl), "%s/%s", cfg.bench_dir, "work_api_aot_XXXXXX");
                 if (n < 0 || (size_t)n >= sizeof(work_tpl)) {
                     skip_reason = "workdir_create_failed";
                     skip_diag_set_basic(&skip_diag, skip_reason, "harness", 0,
@@ -1925,12 +1935,30 @@ int main(int argc, char **argv) {
                     const char *llvm_reason = NULL;
                     int same_nonzero = 0;
                     int saw_signal_failure = 0;
+                    char llvm_obj_path[PATH_MAX];
+                    char liric_obj_path[PATH_MAX];
+                    int llvm_obj_n = 0;
+                    int liric_obj_n = 0;
                     failure_work_dir = attempt_work_dir;
+
+                    llvm_obj_n = snprintf(llvm_obj_path, sizeof(llvm_obj_path),
+                                          "%s/%s", attempt_work_dir, "bench_api_llvm.o");
+                    liric_obj_n = snprintf(liric_obj_path, sizeof(liric_obj_path),
+                                           "%s/%s", attempt_work_dir, "bench_api_liric.o");
+                    if (llvm_obj_n < 0 || liric_obj_n < 0 ||
+                        llvm_obj_n >= (int)sizeof(llvm_obj_path) ||
+                        liric_obj_n >= (int)sizeof(liric_obj_path)) {
+                        skip_reason = "workdir_create_failed";
+                        skip_diag_set_basic(&skip_diag, skip_reason, "harness", it,
+                                            "object output path exceeded PATH_MAX");
+                        break;
+                    }
 
                     llvm_r = run_lfortran_cmd(cfg.lfortran,
                                                   &opt_toks,
                                                   extra_retry_opt,
                                                   source_path,
+                                                  llvm_obj_path,
                                                   cfg.runtime_bc,
                                                   cfg.runtime_lib,
                                                   NULL,
@@ -1950,6 +1978,7 @@ int main(int argc, char **argv) {
                                                    &opt_toks,
                                                    extra_retry_opt,
                                                    source_path,
+                                                   liric_obj_path,
                                                    cfg.runtime_bc,
                                                    cfg.runtime_lib,
                                                    cfg.liric_compile_mode,
@@ -2183,7 +2212,7 @@ int main(int argc, char **argv) {
                 rowlist_push(&rows, row);
 
                 write_json_success_row(jf, &row);
-                printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), ir %.2fms vs %.2fms (%.2fx), jit %.2fms vs %.2fms (%.2fx)\n",
+                printf("  [%zu/%zu] %s: wall %.2fms vs %.2fms (%.2fx), ir %.2fms vs %.2fms (%.2fx), backend %.2fms vs %.2fms (%.2fx)\n",
                        i + 1, tests.n, name, lw, ew, wall_sp, liric_ir, llvm_ir, ir_sp, lc, ec, compile_sp);
             }
             goto next_test;
@@ -2415,7 +2444,7 @@ next_test:
         }
 
         printf("\n========================================================================\n");
-        printf("  API JIT mode: Fortran frontend + LLVM JIT vs Fortran frontend + liric JIT\n");
+        printf("  API AOT mode: Fortran frontend + LLVM AOT object build vs Fortran frontend + liric object build\n");
         printf("  %zu tests\n", rows.n);
         printf("========================================================================\n");
 
@@ -2431,7 +2460,7 @@ next_test:
         printf("  Faster:    %zu/%zu (%.1f%%)\n",
                ir_faster, rows.n, 100.0 * (double)ir_faster / (double)rows.n);
 
-        printf("\n  WALL-CLOCK (frontend + jit-materialize + exec)\n");
+        printf("\n  WALL-CLOCK (frontend + backend materialization)\n");
         printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
                median(lw, rows.n), median(ew, rows.n), median(wall_sp, rows.n));
         printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
@@ -2439,7 +2468,7 @@ next_test:
         printf("  P90/P95:   %.2fx / %.2fx\n", percentile(wall_sp, rows.n, 90), percentile(wall_sp, rows.n, 95));
         printf("  Faster:    %zu/%zu (%.1f%%)\n", wall_faster, rows.n, 100.0 * (double)wall_faster / (double)rows.n);
 
-        printf("\n  JIT MATERIALIZATION (LLVM -> JIT)\n");
+        printf("\n  BACKEND MATERIALIZATION (AOT object: LLVM -> BIN)\n");
         printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
                median(lc, rows.n), median(ec, rows.n), median(compile_sp, rows.n));
         printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
@@ -2447,7 +2476,7 @@ next_test:
         printf("  Faster:    %zu/%zu (%.1f%%)\n",
                compile_faster, rows.n, 100.0 * (double)compile_faster / (double)rows.n);
 
-        printf("\n  EXECUTION (entry invocation only)\n");
+        printf("\n  EXECUTION (not measured in AOT compile-only)\n");
         printf("  Median:    liric %.3f ms, llvm %.3f ms, speedup %.2fx\n",
                median(lr, rows.n), median(er, rows.n), median(run_sp, rows.n));
         printf("  Aggregate: %.0f ms vs %.0f ms, speedup %.2fx\n",
@@ -2543,7 +2572,7 @@ next_test:
                split_liric_before_median, split_llvm_before_median);
         printf("  LFortran/LLVM codegen (IR+opt):         liric %.3f ms, llvm %.3f ms\n",
                split_liric_codegen_median, split_llvm_codegen_median);
-        printf("  Backend-owned (JIT+run):                liric %.3f ms, llvm %.3f ms\n",
+        printf("  Backend-owned (BIN+run):                liric %.3f ms, llvm %.3f ms\n",
                split_liric_backend_median, split_llvm_backend_median);
 
         tracker_has_data = 1;
@@ -2580,10 +2609,10 @@ next_test:
         printf("  LLVM IR creation avg median: %.3f ms (target <= %.3f ms): %s\n",
                tracker_liric_llvm_ir_avg_median, TRACKER_TARGET_LLVM_IR_CREATION_MS,
                tracker_llvm_ir_creation_met ? "met" : "not met");
-        printf("  LLVM -> JIT avg median:      %.3f ms (target <= %.3f ms): %s\n",
+        printf("  Backend materialization avg median: %.3f ms (target <= %.3f ms): %s\n",
                tracker_liric_llvm_to_jit_avg_median, TRACKER_TARGET_LLVM_TO_JIT_MS,
                tracker_llvm_to_jit_met ? "met" : "not met");
-        printf("  JIT run speedup avg/min:     %.2fx / %.2fx (targets >= %.2fx avg, >= %.2fx each): %s\n",
+        printf("  Run phase speedup avg/min:   %.2fx / %.2fx (targets >= %.2fx avg, >= %.2fx each): %s\n",
                tracker_run_speedup_avg, tracker_run_speedup_min,
                TRACKER_TARGET_RUN_SPEEDUP_AVG, TRACKER_TARGET_RUN_SPEEDUP_MIN,
                (tracker_run_speedup_avg_met && tracker_run_speedup_each_met) ? "met" : "not met");
@@ -2669,6 +2698,9 @@ next_test:
         fprintf(sf, "  \"compat_list\": \"%s\",\n", ec);
         fprintf(sf, "  \"options_jsonl\": \"%s\",\n", eo);
         fprintf(sf, "  \"lfortran_exec_mode\": \"%s\",\n", ex);
+        fprintf(sf, "  \"aot_compile_only\": true,\n");
+        fprintf(sf, "  \"linking_included_in_timing\": false,\n");
+        fprintf(sf, "  \"runnability_guardrail\": \"bench_compat_check\",\n");
         fprintf(sf, "  \"liric_compile_mode\": \"%s\",\n", em);
         fprintf(sf, "  \"liric_policy\": \"%s\",\n", ep);
         {

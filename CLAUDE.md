@@ -40,6 +40,8 @@ LLVM-compat API internally (not just `.ll` replay).
 - Do **not** use LFortran JIT mode for performance conclusions, regressions, or reporting.
 - Treat `bench_api` data as valid only when `lfortran_exec_mode` is `aot`.
 - If JIT mode appears in local experiments, mark it non-authoritative and continue with AOT.
+- WITH_LIRIC executable generation is **no-link AOT only**: do not add linker fallback paths.
+- If no-link emission prerequisites are missing (for example `LIRIC_RUNTIME_BC`), fail hard with a clear error.
 
 ### LFortran branch policy
 

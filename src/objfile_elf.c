@@ -73,10 +73,12 @@
 #define DT_STRSZ        10
 #define DT_SYMENT       11
 #define DT_HASH         4
+#define DT_TEXTREL      22
 #define DT_BIND_NOW     24
 #define DT_FLAGS        30
 #define DT_FLAGS_1      0x6FFFFFFB
 
+#define DF_TEXTREL      0x4
 #define DF_BIND_NOW     0x8
 #define DF_1_NOW        0x1
 
@@ -649,19 +651,40 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
     const size_t file_align = 16;
     const size_t page_align = 4096;
 
-    /* _start:
+    /* _start legacy:
      *   call <entry_symbol>
      *   mov edi, eax
      *   mov eax, 60
      *   syscall
      */
-    static const uint8_t start_stub_template[] = {
+    static const uint8_t start_stub_legacy[] = {
         0xE8, 0x00, 0x00, 0x00, 0x00,
         0x89, 0xC7,
         0xB8, 0x3C, 0x00, 0x00, 0x00,
         0x0F, 0x05
     };
-    const size_t start_stub_size = sizeof(start_stub_template);
+    /* _start for C-style main(int argc, char **argv):
+     *   mov rdi, [rsp]
+     *   lea rsi, [rsp+8]
+     *   call <entry_symbol>
+     *   mov edi, eax
+     *   mov eax, 60
+     *   syscall
+     */
+    static const uint8_t start_stub_main_abi[] = {
+        0x48, 0x8B, 0x3C, 0x24,
+        0x48, 0x8D, 0x74, 0x24, 0x08,
+        0xE8, 0x00, 0x00, 0x00, 0x00,
+        0x89, 0xC7,
+        0xB8, 0x3C, 0x00, 0x00, 0x00,
+        0x0F, 0x05
+    };
+    bool entry_is_main = strcmp(entry_symbol, "main") == 0;
+    const uint8_t *start_stub = entry_is_main ? start_stub_main_abi
+                                               : start_stub_legacy;
+    size_t start_stub_size = entry_is_main ? sizeof(start_stub_main_abi)
+                                           : sizeof(start_stub_legacy);
+    size_t entry_call_off = entry_is_main ? 10u : 1u;
 
     uint32_t *got_slot_off = NULL;
     if (oc->num_symbols > 0) {
@@ -900,13 +923,15 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
     w64(&p, total_size);
     w64(&p, page_align);
 
-    memcpy(buf + text_off, start_stub_template, start_stub_size);
+    memcpy(buf + text_off, start_stub, start_stub_size);
     memcpy(buf + code_off, code_mut, code_size);
     if (data_runtime_size > 0)
         memcpy(buf + data_off, data_mut, data_runtime_size);
 
-    if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + 1),
-                          entry_vaddr + 1, code_vaddr + entry_sym->offset) != 0) {
+    if (patch_rel32_vaddr(buf, total_size,
+                          (uint32_t)(text_off + entry_call_off),
+                          entry_vaddr + entry_call_off,
+                          code_vaddr + entry_sym->offset) != 0) {
         free(buf);
         free(code_mut);
         free(data_mut);
@@ -968,30 +993,67 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     const size_t phdr_size = 56;
     const size_t page_align = 0x1000;
 
-    /* _start stub: call <entry>; mov edi, eax; call <exit_trampoline>; hlt
+    /* _start legacy:
+     *   call <entry>
+     *   mov edi, eax
+     *   call <exit_trampoline>
+     *   hlt
      * Using libc exit() instead of raw syscall ensures stdio buffers are flushed. */
-    static const uint8_t start_stub_template[] = {
+    static const uint8_t start_stub_legacy[] = {
         0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (entry) */
         0x89, 0xC7,                      /* mov edi, eax */
         0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (exit trampoline) */
         0xF4                             /* hlt (unreachable) */
     };
-    const size_t start_stub_size = sizeof(start_stub_template);
-    const size_t exit_call_off = 8; /* byte offset of disp32 in exit call */
+    /* _start for C-style main(int argc, char **argv):
+     *   mov rdi, [rsp]
+     *   lea rsi, [rsp+8]
+     *   call <entry>
+     *   mov edi, eax
+     *   call <exit_trampoline>
+     *   hlt
+     */
+    static const uint8_t start_stub_main_abi[] = {
+        0x48, 0x8B, 0x3C, 0x24,
+        0x48, 0x8D, 0x74, 0x24, 0x08,
+        0xE8, 0x00, 0x00, 0x00, 0x00,
+        0x89, 0xC7,
+        0xE8, 0x00, 0x00, 0x00, 0x00,
+        0xF4
+    };
+    bool entry_is_main = strcmp(entry_symbol, "main") == 0;
+    const uint8_t *start_stub = entry_is_main ? start_stub_main_abi
+                                               : start_stub_legacy;
+    size_t start_stub_size = entry_is_main ? sizeof(start_stub_main_abi)
+                                           : sizeof(start_stub_legacy);
+    size_t entry_call_off = entry_is_main ? 10u : 1u;
+    size_t exit_call_off = entry_is_main ? 17u : 8u;
 
     static const char interp[] = "/lib64/ld-linux-x86-64.so.2";
     const size_t interp_size = sizeof(interp); /* includes NUL */
     static const char libc_name[] = "libc.so.6";
     static const char libm_name[] = "libm.so.6";
+    const char *runtime_lib_name = getenv("LIRIC_RUNTIME_LIB");
+    bool has_runtime_lib = runtime_lib_name && runtime_lib_name[0];
 
     /* Count undefined symbols. Always inject "exit" for the _start stub. */
     uint32_t num_undef = 0;
+    uint32_t num_textrel_abs64 = 0;
     bool exit_in_oc = false;
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
         if (!oc->symbols[i].is_defined) {
             num_undef++;
             if (strcmp(oc->symbols[i].name, "exit") == 0)
                 exit_in_oc = true;
+        }
+    }
+    for (uint32_t i = 0; i < oc->num_relocs; i++) {
+        const lr_obj_reloc_t *rel = &oc->relocs[i];
+        if (rel->symbol_idx >= oc->num_symbols)
+            continue;
+        if (!oc->symbols[rel->symbol_idx].is_defined &&
+            rel->type == LR_RELOC_X86_64_64) {
+            num_textrel_abs64++;
         }
     }
     if (num_undef == 0)
@@ -1028,12 +1090,17 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         }
     }
 
-    /* Build .dynstr: "\0libc.so.6\0libm.so.6\0sym1\0sym2\0..." */
+    /* Build .dynstr: "\0libc.so.6\0libm.so.6\0<runtime?>\0sym1\0sym2\0..." */
     size_t dynstr_size = 1; /* leading NUL */
     size_t libc_name_off = dynstr_size;
     dynstr_size += sizeof(libc_name); /* includes NUL */
     size_t libm_name_off = dynstr_size;
     dynstr_size += sizeof(libm_name); /* includes NUL */
+    size_t runtime_lib_name_off = 0;
+    if (has_runtime_lib) {
+        runtime_lib_name_off = dynstr_size;
+        dynstr_size += strlen(runtime_lib_name) + 1;
+    }
     uint32_t *dyn_name_off = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
     if (!dyn_name_off) {
         free(dyn_names); free(dyn_oc_idx); free(sym_to_dynsym);
@@ -1051,15 +1118,17 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     uint32_t nchain = dynsym_count;
     size_t hash_size = (2 + nbucket + nchain) * 4;
 
-    size_t rela_dyn_size = (size_t)num_dynimport * 24;
+    size_t rela_dyn_size = (size_t)(num_dynimport + num_textrel_abs64) * 24;
     size_t trampoline_size = (size_t)num_dynimport * 6;
     size_t got_size = (size_t)num_dynimport * 8;
 
     /* .dynamic: tag entries (each 16 bytes) */
-    /* DT_NEEDED(libc), DT_NEEDED(libm), DT_HASH, DT_STRTAB, DT_SYMTAB,
+    /* DT_NEEDED(libc), DT_NEEDED(libm), DT_NEEDED(runtime?),
+     * DT_HASH, DT_STRTAB, DT_SYMTAB,
      * DT_STRSZ, DT_SYMENT, DT_RELA, DT_RELASZ, DT_RELAENT, DT_BIND_NOW,
-     * DT_FLAGS, DT_FLAGS_1, DT_NULL  = 14 entries */
-    const uint32_t num_dynamic_entries = 14;
+     * DT_TEXTREL?(optional), DT_FLAGS, DT_FLAGS_1, DT_NULL */
+    uint32_t num_dynamic_entries = (num_textrel_abs64 > 0 ? 15u : 14u) +
+                                   (has_runtime_lib ? 1u : 0u);
     size_t dynamic_size = (size_t)num_dynamic_entries * 16;
 
     /* -- Layout computation --
@@ -1104,6 +1173,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     /* Internal defined-symbol GOT slots (for GOTPCREL relocations to
      * defined symbols, same approach as the static writer) */
     uint32_t *int_got_slot_off = NULL;
+    uint32_t *textrel_code_off = NULL;
+    uint32_t *textrel_dynsym = NULL;
     if (oc->num_symbols > 0) {
         int_got_slot_off = (uint32_t *)calloc(oc->num_symbols, sizeof(uint32_t));
         if (!int_got_slot_off) {
@@ -1113,6 +1184,17 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         }
         for (uint32_t i = 0; i < oc->num_symbols; i++)
             int_got_slot_off[i] = UINT32_MAX;
+    }
+    if (num_textrel_abs64 > 0) {
+        textrel_code_off = (uint32_t *)malloc(num_textrel_abs64 * sizeof(uint32_t));
+        textrel_dynsym = (uint32_t *)malloc(num_textrel_abs64 * sizeof(uint32_t));
+        if (!textrel_code_off || !textrel_dynsym) {
+            free(dyn_names); free(dyn_oc_idx);
+            free(sym_to_dynsym); free(dyn_name_off);
+            free(int_got_slot_off);
+            free(textrel_code_off); free(textrel_dynsym);
+            return -1;
+        }
     }
 
     size_t extra_got_size = 0;
@@ -1212,6 +1294,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         memcpy(data_area + (user_data_off - data_seg_off), data, data_size);
 
     /* Apply relocations for defined symbols (same logic as static writer) */
+    uint32_t textrel_i = 0;
     for (uint32_t i = 0; i < oc->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->relocs[i];
         if (rel->symbol_idx >= oc->num_symbols)
@@ -1246,6 +1329,18 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                 if (patch_rel32_vaddr(code_mut, code_size, rel->offset,
                                       place_vaddr, slot_vaddr) != 0)
                     goto fail;
+                continue;
+            }
+            if (rel->type == LR_RELOC_X86_64_64) {
+                uint32_t dsym = sym_to_dynsym[rel->symbol_idx];
+                if ((size_t)rel->offset + 8 > code_size || dsym == 0 ||
+                    !textrel_code_off || !textrel_dynsym ||
+                    textrel_i >= num_textrel_abs64) {
+                    goto fail;
+                }
+                textrel_code_off[textrel_i] = rel->offset;
+                textrel_dynsym[textrel_i] = dsym;
+                textrel_i++;
                 continue;
             }
             goto fail; /* unsupported reloc type for undefined symbol */
@@ -1296,6 +1391,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         }
         if (rc != 0) goto fail;
     }
+    if (textrel_i != num_textrel_abs64)
+        goto fail;
 
     /* Apply data relocations for defined symbols */
     for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
@@ -1391,6 +1488,11 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         dp += sizeof(libc_name);
         memcpy(dp, libm_name, sizeof(libm_name));
         dp += sizeof(libm_name);
+        if (has_runtime_lib) {
+            size_t slen = strlen(runtime_lib_name) + 1;
+            memcpy(dp, runtime_lib_name, slen);
+            dp += slen;
+        }
         for (uint32_t i = 0; i < num_dynimport; i++) {
             const char *name = dyn_names[i];
             size_t slen = strlen(name) + 1;
@@ -1400,12 +1502,14 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     }
 
     /* -- Write .text (start stub + code) -- */
-    memcpy(buf + text_off, start_stub_template, start_stub_size);
+    memcpy(buf + text_off, start_stub, start_stub_size);
     memcpy(buf + code_off, code_mut, code_size);
 
     /* Patch _start call to entry symbol */
-    if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + 1),
-                          entry_vaddr + 1, code_vaddr + entry_sym->offset) != 0)
+    if (patch_rel32_vaddr(buf, total_size,
+                          (uint32_t)(text_off + entry_call_off),
+                          entry_vaddr + entry_call_off,
+                          code_vaddr + entry_sym->offset) != 0)
         goto fail;
 
     /* Patch _start call to exit trampoline */
@@ -1429,6 +1533,11 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             w64(&rp, ELF64_R_INFO(dsym_idx, R_X86_64_GLOB_DAT));    /* r_info */
             w64(&rp, 0);                                              /* r_addend */
         }
+        for (uint32_t i = 0; i < num_textrel_abs64; i++) {
+            w64(&rp, code_vaddr + textrel_code_off[i]);               /* r_offset */
+            w64(&rp, ELF64_R_INFO(textrel_dynsym[i], R_X86_64_64));   /* r_info */
+            w64(&rp, 0);                                               /* r_addend */
+        }
     }
 
     /* .got is zero-initialized (dynamic linker fills it); already calloc'd */
@@ -1436,10 +1545,18 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     /* .dynamic */
     {
         uint8_t *dp = data_area + (dynamic_off - data_seg_off);
+        uint64_t dyn_flags = DF_BIND_NOW;
+#ifdef DF_TEXTREL
+        if (num_textrel_abs64 > 0)
+            dyn_flags |= DF_TEXTREL;
+#endif
         /* DT_NEEDED "libc.so.6" */
         w64(&dp, DT_NEEDED);  w64(&dp, libc_name_off);
         /* DT_NEEDED "libm.so.6" */
         w64(&dp, DT_NEEDED);  w64(&dp, libm_name_off);
+        if (has_runtime_lib) {
+            w64(&dp, DT_NEEDED);  w64(&dp, runtime_lib_name_off);
+        }
         /* DT_HASH */
         w64(&dp, DT_HASH);    w64(&dp, hash_vaddr);
         /* DT_STRTAB */
@@ -1458,8 +1575,12 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         w64(&dp, DT_RELAENT); w64(&dp, 24);
         /* DT_BIND_NOW */
         w64(&dp, DT_BIND_NOW); w64(&dp, 0);
+        if (num_textrel_abs64 > 0) {
+            /* Needed when .rela.dyn contains text segment relocations. */
+            w64(&dp, DT_TEXTREL); w64(&dp, 0);
+        }
         /* DT_FLAGS */
-        w64(&dp, DT_FLAGS);   w64(&dp, DF_BIND_NOW);
+        w64(&dp, DT_FLAGS);   w64(&dp, dyn_flags);
         /* DT_FLAGS_1 */
         w64(&dp, DT_FLAGS_1); w64(&dp, DF_1_NOW);
         /* DT_NULL */
@@ -1662,6 +1783,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     free(sym_to_dynsym);
     free(dyn_name_off);
     free(int_got_slot_off);
+    free(textrel_code_off);
+    free(textrel_dynsym);
     return written == total_size ? 0 : -1;
 
 fail:
@@ -1673,6 +1796,8 @@ fail:
     free(sym_to_dynsym);
     free(dyn_name_off);
     free(int_got_slot_off);
+    free(textrel_code_off);
+    free(textrel_dynsym);
     return -1;
 }
 

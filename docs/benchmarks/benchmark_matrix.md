@@ -53,6 +53,10 @@ Provider artifacts remain in per-cell bundles:
 - LL lanes baseline: LLVM (`lli`)
 - micro lane baseline: TinyCC (TCC)
 
+API lane measurement contract:
+- `bench_api` runs in AOT compile-only mode (`-c`, no executable link timing).
+- Runtime/behavior parity is validated by `bench_compat_check` before API lanes run.
+
 ## Notes
 
 - API lanes run strict LFortran rebuild preflight by default; disable only with `--skip-lfortran-rebuild`.

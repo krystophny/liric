@@ -3687,7 +3687,7 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
     const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
-    if (runtime_bc && runtime_bc[0]) {
+    if ((runtime_bc && runtime_bc[0]) || !runtime_ll || runtime_len == 0) {
         if (lr_session_emit_exe(mod->session, filename, &err) != 0) {
             if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
                 fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
@@ -3695,7 +3695,6 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
         }
         return 0;
     }
-    if (!runtime_ll || runtime_len == 0) return -1;
     if (lr_session_emit_exe_with_runtime(mod->session, filename,
                                          runtime_ll, runtime_len,
                                          &err) != 0) {

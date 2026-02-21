@@ -286,6 +286,43 @@ static size_t align_up_size(size_t value, size_t alignment) {
     return (value + (alignment - 1u)) & ~(alignment - 1u);
 }
 
+static const char *session_entry_symbol(const lr_module_t *m) {
+    bool has_main = false;
+    if (!m)
+        return "_start";
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0] || f->is_decl || !f->first_block)
+            continue;
+        if (strcmp(f->name, "_start") == 0)
+            return "_start";
+        if (strcmp(f->name, "main") == 0)
+            has_main = true;
+    }
+    return has_main ? "main" : "_start";
+}
+
+static const char *session_blob_entry_symbol(const struct lr_session *s,
+                                             const char *fallback) {
+    const char *first = NULL;
+    bool has_main = false;
+    if (!s || !s->blobs || s->blob_count == 0)
+        return fallback ? fallback : "_start";
+    for (uint32_t i = 0; i < s->blob_count; i++) {
+        const lr_func_blob_t *blob = &s->blobs[i];
+        if (!blob->name || !blob->name[0] || !blob->code || blob->code_len == 0)
+            continue;
+        if (!first)
+            first = blob->name;
+        if (strcmp(blob->name, "_start") == 0)
+            return "_start";
+        if (strcmp(blob->name, "main") == 0)
+            has_main = true;
+    }
+    if (has_main)
+        return "main";
+    return first ? first : (fallback ? fallback : "_start");
+}
+
 static int merge_runtime_bc_into_module(struct lr_session *s, lr_module_t *m,
                                         bool *merged_flag,
                                         session_error_t *err) {
@@ -2570,6 +2607,7 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
     char backend_err[256] = {0};
     bool has_runtime_bc;
+    const char *entry = NULL;
 
     err_clear(err);
     if (!s || !s->module || !path) {
@@ -2595,9 +2633,10 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
             return -1;
         }
+        entry = session_blob_entry_symbol(s, session_entry_symbol(s->module));
         int rc = lr_emit_executable_from_blobs(s->blobs, s->blob_count,
                                                s->module, target, out,
-                                               "_start");
+                                               entry);
         (void)fclose(out);
         if (rc != 0) {
             err_set(err, S_ERR_BACKEND, "blob executable emission failed");
@@ -2606,10 +2645,11 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         return 0;
     }
 
+    entry = session_entry_symbol(s->module);
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
             s->jit ? s->jit->mode : LR_COMPILE_ISEL,
-            path, "_start", NULL, 0,
+            path, entry, NULL, 0,
             backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "executable emission failed");
@@ -2623,6 +2663,7 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
                                       session_error_t *err) {
     char backend_err[256] = {0};
     bool has_runtime_bc;
+    const char *entry = NULL;
 
     err_clear(err);
     if (!s || !s->module || !path) {
@@ -2650,9 +2691,10 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
             return -1;
         }
         /* Runtime LL is ignored on DIRECT blob emission path. */
+        entry = session_blob_entry_symbol(s, session_entry_symbol(s->module));
         int rc = lr_emit_executable_from_blobs(s->blobs, s->blob_count,
                                                s->module, target, out,
-                                               "main");
+                                               entry);
         (void)fclose(out);
         if (rc != 0) {
             err_set(err, S_ERR_BACKEND, "blob executable emission failed");
@@ -2661,10 +2703,11 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
         return 0;
     }
 
+    entry = session_entry_symbol(s->module);
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
             s->jit ? s->jit->mode : LR_COMPILE_ISEL,
-            path, "main", runtime_ll, runtime_len,
+            path, entry, runtime_ll, runtime_len,
             backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err :

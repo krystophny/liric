@@ -86,16 +86,18 @@ Default matrix run executes **24 cells**:
 
 | Lane | Source | What it measures |
 |------|--------|-----------------|
-| `api_full_llvm` | lfortran `--backend llvm` | full pipeline wall/non-parse timing |
-| `api_full_liric` | lfortran `--jit` (liric) | full pipeline wall/non-parse timing |
-| `api_backend_llvm` | lfortran `--backend llvm` | backend-isolated timing only |
-| `api_backend_liric` | lfortran `--jit` (liric) | backend-isolated timing only |
+| `api_full_llvm` | lfortran LLVM build (`--backend llvm`, AOT `-c`) | full pipeline wall/non-parse timing (no link) |
+| `api_full_liric` | lfortran WITH_LIRIC build (`--backend llvm`, AOT `-c`) | full pipeline wall/non-parse timing (no link) |
+| `api_backend_llvm` | lfortran LLVM build (`--backend llvm`, AOT `-c`) | backend-isolated timing only (no link) |
+| `api_backend_liric` | lfortran WITH_LIRIC build (`--backend llvm`, AOT `-c`) | backend-isolated timing only (no link) |
 | `ll_jit` | standalone liric | per-file compile time on .ll corpus |
 | `ll_llvm` | standalone lli | per-file compile time on .ll corpus |
 | `micro_c` | standalone liric vs TCC | in-process compile speed on C corpus |
 
 API lanes run `lfortran` as a subprocess -- lfortran links against `libliric.a`,
 so rebuilding lfortran is mandatory before API benchmarks.
+API timing uses AOT compile-only object emission (`-c`); executable runnability
+and output parity are validated by `bench_compat_check`.
 LL and micro_c lanes are standalone (no lfortran subprocess).
 
 ## Run Matrix
@@ -155,23 +157,25 @@ Matrix summary: `status=OK`, `cells_attempted=24`, `cells_ok=24`, `cells_failed=
 
 Canonical corpus snapshot (`docs/benchmarks/readme_perf_snapshot.json`):
 - `corpus_100` attempted/completed: `95/95`
-- liric vs LLVM compile materialized speedup: **21.79x median** (**30.05x aggregate**)
-- liric vs LLVM total materialized speedup: **11.38x median** (**12.56x aggregate**)
+- liric vs LLVM compile materialized speedup: **24.25x median** (**31.19x aggregate**)
+- liric vs LLVM total materialized speedup: **12.21x median** (**12.94x aggregate**)
 
 ### API AOT (lfortran + liric vs lfortran + LLVM, compat corpus)
+Measurement contract: compile-only object emission (`-c`, no linker timing).
+Runnability/behavior parity remains guarded by `bench_compat_check`.
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 95/95 (0 skipped) | **1.05x** | **1.10x** |
-| isel | ir | 95/95 (0 skipped) | **1.08x** | **1.11x** |
-| copy_patch | direct | 95/95 (0 skipped) | **1.06x** | **1.09x** |
-| copy_patch | ir | 95/95 (0 skipped) | **1.06x** | **1.10x** |
+| isel | direct | 95/95 (0 skipped) | **1.44x** | **7.04x** |
+| isel | ir | 95/95 (0 skipped) | **1.64x** | **4.89x** |
+| copy_patch | direct | 95/95 (0 skipped) | **1.50x** | **7.09x** |
+| copy_patch | ir | 95/95 (0 skipped) | **1.51x** | **4.79x** |
 
 ### LL Corpus (compile-only, compat corpus: 95/95 completed)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 3.245 | 0.152 | **21.33x** |
-| isel | ir | 3.395 | 0.144 | **23.58x** |
-| copy_patch | direct | 3.272 | 0.154 | **21.32x** |
-| copy_patch | ir | 3.272 | 0.152 | **21.52x** |
+| isel | direct | 3.155 | 0.155 | **20.38x** |
+| isel | ir | 3.257 | 0.154 | **21.15x** |
+| copy_patch | direct | 3.234 | 0.149 | **21.72x** |
+| copy_patch | ir | 3.233 | 0.156 | **20.69x** |
