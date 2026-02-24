@@ -561,7 +561,14 @@ inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Li
        lr_emit_object uses (!f->is_decl && f->first_block) to decide
        what to compile vs. leave as an undefined symbol. */
     (void)Linkage;
-    return M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
+    Function *fn = M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
+    if (fn) {
+        /* LLVM allows creating detached basic blocks immediately after
+           Function::Create(...). Keep that workflow by tracking the
+           most recently created function as the implicit owner context. */
+        detail::current_function_ref() = fn;
+    }
+    return fn;
 }
 
 inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
