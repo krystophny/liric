@@ -31,9 +31,9 @@ This lane validates compile-time API compatibility:
   Integration tests run in both modes:
     run_tests.py -b llvm --ninja -jN
     run_tests.py -b llvm -f -nf16 --ninja -jN
-  Reference tests exclude backends whose output depends on LLVM IR text
-  or LLVM debug info (llvm, asr_implicit_interface_and_typing_with_llvm,
-  run_with_dbg) unless overridden via --ref-args.
+  Reference tests run ALL backends via lfortran_ref_test_liric.py.
+  IR-text-dependent backends (llvm, run_with_dbg) execute their commands
+  (catching crashes) but skip output comparison since liric IR differs.
 EOF
 }
 
@@ -537,28 +537,20 @@ ctest --test-dir "$lfortran_build_liric" --output-on-failure \
     2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
 
 if [[ "$run_ref_tests" == "yes" ]]; then
-    ref_default_args=""
-    if ! ref_args_has_backend_policy "$ref_args"; then
-        ref_default_args="--exclude-backend llvm asr_implicit_interface_and_typing_with_llvm run_with_dbg"
-        echo "lfortran_api_compat: applying WITH_LIRIC reference policy: ${ref_default_args}" >&2
-    fi
+    liric_ref_wrapper="${liric_root}/tools/lfortran_ref_test_liric.py"
     (
         cd "$lfortran_dir"
         if [[ -z "${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS:-}" ]]; then
             export LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS="1"
             echo "lfortran_api_compat: applying WITH_LIRIC reference policy: LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS=${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS}" >&2
         fi
-        if [[ -n "$ref_default_args" && -n "$ref_args" ]]; then
+        export LIRIC_REF_SKIP_COMPARE="llvm,run_dbg"
+        echo "lfortran_api_compat: IR compare skipped for: ${LIRIC_REF_SKIP_COMPARE}" >&2
+        if [[ -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
-        elif [[ -n "$ref_default_args" ]]; then
-            # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args
-        elif [[ -n "$ref_args" ]]; then
-            # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_args
+            run_in_selected_env "$PYTHON_BIN" "$liric_ref_wrapper" $ref_args
         else
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py
+            run_in_selected_env "$PYTHON_BIN" "$liric_ref_wrapper"
         fi
     ) 2>&1 | tee "${log_root}/lfortran_reference_tests.log" || status=1
 fi
