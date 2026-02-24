@@ -525,7 +525,7 @@ add_custom_target(
         -DLIRIC_REQUIRE_REAL_LLVM_LINK=${LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM}
         ${LIRIC_LFORTRAN_LLVM_ARGS}
         -DWITH_RUNTIME_STACKTRACE=yes
-        -DWITH_LLVM=OFF
+        -DWITH_LLVM=yes
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
         --target lfortran lfortran_runtime build_runtime --parallel
     DEPENDS lfortran_prepare liric_probe_runner
