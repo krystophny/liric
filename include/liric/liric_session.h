@@ -159,6 +159,8 @@ uint32_t lr_session_emit(lr_session_t *s, const lr_inst_desc_t *inst,
 /* ---- IR-mode only ------------------------------------------------------ */
 
 int lr_session_dump_ir(lr_session_t *s, FILE *out, lr_error_t *err);
+int lr_session_set_module(lr_session_t *s, lr_module_t *module,
+                          lr_error_t *err);
 
 /* ---- Convenience: parse+compile .ll text ------------------------------- */
 
@@ -177,6 +179,17 @@ int lr_session_emit_exe(lr_session_t *s, const char *path, lr_error_t *err);
 int lr_session_emit_exe_with_runtime(lr_session_t *s, const char *path,
                                       const char *runtime_ll, size_t runtime_len,
                                       lr_error_t *err);
+
+/* ---- DIRECT blob package I/O ------------------------------------------ */
+
+int lr_session_export_blob_package(lr_session_t *s,
+                                   uint8_t **out_data,
+                                   size_t *out_len,
+                                   lr_error_t *err);
+int lr_session_import_blob_package(lr_session_t *s,
+                                   const uint8_t *data,
+                                   size_t len,
+                                   lr_error_t *err);
 
 /* ---- Access to underlying module (for compat layer interop) ------------ */
 

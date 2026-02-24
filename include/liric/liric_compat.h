@@ -493,7 +493,13 @@ int lc_module_jit_exec(lc_module_compat_t *mod, const char *entry_name);
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out);
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
-                               const char *runtime_ll, size_t runtime_len);
+                              const char *runtime_ll, size_t runtime_len);
+int lc_module_export_blob_package(lc_module_compat_t *mod,
+                                  uint8_t **out_data, size_t *out_len);
+int lc_module_import_blob_package(lc_module_compat_t *mod,
+                                  const uint8_t *data, size_t len);
+int lc_module_merge_ll_text(lc_module_compat_t *mod,
+                            const char *src, size_t len);
 
 /* ---- Session compat layer (LLVM-style naming) ---- */
 

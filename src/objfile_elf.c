@@ -981,10 +981,11 @@ static uint32_t elf_sysv_hash(const char *name) {
  *   Section headers at end of file (non-loaded, for readelf/objdump)
  */
 int write_elf_dynamic_executable_x86_64(FILE *out,
-                                         const uint8_t *code, size_t code_size,
-                                         const uint8_t *data, size_t data_size,
-                                         const lr_objfile_ctx_t *oc,
-                                         const char *entry_symbol) {
+                                        const uint8_t *code, size_t code_size,
+                                        const uint8_t *data, size_t data_size,
+                                        const lr_objfile_ctx_t *oc,
+                                        const char *entry_symbol) {
+    const int verbose_fail = (getenv("LIRIC_VERBOSE_ELF_FAIL") != NULL);
     if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
         return -1;
 
@@ -1036,30 +1037,34 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     const char *runtime_lib_name = getenv("LIRIC_RUNTIME_LIB");
     bool has_runtime_lib = runtime_lib_name && runtime_lib_name[0];
 
-    /* Count undefined symbols. Always inject "exit" for the _start stub. */
+    /* Track referenced undefined symbols only. Declarations without relocations
+       must not become runtime imports. Always inject "exit" for _start. */
     uint32_t num_undef = 0;
     uint32_t num_textrel_abs64 = 0;
     bool exit_in_oc = false;
-    for (uint32_t i = 0; i < oc->num_symbols; i++) {
-        if (!oc->symbols[i].is_defined) {
-            num_undef++;
-            if (strcmp(oc->symbols[i].name, "exit") == 0)
-                exit_in_oc = true;
-        }
+    uint8_t *undef_needed = NULL;
+    if (oc->num_symbols > 0) {
+        undef_needed = (uint8_t *)calloc(oc->num_symbols, 1);
+        if (!undef_needed)
+            return -1;
     }
     for (uint32_t i = 0; i < oc->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->relocs[i];
         if (rel->symbol_idx >= oc->num_symbols)
             continue;
-        if (!oc->symbols[rel->symbol_idx].is_defined &&
-            rel->type == LR_RELOC_X86_64_64) {
-            num_textrel_abs64++;
+        if (!oc->symbols[rel->symbol_idx].is_defined) {
+            if (!undef_needed[rel->symbol_idx]) {
+                undef_needed[rel->symbol_idx] = 1;
+                num_undef++;
+                if (strcmp(oc->symbols[rel->symbol_idx].name, "exit") == 0)
+                    exit_in_oc = true;
+            }
+            if (rel->type == LR_RELOC_X86_64_64)
+                num_textrel_abs64++;
         }
     }
-    if (num_undef == 0)
-        return -1; /* caller should use static writer instead */
 
-    /* num_dynimport = module undefined symbols + synthetic "exit" if needed */
+    /* num_dynimport = referenced undefined symbols + synthetic "exit" if needed */
     uint32_t num_dynimport = num_undef + (exit_in_oc ? 0 : 1);
     uint32_t exit_dyn_idx = 0; /* 0-based index into dyn_* arrays */
 
@@ -1068,12 +1073,13 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     uint32_t *sym_to_dynsym = (uint32_t *)calloc(oc->num_symbols, sizeof(uint32_t));
     if (!dyn_names || !dyn_oc_idx || !sym_to_dynsym) {
         free(dyn_names); free(dyn_oc_idx); free(sym_to_dynsym);
+        free(undef_needed);
         return -1;
     }
     {
         uint32_t di = 0;
         for (uint32_t i = 0; i < oc->num_symbols; i++) {
-            if (!oc->symbols[i].is_defined) {
+            if (!oc->symbols[i].is_defined && undef_needed[i]) {
                 dyn_names[di] = oc->symbols[i].name;
                 dyn_oc_idx[di] = i;
                 sym_to_dynsym[i] = di + 1;
@@ -1104,6 +1110,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     uint32_t *dyn_name_off = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
     if (!dyn_name_off) {
         free(dyn_names); free(dyn_oc_idx); free(sym_to_dynsym);
+        free(undef_needed);
         return -1;
     }
     for (uint32_t i = 0; i < num_dynimport; i++) {
@@ -1180,6 +1187,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         if (!int_got_slot_off) {
             free(dyn_names); free(dyn_oc_idx);
             free(sym_to_dynsym); free(dyn_name_off);
+            free(undef_needed);
             return -1;
         }
         for (uint32_t i = 0; i < oc->num_symbols; i++)
@@ -1193,6 +1201,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             free(sym_to_dynsym); free(dyn_name_off);
             free(int_got_slot_off);
             free(textrel_code_off); free(textrel_dynsym);
+            free(undef_needed);
             return -1;
         }
     }
@@ -1274,6 +1283,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         free(dyn_names); free(dyn_oc_idx);
         free(sym_to_dynsym); free(dyn_name_off);
         free(int_got_slot_off);
+        free(undef_needed);
         return -1;
     }
 
@@ -1287,6 +1297,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         free(dyn_names); free(dyn_oc_idx);
         free(sym_to_dynsym); free(dyn_name_off);
         free(int_got_slot_off);
+        free(undef_needed);
         return -1;
     }
     memcpy(code_mut, code, code_size);
@@ -1297,10 +1308,22 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     uint32_t textrel_i = 0;
     for (uint32_t i = 0; i < oc->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->relocs[i];
-        if (rel->symbol_idx >= oc->num_symbols)
+        if (rel->symbol_idx >= oc->num_symbols) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: bad text reloc symbol index: idx=%u num_symbols=%u\n",
+                        rel->symbol_idx, oc->num_symbols);
+            }
             goto fail;
-        if ((size_t)rel->offset + 4 > code_size)
+        }
+        if ((size_t)rel->offset + 4 > code_size) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: text reloc out of range: off=%u code_size=%zu\n",
+                        rel->offset, code_size);
+            }
             goto fail;
+        }
 
         const lr_obj_symbol_t *sym = &oc->symbols[rel->symbol_idx];
 
@@ -1310,25 +1333,51 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                 rel->type == LR_RELOC_X86_64_PLT32) {
                 /* Redirect call to trampoline for this dynamic import */
                 uint32_t dsym = sym_to_dynsym[rel->symbol_idx];
-                if (dsym == 0) goto fail;
+                if (dsym == 0) {
+                    if (verbose_fail) {
+                        fprintf(stderr,
+                                "write_elf_dynamic_executable_x86_64: missing dynsym for undefined text rel32 symbol: %s\n",
+                                sym->name ? sym->name : "<null>");
+                    }
+                    goto fail;
+                }
                 uint32_t undef_idx = dsym - 1;
                 uint64_t tramp_target = tramp_vaddr + (uint64_t)undef_idx * 6;
                 uint64_t place_vaddr = code_vaddr + rel->offset;
                 if (patch_rel32_vaddr(code_mut, code_size, rel->offset,
-                                      place_vaddr, tramp_target) != 0)
+                                      place_vaddr, tramp_target) != 0) {
+                    if (verbose_fail) {
+                        fprintf(stderr,
+                                "write_elf_dynamic_executable_x86_64: patch_rel32 failed for undefined symbol %s\n",
+                                sym->name ? sym->name : "<null>");
+                    }
                     goto fail;
+                }
                 continue;
             }
             if (rel->type == LR_RELOC_X86_64_GOTPCREL) {
                 /* Undefined symbol with GOTPCREL: point to dynamic GOT slot */
                 uint32_t dsym = sym_to_dynsym[rel->symbol_idx];
-                if (dsym == 0) goto fail;
+                if (dsym == 0) {
+                    if (verbose_fail) {
+                        fprintf(stderr,
+                                "write_elf_dynamic_executable_x86_64: missing dynsym for undefined GOTPCREL symbol: %s\n",
+                                sym->name ? sym->name : "<null>");
+                    }
+                    goto fail;
+                }
                 uint32_t undef_idx = dsym - 1;
                 uint64_t slot_vaddr = got_vaddr + (uint64_t)undef_idx * 8;
                 uint64_t place_vaddr = code_vaddr + rel->offset;
                 if (patch_rel32_vaddr(code_mut, code_size, rel->offset,
-                                      place_vaddr, slot_vaddr) != 0)
+                                      place_vaddr, slot_vaddr) != 0) {
+                    if (verbose_fail) {
+                        fprintf(stderr,
+                                "write_elf_dynamic_executable_x86_64: patch_rel32 GOTPCREL failed for symbol %s\n",
+                                sym->name ? sym->name : "<null>");
+                    }
                     goto fail;
+                }
                 continue;
             }
             if (rel->type == LR_RELOC_X86_64_64) {
@@ -1336,6 +1385,12 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                 if ((size_t)rel->offset + 8 > code_size || dsym == 0 ||
                     !textrel_code_off || !textrel_dynsym ||
                     textrel_i >= num_textrel_abs64) {
+                    if (verbose_fail) {
+                        fprintf(stderr,
+                                "write_elf_dynamic_executable_x86_64: undefined ABS64 text reloc failed for symbol %s (off=%u dsym=%u textrel_i=%u/%u)\n",
+                                sym->name ? sym->name : "<null>", rel->offset,
+                                dsym, textrel_i, num_textrel_abs64);
+                    }
                     goto fail;
                 }
                 textrel_code_off[textrel_i] = rel->offset;
@@ -1343,17 +1398,34 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                 textrel_i++;
                 continue;
             }
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: unsupported undefined text reloc type=%u symbol=%s\n",
+                        rel->type, sym->name ? sym->name : "<null>");
+            }
             goto fail; /* unsupported reloc type for undefined symbol */
         }
 
         /* Defined symbol: resolve directly */
         uint64_t target_vaddr;
         if (sym->section == 1) {
-            if ((size_t)sym->offset >= code_size) goto fail;
+            if ((size_t)sym->offset >= code_size) {
+                if (verbose_fail) {
+                    fprintf(stderr,
+                            "write_elf_dynamic_executable_x86_64: defined text symbol offset out of range: %s off=%u code_size=%zu\n",
+                            sym->name ? sym->name : "<null>", sym->offset, code_size);
+                }
+                goto fail;
+            }
             target_vaddr = code_vaddr + sym->offset;
         } else if (sym->section == 2) {
             target_vaddr = user_data_vaddr + sym->offset;
         } else {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: defined symbol has invalid section=%u name=%s\n",
+                        sym->section, sym->name ? sym->name : "<null>");
+            }
             goto fail;
         }
 
@@ -1389,32 +1461,77 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             rc = -1;
             break;
         }
-        if (rc != 0) goto fail;
+        if (rc != 0) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: failed applying defined text reloc type=%u symbol=%s off=%u\n",
+                        rel->type, sym->name ? sym->name : "<null>", rel->offset);
+            }
+            goto fail;
+        }
     }
-    if (textrel_i != num_textrel_abs64)
+    if (textrel_i != num_textrel_abs64) {
+        if (verbose_fail) {
+            fprintf(stderr,
+                    "write_elf_dynamic_executable_x86_64: textrel count mismatch: got=%u expected=%u\n",
+                    textrel_i, num_textrel_abs64);
+        }
         goto fail;
+    }
 
     /* Apply data relocations for defined symbols */
     for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->data_relocs[i];
         if (rel->symbol_idx >= oc->num_symbols ||
-            rel->type != LR_RELOC_X86_64_64)
+            rel->type != LR_RELOC_X86_64_64) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: invalid data reloc header idx=%u type=%u\n",
+                        rel->symbol_idx, rel->type);
+            }
             goto fail;
+        }
         const lr_obj_symbol_t *sym = &oc->symbols[rel->symbol_idx];
-        if (!sym->is_defined) goto fail;
+        if (!sym->is_defined) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: undefined data reloc symbol=%s off=%u\n",
+                        sym->name ? sym->name : "<null>", rel->offset);
+            }
+            goto fail;
+        }
 
         uint64_t target_vaddr;
         if (sym->section == 1)
             target_vaddr = code_vaddr + sym->offset;
         else if (sym->section == 2)
             target_vaddr = user_data_vaddr + sym->offset;
-        else
+        else {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: invalid data reloc section=%u symbol=%s\n",
+                        sym->section, sym->name ? sym->name : "<null>");
+            }
             goto fail;
+        }
 
         uint32_t da_off = (uint32_t)(user_data_off - data_seg_off) + rel->offset;
-        if ((size_t)da_off + 8 > data_area_size) goto fail;
-        if (write_u64_le(data_area, data_area_size, da_off, target_vaddr) != 0)
+        if ((size_t)da_off + 8 > data_area_size) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: data reloc out of range off=%u data_area_size=%zu\n",
+                        da_off, data_area_size);
+            }
             goto fail;
+        }
+        if (write_u64_le(data_area, data_area_size, da_off, target_vaddr) != 0) {
+            if (verbose_fail) {
+                fprintf(stderr,
+                        "write_elf_dynamic_executable_x86_64: write_u64_le failed for data reloc symbol=%s off=%u\n",
+                        sym->name ? sym->name : "<null>", da_off);
+            }
+            goto fail;
+        }
     }
 
     /* Build trampolines in the output buffer (after code) */
@@ -1785,6 +1902,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     free(int_got_slot_off);
     free(textrel_code_off);
     free(textrel_dynsym);
+    free(undef_needed);
     return written == total_size ? 0 : -1;
 
 fail:
@@ -1798,6 +1916,7 @@ fail:
     free(int_got_slot_off);
     free(textrel_code_off);
     free(textrel_dynsym);
+    free(undef_needed);
     return -1;
 }
 

@@ -2,6 +2,7 @@
 #include "objfile_macho.h"
 #include "objfile_elf.h"
 #include "liric.h"
+#include "compile_mode.h"
 #include "platform/platform.h"
 #include "platform/platform_os.h"
 #include "arena.h"
@@ -87,7 +88,7 @@ int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
             oc->module_sym_defined[sym_id] = 1;
     }
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (!g->name || !g->name[0] || g->is_external)
+        if (!g->name || !g->name[0] || (g->is_external && !g->is_local))
             continue;
         uint32_t sym_id = lr_module_intern_symbol(m, g->name);
         if (sym_id < oc->module_sym_count)
@@ -439,7 +440,7 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
     }
 
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (g->is_external) {
+        if (g->is_external && !g->is_local) {
             if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) == UINT32_MAX) {
                 m->obj_ctx = NULL;
                 lr_arena_destroy(arena);
@@ -517,6 +518,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
                                const lr_target_t *target,
                                bool preserve_symbol_names,
                                lr_obj_build_result_t *out) {
+    lr_arena_t *compile_arena = NULL;
+    lr_compile_mode_t extra_mode = LR_COMPILE_ISEL;
     if (!blobs || num_blobs == 0 || !m || !target || !out)
         return -1;
 
@@ -529,6 +532,17 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
     }
 
     out->ctx.preserve_symbol_names = preserve_symbol_names;
+    const int verbose_blob = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
+    if (lr_obj_build_symbol_cache(&out->ctx, m) != 0) {
+        obj_build_result_destroy(out);
+        return -1;
+    }
+    m->obj_ctx = &out->ctx;
+    extra_mode = lr_compile_mode_from_env();
+    if (extra_mode == LR_COMPILE_LLVM ||
+        !lr_target_can_compile(target, extra_mode)) {
+        extra_mode = LR_COMPILE_ISEL;
+    }
 
     for (uint32_t bi = 0; bi < num_blobs; bi++) {
         const lr_func_blob_t *blob = &blobs[bi];
@@ -570,6 +584,60 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         out->code_pos += blob->code_len;
     }
 
+    /* Compile module-defined functions that are missing from imported blobs.
+       This is needed for mixed no-link merges (e.g. C sources merged as LL)
+       where no sidecar blob package exists for those definitions. */
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        uint32_t sym_idx;
+        uint32_t reloc_base;
+        size_t func_len = 0;
+        if (!f->name || !f->name[0] || f->is_decl || !f->first_block)
+            continue;
+
+        sym_idx = lr_obj_ensure_symbol(&out->ctx, f->name, false, 0, 0);
+        if (sym_idx == UINT32_MAX) {
+            m->obj_ctx = NULL;
+            if (compile_arena) lr_arena_destroy(compile_arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
+        if (out->ctx.symbols[sym_idx].is_defined)
+            continue;
+
+        if (!compile_arena) {
+            compile_arena = lr_arena_create(0);
+            if (!compile_arena) {
+                m->obj_ctx = NULL;
+                obj_build_result_destroy(out);
+                return -1;
+            }
+        }
+
+        out->code_pos = obj_align_up(out->code_pos, 16);
+        sym_idx = lr_obj_ensure_symbol(&out->ctx, f->name, true, 1,
+                                       (uint32_t)out->code_pos);
+        if (sym_idx == UINT32_MAX) {
+            m->obj_ctx = NULL;
+            lr_arena_destroy(compile_arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
+
+        reloc_base = out->ctx.num_relocs;
+        if (lr_target_compile(target, extra_mode, f, m,
+                              out->code_buf + out->code_pos,
+                              OBJ_CODE_BUF_SIZE - out->code_pos,
+                              &func_len, compile_arena) != 0) {
+            m->obj_ctx = NULL;
+            lr_arena_destroy(compile_arena);
+            obj_build_result_destroy(out);
+            return -1;
+        }
+        for (uint32_t ri = reloc_base; ri < out->ctx.num_relocs; ri++)
+            out->ctx.relocs[ri].offset += (uint32_t)out->code_pos;
+        out->code_pos += func_len;
+    }
+
     /* Declare external functions that aren't in the blob list */
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (!f->name || !f->name[0])
@@ -577,6 +645,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         if (f->is_decl || !f->first_block) {
             if (lr_obj_ensure_symbol(&out->ctx, f->name, false, 0, 0) ==
                 UINT32_MAX) {
+                m->obj_ctx = NULL;
+                if (compile_arena) lr_arena_destroy(compile_arena);
                 obj_build_result_destroy(out);
                 return -1;
             }
@@ -584,15 +654,32 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
     }
 
     if (obj_define_intrinsic_stubs(out, target) != 0) {
+        m->obj_ctx = NULL;
+        if (compile_arena) lr_arena_destroy(compile_arena);
         obj_build_result_destroy(out);
         return -1;
     }
 
     /* Globals (same as obj_build_module) */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (g->is_external) {
+        if (verbose_blob) {
+            uint32_t nrel = 0;
+            for (lr_reloc_t *r = g->relocs; r; r = r->next)
+                nrel++;
+            fprintf(stderr,
+                    "obj_build_from_blobs: global name=%s external=%d local=%d const=%d init_size=%zu relocs=%u\n",
+                    g->name ? g->name : "<null>",
+                    g->is_external ? 1 : 0,
+                    g->is_local ? 1 : 0,
+                    g->is_const ? 1 : 0,
+                    g->init_size,
+                    nrel);
+        }
+        if (g->is_external && !g->is_local) {
             if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) ==
                 UINT32_MAX) {
+                m->obj_ctx = NULL;
+                if (compile_arena) lr_arena_destroy(compile_arena);
                 obj_build_result_destroy(out);
                 return -1;
             }
@@ -609,6 +696,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
             galign = 8;
         out->data_pos = obj_align_up(out->data_pos, galign);
         if (out->data_pos + gsize > OBJ_DATA_BUF_SIZE) {
+            m->obj_ctx = NULL;
+            if (compile_arena) lr_arena_destroy(compile_arena);
             obj_build_result_destroy(out);
             return -1;
         }
@@ -621,6 +710,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         uint32_t gsym = lr_obj_ensure_symbol(&out->ctx, g->name, true, 2,
                                              (uint32_t)out->data_pos);
         if (gsym == UINT32_MAX) {
+            m->obj_ctx = NULL;
+            if (compile_arena) lr_arena_destroy(compile_arena);
             obj_build_result_destroy(out);
             return -1;
         }
@@ -630,6 +721,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
             uint32_t rel_sym = lr_obj_ensure_symbol(
                 &out->ctx, rel->symbol_name, false, 0, 0);
             if (rel_sym == UINT32_MAX) {
+                m->obj_ctx = NULL;
+                if (compile_arena) lr_arena_destroy(compile_arena);
                 obj_build_result_destroy(out);
                 return -1;
             }
@@ -645,6 +738,25 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         out->has_data = true;
     }
 
+    if (verbose_blob) {
+        fprintf(stderr, "obj_build_from_blobs: symbols after merge (%u total)\n",
+                out->ctx.num_symbols);
+        for (uint32_t si = 0; si < out->ctx.num_symbols; si++) {
+            const lr_obj_symbol_t *sym = &out->ctx.symbols[si];
+            fprintf(stderr, "  [%u] %s defined=%d section=%u off=%u local=%d weak=%d\n",
+                    si,
+                    sym->name ? sym->name : "<null>",
+                    sym->is_defined ? 1 : 0,
+                    sym->section,
+                    sym->offset,
+                    sym->is_local ? 1 : 0,
+                    sym->is_weak ? 1 : 0);
+        }
+    }
+
+    m->obj_ctx = NULL;
+    if (compile_arena)
+        lr_arena_destroy(compile_arena);
     return 0;
 }
 

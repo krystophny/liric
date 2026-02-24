@@ -543,6 +543,10 @@ if [[ "$run_ref_tests" == "yes" ]]; then
     fi
     (
         cd "$lfortran_dir"
+        if [[ -z "${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS:-}" ]]; then
+            export LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS="1"
+            echo "lfortran_api_compat: applying WITH_LIRIC reference policy: LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS=${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS}" >&2
+        fi
         if [[ -n "$ref_default_args" && -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
             run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
@@ -561,9 +565,14 @@ fi
 if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
+        unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+        fi
+        if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
+            export LFORTRAN_NO_LINK_MODE="1"
+            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
         if [[ -n "$itest_args" ]]; then
@@ -576,9 +585,14 @@ if [[ "$run_itests" == "yes" ]]; then
 
     (
         cd "$lfortran_dir/integration_tests"
+        unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+        fi
+        if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
+            export LFORTRAN_NO_LINK_MODE="1"
+            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (-f -nf16 mode)" >&2
         if [[ -n "$itest_args" ]]; then

@@ -51,7 +51,7 @@ ctest --test-dir build --output-on-failure
                               -> MIR   templates to LLVM
                               -> x86   -> x86   ORC JIT
                                 |        |        |
-                              ~31-33x  ~31-33x  optional
+                              ~22-24x  ~22-24x  optional
                               LL speed LL speed baseline
                               (latest) (latest) mode
 
@@ -61,10 +61,10 @@ ctest --test-dir build --output-on-failure
 
   STANDALONE LANES (no lfortran involved)
 
-  LL corpus    compat-derived corpus (latest: 33 .ll files)
-               ll_jit:  liric compile median    ~0.074-0.077ms
-               ll_llvm: lli compile median      ~2.35-2.56ms
-               Speedup: ~31-33x (isel/copy_patch)
+  LL corpus    compat-derived corpus (latest: 95 .ll files)
+               ll_jit:  liric compile median    ~0.136-0.156ms
+               ll_llvm: lli compile median      ~3.286-3.544ms
+               Speedup: ~22-24x (isel/copy_patch)
 
   Micro C      same corpus, lfortran --show-c output, liric vs TCC
                optional lane (requires `bench_tcc` / libtcc)
@@ -166,16 +166,16 @@ Runnability/behavior parity remains guarded by `bench_compat_check`.
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 95/95 (0 skipped) | **1.44x** | **7.04x** |
-| isel | ir | 95/95 (0 skipped) | **1.64x** | **4.89x** |
-| copy_patch | direct | 95/95 (0 skipped) | **1.50x** | **7.09x** |
-| copy_patch | ir | 95/95 (0 skipped) | **1.51x** | **4.79x** |
+| isel | direct | 95/95 (0 skipped) | **1.50x** | **6.82x** |
+| isel | ir | 95/95 (0 skipped) | **1.68x** | **5.17x** |
+| copy_patch | direct | 95/95 (0 skipped) | **1.51x** | **7.38x** |
+| copy_patch | ir | 95/95 (0 skipped) | **1.71x** | **5.34x** |
 
 ### LL Corpus (compile-only, compat corpus: 95/95 completed)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 3.155 | 0.155 | **20.38x** |
-| isel | ir | 3.257 | 0.154 | **21.15x** |
-| copy_patch | direct | 3.234 | 0.149 | **21.72x** |
-| copy_patch | ir | 3.233 | 0.156 | **20.69x** |
+| isel | direct | 3.438 | 0.145 | **23.64x** |
+| isel | ir | 3.543 | 0.156 | **22.70x** |
+| copy_patch | direct | 3.286 | 0.136 | **24.23x** |
+| copy_patch | ir | 3.372 | 0.151 | **22.30x** |
