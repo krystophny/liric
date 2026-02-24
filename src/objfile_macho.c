@@ -508,7 +508,11 @@ int write_macho_executable_arm64(FILE *out,
     w32(&p, MH_EXECUTE);
     w32(&p, ncmds);
     w32(&p, sizeofcmds);
-    w32(&p, MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE);
+    /*
+     * No-link payload executables carry pre-resolved absolute pointers in
+     * synthesized GOT slots. Keep a fixed image base for this format.
+     */
+    w32(&p, MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL);
     w32(&p, 0u);
 
     /* __PAGEZERO */

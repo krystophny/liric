@@ -1469,10 +1469,17 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
         }
     }
 
+    const int verbose_reloc =
+        (getenv("LIRIC_VERBOSE_JIT_RELOCS") != NULL);
     int rc = 0;
     for (uint32_t i = reloc_start; i < ctx->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &ctx->relocs[i];
         if (rel->symbol_idx >= ctx->num_symbols) {
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: invalid symbol index reloc=%u sym_idx=%u num_symbols=%u\n",
+                        i, rel->symbol_idx, ctx->num_symbols);
+            }
             rc = -1;
             break;
         }
@@ -1489,6 +1496,11 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
                 target_addr = (void *)(j->code_buf + sym->offset);
             } else {
                 if (!sym_name || !sym_name[0]) {
+                    if (verbose_reloc) {
+                        fprintf(stderr,
+                                "jit_reloc: empty unresolved symbol reloc=%u type=%u\n",
+                                i, rel->type);
+                    }
                     rc = -1;
                     break;
                 }
@@ -1500,6 +1512,11 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
                 resolved_mask[rel->symbol_idx] = 1;
         }
         if (!target_addr) {
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: unresolved symbol reloc=%u type=%u name=%s\n",
+                        i, rel->type, sym_name ? sym_name : "<null>");
+            }
             if (missing_symbol)
                 *missing_symbol = sym_name;
             rc = -1;
@@ -1550,12 +1567,35 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
             rc = patch_aarch64_pageoff12(j->code_buf, j->code_size, rel->offset,
                                          patch_target, true);
             break;
+        case LR_RELOC_ARM64_ABS64:
+            rc = write_u64(j->code_buf, j->code_size, rel->offset,
+                           (uint64_t)patch_target);
+            break;
         default:
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: unsupported reloc type=%u off=%u sym=%s\n",
+                        rel->type, rel->offset,
+                        sym_name ? sym_name : "<null>");
+            }
             rc = -1;
             break;
         }
-        if (rc != 0)
+        if (rc != 0) {
+            if (missing_symbol && (!*missing_symbol) &&
+                sym_name && sym_name[0]) {
+                /* Treat patching failures like unresolved symbols so DIRECT
+                   mode can defer them for AOT blob/object emission paths. */
+                *missing_symbol = sym_name;
+            }
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: patch failure type=%u off=%u sym=%s rc=%d\n",
+                        rel->type, rel->offset,
+                        sym_name ? sym_name : "<null>", rc);
+            }
             break;
+        }
         if (j->update_active) {
             j->update_dirty = true;
             if ((size_t)rel->offset < j->update_begin_code_size)
