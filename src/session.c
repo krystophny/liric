@@ -909,6 +909,292 @@ static int capture_blob(struct lr_session *s, const uint8_t *code,
     return 0;
 }
 
+static const uint8_t k_blob_pkg_magic[8] = {
+    'L', 'R', 'B', 'L', 'O', 'B', '1', '\0'
+};
+
+static void blob_pkg_w32(uint8_t **p, uint32_t v) {
+    (*p)[0] = (uint8_t)(v);
+    (*p)[1] = (uint8_t)(v >> 8);
+    (*p)[2] = (uint8_t)(v >> 16);
+    (*p)[3] = (uint8_t)(v >> 24);
+    *p += 4;
+}
+
+static void blob_pkg_w64(uint8_t **p, uint64_t v) {
+    blob_pkg_w32(p, (uint32_t)(v & 0xffffffffu));
+    blob_pkg_w32(p, (uint32_t)(v >> 32));
+}
+
+static int blob_pkg_r32(const uint8_t **p, const uint8_t *end, uint32_t *out) {
+    const uint8_t *q = *p;
+    if (!p || !out || !q || q + 4 > end)
+        return -1;
+    *out = ((uint32_t)q[0]) |
+           ((uint32_t)q[1] << 8) |
+           ((uint32_t)q[2] << 16) |
+           ((uint32_t)q[3] << 24);
+    *p = q + 4;
+    return 0;
+}
+
+static int blob_pkg_r64(const uint8_t **p, const uint8_t *end, uint64_t *out) {
+    uint32_t lo = 0, hi = 0;
+    if (blob_pkg_r32(p, end, &lo) != 0 ||
+        blob_pkg_r32(p, end, &hi) != 0)
+        return -1;
+    *out = ((uint64_t)hi << 32) | (uint64_t)lo;
+    return 0;
+}
+
+static int module_intern_name_slice(lr_module_t *m,
+                                    const uint8_t *bytes,
+                                    uint32_t len,
+                                    const char **out_name) {
+    char *tmp = NULL;
+    uint32_t sym_id;
+    const char *interned = NULL;
+    if (!m || !bytes || !out_name)
+        return -1;
+    tmp = (char *)malloc((size_t)len + 1u);
+    if (!tmp)
+        return -1;
+    memcpy(tmp, bytes, len);
+    tmp[len] = '\0';
+    sym_id = lr_module_intern_symbol(m, tmp);
+    free(tmp);
+    interned = lr_module_symbol_name(m, sym_id);
+    if (!interned)
+        return -1;
+    *out_name = interned;
+    return 0;
+}
+
+int lr_session_export_blob_package(struct lr_session *s,
+                                   uint8_t **out_data,
+                                   size_t *out_len,
+                                   session_error_t *err) {
+    size_t total = 0;
+    uint8_t *buf = NULL;
+    uint8_t *p = NULL;
+
+    err_clear(err);
+    if (!s || !out_data || !out_len) {
+        err_set(err, S_ERR_ARGUMENT, "invalid export_blob_package arguments");
+        return -1;
+    }
+    /* Blob export is valid for both DIRECT and IR sessions.
+       IR-mode producers typically export an empty package (no captured blobs),
+       but imported blobs are still serialized if present. */
+
+    total = 8 + 4 + 4; /* magic + version + blob_count */
+    for (uint32_t bi = 0; bi < s->blob_count; bi++) {
+        const lr_func_blob_t *blob = &s->blobs[bi];
+        size_t name_len;
+        if (!blob->name || !blob->name[0]) {
+            err_set(err, S_ERR_STATE, "blob export encountered unnamed function");
+            return -1;
+        }
+        name_len = strlen(blob->name);
+        total += 4 + name_len;        /* name */
+        total += 8;                   /* code_len */
+        total += 4;                   /* num_relocs */
+        total += blob->code_len;      /* code bytes */
+        for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
+            const char *sym = blob->relocs[ri].symbol_name;
+            size_t sym_len;
+            if (!sym || !sym[0]) {
+                err_set(err, S_ERR_STATE,
+                        "blob export encountered relocation without symbol name");
+                return -1;
+            }
+            sym_len = strlen(sym);
+            total += 4;               /* offset */
+            total += 1 + 3;           /* type + padding */
+            total += 4 + sym_len;     /* symbol name */
+        }
+    }
+
+    buf = (uint8_t *)malloc(total > 0 ? total : 1u);
+    if (!buf) {
+        err_set(err, S_ERR_BACKEND, "blob package allocation failed");
+        return -1;
+    }
+    p = buf;
+    memcpy(p, k_blob_pkg_magic, 8);
+    p += 8;
+    blob_pkg_w32(&p, 1u); /* version */
+    blob_pkg_w32(&p, s->blob_count);
+
+    for (uint32_t bi = 0; bi < s->blob_count; bi++) {
+        const lr_func_blob_t *blob = &s->blobs[bi];
+        uint32_t name_len = (uint32_t)strlen(blob->name);
+        blob_pkg_w32(&p, name_len);
+        memcpy(p, blob->name, name_len);
+        p += name_len;
+        blob_pkg_w64(&p, (uint64_t)blob->code_len);
+        blob_pkg_w32(&p, blob->num_relocs);
+        if (blob->code_len > 0) {
+            memcpy(p, blob->code, blob->code_len);
+            p += blob->code_len;
+        }
+        for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
+            const lr_cached_reloc_t *r = &blob->relocs[ri];
+            uint32_t sym_len = (uint32_t)strlen(r->symbol_name);
+            blob_pkg_w32(&p, r->offset);
+            *p++ = r->type;
+            *p++ = 0;
+            *p++ = 0;
+            *p++ = 0;
+            blob_pkg_w32(&p, sym_len);
+            memcpy(p, r->symbol_name, sym_len);
+            p += sym_len;
+        }
+    }
+    if ((size_t)(p - buf) != total) {
+        free(buf);
+        err_set(err, S_ERR_BACKEND, "blob package size mismatch");
+        return -1;
+    }
+
+    *out_data = buf;
+    *out_len = total;
+    return 0;
+}
+
+int lr_session_import_blob_package(struct lr_session *s,
+                                   const uint8_t *data,
+                                   size_t len,
+                                   session_error_t *err) {
+    const uint8_t *p = data;
+    const uint8_t *end = data + len;
+    uint32_t version = 0;
+    uint32_t blob_count = 0;
+    uint32_t orig_blob_count = 0;
+
+    err_clear(err);
+    if (!s || !data || len == 0) {
+        err_set(err, S_ERR_ARGUMENT, "invalid import_blob_package arguments");
+        return -1;
+    }
+    if (!s->module) {
+        err_set(err, S_ERR_STATE, "session has no module for blob import");
+        return -1;
+    }
+    if (len < 16 || memcmp(p, k_blob_pkg_magic, 8) != 0) {
+        err_set(err, S_ERR_PARSE, "invalid blob package magic");
+        return -1;
+    }
+    p += 8;
+    if (blob_pkg_r32(&p, end, &version) != 0 ||
+        blob_pkg_r32(&p, end, &blob_count) != 0) {
+        err_set(err, S_ERR_PARSE, "invalid blob package header");
+        return -1;
+    }
+    if (version != 1u) {
+        err_set(err, S_ERR_PARSE, "unsupported blob package version");
+        return -1;
+    }
+
+    orig_blob_count = s->blob_count;
+    for (uint32_t bi = 0; bi < blob_count; bi++) {
+        uint32_t name_len = 0;
+        uint64_t code_len_u64 = 0;
+        uint32_t num_relocs = 0;
+        const char *interned_name = NULL;
+        uint8_t *code_copy = NULL;
+        lr_cached_reloc_t *relocs = NULL;
+        lr_func_blob_t *blob = NULL;
+
+        if (blob_pkg_r32(&p, end, &name_len) != 0 ||
+            name_len == 0 || p + name_len > end) {
+            err_set(err, S_ERR_PARSE, "invalid blob function name");
+            goto fail;
+        }
+        if (module_intern_name_slice(s->module, p, name_len, &interned_name) != 0) {
+            err_set(err, S_ERR_BACKEND, "failed to intern blob function name");
+            goto fail;
+        }
+        p += name_len;
+        if (blob_pkg_r64(&p, end, &code_len_u64) != 0 ||
+            code_len_u64 > (uint64_t)(end - p)) {
+            err_set(err, S_ERR_PARSE, "invalid blob code payload");
+            goto fail;
+        }
+        if (blob_pkg_r32(&p, end, &num_relocs) != 0) {
+            err_set(err, S_ERR_PARSE, "invalid blob relocation header");
+            goto fail;
+        }
+        if (ensure_blob_capacity(s, s->blob_count + 1u) != 0) {
+            err_set(err, S_ERR_BACKEND, "blob capacity growth failed");
+            goto fail;
+        }
+        if (code_len_u64 > 0) {
+            code_copy = (uint8_t *)malloc((size_t)code_len_u64);
+            if (!code_copy) {
+                err_set(err, S_ERR_BACKEND, "blob code allocation failed");
+                goto fail;
+            }
+            memcpy(code_copy, p, (size_t)code_len_u64);
+        }
+        p += (size_t)code_len_u64;
+        if (num_relocs > 0) {
+            relocs = (lr_cached_reloc_t *)calloc(num_relocs, sizeof(*relocs));
+            if (!relocs) {
+                err_set(err, S_ERR_BACKEND, "blob relocation allocation failed");
+                goto fail;
+            }
+            for (uint32_t ri = 0; ri < num_relocs; ri++) {
+                uint32_t sym_len = 0;
+                const char *interned_sym = NULL;
+                if (blob_pkg_r32(&p, end, &relocs[ri].offset) != 0 ||
+                    p + 1 + 3 > end) {
+                    err_set(err, S_ERR_PARSE, "invalid blob relocation entry");
+                    goto fail;
+                }
+                relocs[ri].type = *p++;
+                p += 3; /* reserved padding */
+                if (blob_pkg_r32(&p, end, &sym_len) != 0 ||
+                    sym_len == 0 || p + sym_len > end) {
+                    err_set(err, S_ERR_PARSE, "invalid blob relocation symbol");
+                    goto fail;
+                }
+                if (module_intern_name_slice(s->module, p, sym_len, &interned_sym) != 0) {
+                    err_set(err, S_ERR_BACKEND, "failed to intern relocation symbol");
+                    goto fail;
+                }
+                relocs[ri].symbol_name = interned_sym;
+                p += sym_len;
+            }
+        }
+
+        blob = &s->blobs[s->blob_count];
+        memset(blob, 0, sizeof(*blob));
+        blob->name = interned_name;
+        blob->code = code_copy;
+        blob->code_len = (size_t)code_len_u64;
+        blob->relocs = relocs;
+        blob->num_relocs = num_relocs;
+        s->blob_count++;
+    }
+
+    if (p != end) {
+        err_set(err, S_ERR_PARSE, "blob package has trailing bytes");
+        goto fail;
+    }
+    return 0;
+
+fail:
+    while (s->blob_count > orig_blob_count) {
+        lr_func_blob_t *blob = &s->blobs[s->blob_count - 1u];
+        free((void *)blob->code);
+        free((void *)blob->relocs);
+        memset(blob, 0, sizeof(*blob));
+        s->blob_count--;
+    }
+    return -1;
+}
+
 static int finish_direct_compile(struct lr_session *s, void **out_addr,
                                  session_error_t *err) {
     size_t code_len = 0;
@@ -2321,6 +2607,22 @@ int lr_session_dump_ir(struct lr_session *s, FILE *out, session_error_t *err) {
     }
     for (f = s->module->first_func; f; f = f->next)
         lr_dump_func(f, s->module, out);
+    return 0;
+}
+
+int lr_session_set_module(struct lr_session *s, lr_module_t *module,
+                          session_error_t *err) {
+    err_clear(err);
+    if (!s || !module) {
+        err_set(err, S_ERR_ARGUMENT, "invalid set_module arguments");
+        return -1;
+    }
+    if (s->compile_active || s->direct_llvm_stream || s->cur_func) {
+        err_set(err, S_ERR_STATE, "cannot switch module during active function");
+        return -1;
+    }
+    s->module = module;
+    s->ir_module_jit_ready = false;
     return 0;
 }
 

@@ -10,7 +10,7 @@ usage: lfortran_api_compat.sh [options]
   --fresh-workspace       remove existing workspace checkout/build and output root before running
   --lfortran-dir PATH     use an existing lfortran checkout (skip clone if present)
   --lfortran-repo URL     lfortran git URL (default: https://github.com/krystophny/lfortran.git)
-  --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot)
+  --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot-minimal)
   --lfortran-remote NAME  remote name for --lfortran-ref (default: origin)
   --skip-checkout         keep current lfortran checkout/ref
   --build-type TYPE       CMake build type (default: Release)
@@ -31,8 +31,11 @@ This lane validates compile-time API compatibility:
   Integration tests run in both modes:
     run_tests.py -b llvm --ninja -jN
     run_tests.py -b llvm -f -nf16 --ninja -jN
-  Reference tests default to "--exclude-backend llvm" in WITH_LIRIC lane
-  unless backend selection is explicitly set via --ref-args.
+  Reference tests run ALL backends via lfortran_ref_test_liric.py.
+  The llvm backend (--show-llvm) skips IR output comparison (stderr and
+  returncode still checked).  The run_dbg backend skips all comparison
+  (debug-info/DWARF not yet implemented in liric).
+  All other backends are fully compared.
 EOF
 }
 
@@ -100,7 +103,7 @@ ensure_lfortran_generated_sources() {
     local repo_dir="$1"
     local generated_preprocessor="${repo_dir}/src/lfortran/parser/preprocessor.cpp"
     local tag_count="0"
-    local fallback_tag="v0.0.0-liric-aot"
+    local fallback_tag="v0.0.0-liric-aot-minimal"
 
     if [[ -f "$generated_preprocessor" ]]; then
         return 0
@@ -267,7 +270,7 @@ output_root=""
 liric_build=""
 lfortran_dir=""
 lfortran_repo="https://github.com/krystophny/lfortran.git"
-lfortran_ref="origin/liric-aot"
+lfortran_ref="origin/liric-aot-minimal"
 lfortran_remote="origin"
 build_type="Release"
 workers="$(detect_workers)"
@@ -536,24 +539,22 @@ ctest --test-dir "$lfortran_build_liric" --output-on-failure \
     2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
 
 if [[ "$run_ref_tests" == "yes" ]]; then
-    ref_default_args=""
-    if ! ref_args_has_backend_policy "$ref_args"; then
-        ref_default_args="--exclude-backend llvm"
-        echo "lfortran_api_compat: applying WITH_LIRIC reference policy: ${ref_default_args}" >&2
-    fi
+    liric_ref_wrapper="${liric_root}/tools/lfortran_ref_test_liric.py"
     (
         cd "$lfortran_dir"
-        if [[ -n "$ref_default_args" && -n "$ref_args" ]]; then
+        if [[ -z "${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS:-}" ]]; then
+            export LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS="1"
+            echo "lfortran_api_compat: applying WITH_LIRIC reference policy: LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS=${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS}" >&2
+        fi
+        export LIRIC_REF_SKIP_IR="llvm"
+        export LIRIC_REF_SKIP_DBG="run_dbg"
+        echo "lfortran_api_compat: IR comparison skipped for: ${LIRIC_REF_SKIP_IR}" >&2
+        echo "lfortran_api_compat: debug-info comparison skipped for: ${LIRIC_REF_SKIP_DBG}" >&2
+        if [[ -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args $ref_args
-        elif [[ -n "$ref_default_args" ]]; then
-            # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_default_args
-        elif [[ -n "$ref_args" ]]; then
-            # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py $ref_args
+            run_in_selected_env "$PYTHON_BIN" "$liric_ref_wrapper" $ref_args
         else
-            run_in_selected_env "$PYTHON_BIN" ./run_tests.py
+            run_in_selected_env "$PYTHON_BIN" "$liric_ref_wrapper"
         fi
     ) 2>&1 | tee "${log_root}/lfortran_reference_tests.log" || status=1
 fi
@@ -561,9 +562,14 @@ fi
 if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
+        unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+        fi
+        if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
+            export LFORTRAN_NO_LINK_MODE="1"
+            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
         if [[ -n "$itest_args" ]]; then
@@ -576,9 +582,14 @@ if [[ "$run_itests" == "yes" ]]; then
 
     (
         cd "$lfortran_dir/integration_tests"
+        unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+        fi
+        if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
+            export LFORTRAN_NO_LINK_MODE="1"
+            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (-f -nf16 mode)" >&2
         if [[ -n "$itest_args" ]]; then

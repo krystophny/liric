@@ -27,6 +27,7 @@ typedef struct liric_lookup_sig_entry {
     char *name;
     uint32_t num_params;
     liric_lookup_ret_kind_t ret_kind;
+    bool uses_llvm_abi;
     struct liric_lookup_sig_entry *next;
 } liric_lookup_sig_entry_t;
 
@@ -145,7 +146,8 @@ static liric_lookup_sig_entry_t *find_lookup_sig_entry(
 
 static void upsert_lookup_sig_entry(LLVMLiricSessionStateRef state,
                                     const char *name, uint32_t num_params,
-                                    liric_lookup_ret_kind_t ret_kind) {
+                                    liric_lookup_ret_kind_t ret_kind,
+                                    bool uses_llvm_abi) {
     liric_lookup_sig_entry_t *entry;
     if (!state || !name || !name[0])
         return;
@@ -164,6 +166,7 @@ static void upsert_lookup_sig_entry(LLVMLiricSessionStateRef state,
     }
     entry->num_params = num_params;
     entry->ret_kind = ret_kind;
+    entry->uses_llvm_abi = uses_llvm_abi;
 }
 
 static void record_module_lookup_signatures(LLVMLiricSessionStateRef state,
@@ -175,7 +178,8 @@ static void record_module_lookup_signatures(LLVMLiricSessionStateRef state,
         if (!f->name || !f->name[0] || f->is_decl)
             continue;
         upsert_lookup_sig_entry(state, f->name, f->num_params,
-                                classify_lookup_ret_kind(f->ret_type));
+                                classify_lookup_ret_kind(f->ret_type),
+                                f->uses_llvm_abi);
     }
 }
 
@@ -657,7 +661,9 @@ void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
         return NULL;
 
     sig = find_lookup_sig_entry(state, name);
-    if (!sig || sig->num_params != 0 || sig->ret_kind == LIRIC_LOOKUP_RET_OTHER)
+    if (!sig || sig->num_params != 0 ||
+        sig->ret_kind == LIRIC_LOOKUP_RET_OTHER ||
+        sig->uses_llvm_abi)
         return addr;
 
     wrapper = find_lookup_wrapper(state, name, addr, sig->ret_kind);

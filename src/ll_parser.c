@@ -2588,6 +2588,14 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
             lr_session_declare(p->session, name, ret_type, params, nparams,
                                vararg, &serr);
             uint32_t sym_id = lr_session_intern(p->session, name);
+            lr_func_t *decl = NULL;
+            lr_module_t *sm = lr_session_module(p->session);
+            if (sm && sm->last_func && sm->last_func->name &&
+                strcmp(sm->last_func->name, name) == 0) {
+                decl = sm->last_func;
+            }
+            if (decl)
+                decl->uses_llvm_abi = true;
             if (resolve_global(p, name) == UINT32_MAX)
                 register_global(p, name, sym_id);
         } else {
@@ -2601,6 +2609,7 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
             p->cur_func = func;
             if (func->next_vreg == 0)
                 func->next_vreg = 1;
+            func->uses_llvm_abi = true;
             uint32_t sym_id = lr_frontend_intern_symbol(p->module, name);
             if (resolve_global(p, name) == UINT32_MAX)
                 register_global(p, name, sym_id);
@@ -2619,6 +2628,8 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
                                                       ret_type, params,
                                                       nparams, vararg,
                                                       is_decl, &sym_id);
+        if (func)
+            func->uses_llvm_abi = true;
         if (resolve_global(p, name) == UINT32_MAX)
             register_global(p, name, sym_id);
         register_func(p, name, func);
@@ -2840,6 +2851,7 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
 
 static void parse_global(lr_parser_t *p) {
     char *name = tok_name(p, &p->cur);
+    bool saw_initializer = false;
     next(p);
     expect(p, LR_TOK_EQUALS);
 
@@ -2876,8 +2888,11 @@ static void parse_global(lr_parser_t *p) {
     uint32_t sym_id = lr_frontend_intern_symbol(p->module, g->name);
     if (resolve_global(p, g->name) == UINT32_MAX)
         register_global(p, g->name, sym_id);
+    bool at_toplevel_col = (p->cur.start == p->lex.src ||
+                            p->cur.start[-1] == '\n');
 
     if (check(p, LR_TOK_STRING_LIT)) {
+        saw_initializer = true;
         const char *s = p->cur.start;
         size_t slen = p->cur.len;
         if (slen >= 3 && s[0] == 'c' && s[1] == '"') {
@@ -2914,8 +2929,10 @@ static void parse_global(lr_parser_t *p) {
         }
         next(p);
     } else if (check(p, LR_TOK_ZEROINITIALIZER)) {
+        saw_initializer = true;
         next(p);
     } else if (check(p, LR_TOK_INT_LIT)) {
+        saw_initializer = true;
         int64_t val = p->cur.int_val;
         size_t sz = lr_type_size(ty);
         if (sz > 0 && sz <= 8) {
@@ -2926,6 +2943,7 @@ static void parse_global(lr_parser_t *p) {
         }
         next(p);
     } else if (check(p, LR_TOK_FLOAT_LIT)) {
+        saw_initializer = true;
         double val = p->cur.float_val;
         size_t sz = lr_type_size(ty);
         if (sz > 0) {
@@ -2943,6 +2961,7 @@ static void parse_global(lr_parser_t *p) {
         next(p);
     } else if (check(p, LR_TOK_LANGLE) || check(p, LR_TOK_LBRACE) ||
                check(p, LR_TOK_LBRACKET)) {
+        saw_initializer = true;
         size_t sz = lr_type_size(ty);
         if (sz > 0) {
             uint8_t *buf = lr_arena_array(p->arena, uint8_t, sz);
@@ -2962,16 +2981,20 @@ static void parse_global(lr_parser_t *p) {
             }
         }
     } else if (check(p, LR_TOK_NULL)) {
+        saw_initializer = true;
         next(p);
     } else if (check(p, LR_TOK_TRUE)) {
+        saw_initializer = true;
         uint8_t *buf = lr_arena_array(p->arena, uint8_t, 1);
         buf[0] = 1;
         g->init_data = buf;
         g->init_size = 1;
         next(p);
     } else if (check(p, LR_TOK_FALSE)) {
+        saw_initializer = true;
         next(p);
     } else if (check(p, LR_TOK_GETELEMENTPTR)) {
+        saw_initializer = true;
         lr_operand_t gep = parse_const_gep_operand(p, p->module->type_ptr);
         size_t sz = lr_type_size(ty);
         if (sz == 0)
@@ -2991,7 +3014,8 @@ static void parse_global(lr_parser_t *p) {
                 g->relocs = r;
             }
         }
-    } else if (check(p, LR_TOK_GLOBAL_ID)) {
+    } else if (check(p, LR_TOK_GLOBAL_ID) && !at_toplevel_col) {
+        saw_initializer = true;
         char *ref_name = tok_name(p, &p->cur);
         next(p);
         uint32_t gid = resolve_global(p, ref_name);
@@ -3014,7 +3038,9 @@ static void parse_global(lr_parser_t *p) {
         g->relocs = r;
     }
 
-    skip_line(p);
+    if (saw_initializer) {
+        skip_line(p);
+    }
 }
 
 lr_module_t *lr_parse_ll_text_streaming(const char *src, size_t len,

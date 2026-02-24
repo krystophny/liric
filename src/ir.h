@@ -116,6 +116,7 @@ typedef struct lr_func {
     uint32_t *param_vregs;
     bool vararg;
     bool is_decl;
+    bool uses_llvm_abi;
     lr_block_t *first_block;
     lr_block_t *last_block;
     lr_block_t **block_array;

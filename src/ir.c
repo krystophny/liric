@@ -2091,6 +2091,7 @@ static void merge_replace_func(lr_module_t *dest, lr_func_t *df,
     df->ret_type = merge_remap_type(dest, sf->ret_type);
     df->num_params = sf->num_params;
     df->vararg = sf->vararg;
+    df->uses_llvm_abi = sf->uses_llvm_abi;
 
     if (sf->num_params > 0) {
         df->param_types = lr_arena_array(a, lr_type_t *, sf->num_params);
@@ -2134,6 +2135,16 @@ static void merge_copy_global_data(lr_module_t *dest, lr_global_t *dg,
     }
 }
 
+static bool merge_global_init_all_zero(const lr_global_t *g) {
+    if (!g || !g->init_data || g->init_size == 0)
+        return true;
+    for (size_t i = 0; i < g->init_size; i++) {
+        if (g->init_data[i] != 0)
+            return false;
+    }
+    return true;
+}
+
 int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
     uint32_t *symbol_remap = NULL;
     lr_arena_t *a = dest->arena;
@@ -2158,7 +2169,28 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                 dg->is_const = sg->is_const;
                 dg->is_external = false;
                 dg->is_local = sg->is_local;
+                dg->init_data = NULL;
+                dg->init_size = 0;
+                dg->relocs = NULL;
                 merge_copy_global_data(dest, dg, sg);
+            } else if (!dg->is_external && !sg->is_external) {
+                bool dg_has_relocs = dg->relocs != NULL;
+                bool sg_has_relocs = sg->relocs != NULL;
+                bool dg_has_effective_init =
+                    (dg->init_size > 0) && !merge_global_init_all_zero(dg);
+                bool sg_has_effective_init =
+                    (sg->init_size > 0) && !merge_global_init_all_zero(sg);
+                bool dg_is_weak = !dg_has_effective_init && !dg_has_relocs;
+                bool sg_is_stronger = sg_has_effective_init || sg_has_relocs;
+                if (dg_is_weak && sg_is_stronger) {
+                    dg->type = merge_remap_type(dest, sg->type);
+                    dg->is_const = sg->is_const;
+                    dg->is_local = sg->is_local;
+                    dg->init_data = NULL;
+                    dg->init_size = 0;
+                    dg->relocs = NULL;
+                    merge_copy_global_data(dest, dg, sg);
+                }
             }
         } else {
             lr_global_t *ng = lr_global_create(dest, sg->name,
@@ -2186,13 +2218,15 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
             }
 
             if (src_is_decl) {
-                lr_func_declare(dest, sf->name,
+                lr_func_t *nf = lr_func_declare(dest, sf->name,
                     merge_remap_type(dest, sf->ret_type),
                     params, sf->num_params, sf->vararg);
+                nf->uses_llvm_abi = sf->uses_llvm_abi;
             } else {
                 lr_func_t *nf = lr_func_create(dest, sf->name,
                     merge_remap_type(dest, sf->ret_type),
                     params, sf->num_params, sf->vararg);
+                nf->uses_llvm_abi = sf->uses_llvm_abi;
                 nf->first_block = NULL;
                 nf->last_block = NULL;
                 nf->block_array = NULL;

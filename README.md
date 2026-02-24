@@ -12,6 +12,26 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+### LFortran split builds (mandatory for matrix/API work)
+
+`bench_matrix` and API checks rebuild two separate LFortran trees:
+
+- `build/deps/lfortran/build-llvm`: baseline `WITH_LLVM=yes`
+- `build/deps/lfortran/build-liric`: `WITH_LIRIC=yes` with `WITH_LLVM=OFF`
+
+The prepare step always checks out `origin/liric-aot-minimal` before rebuilding.
+
+### WITH_LIRIC `-c` sidecars
+
+In WITH_LIRIC AOT no-link flows, `-c` emits:
+
+- `<obj>.liric_blob`
+- `<obj>.liric_ll`
+
+Direct policy typically emits non-empty blob packages. IR policy may emit an
+empty-but-valid blob package while carrying code in `.liric_ll`; no-link
+object-sidecar executable emission supports both forms.
+
 ## Architecture
 
 ```
@@ -51,7 +71,7 @@ ctest --test-dir build --output-on-failure
                               -> MIR   templates to LLVM
                               -> x86   -> x86   ORC JIT
                                 |        |        |
-                              ~31-33x  ~31-33x  optional
+                              ~21-26x  ~21-26x  optional
                               LL speed LL speed baseline
                               (latest) (latest) mode
 
@@ -61,10 +81,10 @@ ctest --test-dir build --output-on-failure
 
   STANDALONE LANES (no lfortran involved)
 
-  LL corpus    compat-derived corpus (latest: 33 .ll files)
-               ll_jit:  liric compile median    ~0.074-0.077ms
-               ll_llvm: lli compile median      ~2.35-2.56ms
-               Speedup: ~31-33x (isel/copy_patch)
+  LL corpus    compat-derived corpus (latest: 91 .ll files)
+               ll_jit:  liric compile median    ~0.123-0.149ms
+               ll_llvm: lli compile median      ~3.120-3.290ms
+               Speedup: ~21-26x (isel/copy_patch)
 
   Micro C      same corpus, lfortran --show-c output, liric vs TCC
                optional lane (requires `bench_tcc` / libtcc)
@@ -147,7 +167,7 @@ Runtime artifacts:
   - `docs/benchmarks/readme_perf_table.md`
   - using `./tools/bench_readme_perf_snapshot.sh --build-dir ./build --bench-dir /tmp/liric_bench --out-dir docs/benchmarks`
 
-## Speedup Tables (2026-02-21)
+## Speedup Tables (2026-02-24)
 
 Source: `/tmp/liric_bench/matrix_rows.jsonl` and `/tmp/liric_bench/matrix_summary.json` from
 `./build/bench_matrix --timeout 15` (default modes: isel, copy_patch; default policies: direct, ir).
@@ -166,16 +186,16 @@ Runnability/behavior parity remains guarded by `bench_compat_check`.
 
 | Mode | Policy | Pass rate | Wall speedup | Backend speedup |
 |------|--------|----------:|-------------:|----------------:|
-| isel | direct | 95/95 (0 skipped) | **1.44x** | **7.04x** |
-| isel | ir | 95/95 (0 skipped) | **1.64x** | **4.89x** |
-| copy_patch | direct | 95/95 (0 skipped) | **1.50x** | **7.09x** |
-| copy_patch | ir | 95/95 (0 skipped) | **1.51x** | **4.79x** |
+| isel | direct | 91/91 (0 skipped) | **1.01x** | **1.05x** |
+| isel | ir | 91/91 (0 skipped) | **1.07x** | **1.00x** |
+| copy_patch | direct | 91/91 (0 skipped) | **1.02x** | **1.03x** |
+| copy_patch | ir | 91/91 (0 skipped) | **1.01x** | **1.02x** |
 
-### LL Corpus (compile-only, compat corpus: 95/95 completed)
+### LL Corpus (compile-only, compat corpus: 91/91 completed)
 
 | Mode | Policy | LLVM (ms) | liric (ms) | Speedup |
 |------|--------|----------:|-----------:|--------:|
-| isel | direct | 3.155 | 0.155 | **20.38x** |
-| isel | ir | 3.257 | 0.154 | **21.15x** |
-| copy_patch | direct | 3.234 | 0.149 | **21.72x** |
-| copy_patch | ir | 3.233 | 0.156 | **20.69x** |
+| isel | direct | 3.158 | 0.123 | **25.68x** |
+| isel | ir | 3.290 | 0.131 | **25.11x** |
+| copy_patch | direct | 3.120 | 0.149 | **20.94x** |
+| copy_patch | ir | 3.274 | 0.149 | **22.02x** |

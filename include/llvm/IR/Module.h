@@ -86,6 +86,11 @@ public:
         std::string base = name.str();
         if (!compat || base.empty() || !isLocalGlobalLinkage(linkage))
             return base;
+        /* Preserve stable names when reparsing carrier modules:
+           if a local name already carries the liric-local suffix,
+           do not append a second, process-local suffix. */
+        if (base.find(".__liric_local.") != std::string::npos)
+            return base;
         char suffix[32];
         std::snprintf(suffix, sizeof(suffix), "%llx",
                       (unsigned long long)(uintptr_t)compat);

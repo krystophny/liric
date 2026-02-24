@@ -26,7 +26,7 @@ jobs:
       LFORTRAN_BUILD_LLVM: ${{ github.workspace }}/build/deps/lfortran/build-llvm
       LFORTRAN_BUILD_LIRIC: ${{ github.workspace }}/build/deps/lfortran/build-liric
       LFORTRAN_REPO: https://github.com/krystophny/lfortran.git
-      LFORTRAN_REF: origin/liric-aot
+      LFORTRAN_REF: origin/liric-aot-minimal
       LIRIC_BUILD: ${{ github.workspace }}/build
       MASS_OUT: ${{ github.workspace }}/.nightly_mass/${{ matrix.os }}/out
       BASELINE_DIR: ${{ github.workspace }}/.nightly_mass/${{ matrix.os }}/baseline

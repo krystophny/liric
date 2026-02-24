@@ -695,6 +695,14 @@ static int compat_finish_active_func(lc_module_compat_t *mod) {
     return 0;
 }
 
+static int compat_sync_session_module(lc_module_compat_t *mod, lr_error_t *err) {
+    if (!mod || !mod->session || !mod->mod)
+        return -1;
+    if (lr_session_module(mod->session) == mod->mod)
+        return 0;
+    return lr_session_set_module(mod->session, mod->mod, err);
+}
+
 static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                             lr_error_t *err) {
     lr_session_t *s;
@@ -1907,6 +1915,7 @@ lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
              * This keeps one canonical symbol and avoids declare/define
              * duplication under different internal names. */
             existing->is_decl = false;
+            existing->uses_llvm_abi = true;
             return create_func_value(mod, existing);
         }
     }
@@ -1922,6 +1931,7 @@ lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
     }
     lr_func_t *f = lr_func_create(mod->mod, name, ret,
                                    params, num_params, vararg);
+    f->uses_llvm_abi = true;
     return create_func_value(mod, f);
 }
 
@@ -1930,8 +1940,10 @@ lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
     if (!mod) return safe_undef(NULL);
     if (name && name[0]) {
         lr_func_t *existing = lookup_func_cached(mod, name, NULL);
-        if (existing)
+        if (existing) {
+            existing->uses_llvm_abi = true;
             return create_func_value(mod, existing);
+        }
     }
     lr_type_t *ret = mod->mod->type_void;
     lr_type_t **params = NULL;
@@ -1945,6 +1957,7 @@ lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
     }
     lr_func_t *f = lr_func_declare(mod->mod, name, ret,
                                     params, num_params, vararg);
+    f->uses_llvm_abi = true;
     return create_func_value(mod, f);
 }
 
@@ -2494,10 +2507,50 @@ static lc_value_t *compat_binop(lc_module_compat_t *mod, lr_block_t *b,
     return wrap_vreg(mod, v, ty, f);
 }
 
+static bool compat_types_equivalent(const lr_type_t *a, const lr_type_t *b) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != b->kind)
+        return false;
+    switch (a->kind) {
+    case LR_TYPE_ARRAY:
+    case LR_TYPE_VECTOR:
+        return a->array.count == b->array.count &&
+               compat_types_equivalent(a->array.elem, b->array.elem);
+    case LR_TYPE_STRUCT:
+        if (a->struc.packed != b->struc.packed ||
+            a->struc.num_fields != b->struc.num_fields)
+            return false;
+        for (uint32_t i = 0; i < a->struc.num_fields; i++) {
+            if (!compat_types_equivalent(a->struc.fields[i], b->struc.fields[i]))
+                return false;
+        }
+        return true;
+    case LR_TYPE_FUNC:
+        if (a->func.vararg != b->func.vararg ||
+            a->func.num_params != b->func.num_params ||
+            !compat_types_equivalent(a->func.ret, b->func.ret))
+            return false;
+        for (uint32_t i = 0; i < a->func.num_params; i++) {
+            if (!compat_types_equivalent(a->func.params[i], b->func.params[i]))
+                return false;
+        }
+        return true;
+    default:
+        return true;
+    }
+}
+
 static lc_value_t *compat_cast(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, lr_opcode_t op,
                                  lc_value_t *val, lr_type_t *to_type) {
     if (!mod || !b || !f || !val) return safe_undef(mod);
+
+    /* Preserve no-op cast semantics instead of materializing a backend cast.
+       Some LLVM-compat producers emit canonical no-op casts (same src/dst
+       type), and lowering those as real casts can corrupt constants. */
+    if (to_type && val->type && compat_types_equivalent(to_type, val->type))
+        return val;
 
     /* Keep constant null/pointer casts well-typed in emitted IR. */
     if (op == LR_OP_PTRTOINT &&
@@ -2709,9 +2762,19 @@ lc_value_t *lc_create_fdiv(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *val,
                             const char *name) {
+    lr_inst_desc_t inst;
+    lr_operand_desc_t ops[1];
+    uint32_t dest;
     (void)name;
     if (!val) return safe_undef(mod);
-    return compat_cast(mod, b, f, LR_OP_FNEG, val, val->type);
+    memset(&inst, 0, sizeof(inst));
+    ops[0] = lc_value_to_desc(val);
+    inst.op = LR_OP_FNEG;
+    inst.type = val->type ? val->type : mod->mod->type_double;
+    inst.operands = ops;
+    inst.num_operands = 1;
+    dest = compat_emit(mod, b, f, &inst);
+    return wrap_vreg(mod, dest, inst.type, f);
 }
 
 /* ---- Comparison ---- */
@@ -3084,9 +3147,8 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
         inst.call_fixed_args = func_type->func.num_params;
     }
 
-    /* Indirect calls (e.g. bitcasted function values) should use C ABI. */
-    if (ops[0].kind != LR_OP_KIND_GLOBAL)
-        inst.call_external_abi = true;
+    /* Default to liric internal ABI for indirect calls as well.
+       External ABI should be enabled only by explicit frontend intent. */
 
     dest = compat_emit(mod, b, f, &inst);
     free(ops);
@@ -3291,6 +3353,16 @@ lc_value_t *lc_create_sitofp(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
     (void)name;
+    if (getenv("LIRIC_TRACE_CASTS")) {
+        fprintf(stderr,
+                "[liric_cast] sitofp src_kind=%d src_ty=%d dst_ty=%d imm=%lld\n",
+                val ? (int)val->kind : -1,
+                (val && val->type) ? (int)val->type->kind : -1,
+                to_type ? (int)to_type->kind : -1,
+                (long long)((val && val->kind == LC_VAL_CONST_INT)
+                                ? val->const_int.val
+                                : 0));
+    }
     return compat_cast(mod, b, f, LR_OP_SITOFP, val, to_type);
 }
 
@@ -3298,6 +3370,16 @@ lc_value_t *lc_create_uitofp(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
     (void)name;
+    if (getenv("LIRIC_TRACE_CASTS")) {
+        fprintf(stderr,
+                "[liric_cast] uitofp src_kind=%d src_ty=%d dst_ty=%d imm=%lld\n",
+                val ? (int)val->kind : -1,
+                (val && val->type) ? (int)val->type->kind : -1,
+                to_type ? (int)to_type->kind : -1,
+                (long long)((val && val->kind == LC_VAL_CONST_INT)
+                                ? val->const_int.val
+                                : 0));
+    }
     return compat_cast(mod, b, f, LR_OP_UITOFP, val, to_type);
 }
 
@@ -3590,20 +3672,26 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     return 0;
 }
 
+static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
+    const char *dump_path;
+    FILE *f;
+    if (!mod || !mod->mod)
+        return;
+    dump_path = getenv("LIRIC_COMPAT_DUMP_FINAL_IR");
+    if (!dump_path || !dump_path[0])
+        return;
+    f = fopen(dump_path, "a");
+    if (!f)
+        return;
+    fprintf(f, "; ---- module ----\n");
+    compat_dump_module(mod->mod, f);
+    fprintf(f, "\n");
+    fclose(f);
+}
+
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (!mod || !jit) return -1;
-    {
-        const char *dump_path = getenv("LIRIC_COMPAT_DUMP_FINAL_IR");
-        if (dump_path && dump_path[0]) {
-            FILE *f = fopen(dump_path, "a");
-            if (f) {
-                fprintf(f, "; ---- module ----\n");
-                compat_dump_module(mod->mod, f);
-                fprintf(f, "\n");
-                fclose(f);
-            }
-        }
-    }
+    compat_maybe_dump_final_ir(mod);
     if (lr_session_is_direct(mod->session)) {
         lr_module_t *session_mod = lr_session_module(mod->session);
         if (session_mod == mod->mod)
@@ -3658,6 +3746,9 @@ int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
     lr_error_t err = {0};
     if (!mod || !out) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (compat_sync_session_module(mod, &err) != 0)
+        return -1;
+    compat_maybe_dump_final_ir(mod);
     if (mod->session) {
         int rc = lr_session_emit_object_stream(mod->session, out, &err);
         if (rc != 0 && err.msg[0])
@@ -3673,11 +3764,68 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename) {
     lr_error_t err = {0};
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (compat_sync_session_module(mod, &err) != 0)
+        return -1;
+    compat_maybe_dump_final_ir(mod);
     if (lr_session_emit_object(mod->session, filename, &err) != 0) {
         if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
             fprintf(stderr, "lc_module_emit_object: %s\n", err.msg);
         return -1;
     }
+    return 0;
+}
+
+int lc_module_export_blob_package(lc_module_compat_t *mod,
+                                  uint8_t **out_data, size_t *out_len) {
+    lr_error_t err = {0};
+    if (!mod || !out_data || !out_len)
+        return -1;
+    if (compat_finish_active_func(mod) != 0)
+        return -1;
+    if (compat_sync_session_module(mod, &err) != 0)
+        return -1;
+    if (lr_session_export_blob_package(mod->session, out_data, out_len, &err) != 0) {
+        if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_export_blob_package: %s\n", err.msg);
+        return -1;
+    }
+    return 0;
+}
+
+int lc_module_import_blob_package(lc_module_compat_t *mod,
+                                  const uint8_t *data, size_t len) {
+    lr_error_t err = {0};
+    if (!mod || !data || len == 0)
+        return -1;
+    if (compat_finish_active_func(mod) != 0)
+        return -1;
+    if (compat_sync_session_module(mod, &err) != 0)
+        return -1;
+    if (lr_session_import_blob_package(mod->session, data, len, &err) != 0) {
+        if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_import_blob_package: %s\n", err.msg);
+        return -1;
+    }
+    return 0;
+}
+
+int lc_module_merge_ll_text(lc_module_compat_t *mod,
+                            const char *src, size_t len) {
+    char parse_err[256] = {0};
+    lr_error_t err = {0};
+    lr_module_t *parsed = NULL;
+    if (!mod || !mod->mod || !src || len == 0)
+        return -1;
+    parsed = lr_parse_ll(src, len, parse_err, sizeof(parse_err));
+    if (!parsed)
+        return -1;
+    if (lr_module_merge(mod->mod, parsed) != 0) {
+        lr_module_free(parsed);
+        return -1;
+    }
+    lr_module_free(parsed);
+    if (compat_sync_session_module(mod, &err) != 0)
+        return -1;
     return 0;
 }
 
@@ -3687,6 +3835,9 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
     const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
+    if (compat_sync_session_module(mod, &err) != 0)
+        return -1;
+    compat_maybe_dump_final_ir(mod);
     if ((runtime_bc && runtime_bc[0]) || !runtime_ll || runtime_len == 0) {
         if (lr_session_emit_exe(mod->session, filename, &err) != 0) {
             if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))

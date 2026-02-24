@@ -37,6 +37,9 @@ file(MAKE_DIRECTORY "${log_dir}")
 file(MAKE_DIRECTORY "${llvm_build_dir}")
 file(MAKE_DIRECTORY "${liric_build_dir}")
 
+set(build_dir "${root}/build")
+file(MAKE_DIRECTORY "${build_dir}")
+
 file(WRITE "${fake_cmake}" "#!/usr/bin/env bash
 set -euo pipefail
 echo \"$*\" >> \"${cmake_log}\"
@@ -138,6 +141,7 @@ execute_process(
         --lfortran-liric "${fake_lfortran_liric}"
         --bench-compat-check "${fake_compat}"
         --bench-api "${fake_api}"
+        --build-dir "${build_dir}"
     WORKING_DIRECTORY "${root}"
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out
@@ -160,8 +164,8 @@ endif()
 file(READ "${cmake_log}" cmake_text)
 string(REGEX MATCHALL "--build" build_hits "${cmake_text}")
 list(LENGTH build_hits build_count)
-if(NOT build_count EQUAL 2)
-    message(FATAL_ERROR "expected 2 cmake --build invocations, got ${build_count}\nlog:\n${cmake_text}")
+if(NOT build_count EQUAL 3)
+    message(FATAL_ERROR "expected 3 cmake --build invocations, got ${build_count}\nlog:\n${cmake_text}")
 endif()
 
 string(FIND "${cmake_text}" "--build ${llvm_build_dir}" llvm_hit)

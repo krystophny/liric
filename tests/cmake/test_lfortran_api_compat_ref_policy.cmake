@@ -42,7 +42,9 @@ set(fake_python "${fake_bin}/python")
 file(WRITE "${fake_python}" "#!/usr/bin/env bash
 set -euo pipefail
 if [[ -n \"\${LIRIC_TEST_PY_LOG:-}\" ]]; then
-    printf '%s\\n' \"\$*\" >> \"\${LIRIC_TEST_PY_LOG}\"
+    printf 'ARGS: %s\\n' \"\$*\" >> \"\${LIRIC_TEST_PY_LOG}\"
+    printf 'LIRIC_REF_SKIP_IR: %s\\n' \"\${LIRIC_REF_SKIP_IR:-}\" >> \"\${LIRIC_TEST_PY_LOG}\"
+    printf 'LIRIC_REF_SKIP_DBG: %s\\n' \"\${LIRIC_REF_SKIP_DBG:-}\" >> \"\${LIRIC_TEST_PY_LOG}\"
 fi
 exit 0
 ")
@@ -112,10 +114,15 @@ endif()
 if(NOT EXISTS "${default_log}")
     message(FATAL_ERROR "default reference policy run did not invoke python shim")
 endif()
-file(READ "${default_log}" default_args_text)
-if(NOT default_args_text MATCHES "--exclude-backend[ \t]+llvm")
+file(READ "${default_log}" default_log_text)
+if(NOT default_log_text MATCHES "lfortran_ref_test_liric\\.py")
     message(FATAL_ERROR
-        "default reference policy must suppress llvm backend snapshots\nargs:\n${default_args_text}"
+        "default reference policy must invoke the liric wrapper script\nlog:\n${default_log_text}"
+    )
+endif()
+if(NOT default_log_text MATCHES "LIRIC_REF_SKIP_IR:[ \t]*[^\n]*llvm")
+    message(FATAL_ERROR
+        "default reference policy must set LIRIC_REF_SKIP_IR containing llvm\nlog:\n${default_log_text}"
     )
 endif()
 set(default_summary "${root}/out_default/summary.json")
@@ -155,14 +162,14 @@ endif()
 if(NOT EXISTS "${override_log}")
     message(FATAL_ERROR "override reference policy run did not invoke python shim")
 endif()
-file(READ "${override_log}" override_args_text)
-if(NOT override_args_text MATCHES "--backend[ \t]+llvm")
-    message(FATAL_ERROR "override run must keep explicit backend selection\nargs:\n${override_args_text}")
-endif()
-if(override_args_text MATCHES "--exclude-backend[ \t]+llvm")
+file(READ "${override_log}" override_log_text)
+if(NOT override_log_text MATCHES "lfortran_ref_test_liric\\.py")
     message(FATAL_ERROR
-        "override run must not inject default llvm exclusion when backend policy is explicit\nargs:\n${override_args_text}"
+        "override run must still invoke the liric wrapper script\nlog:\n${override_log_text}"
     )
+endif()
+if(NOT override_log_text MATCHES "--backend[ \t]+llvm")
+    message(FATAL_ERROR "override run must pass through explicit backend selection\nlog:\n${override_log_text}")
 endif()
 if(NOT EXISTS "${ctest_log}")
     message(FATAL_ERROR "reference policy runs must invoke ctest for build-liric unit suites")

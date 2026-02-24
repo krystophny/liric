@@ -49,7 +49,17 @@ typedef struct {
     uint32_t sym_count;
     uint32_t x9_holds_vreg;
     uint32_t x10_holds_vreg;
+    bool func_uses_fp_abi;
 } a64_compile_ctx_t;
+
+static bool is_fp_abi_type(const lr_type_t *type) {
+    return type &&
+           (type->kind == LR_TYPE_FLOAT || type->kind == LR_TYPE_DOUBLE);
+}
+
+static uint8_t fp_abi_size(const lr_type_t *type) {
+    return (type && type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+}
 
 static void invalidate_cached_reg_a64(a64_compile_ctx_t *ctx, uint8_t reg) {
     if (!ctx) return;
@@ -906,8 +916,14 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
 
     switch (dt->op) {
     case LR_OP_RET:
-        emit_load_operand(cc, &dt->ops[0], A64_X9);
-        emit_mov_reg(cc->buf, &cc->pos, cc->buflen, A64_X0, A64_X9, true);
+        if (cc->func_uses_fp_abi && is_fp_abi_type(ctx->ret_type)) {
+            emit_load_fp_operand(cc, &dt->ops[0], A64_D0,
+                                 fp_abi_size(ctx->ret_type));
+        } else {
+            emit_load_operand(cc, &dt->ops[0], A64_X9);
+            emit_mov_reg(cc->buf, &cc->pos, cc->buflen, A64_X0, A64_X9,
+                         true);
+        }
         emit_epilogue_a64(cc);
         break;
     case LR_OP_RET_VOID:
@@ -1000,15 +1016,53 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->sym_count = 0;
     cc->x9_holds_vreg = UINT32_MAX;
     cc->x10_holds_vreg = UINT32_MAX;
+    cc->func_uses_fp_abi = func_meta->func && func_meta->func->uses_llvm_abi;
     ctx->prologue_patch_pos = emit_prologue_a64(cc);
 
-    for (uint32_t i = 0; i < num_params && i < 8; i++)
-        emit_store_slot(cc, param_vregs[i], param_regs[i]);
-    for (uint32_t i = 8; i < num_params; i++) {
-        int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
-        emit_load(cc->buf, &cc->pos, cc->buflen, A64_X9, A64_FP,
-                  caller_off, 8);
-        emit_store_slot(cc, param_vregs[i], A64_X9);
+    if (cc->func_uses_fp_abi) {
+        static const uint8_t param_fp_regs[] = {
+            A64_D0, A64_D1, A64_D2, A64_D3,
+            A64_D4, A64_D5, A64_D6, A64_D7
+        };
+        lr_type_t **param_types = func_meta->param_types;
+        uint32_t gp_used = 0;
+        uint32_t fp_used = 0;
+        uint32_t stack_used = 0;
+        for (uint32_t i = 0; i < num_params; i++) {
+            const lr_type_t *pty = param_types ? param_types[i] : NULL;
+            if (is_fp_abi_type(pty) && fp_used < 8) {
+                emit_store_fp_slot(cc, param_vregs[i],
+                                   param_fp_regs[fp_used],
+                                   fp_abi_size(pty));
+                fp_used++;
+            } else if (!is_fp_abi_type(pty) && gp_used < 8) {
+                emit_store_slot(cc, param_vregs[i], param_regs[gp_used]);
+                gp_used++;
+            } else {
+                int32_t caller_off = 16 + (int32_t)(stack_used * 8u);
+                if (is_fp_abi_type(pty)) {
+                    uint8_t fsize = fp_abi_size(pty);
+                    emit_fp_load(cc->buf, &cc->pos, cc->buflen,
+                                 FP_SCRATCH0, A64_FP, caller_off, fsize);
+                    emit_store_fp_slot(cc, param_vregs[i], FP_SCRATCH0,
+                                       fsize);
+                } else {
+                    emit_load(cc->buf, &cc->pos, cc->buflen, A64_X9,
+                              A64_FP, caller_off, 8);
+                    emit_store_slot(cc, param_vregs[i], A64_X9);
+                }
+                stack_used++;
+            }
+        }
+    } else {
+        for (uint32_t i = 0; i < num_params && i < 8; i++)
+            emit_store_slot(cc, param_vregs[i], param_regs[i]);
+        for (uint32_t i = 8; i < num_params; i++) {
+            int32_t caller_off = 16 + (int32_t)(i - 8) * 8;
+            emit_load(cc->buf, &cc->pos, cc->buflen, A64_X9, A64_FP,
+                      caller_off, 8);
+            emit_store_slot(cc, param_vregs[i], A64_X9);
+        }
     }
 
     *compile_ctx = ctx;

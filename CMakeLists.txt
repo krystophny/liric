@@ -58,7 +58,7 @@ set(LIRIC_LFORTRAN_API_OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_ap
     CACHE PATH "Path to lfortran API compatibility output artifacts")
 set(LIRIC_LFORTRAN_REPO "https://github.com/krystophny/lfortran.git"
     CACHE STRING "LFortran repository URL for CMake-managed checkout")
-set(LIRIC_LFORTRAN_REF "origin/liric-aot"
+set(LIRIC_LFORTRAN_REF "origin/liric-aot-minimal"
     CACHE STRING "LFortran git ref for CMake-managed checkout")
 set(LIRIC_LFORTRAN_REMOTE "origin"
     CACHE STRING "Remote name used for LFortran ref policy")
@@ -527,7 +527,8 @@ add_custom_target(
         -DWITH_RUNTIME_STACKTRACE=yes
         -DWITH_LLVM=OFF
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
-        --target lfortran lfortran_runtime build_runtime --parallel
+        --target lfortran lfortran_runtime build_runtime
+        test_cwrapper test_stacktrace test_lfortran --parallel
     DEPENDS lfortran_prepare liric_probe_runner
     COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
     USES_TERMINAL
