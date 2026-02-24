@@ -12,6 +12,26 @@ cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
+### LFortran split builds (mandatory for matrix/API work)
+
+`bench_matrix` and API checks rebuild two separate LFortran trees:
+
+- `build/deps/lfortran/build-llvm`: baseline `WITH_LLVM=yes`
+- `build/deps/lfortran/build-liric`: `WITH_LIRIC=yes` with `WITH_LLVM=OFF`
+
+The prepare step always checks out `origin/liric-aot` before rebuilding.
+
+### WITH_LIRIC `-c` sidecars
+
+In WITH_LIRIC AOT no-link flows, `-c` emits:
+
+- `<obj>.liric_blob`
+- `<obj>.liric_ll`
+
+Direct policy typically emits non-empty blob packages. IR policy may emit an
+empty-but-valid blob package while carrying code in `.liric_ll`; no-link
+object-sidecar executable emission supports both forms.
+
 ## Architecture
 
 ```

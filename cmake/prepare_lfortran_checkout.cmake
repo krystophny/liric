@@ -31,16 +31,24 @@ endif()
 
 if(LFORTRAN_REF MATCHES "^${LFORTRAN_REMOTE}/")
     execute_process(
-        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" remote
-        OUTPUT_VARIABLE remotes
-        RESULT_VARIABLE remote_list_rc
+        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" remote get-url "${LFORTRAN_REMOTE}"
+        OUTPUT_VARIABLE remote_url
+        RESULT_VARIABLE remote_get_url_rc
         OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
     )
-    if(NOT remote_list_rc EQUAL 0)
-        message(FATAL_ERROR "failed to list lfortran remotes")
-    endif()
 
-    if(NOT remotes MATCHES "(^|\\n)${LFORTRAN_REMOTE}(\\n|$)")
+    if(remote_get_url_rc EQUAL 0)
+        if(NOT "${remote_url}" STREQUAL "${LFORTRAN_REPO}")
+            execute_process(
+                COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" remote set-url "${LFORTRAN_REMOTE}" "${LFORTRAN_REPO}"
+                RESULT_VARIABLE remote_set_url_rc
+            )
+            if(NOT remote_set_url_rc EQUAL 0)
+                message(FATAL_ERROR "failed to update lfortran remote URL: ${LFORTRAN_REMOTE}")
+            endif()
+        endif()
+    else()
         execute_process(
             COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" remote add "${LFORTRAN_REMOTE}" "${LFORTRAN_REPO}"
             RESULT_VARIABLE remote_add_rc
@@ -93,9 +101,43 @@ if(NOT EXISTS "${_lfortran_version_file}")
     message(STATUS "Generated missing LFortran version file: ${lfortran_version}")
 endif()
 
+execute_process(
+    COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" rev-parse HEAD
+    RESULT_VARIABLE head_rc
+    OUTPUT_VARIABLE _lfortran_head
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT head_rc EQUAL 0 OR "${_lfortran_head}" STREQUAL "")
+    message(FATAL_ERROR "failed to read lfortran HEAD commit")
+endif()
+
 set(_lfortran_generated_preprocessor
     "${LFORTRAN_ROOT}/src/lfortran/parser/preprocessor.cpp")
-if(NOT EXISTS "${_lfortran_generated_preprocessor}")
+set(_lfortran_generated_parser_cc
+    "${LFORTRAN_ROOT}/src/lfortran/parser/parser.tab.cc")
+set(_lfortran_generated_parser_hh
+    "${LFORTRAN_ROOT}/src/lfortran/parser/parser.tab.hh")
+set(_lfortran_prepare_head_file
+    "${LFORTRAN_ROOT}/.liric_prepare_head")
+set(_lfortran_need_generated_refresh OFF)
+
+if(NOT EXISTS "${_lfortran_generated_preprocessor}" OR
+   NOT EXISTS "${_lfortran_generated_parser_cc}" OR
+   NOT EXISTS "${_lfortran_generated_parser_hh}")
+    set(_lfortran_need_generated_refresh ON)
+endif()
+
+if(EXISTS "${_lfortran_prepare_head_file}")
+    file(READ "${_lfortran_prepare_head_file}" _lfortran_prev_head)
+    string(STRIP "${_lfortran_prev_head}" _lfortran_prev_head)
+    if(NOT "${_lfortran_prev_head}" STREQUAL "${_lfortran_head}")
+        set(_lfortran_need_generated_refresh ON)
+    endif()
+else()
+    set(_lfortran_need_generated_refresh ON)
+endif()
+
+if(_lfortran_need_generated_refresh)
     find_program(BASH_EXE bash)
     find_program(RE2C_EXE re2c)
     find_program(BISON_EXE bison)
@@ -145,3 +187,5 @@ if(NOT EXISTS "${_lfortran_generated_preprocessor}")
         message(FATAL_ERROR "failed to generate lfortran parser sources with build0.sh")
     endif()
 endif()
+
+file(WRITE "${_lfortran_prepare_head_file}" "${_lfortran_head}\n")

@@ -758,6 +758,59 @@ static int run_lfortran_rebuild_step(const cfg_t *cfg,
     return 0;
 }
 
+static int run_lfortran_prepare_step(const cfg_t *cfg,
+                                     FILE *fails,
+                                     const char *lane_name) {
+    cmd_result_t r = {0};
+    char jobs_buf[32];
+    char *cmd[10];
+    int n = 0;
+
+    if (!cfg->build_dir || !cfg->build_dir[0] || !dir_exists(cfg->build_dir)) {
+        char *e_lane = json_escape(lane_name);
+        char *e_build = json_escape(cfg->build_dir ? cfg->build_dir : "");
+        fprintf(fails,
+                "{\"lane\":\"%s\",\"mode\":\"all\",\"policy\":\"all\",\"baseline\":\"lfortran_llvm\","
+                "\"reason\":\"lfortran_prepare_build_dir_missing\",\"rc\":2,\"summary\":\"%s\"}\n",
+                e_lane, e_build);
+        free(e_lane);
+        free(e_build);
+        return -1;
+    }
+
+    snprintf(jobs_buf, sizeof(jobs_buf), "%d",
+             cfg->rebuild_jobs > 0 ? cfg->rebuild_jobs : host_nproc());
+    cmd[n++] = (char *)cfg->cmake;
+    cmd[n++] = "--build";
+    cmd[n++] = (char *)cfg->build_dir;
+    cmd[n++] = "-j";
+    cmd[n++] = jobs_buf;
+    cmd[n++] = "--target";
+    cmd[n++] = "lfortran_prepare";
+    cmd[n++] = NULL;
+
+    printf("[matrix] rebuild: %s (target=lfortran_prepare)\n", cfg->build_dir);
+    if (run_cmd(cmd, &r) != 0 || r.rc != 0) {
+        char *e_lane = json_escape(lane_name);
+        char *e_build = json_escape(cfg->build_dir);
+        fprintf(stderr, "[matrix] lfortran_prepare failed (rc=%d): %s\n",
+                r.rc, cfg->build_dir);
+        if (r.stderr_text && r.stderr_text[0])
+            fprintf(stderr, "[matrix] lfortran_prepare stderr:\n%s\n", r.stderr_text);
+        if (r.stdout_text && r.stdout_text[0])
+            fprintf(stderr, "[matrix] lfortran_prepare stdout:\n%s\n", r.stdout_text);
+        fprintf(fails,
+                "{\"lane\":\"%s\",\"mode\":\"all\",\"policy\":\"all\",\"baseline\":\"lfortran_llvm\","
+                "\"reason\":\"lfortran_prepare_failed\",\"rc\":%d,\"summary\":\"%s\"}\n",
+                e_lane, r.rc, e_build);
+        free(e_lane);
+        free(e_build);
+        return -1;
+    }
+
+    return 0;
+}
+
 static void write_failure_row(FILE *ff,
                               const char *lane,
                               const char *mode,
@@ -1720,16 +1773,22 @@ int main(int argc, char **argv) {
     if (any_api_mode_selected_and_supported(&cfg)) {
         const char *api_lane = compat_api_lane_name(&cfg);
         if (cfg.rebuild_lfortran) {
-            if (run_lfortran_rebuild_step(&cfg,
-                                          fails,
-                                          api_lane,
-                                          cfg.lfortran_build_dir,
-                                          "lfortran_build_dir_missing",
-                                          "lfortran_llvm_rebuild_failed") != 0) {
+            int prepare_ok = 1;
+            if (run_lfortran_prepare_step(&cfg, fails, api_lane) != 0) {
+                compat_ok = 0;
+                prepare_ok = 0;
+            }
+            if (prepare_ok && run_lfortran_rebuild_step(&cfg,
+                                                        fails,
+                                                        api_lane,
+                                                        cfg.lfortran_build_dir,
+                                                        "lfortran_build_dir_missing",
+                                                        "lfortran_llvm_rebuild_failed") != 0) {
                 compat_ok = 0;
             }
 
-            if (cfg.lfortran_liric_build_dir &&
+            if (prepare_ok &&
+                cfg.lfortran_liric_build_dir &&
                 cfg.lfortran_liric_build_dir[0] &&
                 (!cfg.lfortran_build_dir ||
                  strcmp(cfg.lfortran_build_dir, cfg.lfortran_liric_build_dir) != 0)) {

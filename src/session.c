@@ -983,10 +983,9 @@ int lr_session_export_blob_package(struct lr_session *s,
         err_set(err, S_ERR_ARGUMENT, "invalid export_blob_package arguments");
         return -1;
     }
-    if (s->cfg.mode != SESSION_MODE_DIRECT) {
-        err_set(err, S_ERR_MODE, "blob export requires DIRECT mode session");
-        return -1;
-    }
+    /* Blob export is valid for both DIRECT and IR sessions.
+       IR-mode producers typically export an empty package (no captured blobs),
+       but imported blobs are still serialized if present. */
 
     total = 8 + 4 + 4; /* magic + version + blob_count */
     for (uint32_t bi = 0; bi < s->blob_count; bi++) {

@@ -1344,6 +1344,32 @@ cleanup:
     return result;
 }
 
+int test_session_blob_export_ir_mode_contract(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    uint8_t *pkg = NULL;
+    size_t pkg_len = 0;
+    int rc;
+
+    cfg.mode = LR_MODE_IR;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    rc = lr_session_export_blob_package(s, &pkg, &pkg_len, &err);
+    TEST_ASSERT_EQ(rc, 0, "export blob package in IR mode");
+    TEST_ASSERT(pkg != NULL, "blob package buffer allocated");
+    TEST_ASSERT_EQ((int)pkg_len, 16, "empty blob package has header-only size");
+    TEST_ASSERT(memcmp(pkg, "LRBLOB1\0", 8) == 0, "blob package magic");
+    TEST_ASSERT(pkg[8] == 1 && pkg[9] == 0 && pkg[10] == 0 && pkg[11] == 0,
+                "blob package version=1");
+    TEST_ASSERT(pkg[12] == 0 && pkg[13] == 0 && pkg[14] == 0 && pkg[15] == 0,
+                "blob package blob_count=0");
+
+    free(pkg);
+    lr_session_destroy(s);
+    return 0;
+}
+
 #if defined(__linux__)
 
 static int run_exe_expect(const char *path, int expected_rc) {
