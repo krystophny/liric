@@ -110,29 +110,8 @@ typedef struct lr_exec_stub {
     uint32_t size;
 } lr_exec_stub_t;
 
-static const uint8_t exec_stub_ret[] = {
-    0xC0, 0x03, 0x5F, 0xD6 /* ret */
-};
-
-static const uint8_t exec_stub_exit[] = {
-    0x30, 0x00, 0x80, 0xD2, /* mov x16, #1 */
-    0x01, 0x10, 0x00, 0xD4, /* svc #0x80 */
-    0xC0, 0x03, 0x5F, 0xD6  /* ret */
-};
-
-static const lr_exec_stub_t exec_stubs[] = {
-    {"exit", exec_stub_exit, (uint32_t)sizeof(exec_stub_exit)},
-    {"_lpython_free_argv", exec_stub_ret, (uint32_t)sizeof(exec_stub_ret)},
-    {"_lcompilers_print_error", exec_stub_ret, (uint32_t)sizeof(exec_stub_ret)}
-};
-
 static const lr_exec_stub_t *find_exec_stub(const char *name) {
-    if (!name || !name[0])
-        return NULL;
-    for (size_t i = 0; i < sizeof(exec_stubs) / sizeof(exec_stubs[0]); i++) {
-        if (strcmp(name, exec_stubs[i].name) == 0)
-            return &exec_stubs[i];
-    }
+    (void)name;
     return NULL;
 }
 

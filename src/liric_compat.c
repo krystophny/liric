@@ -4,6 +4,7 @@
 #include "liric.h"
 #include "llvm_backend.h"
 #include "module_emit.h"
+#include "platform/platform_os.h"
 #include <liric/liric_session.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,12 @@
 #include <stdarg.h>
 #include <limits.h>
 #include <stdint.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 static int compat_policy_from_env(lr_session_mode_t *out_mode) {
     const char *p;
@@ -65,6 +72,353 @@ static int read_file_bytes(const char *path, uint8_t **out_data, size_t *out_len
     *out_data = buf;
     *out_len = nread;
     return 0;
+}
+
+typedef struct compat_runtime_bc_cache {
+    int state; /* 0=unknown, 1=ready, -1=unavailable */
+    uint8_t *data;
+    size_t len;
+} compat_runtime_bc_cache_t;
+
+static compat_runtime_bc_cache_t g_runtime_bc_cache = {0, NULL, 0};
+
+static int compat_path_exists(const char *path) {
+    FILE *f = NULL;
+    if (!path || !path[0])
+        return 0;
+    f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+static int compat_path_executable(const char *path) {
+    if (!path || !path[0])
+        return 0;
+#if defined(_WIN32)
+    return compat_path_exists(path);
+#else
+    return access(path, X_OK) == 0;
+#endif
+}
+
+static int compat_tool_available(const char *tool) {
+    int status = -1;
+    char *const argv[] = {
+        (char *)tool,
+        (char *)"--version",
+        NULL
+    };
+    if (!tool || !tool[0])
+        return 0;
+    if (lr_platform_run_process(argv, true, &status) != 0)
+        return 0;
+    return status == 0;
+}
+
+static const char *compat_select_runtime_clang(void) {
+    const char *env_clang = getenv("LIRIC_CLANG");
+    const char *candidate = NULL;
+    size_t i = 0;
+
+    if (env_clang && env_clang[0])
+        return env_clang;
+
+#if defined(__APPLE__)
+    static const char *const brew_candidates[] = {
+        "/opt/homebrew/opt/llvm/bin/clang-21",
+        "/opt/homebrew/opt/llvm/bin/clang",
+        "/usr/local/opt/llvm/bin/clang-21",
+        "/usr/local/opt/llvm/bin/clang",
+        NULL
+    };
+    for (i = 0; brew_candidates[i]; i++) {
+        candidate = brew_candidates[i];
+        if (!compat_path_executable(candidate))
+            continue;
+        if (compat_tool_available(candidate))
+            return candidate;
+    }
+#endif
+
+    {
+        static const char *const path_candidates[] = {
+            "clang-21",
+            "clang",
+            NULL
+        };
+        for (i = 0; path_candidates[i]; i++) {
+            candidate = path_candidates[i];
+            if (compat_tool_available(candidate))
+                return candidate;
+        }
+    }
+
+    return "clang";
+}
+
+static int compat_parent_dir(char *path) {
+    char *slash = NULL;
+    if (!path || !path[0])
+        return -1;
+    slash = strrchr(path, '/');
+    if (!slash)
+        return -1;
+    if (slash == path) {
+        path[1] = '\0';
+        return 0;
+    }
+    *slash = '\0';
+    return 0;
+}
+
+static uint32_t compat_u32_le(const uint8_t *p) {
+    return (uint32_t)p[0] |
+           ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) |
+           ((uint32_t)p[3] << 24);
+}
+
+static int compat_extract_raw_bitcode(const uint8_t *data, size_t len,
+                                      uint8_t **out_data, size_t *out_len) {
+    uint8_t *copy = NULL;
+    size_t payload_off = 0;
+    size_t payload_len = 0;
+    if (!data || len < 4 || !out_data || !out_len)
+        return -1;
+
+    if (data[0] == 'B' && data[1] == 'C' && data[2] == 0xC0 && data[3] == 0xDE) {
+        payload_off = 0;
+        payload_len = len;
+    } else if (len >= 20 &&
+               data[0] == 0xDE && data[1] == 0xC0 &&
+               data[2] == 0x17 && data[3] == 0x0B) {
+        uint32_t off = compat_u32_le(data + 8);
+        uint32_t size = compat_u32_le(data + 12);
+        if ((size_t)off + (size_t)size > len || size < 4)
+            return -1;
+        if (!(data[off + 0] == 'B' && data[off + 1] == 'C' &&
+              data[off + 2] == 0xC0 && data[off + 3] == 0xDE))
+            return -1;
+        payload_off = off;
+        payload_len = size;
+    } else {
+        return -1;
+    }
+
+    copy = (uint8_t *)malloc(payload_len);
+    if (!copy)
+        return -1;
+    memcpy(copy, data + payload_off, payload_len);
+    *out_data = copy;
+    *out_len = payload_len;
+    return 0;
+}
+
+static int compat_get_executable_path(char *out, size_t out_cap) {
+    if (!out || out_cap == 0)
+        return -1;
+#if defined(__APPLE__)
+    {
+        uint32_t cap_u32 = (uint32_t)out_cap;
+        char resolved[PATH_MAX];
+        if (_NSGetExecutablePath(out, &cap_u32) != 0)
+            return -1;
+        if (realpath(out, resolved)) {
+            if (strlen(resolved) + 1 > out_cap)
+                return -1;
+            memcpy(out, resolved, strlen(resolved) + 1);
+        }
+        return 0;
+    }
+#elif defined(__linux__)
+    {
+        ssize_t n = readlink("/proc/self/exe", out, out_cap - 1);
+        if (n <= 0 || (size_t)n >= out_cap)
+            return -1;
+        out[n] = '\0';
+        return 0;
+    }
+#else
+    return -1;
+#endif
+}
+
+static int compat_guess_runtime_source(char *out_src, size_t out_src_cap,
+                                       char *out_include_root,
+                                       size_t out_include_root_cap) {
+    const char *env_runtime_c = getenv("LIRIC_LFORTRAN_RUNTIME_C");
+    const char *env_src_dir = getenv("LIRIC_LFORTRAN_SRC_DIR");
+    char walk[PATH_MAX];
+    int depth = 0;
+
+    if (env_runtime_c && env_runtime_c[0] && compat_path_exists(env_runtime_c)) {
+        if (snprintf(out_src, out_src_cap, "%s", env_runtime_c) >= (int)out_src_cap)
+            return -1;
+        if (env_src_dir && env_src_dir[0]) {
+            if (snprintf(out_include_root, out_include_root_cap, "%s", env_src_dir) >=
+                (int)out_include_root_cap)
+                return -1;
+            return 0;
+        }
+    }
+
+    if (env_src_dir && env_src_dir[0]) {
+        if (snprintf(out_src, out_src_cap, "%s/libasr/runtime/lfortran_intrinsics.c",
+                     env_src_dir) >= (int)out_src_cap)
+            return -1;
+        if (compat_path_exists(out_src)) {
+            if (snprintf(out_include_root, out_include_root_cap, "%s", env_src_dir) >=
+                (int)out_include_root_cap)
+                return -1;
+            return 0;
+        }
+    }
+
+    if (compat_get_executable_path(walk, sizeof(walk)) != 0)
+        return -1;
+    if (compat_parent_dir(walk) != 0)
+        return -1;
+
+    for (depth = 0; depth < 12; depth++) {
+        if (snprintf(out_src, out_src_cap, "%s/src/libasr/runtime/lfortran_intrinsics.c",
+                     walk) >= (int)out_src_cap)
+            return -1;
+        if (compat_path_exists(out_src)) {
+            if (snprintf(out_include_root, out_include_root_cap, "%s/src", walk) >=
+                (int)out_include_root_cap)
+                return -1;
+            return 0;
+        }
+        if (compat_parent_dir(walk) != 0)
+            break;
+    }
+    return -1;
+}
+
+static int compat_build_runtime_bc(uint8_t **out_data, size_t *out_len) {
+#if defined(_WIN32)
+    (void)out_data;
+    (void)out_len;
+    return -1;
+#else
+    char src_path[PATH_MAX];
+    char include_root[PATH_MAX];
+    char tmp_bc[] = "/tmp/liric_runtime_bc_XXXXXX";
+    const char *clang_bin = compat_select_runtime_clang();
+    int fd = -1;
+    int status = -1;
+    uint8_t *wrapped = NULL;
+    size_t wrapped_len = 0;
+    uint8_t *raw = NULL;
+    size_t raw_len = 0;
+    char include_arg[PATH_MAX + 2];
+
+    if (!out_data || !out_len)
+        return -1;
+    if (compat_guess_runtime_source(src_path, sizeof(src_path),
+                                    include_root, sizeof(include_root)) != 0)
+        return -1;
+
+    fd = mkstemp(tmp_bc);
+    if (fd < 0)
+        return -1;
+    close(fd);
+    if (snprintf(include_arg, sizeof(include_arg), "-I%s", include_root) >=
+        (int)sizeof(include_arg)) {
+        unlink(tmp_bc);
+        return -1;
+    }
+
+    {
+        char *const argv[] = {
+            (char *)clang_bin,
+            (char *)"-O2",
+            (char *)"-emit-llvm",
+            (char *)"-c",
+            src_path,
+            include_arg,
+            (char *)"-o",
+            tmp_bc,
+            NULL
+        };
+        if (lr_platform_run_process(argv, true, &status) != 0 || status != 0) {
+            unlink(tmp_bc);
+            return -1;
+        }
+    }
+
+    if (read_file_bytes(tmp_bc, &wrapped, &wrapped_len) != 0) {
+        unlink(tmp_bc);
+        return -1;
+    }
+    unlink(tmp_bc);
+    if (compat_extract_raw_bitcode(wrapped, wrapped_len, &raw, &raw_len) != 0) {
+        free(wrapped);
+        return -1;
+    }
+    free(wrapped);
+    *out_data = raw;
+    *out_len = raw_len;
+    return 0;
+#endif
+}
+
+static int compat_prepare_runtime_bc_cache(void) {
+    if (g_runtime_bc_cache.state == 1)
+        return 0;
+    if (g_runtime_bc_cache.state == -1)
+        return -1;
+    if (compat_build_runtime_bc(&g_runtime_bc_cache.data,
+                                &g_runtime_bc_cache.len) != 0) {
+        g_runtime_bc_cache.state = -1;
+        return -1;
+    }
+    g_runtime_bc_cache.state = 1;
+    return 0;
+}
+
+static int compat_try_attach_runtime_bc(lr_session_t *session) {
+    const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
+    lr_error_t rt_err = {0};
+    uint8_t *bc_data = NULL;
+    size_t bc_len = 0;
+    uint8_t *raw_bc = NULL;
+    size_t raw_len = 0;
+
+    if (!session)
+        return -1;
+
+    if (runtime_bc && runtime_bc[0]) {
+        if (read_file_bytes(runtime_bc, &bc_data, &bc_len) != 0)
+            return -1;
+        if (compat_extract_raw_bitcode(bc_data, bc_len, &raw_bc, &raw_len) != 0) {
+            free(bc_data);
+            return -1;
+        }
+        free(bc_data);
+        if (lr_session_set_runtime_bc(session, raw_bc, raw_len, &rt_err) != 0) {
+            if (rt_err.code == LR_ERR_STATE) {
+                free(raw_bc);
+                return 1;
+            }
+            free(raw_bc);
+            return -1;
+        }
+        free(raw_bc);
+        return 1;
+    }
+
+    if (compat_prepare_runtime_bc_cache() != 0)
+        return 0;
+    if (lr_session_set_runtime_bc(session, g_runtime_bc_cache.data,
+                                  g_runtime_bc_cache.len, &rt_err) != 0) {
+        if (rt_err.code == LR_ERR_STATE)
+            return 1;
+        return -1;
+    }
+    return 1;
 }
 
 /* ---- Compat types (must match the public header exactly) ---- */
@@ -872,21 +1226,12 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
         return NULL;
     }
     {
-        const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
-        if (runtime_bc && runtime_bc[0]) {
-            lr_error_t rt_err = {0};
-            uint8_t *bc_data = NULL;
-            size_t bc_len = 0;
-            if (read_file_bytes(runtime_bc, &bc_data, &bc_len) != 0 ||
-                lr_session_set_runtime_bc(cm->session, bc_data, bc_len,
-                                          &rt_err) != 0) {
-                free(bc_data);
-                lr_session_destroy(cm->session);
-                lr_arena_destroy(arena);
-                free(cm);
-                return NULL;
-            }
-            free(bc_data);
+        int rt_rc = compat_try_attach_runtime_bc(cm->session);
+        if (rt_rc < 0) {
+            lr_session_destroy(cm->session);
+            lr_arena_destroy(arena);
+            free(cm);
+            return NULL;
         }
     }
     cm->cache_owner_mod = cm->mod;
@@ -3839,6 +4184,16 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
         return -1;
     compat_maybe_dump_final_ir(mod);
     if ((runtime_bc && runtime_bc[0]) || !runtime_ll || runtime_len == 0) {
+        int rt_rc = compat_try_attach_runtime_bc(mod->session);
+        if (rt_rc <= 0) {
+            if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
+                fprintf(stderr,
+                        "lc_module_emit_executable: runtime bitcode unavailable; "
+                        "set LIRIC_RUNTIME_BC or provide lfortran runtime source "
+                        "for auto-discovery\n");
+            }
+            return -1;
+        }
         if (lr_session_emit_exe(mod->session, filename, &err) != 0) {
             if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
                 fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);

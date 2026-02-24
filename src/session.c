@@ -2777,22 +2777,13 @@ static const lr_target_t *session_resolve_target(struct lr_session *s) {
 int lr_session_emit_object(struct lr_session *s, const char *path,
                             session_error_t *err) {
     char backend_err[256] = {0};
-    bool has_runtime_bc;
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_object arguments");
         return -1;
     }
-    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
-    if (has_runtime_bc) {
-        if (merge_runtime_bc_into_module(s, s->module,
-                                         &s->runtime_bc_merged_into_main_module,
-                                         err) != 0)
-            return -1;
-    }
-
-    if (s->blob_count > 0 && !has_runtime_bc) {
+    if (s->blob_count > 0) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2826,21 +2817,12 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
 
 int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
                                   session_error_t *err) {
-    bool has_runtime_bc;
     err_clear(err);
     if (!s || !s->module || !out) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_object_stream arguments");
         return -1;
     }
-    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
-    if (has_runtime_bc) {
-        if (merge_runtime_bc_into_module(s, s->module,
-                                         &s->runtime_bc_merged_into_main_module,
-                                         err) != 0)
-            return -1;
-    }
-
-    if (s->blob_count > 0 && !has_runtime_bc) {
+    if (s->blob_count > 0) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2908,7 +2890,6 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
 int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
     char backend_err[256] = {0};
-    bool has_runtime_bc;
     const char *entry = NULL;
 
     err_clear(err);
@@ -2916,15 +2897,7 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
-    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
-    if (has_runtime_bc) {
-        if (merge_runtime_bc_into_module(s, s->module,
-                                         &s->runtime_bc_merged_into_main_module,
-                                         err) != 0)
-            return -1;
-    }
-
-    if (s->blob_count > 0 && !has_runtime_bc) {
+    if (s->blob_count > 0) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2945,6 +2918,13 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             return -1;
         }
         return 0;
+    }
+
+    if (s->runtime_bc_data && s->runtime_bc_len > 0) {
+        if (merge_runtime_bc_into_module(s, s->module,
+                                         &s->runtime_bc_merged_into_main_module,
+                                         err) != 0)
+            return -1;
     }
 
     entry = session_entry_symbol(s->module);
@@ -2982,6 +2962,22 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
     }
 
     if (s->blob_count > 0) {
+        char parse_err[256] = {0};
+        lr_module_t *parsed_runtime = NULL;
+
+        parsed_runtime = lr_parse_ll(runtime_ll, runtime_len, parse_err, sizeof(parse_err));
+        if (!parsed_runtime) {
+            err_set(err, S_ERR_PARSE, "runtime ll parse failed: %s",
+                    parse_err[0] ? parse_err : "unknown parse error");
+            return -1;
+        }
+        if (lr_module_merge(s->module, parsed_runtime) != 0) {
+            lr_module_free(parsed_runtime);
+            err_set(err, S_ERR_BACKEND, "runtime ll merge failed");
+            return -1;
+        }
+        lr_module_free(parsed_runtime);
+
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
             err_set(err, S_ERR_BACKEND, "target not found");
@@ -2992,7 +2988,6 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
             return -1;
         }
-        /* Runtime LL is ignored on DIRECT blob emission path. */
         entry = session_blob_entry_symbol(s, session_entry_symbol(s->module));
         int rc = lr_emit_executable_from_blobs(s->blobs, s->blob_count,
                                                s->module, target, out,

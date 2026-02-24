@@ -501,7 +501,8 @@ enum {
     FUNC_CODE_INST_CALL     = 34,
     FUNC_CODE_INST_GEP      = 43,
     FUNC_CODE_INST_STORE    = 44,
-    FUNC_CODE_INST_UNOP     = 56
+    FUNC_CODE_INST_UNOP     = 56,
+    FUNC_CODE_INST_FREEZE   = 58
 };
 
 enum {
@@ -551,6 +552,7 @@ typedef struct {
     uint32_t bc_version;
     lr_bc_stream_callback_t on_inst;
     void *on_inst_ctx;
+    uint32_t cur_func_code;
     char *err;
     size_t errlen;
 } bc_decoder_t;
@@ -602,7 +604,8 @@ static void bc_func_list_push(bc_func_list_t *fl, lr_func_t *f) {
 
 static lr_type_t *bc_get_type(bc_decoder_t *d, uint32_t idx) {
     if (idx >= d->types.count) {
-        bc_dec_error(d, "type index %u out of range (have %u)", idx, d->types.count);
+        bc_dec_error(d, "type index %u out of range (have %u, func_code=%u)",
+                     idx, d->types.count, d->cur_func_code);
         return NULL;
     }
     return d->types.types[idx];
@@ -615,6 +618,12 @@ static lr_operand_t bc_make_operand_from_value(bc_decoder_t *d, bc_value_table_t
     lr_operand_t op;
     bc_value_t *v;
     memset(&op, 0, sizeof(op));
+    if (val_id > vt->count + 65536u) {
+        bc_dec_error(d, "value id too far ahead: id=%u have=%u", val_id, vt->count);
+        op.kind = LR_VAL_UNDEF;
+        op.type = type_hint ? type_hint : d->module->type_i32;
+        return op;
+    }
     while (val_id >= vt->count) {
         bc_value_t fwd;
         uint32_t before = vt->count;
@@ -660,9 +669,11 @@ static int64_t bc_decode_signed_vbr(uint64_t v) {
 
 static bool bc_resolve_rel_value_id(bc_decoder_t *d, uint32_t base_value_id,
                                     uint32_t rel, uint32_t *out_val_id) {
+    (void)d;
     if (rel > base_value_id) {
-        bc_dec_error(d, "invalid relative value id: rel=%u base=%u", rel, base_value_id);
-        return false;
+        /* LLVM may encode forward references using absolute value ids. */
+        *out_val_id = rel;
+        return true;
     }
     *out_val_id = base_value_id - rel;
     return true;
@@ -673,9 +684,9 @@ static bool bc_resolve_phi_value_id(bc_decoder_t *d, uint32_t base_before_def,
     if (rel_signed >= 0) {
         uint32_t rel = (uint32_t)rel_signed;
         if (rel > base_before_def) {
-            bc_dec_error(d, "invalid PHI relative value id: rel=%u base=%u",
-                         rel, base_before_def);
-            return false;
+            /* LLVM may encode forward references using absolute value ids. */
+            *out_val_id = rel;
+            return true;
         }
         *out_val_id = base_before_def - rel;
         return true;
@@ -746,6 +757,35 @@ static bool bc_define_undef_value(bc_decoder_t *d, bc_value_table_t *vt,
         slot->operand.kind = LR_VAL_UNDEF;
         slot->operand.type = slot->type;
         slot->operand.global_offset = 0;
+    }
+    return true;
+}
+
+static bool bc_define_alias_value(bc_decoder_t *d, bc_value_table_t *vt,
+                                  uint32_t value_id, lr_operand_t op,
+                                  lr_type_t *type) {
+    while (value_id >= vt->count) {
+        bc_value_t fwd;
+        uint32_t before = vt->count;
+        fwd.kind = BC_VAL_VREG;
+        fwd.type = d->module->type_i32;
+        fwd.vreg = 0;
+        bc_value_push(vt, fwd);
+        if (vt->count == before) {
+            bc_dec_error(d, "out of memory while materializing alias value");
+            return false;
+        }
+    }
+
+    {
+        bc_value_t *slot = &vt->values[value_id];
+        lr_type_t *alias_type = type ? type : op.type;
+        if (!alias_type)
+            alias_type = d->module->type_i32;
+        slot->kind = BC_VAL_CONST;
+        slot->type = alias_type;
+        slot->operand = op;
+        slot->operand.type = alias_type;
     }
     return true;
 }
@@ -1430,6 +1470,7 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
 
+            d->cur_func_code = code;
             switch (code) {
             case FUNC_CODE_INST_RET: {
                 lr_inst_t *inst;
@@ -1500,9 +1541,10 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_BINOP: {
-                uint32_t lhs_rel = (uint32_t)r->record[0];
-                uint32_t rhs_rel = (uint32_t)r->record[1];
-                uint32_t opc = (uint32_t)r->record[2];
+                uint32_t lhs_rel;
+                uint32_t rhs_rel;
+                uint32_t opc;
+                uint32_t ty_idx = UINT32_MAX;
                 uint32_t lhs_vid = 0;
                 uint32_t rhs_vid = 0;
                 lr_operand_t ops[2];
@@ -1511,6 +1553,35 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 lr_inst_t *inst;
                 bool is_fp;
 
+                if (r->record_len >= 4) {
+                    uint32_t r0 = (uint32_t)r->record[0];
+                    uint32_t r1 = (uint32_t)r->record[1];
+                    uint32_t r2 = (uint32_t)r->record[2];
+                    uint32_t r3 = (uint32_t)r->record[3];
+                    bool canonical = (r1 < d->types.count) &&
+                                     (r2 <= next_value_id) &&
+                                     (r3 <= next_value_id);
+                    bool legacy = (r0 <= next_value_id) &&
+                                  (r1 <= next_value_id);
+                    if (canonical && !legacy) {
+                        /* LLVM canonical: [opcode, ty, lhs, rhs] */
+                        opc = r0;
+                        ty_idx = r1;
+                        lhs_rel = r2;
+                        rhs_rel = r3;
+                    } else {
+                        /* Legacy/internal: [lhs, rhs, opcode, ...flags] */
+                        lhs_rel = r0;
+                        rhs_rel = r1;
+                        opc = r2;
+                    }
+                } else {
+                    /* Legacy/internal: [lhs, rhs, opcode] */
+                    lhs_rel = (uint32_t)r->record[0];
+                    rhs_rel = (uint32_t)r->record[1];
+                    opc = (uint32_t)r->record[2];
+                }
+
                 if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
                     !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid)) {
                     ok = false;
@@ -1518,7 +1589,15 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 }
                 ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
                 ops[1] = bc_make_operand_from_value(d, &local_vt, rhs_vid, func, ops[0].type);
-                res_type = ops[0].type;
+                if (ty_idx != UINT32_MAX) {
+                    res_type = bc_get_type(d, ty_idx);
+                    if (!res_type) {
+                        ok = false;
+                        break;
+                    }
+                } else {
+                    res_type = ops[0].type;
+                }
                 is_fp = bc_type_is_fp(res_type);
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, res_type, &dest)) {
                     ok = false;
@@ -1535,14 +1614,26 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_CAST: {
-                uint32_t src_rel = (uint32_t)r->record[0];
-                uint32_t dest_ty_idx = (uint32_t)r->record[1];
-                uint32_t cast_opc = (uint32_t)r->record[2];
+                uint32_t src_rel;
+                uint32_t dest_ty_idx;
+                uint32_t cast_opc;
                 uint32_t src_vid = 0;
                 lr_operand_t op;
                 lr_type_t *dest_type;
                 uint32_t dest;
                 lr_inst_t *inst;
+
+                if (r->record_len >= 4) {
+                    /* LLVM canonical: [opcode, dest_ty, src_ty, src] */
+                    cast_opc = (uint32_t)r->record[0];
+                    dest_ty_idx = (uint32_t)r->record[1];
+                    src_rel = (uint32_t)r->record[3];
+                } else {
+                    /* Legacy/internal: [src, dest_ty, opcode] */
+                    src_rel = (uint32_t)r->record[0];
+                    dest_ty_idx = (uint32_t)r->record[1];
+                    cast_opc = (uint32_t)r->record[2];
+                }
 
                 if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
                     ok = false;
@@ -1566,14 +1657,26 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_CMP2: {
-                uint32_t lhs_rel = (uint32_t)r->record[0];
-                uint32_t rhs_rel = (uint32_t)r->record[1];
-                uint32_t pred = (uint32_t)r->record[2];
+                uint32_t lhs_rel;
+                uint32_t rhs_rel;
+                uint32_t pred;
                 uint32_t lhs_vid = 0;
                 uint32_t rhs_vid = 0;
                 lr_operand_t ops[2];
                 uint32_t dest;
                 lr_inst_t *inst;
+
+                if (r->record_len >= 4) {
+                    /* LLVM canonical: [op_ty, lhs, rhs, pred] */
+                    lhs_rel = (uint32_t)r->record[1];
+                    rhs_rel = (uint32_t)r->record[2];
+                    pred = (uint32_t)r->record[3];
+                } else {
+                    /* Legacy/internal: [lhs, rhs, pred] */
+                    lhs_rel = (uint32_t)r->record[0];
+                    rhs_rel = (uint32_t)r->record[1];
+                    pred = (uint32_t)r->record[2];
+                }
 
                 if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
                     !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid)) {
@@ -1592,6 +1695,14 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 if (bc_type_is_fp(ops[0].type)) {
                     lr_fcmp_pred_t fpred;
                     if (!bc_map_fcmp_pred(pred, &fpred)) {
+                        lr_icmp_pred_t ipred_fallback;
+                        if (bc_map_icmp_pred(pred, &ipred_fallback)) {
+                            inst = lr_inst_create(d->arena, LR_OP_ICMP,
+                                                   d->module->type_i1, dest, ops, 2);
+                            if (inst)
+                                inst->icmp_pred = ipred_fallback;
+                            goto cmp_emit_done;
+                        }
                         bc_dec_error(d, "unsupported fcmp predicate: %u", pred);
                         ok = false;
                         break;
@@ -1619,6 +1730,7 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                         break;
                     }
                 }
+cmp_emit_done:
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
                     ok = false;
                     break;
@@ -1722,13 +1834,40 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_LOAD: {
-                uint32_t ptr_rel = (uint32_t)r->record[0];
-                uint32_t ty_idx = (uint32_t)r->record[1];
+                uint32_t ptr_rel;
+                uint32_t ty_idx;
                 uint32_t ptr_vid = 0;
                 lr_operand_t op;
                 lr_type_t *load_ty;
                 uint32_t dest;
                 lr_inst_t *inst;
+
+                if (r->record_len >= 2) {
+                    uint32_t a = (uint32_t)r->record[0];
+                    uint32_t b = (uint32_t)r->record[1];
+                    bool a_is_ty = a < d->types.count;
+                    bool b_is_ty = b < d->types.count;
+                    if (a_is_ty && !b_is_ty) {
+                        /* LLVM canonical: [val_ty, ptr, ...] */
+                        ty_idx = a;
+                        ptr_rel = b;
+                    } else if (!a_is_ty && b_is_ty) {
+                        /* Legacy/internal: [ptr, val_ty, ...] */
+                        ptr_rel = a;
+                        ty_idx = b;
+                    } else if (a_is_ty) {
+                        /* Ambiguous: prefer canonical on modern streams. */
+                        ty_idx = a;
+                        ptr_rel = b;
+                    } else {
+                        ptr_rel = a;
+                        ty_idx = b;
+                    }
+                } else {
+                    bc_dec_error(d, "malformed load record");
+                    ok = false;
+                    break;
+                }
 
                 if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid)) {
                     ok = false;
@@ -1755,9 +1894,18 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 lr_operand_t ops[2];
                 lr_inst_t *inst;
                 if (code == FUNC_CODE_INST_STORE) {
-                    uint32_t ptr_rel = (uint32_t)r->record[0];
-                    uint32_t val_rel = (uint32_t)r->record[1];
+                    uint32_t ptr_rel;
+                    uint32_t val_rel;
                     uint32_t ptr_vid = 0, val_vid = 0;
+                    if (r->record_len >= 6) {
+                        /* LLVM canonical: [ptr_ty, ptr, val_ty, val, align, vol, ...] */
+                        ptr_rel = (uint32_t)r->record[1];
+                        val_rel = (uint32_t)r->record[3];
+                    } else {
+                        /* Legacy/internal: [ptr, val, ...] */
+                        ptr_rel = (uint32_t)r->record[0];
+                        val_rel = (uint32_t)r->record[1];
+                    }
                     if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
                         ok = false;
@@ -1767,9 +1915,18 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     ops[1] = bc_make_operand_from_value(d, &local_vt, ptr_vid,
                                                         func, d->module->type_ptr);
                 } else {
-                    uint32_t ptr_rel = (uint32_t)r->record[0];
-                    uint32_t val_rel = (uint32_t)r->record[1];
+                    uint32_t ptr_rel;
+                    uint32_t val_rel;
                     uint32_t ptr_vid = 0, val_vid = 0;
+                    if (r->record_len >= 5) {
+                        /* LLVM canonical old: [ptr_ty, ptr, val, align, vol] */
+                        ptr_rel = (uint32_t)r->record[1];
+                        val_rel = (uint32_t)r->record[2];
+                    } else {
+                        /* Legacy/internal: [ptr, val, ...] */
+                        ptr_rel = (uint32_t)r->record[0];
+                        val_rel = (uint32_t)r->record[1];
+                    }
                     if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
                         ok = false;
@@ -1975,12 +2132,21 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
             }
             case FUNC_CODE_INST_EXTRACTELT: {
                 if (r->record_len >= 2) {
-                    uint32_t vec_rel = (uint32_t)r->record[0];
-                    uint32_t idx_rel = (uint32_t)r->record[1];
+                    uint32_t vec_rel;
+                    uint32_t idx_rel;
                     uint32_t vec_vid = 0;
                     uint32_t idx_vid = 0;
                     lr_operand_t vec_op;
                     (void)idx_vid;
+                    if (r->record_len >= 3) {
+                        /* LLVM canonical: [vec_ty, vec, idx] */
+                        vec_rel = (uint32_t)r->record[1];
+                        idx_rel = (uint32_t)r->record[2];
+                    } else {
+                        /* Legacy/internal: [vec, idx] */
+                        vec_rel = (uint32_t)r->record[0];
+                        idx_rel = (uint32_t)r->record[1];
+                    }
                     if (!bc_resolve_rel_value_id(d, next_value_id, vec_rel, &vec_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, idx_rel, &idx_vid)) {
                         ok = false;
@@ -2002,13 +2168,24 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
             }
             case FUNC_CODE_INST_INSERTELT: {
                 if (r->record_len >= 3) {
-                    uint32_t vec_rel = (uint32_t)r->record[0];
-                    uint32_t val_rel = (uint32_t)r->record[1];
-                    uint32_t idx_rel = (uint32_t)r->record[2];
+                    uint32_t vec_rel;
+                    uint32_t val_rel;
+                    uint32_t idx_rel;
                     uint32_t vec_vid = 0, val_vid = 0, idx_vid = 0;
                     lr_operand_t vec_op;
                     (void)val_vid;
                     (void)idx_vid;
+                    if (r->record_len >= 4) {
+                        /* LLVM canonical: [vec_ty, vec, val, idx] */
+                        vec_rel = (uint32_t)r->record[1];
+                        val_rel = (uint32_t)r->record[2];
+                        idx_rel = (uint32_t)r->record[3];
+                    } else {
+                        /* Legacy/internal: [vec, val, idx] */
+                        vec_rel = (uint32_t)r->record[0];
+                        val_rel = (uint32_t)r->record[1];
+                        idx_rel = (uint32_t)r->record[2];
+                    }
                     if (!bc_resolve_rel_value_id(d, next_value_id, vec_rel, &vec_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, idx_rel, &idx_vid)) {
@@ -2031,13 +2208,24 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
             }
             case FUNC_CODE_INST_SHUFFLEVEC: {
                 if (r->record_len >= 3) {
-                    uint32_t lhs_rel = (uint32_t)r->record[0];
-                    uint32_t rhs_rel = (uint32_t)r->record[1];
-                    uint32_t mask_rel = (uint32_t)r->record[2];
+                    uint32_t lhs_rel;
+                    uint32_t rhs_rel;
+                    uint32_t mask_rel;
                     uint32_t lhs_vid = 0, rhs_vid = 0, mask_vid = 0;
                     lr_operand_t lhs_op;
                     (void)rhs_vid;
                     (void)mask_vid;
+                    if (r->record_len >= 4) {
+                        /* LLVM canonical: [vec_ty, lhs, rhs, mask] */
+                        lhs_rel = (uint32_t)r->record[1];
+                        rhs_rel = (uint32_t)r->record[2];
+                        mask_rel = (uint32_t)r->record[3];
+                    } else {
+                        /* Legacy/internal: [lhs, rhs, mask] */
+                        lhs_rel = (uint32_t)r->record[0];
+                        rhs_rel = (uint32_t)r->record[1];
+                        mask_rel = (uint32_t)r->record[2];
+                    }
                     if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid) ||
                         !bc_resolve_rel_value_id(d, next_value_id, mask_rel, &mask_vid)) {
@@ -2069,7 +2257,6 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 lr_type_t *res_type;
                 uint32_t dest;
                 lr_inst_t *inst;
-
                 if (r->record_len >= 5) {
                     true_rel = (uint32_t)r->record[1];
                     false_rel = (uint32_t)r->record[2];
@@ -2187,12 +2374,22 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_UNOP: {
-                uint32_t src_rel = (uint32_t)r->record[0];
-                uint32_t unopc = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                uint32_t src_rel;
+                uint32_t unopc;
                 uint32_t src_vid = 0;
                 lr_operand_t op;
                 uint32_t dest;
                 lr_inst_t *inst;
+
+                if (r->record_len >= 3) {
+                    /* LLVM canonical: [opcode, ty, src] */
+                    unopc = (uint32_t)r->record[0];
+                    src_rel = (uint32_t)r->record[2];
+                } else {
+                    /* Legacy/internal: [src, opcode] */
+                    src_rel = (uint32_t)r->record[0];
+                    unopc = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                }
 
                 if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
                     ok = false;
@@ -2213,6 +2410,29 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     ok = false;
                     break;
                 }
+                break;
+            }
+            case FUNC_CODE_INST_FREEZE: {
+                uint32_t ty_idx = (uint32_t)r->record[0];
+                uint32_t src_rel = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                uint32_t src_vid = 0;
+                lr_type_t *freeze_ty = bc_get_type(d, ty_idx);
+                lr_operand_t op;
+
+                if (!freeze_ty) {
+                    ok = false;
+                    break;
+                }
+                if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
+                    ok = false;
+                    break;
+                }
+                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, freeze_ty);
+                if (!bc_define_alias_value(d, &local_vt, next_value_id, op, freeze_ty)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
                 break;
             }
             case FUNC_CODE_INST_SWITCH: {
