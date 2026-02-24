@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -50,6 +51,9 @@ typedef struct {
     uint32_t x9_holds_vreg;
     uint32_t x10_holds_vreg;
     bool func_uses_fp_abi;
+    bool func_is_vararg;
+    int32_t vararg_stack_start_off;
+    const char *func_name;
 } a64_compile_ctx_t;
 
 static bool is_fp_abi_type(const lr_type_t *type) {
@@ -463,6 +467,75 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
             return true;
     }
     return false;
+}
+
+static const char *normalize_llvm_symbol_name(const char *name) {
+    if (!name)
+        return NULL;
+    while (*name == '\1' || *name == '_')
+        name++;
+    return name;
+}
+
+static bool is_llvm_va_start_name(const char *name) {
+    name = normalize_llvm_symbol_name(name);
+    return name && strncmp(name, "llvm.va_start", 13) == 0;
+}
+
+static bool is_llvm_va_end_name(const char *name) {
+    name = normalize_llvm_symbol_name(name);
+    return name && strncmp(name, "llvm.va_end", 11) == 0;
+}
+
+static bool is_llvm_va_copy_name(const char *name) {
+    name = normalize_llvm_symbol_name(name);
+    return name && strncmp(name, "llvm.va_copy", 12) == 0;
+}
+
+typedef enum a64_int_cmp_intrinsic_kind {
+    A64_INT_CMP_INTRIN_NONE = 0,
+    A64_INT_CMP_INTRIN_UMAX,
+    A64_INT_CMP_INTRIN_UMIN,
+    A64_INT_CMP_INTRIN_SMAX,
+    A64_INT_CMP_INTRIN_SMIN
+} a64_int_cmp_intrinsic_kind_t;
+
+static a64_int_cmp_intrinsic_kind_t classify_llvm_int_cmp_intrinsic(const char *name,
+                                                                     bool *is64_out) {
+    name = normalize_llvm_symbol_name(name);
+    if (is64_out)
+        *is64_out = true;
+    if (!name)
+        return A64_INT_CMP_INTRIN_NONE;
+    if (strcmp(name, "llvm.umax.i64") == 0)
+        return A64_INT_CMP_INTRIN_UMAX;
+    if (strcmp(name, "llvm.umin.i64") == 0)
+        return A64_INT_CMP_INTRIN_UMIN;
+    if (strcmp(name, "llvm.smax.i64") == 0)
+        return A64_INT_CMP_INTRIN_SMAX;
+    if (strcmp(name, "llvm.smin.i64") == 0)
+        return A64_INT_CMP_INTRIN_SMIN;
+    if (strcmp(name, "llvm.umax.i32") == 0) {
+        if (is64_out)
+            *is64_out = false;
+        return A64_INT_CMP_INTRIN_UMAX;
+    }
+    if (strcmp(name, "llvm.umin.i32") == 0) {
+        if (is64_out)
+            *is64_out = false;
+        return A64_INT_CMP_INTRIN_UMIN;
+    }
+    if (strcmp(name, "llvm.smax.i32") == 0) {
+        if (is64_out)
+            *is64_out = false;
+        return A64_INT_CMP_INTRIN_SMAX;
+    }
+    if (strcmp(name, "llvm.smin.i32") == 0) {
+        if (is64_out)
+            *is64_out = false;
+        return A64_INT_CMP_INTRIN_SMIN;
+    }
+    return A64_INT_CMP_INTRIN_NONE;
 }
 
 static uint8_t int_type_width_bits(const lr_type_t *type) {
@@ -1017,6 +1090,34 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->x9_holds_vreg = UINT32_MAX;
     cc->x10_holds_vreg = UINT32_MAX;
     cc->func_uses_fp_abi = func_meta->func && func_meta->func->uses_llvm_abi;
+    cc->func_is_vararg = func_meta->vararg;
+    cc->vararg_stack_start_off = 16;
+    cc->func_name = (func_meta->func && func_meta->func->name)
+                        ? func_meta->func->name
+                        : "<anon>";
+
+    if (cc->func_is_vararg) {
+        uint32_t stack_used = 0;
+        if (cc->func_uses_fp_abi) {
+            lr_type_t **param_types_local = func_meta->param_types;
+            uint32_t gp_used_local = 0;
+            uint32_t fp_used_local = 0;
+            for (uint32_t i = 0; i < num_params; i++) {
+                const lr_type_t *pty = param_types_local ? param_types_local[i] : NULL;
+                if (is_fp_abi_type(pty) && fp_used_local < 8) {
+                    fp_used_local++;
+                } else if (!is_fp_abi_type(pty) && gp_used_local < 8) {
+                    gp_used_local++;
+                } else {
+                    stack_used++;
+                }
+            }
+        } else if (num_params > 8) {
+            stack_used = num_params - 8;
+        }
+        cc->vararg_stack_start_off = 16 + (int32_t)(stack_used * 8u);
+    }
+
     ctx->prologue_patch_pos = emit_prologue_a64(cc);
 
     if (cc->func_uses_fp_abi) {
@@ -1694,6 +1795,78 @@ static int aarch64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_CALL: {
+        if (ops_ptr[0].kind == LR_VAL_GLOBAL && cc->mod) {
+            const char *cname = lr_module_symbol_name(cc->mod, ops_ptr[0].global_id);
+            bool cmp_is64 = true;
+            a64_int_cmp_intrinsic_kind_t cmp_intrin =
+                classify_llvm_int_cmp_intrinsic(cname, &cmp_is64);
+            if (cmp_intrin != A64_INT_CMP_INTRIN_NONE) {
+                uint8_t cond = 0;
+                if (nops >= 3) {
+                    emit_load_operand(cc, &ops_ptr[1], A64_X9);
+                    emit_load_operand(cc, &ops_ptr[2], A64_X10);
+                    emit_u32(cc->buf, &cc->pos, cc->buflen,
+                             enc_subs_reg(cmp_is64, A64_X9, A64_X10));
+                    switch (cmp_intrin) {
+                    case A64_INT_CMP_INTRIN_UMAX: cond = 2; break;  /* hs */
+                    case A64_INT_CMP_INTRIN_UMIN: cond = 9; break;  /* ls */
+                    case A64_INT_CMP_INTRIN_SMAX: cond = 10; break; /* ge */
+                    case A64_INT_CMP_INTRIN_SMIN: cond = 13; break; /* le */
+                    default: cond = 0; break;
+                    }
+                    emit_u32(cc->buf, &cc->pos, cc->buflen,
+                             enc_csel(cmp_is64, A64_X9, A64_X9, A64_X10, cond));
+                    if (desc->type && desc->type->kind != LR_TYPE_VOID)
+                        emit_store_slot(cc, desc->dest, A64_X9);
+                }
+                invalidate_cached_gprs_a64(cc);
+                break;
+            }
+            if (is_llvm_va_start_name(cname)) {
+                if (getenv("LIRIC_VERBOSE_VA_LOWER")) {
+                    fprintf(stderr,
+                            "aarch64 va-lower: %s: va_start stack_off=%d vararg=%d\n",
+                            cc->func_name ? cc->func_name : "<anon>",
+                            cc->vararg_stack_start_off,
+                            cc->func_is_vararg ? 1 : 0);
+                }
+                if (nops >= 2) {
+                    emit_load_operand(cc, &ops_ptr[1], A64_X9);
+                    if (cc->func_is_vararg) {
+                        emit_addr(cc->buf, &cc->pos, cc->buflen, A64_X10, A64_FP,
+                                  cc->vararg_stack_start_off);
+                    } else {
+                        emit_move_imm_ctx(cc, A64_X10, 0, true);
+                    }
+                    emit_store(cc->buf, &cc->pos, cc->buflen, A64_X10, A64_X9, 0, 8);
+                }
+                invalidate_cached_gprs_a64(cc);
+                break;
+            }
+            if (is_llvm_va_end_name(cname)) {
+                if (getenv("LIRIC_VERBOSE_VA_LOWER")) {
+                    fprintf(stderr, "aarch64 va-lower: %s: va_end\n",
+                            cc->func_name ? cc->func_name : "<anon>");
+                }
+                invalidate_cached_gprs_a64(cc);
+                break;
+            }
+            if (is_llvm_va_copy_name(cname)) {
+                if (getenv("LIRIC_VERBOSE_VA_LOWER")) {
+                    fprintf(stderr, "aarch64 va-lower: %s: va_copy\n",
+                            cc->func_name ? cc->func_name : "<anon>");
+                }
+                if (nops >= 3) {
+                    emit_load_operand(cc, &ops_ptr[1], A64_X9);
+                    emit_load_operand(cc, &ops_ptr[2], A64_X10);
+                    emit_load(cc->buf, &cc->pos, cc->buflen, A64_X11, A64_X10, 0, 8);
+                    emit_store(cc->buf, &cc->pos, cc->buflen, A64_X11, A64_X9, 0, 8);
+                }
+                invalidate_cached_gprs_a64(cc);
+                break;
+            }
+        }
+
         static const uint8_t call_regs[] = {
             A64_X0, A64_X1, A64_X2, A64_X3,
             A64_X4, A64_X5, A64_X6, A64_X7

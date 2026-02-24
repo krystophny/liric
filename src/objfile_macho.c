@@ -37,6 +37,14 @@
 #define PLATFORM_MACOS 1u
 #define TOOL_LD 3u
 
+size_t lr_macho_executable_text_offset_arm64(void) {
+    /* Keep in sync with write_macho_executable_arm64() command layout. */
+    const size_t header_size = 32u;
+    const size_t sizeofcmds = 648u;
+    const size_t code_sig_cmd_slack = 16u;
+    return obj_align_up(header_size + sizeofcmds + code_sig_cmd_slack, 8u);
+}
+
 static size_t append_uleb128(uint8_t *buf, size_t cap, uint64_t value) {
     size_t n = 0;
     if (!buf || cap == 0)
@@ -376,9 +384,7 @@ int write_macho_executable_arm64(FILE *out,
     const size_t page = 0x4000u;
     const uint32_t ncmds = 15;
     const uint32_t sizeofcmds = 648;
-    const size_t code_sig_cmd_slack = 16u;
-    const size_t header_and_cmds = 32u + (size_t)sizeofcmds + code_sig_cmd_slack;
-    const size_t text_off = obj_align_up(header_and_cmds, 8);
+    const size_t text_off = lr_macho_executable_text_offset_arm64();
     const size_t text_file_size = obj_align_up(text_off + code_size, page);
     const size_t linkedit_off = text_file_size;
     size_t fixups_off = linkedit_off;
@@ -447,8 +453,9 @@ int write_macho_executable_arm64(FILE *out,
         exports_blob[ep++] = 0x00;
         exports_blob[ep++] = 0x00;
         exports_blob[ep++] = 0x02;
-        memcpy(exports_blob + ep, "_mh_execute_header", 18);
-        ep += 18;
+        memcpy(exports_blob + ep, "_mh_execute_header",
+               sizeof("_mh_execute_header"));
+        ep += sizeof("_mh_execute_header");
         exports_blob[ep++] = 0x09;
         memcpy(exports_blob + ep, "main", 5);
         ep += 5;
@@ -472,7 +479,8 @@ int write_macho_executable_arm64(FILE *out,
     memset(strtab_blob, 0, sizeof(strtab_blob));
     strtab_blob[0] = 0x20;
     strtab_blob[1] = 0x00;
-    memcpy(strtab_blob + 2, "__mh_execute_header", 18);
+    memcpy(strtab_blob + 2, "__mh_execute_header",
+           sizeof("__mh_execute_header"));
     memcpy(strtab_blob + 22, "_main", 6);
     {
         uint8_t *s = symtab_blob;
@@ -512,7 +520,7 @@ int write_macho_executable_arm64(FILE *out,
      * No-link payload executables carry pre-resolved absolute pointers in
      * synthesized GOT slots. Keep a fixed image base for this format.
      */
-    w32(&p, MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL);
+    w32(&p, MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE);
     w32(&p, 0u);
 
     /* __PAGEZERO */

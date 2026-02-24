@@ -2897,6 +2897,12 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
+    if (s->runtime_bc_data && s->runtime_bc_len > 0) {
+        if (merge_runtime_bc_into_module(s, s->module,
+                                         &s->runtime_bc_merged_into_main_module,
+                                         err) != 0)
+            return -1;
+    }
     if (s->blob_count > 0) {
         const lr_target_t *target = session_resolve_target(s);
         if (!target) {
@@ -2918,13 +2924,6 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             return -1;
         }
         return 0;
-    }
-
-    if (s->runtime_bc_data && s->runtime_bc_len > 0) {
-        if (merge_runtime_bc_into_module(s, s->module,
-                                         &s->runtime_bc_merged_into_main_module,
-                                         err) != 0)
-            return -1;
     }
 
     entry = session_entry_symbol(s->module);

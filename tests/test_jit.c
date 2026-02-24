@@ -2198,6 +2198,8 @@ int test_jit_llvm_intrinsic_extended_blob_coverage(void) {
         "llvm.nearbyint.f32", "llvm.nearbyint.f64",
         "llvm.fma.f32", "llvm.fma.f64",
         "llvm.fmuladd.f32", "llvm.fmuladd.f64",
+        "llvm.fmuladd.v2f32", "llvm.fmuladd.v4f32",
+        "llvm.fmuladd.v2f64",
         "llvm.minnum.f32", "llvm.minnum.f64",
         "llvm.maxnum.f32", "llvm.maxnum.f64",
         "llvm.abs.i32", "llvm.abs.i64",

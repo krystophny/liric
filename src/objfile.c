@@ -10,7 +10,6 @@
 #include <string.h>
 #if !defined(_WIN32)
 #include <unistd.h>
-#include <dlfcn.h>
 #endif
 
 #define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
@@ -28,9 +27,7 @@ typedef struct lr_obj_build_result {
 } lr_obj_build_result_t;
 
 #if !defined(__linux__) && !defined(_WIN32)
-/* Keep these in sync with write_macho_executable_arm64() layout constants. */
 #define MACHO_ARM64_EXEC_IMAGE_BASE 0x100000000ULL
-#define MACHO_ARM64_EXEC_TEXT_OFF   696ULL
 
 static uint32_t read_u32_le(const uint8_t *buf, uint32_t off) {
     return (uint32_t)buf[off] |
@@ -89,17 +86,48 @@ static int patch_aarch64_pageoff12_exec(uint8_t *buf, size_t buflen, uint32_t of
     return write_u32_le(buf, buflen, off, insn);
 }
 
-static void *resolve_external_symbol_addr(const char *name, void *runtime_handle) {
-    void *addr = NULL;
-    if (!name || !name[0])
+static const char *normalize_external_lookup_name(const char *name) {
+    if (!name)
         return NULL;
-    addr = dlsym(RTLD_DEFAULT, name);
-    if (!addr && name[0] == '_')
-        addr = dlsym(RTLD_DEFAULT, name + 1);
+    while (*name == '\1')
+        name++;
+    return name;
+}
+
+static void *resolve_external_symbol_addr(const char *name, void *runtime_handle) {
+    const char *lookup = normalize_external_lookup_name(name);
+    void *addr = NULL;
+    const int verbose = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
+    if (!lookup || !lookup[0])
+        return NULL;
+    addr = lr_platform_intrinsic_resolve_addr(lookup, runtime_handle);
+    if (addr)
+        return addr;
+    if (verbose && name && name != lookup) {
+        fprintf(stderr,
+                "macho_exec_payload: normalize external '%s' -> '%s'\n",
+                name, lookup);
+    }
+    addr = lr_platform_dlsym_default(lookup);
+    if (verbose && !addr) {
+        fprintf(stderr, "macho_exec_payload: dlsym default miss '%s'\n", lookup);
+    }
+    if (!addr && lookup[0] == '_')
+        addr = lr_platform_dlsym_default(lookup + 1);
+    if (verbose && !addr && lookup[0] == '_') {
+        fprintf(stderr, "macho_exec_payload: dlsym default miss '%s'\n", lookup + 1);
+    }
     if (!addr && runtime_handle) {
-        addr = dlsym(runtime_handle, name);
-        if (!addr && name[0] == '_')
-            addr = dlsym(runtime_handle, name + 1);
+        addr = lr_platform_dlsym(runtime_handle, lookup);
+        if (verbose && !addr) {
+            fprintf(stderr, "macho_exec_payload: dlsym runtime miss '%s'\n", lookup);
+        }
+        if (!addr && lookup[0] == '_')
+            addr = lr_platform_dlsym(runtime_handle, lookup + 1);
+        if (verbose && !addr && lookup[0] == '_') {
+            fprintf(stderr, "macho_exec_payload: dlsym runtime miss '%s'\n",
+                    lookup + 1);
+        }
     }
     return addr;
 }
@@ -122,10 +150,13 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
     uint64_t *sym_addr = NULL;
     uint32_t *got_slot_off = NULL;
     uint32_t *stub_off = NULL;
+    uint8_t *sym_needed = NULL;
     const lr_exec_stub_t **stub_for_sym = NULL;
     size_t code_size = 0, data_off = 0, got_off = 0, total_size = 0;
     void *runtime_handle = NULL;
     const int verbose = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
+    const uint64_t text_base = MACHO_ARM64_EXEC_IMAGE_BASE +
+        (uint64_t)lr_macho_executable_text_offset_arm64();
 #define FAIL_BUILD(msg) do { \
     if (verbose) fprintf(stderr, "macho_exec_payload: %s\n", (msg)); \
     goto fail; \
@@ -144,9 +175,10 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
     got_slot_off = (uint32_t *)calloc(build->ctx.num_symbols, sizeof(uint32_t));
     sym_addr = (uint64_t *)calloc(build->ctx.num_symbols, sizeof(uint64_t));
     stub_off = (uint32_t *)calloc(build->ctx.num_symbols, sizeof(uint32_t));
+    sym_needed = (uint8_t *)calloc(build->ctx.num_symbols, sizeof(uint8_t));
     stub_for_sym = (const lr_exec_stub_t **)calloc(build->ctx.num_symbols,
                                                    sizeof(lr_exec_stub_t *));
-    if (!got_slot_off || !sym_addr || !stub_off || !stub_for_sym)
+    if (!got_slot_off || !sym_addr || !stub_off || !sym_needed || !stub_for_sym)
         FAIL_BUILD("allocation failed");
     for (uint32_t i = 0; i < build->ctx.num_symbols; i++) {
         got_slot_off[i] = UINT32_MAX;
@@ -155,15 +187,26 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
 
     const char *runtime_lib = getenv("LIRIC_RUNTIME_LIB");
     if (runtime_lib && runtime_lib[0])
-        runtime_handle = dlopen(runtime_lib, RTLD_LAZY | RTLD_GLOBAL);
+        runtime_handle = lr_platform_dlopen(runtime_lib);
+
+    for (uint32_t ri = 0; ri < build->ctx.num_relocs; ri++) {
+        const lr_obj_reloc_t *rel = &build->ctx.relocs[ri];
+        if (rel->symbol_idx >= build->ctx.num_symbols)
+            FAIL_BUILD("bad code reloc symbol index");
+        sym_needed[rel->symbol_idx] = 1;
+    }
+    for (uint32_t ri = 0; ri < build->ctx.num_data_relocs; ri++) {
+        const lr_obj_reloc_t *rel = &build->ctx.data_relocs[ri];
+        if (rel->symbol_idx >= build->ctx.num_symbols)
+            FAIL_BUILD("bad data reloc symbol index");
+        sym_needed[rel->symbol_idx] = 1;
+    }
 
     for (uint32_t ri = 0; ri < build->ctx.num_relocs; ri++) {
         const lr_obj_reloc_t *rel = &build->ctx.relocs[ri];
         if ((rel->type != LR_RELOC_ARM64_GOT_LOAD_PAGE21) &&
             (rel->type != LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12))
             continue;
-        if (rel->symbol_idx >= build->ctx.num_symbols)
-            FAIL_BUILD("bad GOT reloc symbol index");
         if (got_slot_off[rel->symbol_idx] != UINT32_MAX)
             continue;
         got_slot_off[rel->symbol_idx] = (uint32_t)got_off;
@@ -206,11 +249,9 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
         const lr_obj_symbol_t *sym = &build->ctx.symbols[si];
         if (sym->is_defined) {
             if (sym->section == 1) {
-                sym_addr[si] = MACHO_ARM64_EXEC_IMAGE_BASE +
-                               MACHO_ARM64_EXEC_TEXT_OFF + sym->offset;
+                sym_addr[si] = text_base + sym->offset;
             } else if (sym->section == 2) {
-                sym_addr[si] = MACHO_ARM64_EXEC_IMAGE_BASE +
-                               MACHO_ARM64_EXEC_TEXT_OFF + data_off + sym->offset;
+                sym_addr[si] = text_base + data_off + sym->offset;
             } else {
                 if (verbose) {
                     fprintf(stderr, "macho_exec_payload: bad defined section=%u symbol=%s\n",
@@ -222,10 +263,11 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
         }
 
         if (stub_off[si] != UINT32_MAX) {
-            sym_addr[si] = MACHO_ARM64_EXEC_IMAGE_BASE +
-                           MACHO_ARM64_EXEC_TEXT_OFF + stub_off[si];
+            sym_addr[si] = text_base + stub_off[si];
             continue;
         }
+        if (!sym_needed[si])
+            continue;
 
         void *addr = resolve_external_symbol_addr(sym->name, runtime_handle);
         if (!addr) {
@@ -247,8 +289,7 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
 
     for (uint32_t ri = 0; ri < build->ctx.num_relocs; ri++) {
         const lr_obj_reloc_t *rel = &build->ctx.relocs[ri];
-        uint64_t place_addr = MACHO_ARM64_EXEC_IMAGE_BASE +
-                              MACHO_ARM64_EXEC_TEXT_OFF + rel->offset;
+        uint64_t place_addr = text_base + rel->offset;
         uint64_t target_addr = 0;
         if (rel->symbol_idx >= build->ctx.num_symbols) {
             if (verbose) {
@@ -286,8 +327,7 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
         case LR_RELOC_ARM64_GOT_LOAD_PAGE21:
             if (got_slot_off[rel->symbol_idx] == UINT32_MAX)
                 FAIL_BUILD("missing GOT slot for PAGE21");
-            target_addr = MACHO_ARM64_EXEC_IMAGE_BASE +
-                          MACHO_ARM64_EXEC_TEXT_OFF + got_slot_off[rel->symbol_idx];
+            target_addr = text_base + got_slot_off[rel->symbol_idx];
             if (patch_aarch64_page21_exec(buf, total_size, rel->offset,
                                           place_addr, target_addr) != 0) {
                 if (verbose) {
@@ -301,8 +341,7 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
         case LR_RELOC_ARM64_GOT_LOAD_PAGEOFF12:
             if (got_slot_off[rel->symbol_idx] == UINT32_MAX)
                 FAIL_BUILD("missing GOT slot for PAGEOFF12");
-            target_addr = MACHO_ARM64_EXEC_IMAGE_BASE +
-                          MACHO_ARM64_EXEC_TEXT_OFF + got_slot_off[rel->symbol_idx];
+            target_addr = text_base + got_slot_off[rel->symbol_idx];
             if (patch_aarch64_pageoff12_exec(buf, total_size, rel->offset,
                                              target_addr, true) != 0) {
                 if (verbose) {
@@ -334,10 +373,11 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
     }
 
     if (runtime_handle)
-        dlclose(runtime_handle);
+        (void)lr_platform_dlclose(runtime_handle);
     free(sym_addr);
     free(got_slot_off);
     free(stub_off);
+    free(sym_needed);
     free(stub_for_sym);
     *out_code = buf;
     *out_code_size = total_size;
@@ -345,11 +385,12 @@ static int build_macho_exec_payload_aarch64(const lr_obj_build_result_t *build,
 
 fail:
     if (runtime_handle)
-        dlclose(runtime_handle);
+        (void)lr_platform_dlclose(runtime_handle);
     free(buf);
     free(sym_addr);
     free(got_slot_off);
     free(stub_off);
+    free(sym_needed);
     free(stub_for_sym);
     return -1;
 #undef FAIL_BUILD

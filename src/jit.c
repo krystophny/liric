@@ -1054,8 +1054,13 @@ static void register_builtin_symbols(lr_jit_t *j) {
     size_t n = lr_platform_intrinsic_count();
     for (size_t i = 0; i < n; i++) {
         const char *name = lr_platform_intrinsic_name(i);
+        lr_platform_intrinsic_info_t info;
         const uint8_t *blob_begin, *blob_end;
-        if (lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end)) {
+        void *addr = NULL;
+        if (!name || lr_platform_intrinsic_lookup(name, &info) == 0)
+            continue;
+        if (info.has_blob &&
+            lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end)) {
             size_t blob_size = (size_t)(blob_end - blob_begin);
             size_t dest = align_up(j->code_size, 16);
             if (dest + blob_size > j->code_cap)
@@ -1068,13 +1073,9 @@ static void register_builtin_symbols(lr_jit_t *j) {
             lr_jit_add_symbol(j, name, (void *)(j->code_buf + dest));
             continue;
         }
-        /* No blob available (e.g. macOS): resolve via libc equivalent. */
-        const char *libc_name = lr_platform_intrinsic_libc_name(name);
-        if (libc_name != name) {
-            void *addr = lr_platform_dlsym_default(libc_name);
-            if (addr)
-                lr_jit_add_symbol(j, name, addr);
-        }
+        addr = lr_platform_intrinsic_resolve_addr(name, NULL);
+        if (addr)
+            lr_jit_add_symbol(j, name, addr);
     }
 }
 

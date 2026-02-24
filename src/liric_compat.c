@@ -122,8 +122,16 @@ static const char *compat_select_runtime_clang(void) {
     const char *candidate = NULL;
     size_t i = 0;
 
-    if (env_clang && env_clang[0])
-        return env_clang;
+    if (env_clang && env_clang[0]) {
+        /* Absolute/relative paths should be executable files. Bare tool names
+           are resolved via PATH and validated by spawning --version. */
+        if (strchr(env_clang, '/')) {
+            if (compat_path_executable(env_clang) && compat_tool_available(env_clang))
+                return env_clang;
+        } else if (compat_tool_available(env_clang)) {
+            return env_clang;
+        }
+    }
 
 #if defined(__APPLE__)
     static const char *const brew_candidates[] = {

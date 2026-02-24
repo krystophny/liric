@@ -13,7 +13,10 @@ set(CMAKE_C_FLAGS_RELEASE "-O2 -g -fno-omit-frame-pointer -DNDEBUG"
 set(CMAKE_C_FLAGS_RELWITHDEBINFO "-O2 -g -fno-omit-frame-pointer -DNDEBUG"
     CACHE STRING "RelWithDebInfo C flags" FORCE)
 
-option(LIRIC_ENABLE_LTO "Enable interprocedural optimization (LTO/IPO)" ON)
+option(LIRIC_ENABLE_LTO "Enable interprocedural optimization (LTO/IPO)" OFF)
+option(LIRIC_LFORTRAN_NO_LTO
+    "Disable IPO for targets used by lfortran_api_compat workflow"
+    ON)
 if(LIRIC_ENABLE_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT LIRIC_IPO_SUPPORTED OUTPUT LIRIC_IPO_ERROR)
@@ -325,6 +328,17 @@ target_include_directories(liric_bin PRIVATE src)
 add_executable(liric_probe_runner tools/liric_probe_runner.c)
 target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_probe_runner PRIVATE src)
+if(LIRIC_LFORTRAN_NO_LTO)
+    set_property(TARGET liric PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    set_property(TARGET liric PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET liric PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+    set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+    set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+    set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+    target_compile_options(liric PRIVATE -fno-lto)
+    target_compile_options(liric_probe_runner PRIVATE -fno-lto)
+    set_property(TARGET liric_probe_runner APPEND_STRING PROPERTY LINK_FLAGS " -fno-lto")
+endif()
 
 add_executable(bench_compat_check tools/bench_compat_check.c tools/bench_common.c)
 target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})

@@ -1,5 +1,8 @@
 #include "platform.h"
+#include "platform_os.h"
 
+#include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -103,6 +106,12 @@ extern const uint8_t lr_stub_llvm_fma_f32_begin[];
 extern const uint8_t lr_stub_llvm_fma_f32_end[];
 extern const uint8_t lr_stub_llvm_fma_f64_begin[];
 extern const uint8_t lr_stub_llvm_fma_f64_end[];
+extern const uint8_t lr_stub_llvm_fmuladd_v2f32_begin[];
+extern const uint8_t lr_stub_llvm_fmuladd_v2f32_end[];
+extern const uint8_t lr_stub_llvm_fmuladd_v4f32_begin[];
+extern const uint8_t lr_stub_llvm_fmuladd_v4f32_end[];
+extern const uint8_t lr_stub_llvm_fmuladd_v2f64_begin[];
+extern const uint8_t lr_stub_llvm_fmuladd_v2f64_end[];
 extern const uint8_t lr_stub_llvm_minnum_f32_begin[];
 extern const uint8_t lr_stub_llvm_minnum_f32_end[];
 extern const uint8_t lr_stub_llvm_minnum_f64_begin[];
@@ -186,6 +195,9 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.fma.f64", LR_STUB_BLOB(lr_stub_llvm_fma_f64_begin, lr_stub_llvm_fma_f64_end) },
     { "llvm.fmuladd.f32", LR_STUB_BLOB(lr_stub_llvm_fma_f32_begin, lr_stub_llvm_fma_f32_end) },
     { "llvm.fmuladd.f64", LR_STUB_BLOB(lr_stub_llvm_fma_f64_begin, lr_stub_llvm_fma_f64_end) },
+    { "llvm.fmuladd.v2f32", LR_STUB_BLOB(lr_stub_llvm_fmuladd_v2f32_begin, lr_stub_llvm_fmuladd_v2f32_end) },
+    { "llvm.fmuladd.v4f32", LR_STUB_BLOB(lr_stub_llvm_fmuladd_v4f32_begin, lr_stub_llvm_fmuladd_v4f32_end) },
+    { "llvm.fmuladd.v2f64", LR_STUB_BLOB(lr_stub_llvm_fmuladd_v2f64_begin, lr_stub_llvm_fmuladd_v2f64_end) },
     { "llvm.minnum.f32", LR_STUB_BLOB(lr_stub_llvm_minnum_f32_begin, lr_stub_llvm_minnum_f32_end) },
     { "llvm.minnum.f64", LR_STUB_BLOB(lr_stub_llvm_minnum_f64_begin, lr_stub_llvm_minnum_f64_end) },
     { "llvm.maxnum.f32", LR_STUB_BLOB(lr_stub_llvm_maxnum_f32_begin, lr_stub_llvm_maxnum_f32_end) },
@@ -196,47 +208,202 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.is.fpclass.f64", LR_STUB_BLOB(lr_stub_llvm_is_fpclass_f64_begin, lr_stub_llvm_is_fpclass_f64_end) },
 };
 
+static const char *normalize_intrinsic_name(const char *name) {
+    if (!name)
+        return NULL;
+    while (*name == '\1' || *name == '_')
+        name++;
+    return name;
+}
+
 static const lr_platform_intrinsic_desc_t *lookup_intrinsic(const char *name) {
+    size_t i;
     if (!name || !name[0])
         return NULL;
-
-    size_t n = sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
-    for (size_t i = 0; i < n; i++) {
+    for (i = 0; i < sizeof(g_intrinsics) / sizeof(g_intrinsics[0]); i++) {
         if (strcmp(g_intrinsics[i].name, name) == 0)
             return &g_intrinsics[i];
     }
     return NULL;
 }
 
-bool lr_platform_intrinsic_supported(const char *name) {
-    const lr_platform_intrinsic_desc_t *d = lookup_intrinsic(name);
-    return d && d->blob_begin && d->blob_end && d->blob_end > d->blob_begin;
+static bool starts_with(const char *s, const char *prefix) {
+    if (!s || !prefix)
+        return false;
+    return strncmp(s, prefix, strlen(prefix)) == 0;
 }
 
-bool lr_platform_intrinsic_blob_lookup(const char *name,
-                                       const uint8_t **begin,
-                                       const uint8_t **end) {
-    const lr_platform_intrinsic_desc_t *d = lookup_intrinsic(name);
-    if (!d || !begin || !end || !d->blob_begin || !d->blob_end || d->blob_end <= d->blob_begin)
+static bool parse_int_suffix_bits(const char *name,
+                                  const char *prefix,
+                                  unsigned *out_bits) {
+    const char *p;
+    unsigned bits = 0;
+    if (!name || !prefix || !out_bits)
         return false;
-    *begin = d->blob_begin;
-    *end = d->blob_end;
+    if (!starts_with(name, prefix))
+        return false;
+    p = name + strlen(prefix);
+    if (*p == '\0')
+        return false;
+    while (*p >= '0' && *p <= '9') {
+        bits = bits * 10u + (unsigned)(*p - '0');
+        p++;
+    }
+    if (*p != '\0')
+        return false;
+    *out_bits = bits;
     return true;
 }
 
-size_t lr_platform_intrinsic_count(void) {
-    return sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
+static uint64_t lr_intrin_umax_i64(uint64_t a, uint64_t b) { return (a > b) ? a : b; }
+static uint64_t lr_intrin_umin_i64(uint64_t a, uint64_t b) { return (a < b) ? a : b; }
+static int64_t lr_intrin_smax_i64(int64_t a, int64_t b) { return (a > b) ? a : b; }
+static int64_t lr_intrin_smin_i64(int64_t a, int64_t b) { return (a < b) ? a : b; }
+static uint32_t lr_intrin_umax_i32(uint32_t a, uint32_t b) { return (a > b) ? a : b; }
+static uint32_t lr_intrin_umin_i32(uint32_t a, uint32_t b) { return (a < b) ? a : b; }
+static int32_t lr_intrin_smax_i32(int32_t a, int32_t b) { return (a > b) ? a : b; }
+static int32_t lr_intrin_smin_i32(int32_t a, int32_t b) { return (a < b) ? a : b; }
+
+static int8_t lr_intrin_abs_i8(int8_t x, uint8_t poison) { (void)poison; return x < 0 ? (int8_t)-x : x; }
+static int16_t lr_intrin_abs_i16(int16_t x, uint8_t poison) { (void)poison; return x < 0 ? (int16_t)-x : x; }
+static int32_t lr_intrin_abs_i32_fallback(int32_t x, uint8_t poison) { (void)poison; return x < 0 ? -x : x; }
+static int64_t lr_intrin_abs_i64_fallback(int64_t x, uint8_t poison) { (void)poison; return x < 0 ? -x : x; }
+
+static void lr_intrin_noop(void) { }
+static void lr_intrin_assume_i1(uint8_t cond) { (void)cond; }
+static void lr_intrin_trap(void) { abort(); }
+
+static double lr_intrin_exp10_f64(double x) { return pow(10.0, x); }
+static float lr_intrin_exp10_f32(float x) { return powf(10.0f, x); }
+
+static uint8_t lr_intrin_ctpop_i8(uint8_t x) {
+    uint8_t c = 0;
+    while (x) {
+        x &= (uint8_t)(x - 1u);
+        c++;
+    }
+    return c;
 }
 
-const char *lr_platform_intrinsic_name(size_t idx) {
-    size_t n = sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
-    if (idx >= n)
+static uint16_t lr_intrin_ctpop_i16(uint16_t x) {
+    uint16_t c = 0;
+    while (x) {
+        x &= (uint16_t)(x - 1u);
+        c++;
+    }
+    return c;
+}
+
+static uint32_t lr_intrin_ctpop_i32(uint32_t x) {
+    uint32_t c = 0;
+    while (x) {
+        x &= (x - 1u);
+        c++;
+    }
+    return c;
+}
+
+static uint64_t lr_intrin_ctpop_i64(uint64_t x) {
+    uint64_t c = 0;
+    while (x) {
+        x &= (x - 1u);
+        c++;
+    }
+    return c;
+}
+
+static uint8_t lr_intrin_ctlz_i8(uint8_t x, uint8_t is_zero_undef) {
+    uint8_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 8;
+    while ((x & 0x80u) == 0u) {
+        n++;
+        x <<= 1;
+    }
+    return n;
+}
+
+static uint16_t lr_intrin_ctlz_i16(uint16_t x, uint8_t is_zero_undef) {
+    uint16_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 16;
+    while ((x & 0x8000u) == 0u) {
+        n++;
+        x <<= 1;
+    }
+    return n;
+}
+
+static uint32_t lr_intrin_ctlz_i32(uint32_t x, uint8_t is_zero_undef) {
+    uint32_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 32;
+    while ((x & 0x80000000u) == 0u) {
+        n++;
+        x <<= 1;
+    }
+    return n;
+}
+
+static uint64_t lr_intrin_ctlz_i64(uint64_t x, uint8_t is_zero_undef) {
+    uint64_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 64;
+    while ((x & 0x8000000000000000ULL) == 0ULL) {
+        n++;
+        x <<= 1;
+    }
+    return n;
+}
+
+static uint8_t lr_intrin_cttz_i8(uint8_t x, uint8_t is_zero_undef) {
+    uint8_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 8;
+    while ((x & 1u) == 0u) {
+        n++;
+        x >>= 1;
+    }
+    return n;
+}
+
+static uint16_t lr_intrin_cttz_i16(uint16_t x, uint8_t is_zero_undef) {
+    uint16_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 16;
+    while ((x & 1u) == 0u) {
+        n++;
+        x >>= 1;
+    }
+    return n;
+}
+
+static uint32_t lr_intrin_cttz_i32(uint32_t x, uint8_t is_zero_undef) {
+    uint32_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 32;
+    while ((x & 1u) == 0u) {
+        n++;
+        x >>= 1;
+    }
+    return n;
+}
+
+static uint64_t lr_intrin_cttz_i64(uint64_t x, uint8_t is_zero_undef) {
+    uint64_t n = 0;
+    if (x == 0)
+        return is_zero_undef ? 0 : 64;
+    while ((x & 1u) == 0u) {
+        n++;
+        x >>= 1;
+    }
+    return n;
+}
+
+static const char *intrinsic_libc_name_impl(const char *name) {
+    if (!name || strncmp(name, "llvm.", 5) != 0)
         return NULL;
-    return g_intrinsics[idx].name;
-}
 
-const char *lr_platform_intrinsic_libc_name(const char *name) {
-    if (!name || strncmp(name, "llvm.", 5) != 0) return name;
     if (strcmp(name, "llvm.fabs.f32") == 0) return "fabsf";
     if (strcmp(name, "llvm.fabs.f64") == 0) return "fabs";
     if (strcmp(name, "llvm.sqrt.f32") == 0) return "sqrtf";
@@ -247,10 +414,22 @@ const char *lr_platform_intrinsic_libc_name(const char *name) {
     if (strcmp(name, "llvm.copysign.f64") == 0) return "copysign";
     if (strcmp(name, "llvm.sin.f32") == 0) return "sinf";
     if (strcmp(name, "llvm.sin.f64") == 0) return "sin";
+    if (strcmp(name, "llvm.asin.f32") == 0) return "asinf";
+    if (strcmp(name, "llvm.asin.f64") == 0) return "asin";
+    if (strcmp(name, "llvm.acos.f32") == 0) return "acosf";
+    if (strcmp(name, "llvm.acos.f64") == 0) return "acos";
+    if (strcmp(name, "llvm.atan.f32") == 0) return "atanf";
+    if (strcmp(name, "llvm.atan.f64") == 0) return "atan";
+    if (strcmp(name, "llvm.atan2.f32") == 0) return "atan2f";
+    if (strcmp(name, "llvm.atan2.f64") == 0) return "atan2";
     if (strcmp(name, "llvm.cos.f32") == 0) return "cosf";
     if (strcmp(name, "llvm.cos.f64") == 0) return "cos";
+    if (strcmp(name, "llvm.tan.f32") == 0) return "tanf";
+    if (strcmp(name, "llvm.tan.f64") == 0) return "tan";
     if (strcmp(name, "llvm.exp.f32") == 0) return "expf";
     if (strcmp(name, "llvm.exp.f64") == 0) return "exp";
+    if (strcmp(name, "llvm.exp10.f32") == 0) return "exp10f";
+    if (strcmp(name, "llvm.exp10.f64") == 0) return "exp10";
     if (strcmp(name, "llvm.exp2.f32") == 0) return "exp2f";
     if (strcmp(name, "llvm.exp2.f64") == 0) return "exp2";
     if (strcmp(name, "llvm.log.f32") == 0) return "logf";
@@ -259,6 +438,12 @@ const char *lr_platform_intrinsic_libc_name(const char *name) {
     if (strcmp(name, "llvm.log2.f64") == 0) return "log2";
     if (strcmp(name, "llvm.log10.f32") == 0) return "log10f";
     if (strcmp(name, "llvm.log10.f64") == 0) return "log10";
+    if (strcmp(name, "llvm.sinh.f32") == 0) return "sinhf";
+    if (strcmp(name, "llvm.sinh.f64") == 0) return "sinh";
+    if (strcmp(name, "llvm.cosh.f32") == 0) return "coshf";
+    if (strcmp(name, "llvm.cosh.f64") == 0) return "cosh";
+    if (strcmp(name, "llvm.tanh.f32") == 0) return "tanhf";
+    if (strcmp(name, "llvm.tanh.f64") == 0) return "tanh";
     if (strcmp(name, "llvm.floor.f32") == 0) return "floorf";
     if (strcmp(name, "llvm.floor.f64") == 0) return "floor";
     if (strcmp(name, "llvm.ceil.f32") == 0) return "ceilf";
@@ -275,23 +460,239 @@ const char *lr_platform_intrinsic_libc_name(const char *name) {
     if (strcmp(name, "llvm.fma.f64") == 0) return "fma";
     if (strcmp(name, "llvm.fmuladd.f32") == 0) return "fmaf";
     if (strcmp(name, "llvm.fmuladd.f64") == 0) return "fma";
-    if (strcmp(name, "llvm.minnum.f32") == 0) return "fminf";
-    if (strcmp(name, "llvm.minnum.f64") == 0) return "fmin";
+    if (strcmp(name, "llvm.maximum.f32") == 0) return "fmaxf";
+    if (strcmp(name, "llvm.maximum.f64") == 0) return "fmax";
     if (strcmp(name, "llvm.maxnum.f32") == 0) return "fmaxf";
     if (strcmp(name, "llvm.maxnum.f64") == 0) return "fmax";
+    if (strcmp(name, "llvm.minimum.f32") == 0) return "fminf";
+    if (strcmp(name, "llvm.minimum.f64") == 0) return "fmin";
+    if (strcmp(name, "llvm.minnum.f32") == 0) return "fminf";
+    if (strcmp(name, "llvm.minnum.f64") == 0) return "fmin";
     if (strcmp(name, "llvm.abs.i32") == 0) return "abs";
     if (strcmp(name, "llvm.abs.i64") == 0) return "llabs";
-    if (strcmp(name, "llvm.memcpy.p0.p0.i64") == 0) return "memcpy";
-    if (strcmp(name, "llvm.memcpy.p0.p0.i32") == 0) return "memcpy";
-    if (strcmp(name, "llvm.memcpy.p0i8.p0i8.i64") == 0) return "memcpy";
-    if (strcmp(name, "llvm.memcpy.p0i8.p0i8.i32") == 0) return "memcpy";
-    if (strcmp(name, "llvm.memmove.p0.p0.i64") == 0) return "memmove";
-    if (strcmp(name, "llvm.memmove.p0.p0.i32") == 0) return "memmove";
-    if (strcmp(name, "llvm.memmove.p0i8.p0i8.i64") == 0) return "memmove";
-    if (strcmp(name, "llvm.memmove.p0i8.p0i8.i32") == 0) return "memmove";
-    if (strcmp(name, "llvm.memset.p0.i64") == 0) return "memset";
-    if (strcmp(name, "llvm.memset.p0.i32") == 0) return "memset";
-    if (strcmp(name, "llvm.memset.p0i8.i64") == 0) return "memset";
-    if (strcmp(name, "llvm.memset.p0i8.i32") == 0) return "memset";
+
+    if (starts_with(name, "llvm.memcpy.")) return "memcpy";
+    if (starts_with(name, "llvm.memmove.")) return "memmove";
+    if (starts_with(name, "llvm.memset.")) return "memset";
+
+    return NULL;
+}
+
+static void *resolve_builtin_intrinsic_addr(const char *name) {
+    unsigned bits = 0;
+    if (!name || !name[0])
+        return NULL;
+
+    if (strcmp(name, "llvm.umax.i64") == 0) return (void *)(uintptr_t)lr_intrin_umax_i64;
+    if (strcmp(name, "llvm.umin.i64") == 0) return (void *)(uintptr_t)lr_intrin_umin_i64;
+    if (strcmp(name, "llvm.smax.i64") == 0) return (void *)(uintptr_t)lr_intrin_smax_i64;
+    if (strcmp(name, "llvm.smin.i64") == 0) return (void *)(uintptr_t)lr_intrin_smin_i64;
+    if (strcmp(name, "llvm.umax.i32") == 0) return (void *)(uintptr_t)lr_intrin_umax_i32;
+    if (strcmp(name, "llvm.umin.i32") == 0) return (void *)(uintptr_t)lr_intrin_umin_i32;
+    if (strcmp(name, "llvm.smax.i32") == 0) return (void *)(uintptr_t)lr_intrin_smax_i32;
+    if (strcmp(name, "llvm.smin.i32") == 0) return (void *)(uintptr_t)lr_intrin_smin_i32;
+
+    if (strcmp(name, "llvm.abs.i8") == 0) return (void *)(uintptr_t)lr_intrin_abs_i8;
+    if (strcmp(name, "llvm.abs.i16") == 0) return (void *)(uintptr_t)lr_intrin_abs_i16;
+    if (strcmp(name, "llvm.abs.i32") == 0) return (void *)(uintptr_t)lr_intrin_abs_i32_fallback;
+    if (strcmp(name, "llvm.abs.i64") == 0) return (void *)(uintptr_t)lr_intrin_abs_i64_fallback;
+
+    if (starts_with(name, "llvm.assume")) return (void *)(uintptr_t)lr_intrin_assume_i1;
+    if (starts_with(name, "llvm.lifetime.start")) return (void *)(uintptr_t)lr_intrin_noop;
+    if (starts_with(name, "llvm.lifetime.end")) return (void *)(uintptr_t)lr_intrin_noop;
+    if (starts_with(name, "llvm.dbg.declare")) return (void *)(uintptr_t)lr_intrin_noop;
+    if (starts_with(name, "llvm.dbg.value")) return (void *)(uintptr_t)lr_intrin_noop;
+    if (strcmp(name, "llvm.trap") == 0) return (void *)(uintptr_t)lr_intrin_trap;
+
+    if (strcmp(name, "llvm.exp10.f64") == 0 || strcmp(name, "exp10") == 0)
+        return (void *)(uintptr_t)lr_intrin_exp10_f64;
+    if (strcmp(name, "llvm.exp10.f32") == 0 || strcmp(name, "exp10f") == 0)
+        return (void *)(uintptr_t)lr_intrin_exp10_f32;
+
+    if (parse_int_suffix_bits(name, "llvm.ctpop.i", &bits)) {
+        if (bits == 8) return (void *)(uintptr_t)lr_intrin_ctpop_i8;
+        if (bits == 16) return (void *)(uintptr_t)lr_intrin_ctpop_i16;
+        if (bits == 32) return (void *)(uintptr_t)lr_intrin_ctpop_i32;
+        if (bits == 64) return (void *)(uintptr_t)lr_intrin_ctpop_i64;
+        return NULL;
+    }
+    if (parse_int_suffix_bits(name, "llvm.ctlz.i", &bits)) {
+        if (bits == 8) return (void *)(uintptr_t)lr_intrin_ctlz_i8;
+        if (bits == 16) return (void *)(uintptr_t)lr_intrin_ctlz_i16;
+        if (bits == 32) return (void *)(uintptr_t)lr_intrin_ctlz_i32;
+        if (bits == 64) return (void *)(uintptr_t)lr_intrin_ctlz_i64;
+        return NULL;
+    }
+    if (parse_int_suffix_bits(name, "llvm.cttz.i", &bits)) {
+        if (bits == 8) return (void *)(uintptr_t)lr_intrin_cttz_i8;
+        if (bits == 16) return (void *)(uintptr_t)lr_intrin_cttz_i16;
+        if (bits == 32) return (void *)(uintptr_t)lr_intrin_cttz_i32;
+        if (bits == 64) return (void *)(uintptr_t)lr_intrin_cttz_i64;
+        return NULL;
+    }
+
+    return NULL;
+}
+
+static bool is_target_lowered_intrinsic(const char *name) {
+    return starts_with(name, "llvm.va_start") ||
+           starts_with(name, "llvm.va_end") ||
+           starts_with(name, "llvm.va_copy");
+}
+
+const char *lr_platform_intrinsic_canonical_name(const char *name) {
+    return normalize_intrinsic_name(name);
+}
+
+int lr_platform_intrinsic_lookup(const char *name,
+                                 lr_platform_intrinsic_info_t *out_info) {
+    const char *canonical = normalize_intrinsic_name(name);
+    const lr_platform_intrinsic_desc_t *d = NULL;
+    const char *libc_name = NULL;
+    void *builtin_addr = NULL;
+    bool known = false;
+    lr_platform_intrinsic_strategy_t preferred = LR_PLATFORM_INTRINSIC_UNSUPPORTED;
+
+    if (!canonical || !canonical[0]) {
+        if (out_info)
+            memset(out_info, 0, sizeof(*out_info));
+        return 0;
+    }
+
+    d = lookup_intrinsic(canonical);
+    libc_name = intrinsic_libc_name_impl(canonical);
+    builtin_addr = resolve_builtin_intrinsic_addr(canonical);
+
+    if (d && d->blob_begin && d->blob_end && d->blob_end > d->blob_begin) {
+        known = true;
+        preferred = LR_PLATFORM_INTRINSIC_BLOB;
+    } else if (libc_name) {
+        known = true;
+        preferred = LR_PLATFORM_INTRINSIC_LIBC;
+    } else if (builtin_addr) {
+        known = true;
+        preferred = LR_PLATFORM_INTRINSIC_BUILTIN;
+    } else if (is_target_lowered_intrinsic(canonical)) {
+        known = true;
+        preferred = LR_PLATFORM_INTRINSIC_TARGET_LOWER;
+    }
+
+    if (out_info) {
+        memset(out_info, 0, sizeof(*out_info));
+        out_info->canonical_name = canonical;
+        out_info->libc_name = libc_name;
+        out_info->blob_begin = d ? d->blob_begin : NULL;
+        out_info->blob_end = d ? d->blob_end : NULL;
+        out_info->preferred_strategy = preferred;
+        out_info->known = known;
+        out_info->has_blob = d && d->blob_begin && d->blob_end && d->blob_end > d->blob_begin;
+        out_info->has_builtin = builtin_addr != NULL;
+    }
+
+    return known ? 1 : 0;
+}
+
+static void *resolve_symbol_handle(void *handle, const char *name) {
+    void *addr;
+    if (!name || !name[0])
+        return NULL;
+
+    if (handle) {
+        addr = lr_platform_dlsym(handle, name);
+        if (addr)
+            return addr;
+        if (name[0] == '_')
+            return lr_platform_dlsym(handle, name + 1);
+        return NULL;
+    }
+
+    addr = lr_platform_dlsym_default(name);
+    if (addr)
+        return addr;
+    if (name[0] == '_')
+        return lr_platform_dlsym_default(name + 1);
+    return NULL;
+}
+
+void *lr_platform_intrinsic_resolve_addr(const char *name, void *runtime_handle) {
+    const char *canonical = normalize_intrinsic_name(name);
+    const char *libc_name;
+    void *addr;
+
+    if (!canonical || !canonical[0])
+        return NULL;
+
+    libc_name = intrinsic_libc_name_impl(canonical);
+    if (libc_name) {
+        addr = resolve_symbol_handle(NULL, libc_name);
+        if (!addr && runtime_handle)
+            addr = resolve_symbol_handle(runtime_handle, libc_name);
+        if (addr)
+            return addr;
+    }
+
+    addr = resolve_builtin_intrinsic_addr(canonical);
+    if (addr)
+        return addr;
+
+    return NULL;
+}
+
+bool lr_platform_intrinsic_is_supported(const char *name) {
+    lr_platform_intrinsic_info_t info;
+    if (lr_platform_intrinsic_lookup(name, &info) == 0)
+        return false;
+    return info.known;
+}
+
+size_t lr_platform_intrinsic_registry_count(void) {
+    return sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
+}
+
+const char *lr_platform_intrinsic_registry_name(size_t idx) {
+    size_t n = sizeof(g_intrinsics) / sizeof(g_intrinsics[0]);
+    if (idx >= n)
+        return NULL;
+    return g_intrinsics[idx].name;
+}
+
+bool lr_platform_intrinsic_supported(const char *name) {
+    lr_platform_intrinsic_info_t info;
+    if (lr_platform_intrinsic_lookup(name, &info) == 0)
+        return false;
+    return info.has_blob;
+}
+
+bool lr_platform_intrinsic_blob_lookup(const char *name,
+                                       const uint8_t **begin,
+                                       const uint8_t **end) {
+    lr_platform_intrinsic_info_t info;
+    if (!begin || !end)
+        return false;
+    if (lr_platform_intrinsic_lookup(name, &info) == 0)
+        return false;
+    if (!info.has_blob)
+        return false;
+    *begin = info.blob_begin;
+    *end = info.blob_end;
+    return true;
+}
+
+size_t lr_platform_intrinsic_count(void) {
+    return lr_platform_intrinsic_registry_count();
+}
+
+const char *lr_platform_intrinsic_name(size_t idx) {
+    return lr_platform_intrinsic_registry_name(idx);
+}
+
+const char *lr_platform_intrinsic_libc_name(const char *name) {
+    const char *canonical = normalize_intrinsic_name(name);
+    const char *mapped;
+    if (!canonical || !canonical[0])
+        return name;
+    mapped = intrinsic_libc_name_impl(canonical);
+    if (mapped)
+        return mapped;
     return name;
 }

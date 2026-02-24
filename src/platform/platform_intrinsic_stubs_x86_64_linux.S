@@ -676,6 +676,30 @@ lr_stub_llvm_fma_f32_begin:
     ret
 lr_stub_llvm_fma_f32_end:
 
+.globl lr_stub_llvm_fmuladd_v2f32_begin
+.globl lr_stub_llvm_fmuladd_v2f32_end
+lr_stub_llvm_fmuladd_v2f32_begin:
+    mulps xmm0, xmm1
+    addps xmm0, xmm2
+    ret
+lr_stub_llvm_fmuladd_v2f32_end:
+
+.globl lr_stub_llvm_fmuladd_v4f32_begin
+.globl lr_stub_llvm_fmuladd_v4f32_end
+lr_stub_llvm_fmuladd_v4f32_begin:
+    mulps xmm0, xmm1
+    addps xmm0, xmm2
+    ret
+lr_stub_llvm_fmuladd_v4f32_end:
+
+.globl lr_stub_llvm_fmuladd_v2f64_begin
+.globl lr_stub_llvm_fmuladd_v2f64_end
+lr_stub_llvm_fmuladd_v2f64_begin:
+    mulpd xmm0, xmm1
+    addpd xmm0, xmm2
+    ret
+lr_stub_llvm_fmuladd_v2f64_end:
+
 .globl lr_stub_llvm_minnum_f64_begin
 .globl lr_stub_llvm_minnum_f64_end
 lr_stub_llvm_minnum_f64_begin:
