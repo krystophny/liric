@@ -43,7 +43,8 @@ file(WRITE "${fake_python}" "#!/usr/bin/env bash
 set -euo pipefail
 if [[ -n \"\${LIRIC_TEST_PY_LOG:-}\" ]]; then
     printf 'ARGS: %s\\n' \"\$*\" >> \"\${LIRIC_TEST_PY_LOG}\"
-    printf 'LIRIC_REF_SKIP_COMPARE: %s\\n' \"\${LIRIC_REF_SKIP_COMPARE:-}\" >> \"\${LIRIC_TEST_PY_LOG}\"
+    printf 'LIRIC_REF_SKIP_IR: %s\\n' \"\${LIRIC_REF_SKIP_IR:-}\" >> \"\${LIRIC_TEST_PY_LOG}\"
+    printf 'LIRIC_REF_SKIP_DBG: %s\\n' \"\${LIRIC_REF_SKIP_DBG:-}\" >> \"\${LIRIC_TEST_PY_LOG}\"
 fi
 exit 0
 ")
@@ -119,9 +120,9 @@ if(NOT default_log_text MATCHES "lfortran_ref_test_liric\\.py")
         "default reference policy must invoke the liric wrapper script\nlog:\n${default_log_text}"
     )
 endif()
-if(NOT default_log_text MATCHES "LIRIC_REF_SKIP_COMPARE:[ \t]*[^\n]*llvm")
+if(NOT default_log_text MATCHES "LIRIC_REF_SKIP_IR:[ \t]*[^\n]*llvm")
     message(FATAL_ERROR
-        "default reference policy must set LIRIC_REF_SKIP_COMPARE containing llvm\nlog:\n${default_log_text}"
+        "default reference policy must set LIRIC_REF_SKIP_IR containing llvm\nlog:\n${default_log_text}"
     )
 endif()
 set(default_summary "${root}/out_default/summary.json")

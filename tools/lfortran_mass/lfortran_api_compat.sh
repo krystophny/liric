@@ -32,8 +32,10 @@ This lane validates compile-time API compatibility:
     run_tests.py -b llvm --ninja -jN
     run_tests.py -b llvm -f -nf16 --ninja -jN
   Reference tests run ALL backends via lfortran_ref_test_liric.py.
-  IR-text-dependent backends (llvm, run_with_dbg) execute their commands
-  (catching crashes) but skip output comparison since liric IR differs.
+  The llvm backend (--show-llvm) skips IR output comparison (stderr and
+  returncode still checked).  The run_dbg backend skips all comparison
+  (debug-info/DWARF not yet implemented in liric).
+  All other backends are fully compared.
 EOF
 }
 
@@ -544,8 +546,10 @@ if [[ "$run_ref_tests" == "yes" ]]; then
             export LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS="1"
             echo "lfortran_api_compat: applying WITH_LIRIC reference policy: LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS=${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS}" >&2
         fi
-        export LIRIC_REF_SKIP_COMPARE="llvm,run_dbg"
-        echo "lfortran_api_compat: IR compare skipped for: ${LIRIC_REF_SKIP_COMPARE}" >&2
+        export LIRIC_REF_SKIP_IR="llvm"
+        export LIRIC_REF_SKIP_DBG="run_dbg"
+        echo "lfortran_api_compat: IR comparison skipped for: ${LIRIC_REF_SKIP_IR}" >&2
+        echo "lfortran_api_compat: debug-info comparison skipped for: ${LIRIC_REF_SKIP_DBG}" >&2
         if [[ -n "$ref_args" ]]; then
             # shellcheck disable=SC2086
             run_in_selected_env "$PYTHON_BIN" "$liric_ref_wrapper" $ref_args
