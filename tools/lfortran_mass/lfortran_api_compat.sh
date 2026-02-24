@@ -31,8 +31,9 @@ This lane validates compile-time API compatibility:
   Integration tests run in both modes:
     run_tests.py -b llvm --ninja -jN
     run_tests.py -b llvm -f -nf16 --ninja -jN
-  Reference tests default to "--exclude-backend llvm" in WITH_LIRIC lane
-  unless backend selection is explicitly set via --ref-args.
+  Reference tests exclude backends whose output depends on LLVM IR text
+  or LLVM debug info (llvm, asr_implicit_interface_and_typing_with_llvm,
+  run_with_dbg) unless overridden via --ref-args.
 EOF
 }
 
@@ -538,7 +539,7 @@ ctest --test-dir "$lfortran_build_liric" --output-on-failure \
 if [[ "$run_ref_tests" == "yes" ]]; then
     ref_default_args=""
     if ! ref_args_has_backend_policy "$ref_args"; then
-        ref_default_args="--exclude-backend llvm"
+        ref_default_args="--exclude-backend llvm asr_implicit_interface_and_typing_with_llvm run_with_dbg"
         echo "lfortran_api_compat: applying WITH_LIRIC reference policy: ${ref_default_args}" >&2
     fi
     (
