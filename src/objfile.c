@@ -88,7 +88,7 @@ int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
             oc->module_sym_defined[sym_id] = 1;
     }
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (!g->name || !g->name[0] || (g->is_external && !g->is_local))
+        if (!g->name || !g->name[0] || g->is_external)
             continue;
         uint32_t sym_id = lr_module_intern_symbol(m, g->name);
         if (sym_id < oc->module_sym_count)
@@ -440,7 +440,7 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
     }
 
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (g->is_external && !g->is_local) {
+        if (g->is_external) {
             if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) == UINT32_MAX) {
                 m->obj_ctx = NULL;
                 lr_arena_destroy(arena);
@@ -675,7 +675,7 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
                     g->init_size,
                     nrel);
         }
-        if (g->is_external && !g->is_local) {
+        if (g->is_external) {
             if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) ==
                 UINT32_MAX) {
                 m->obj_ctx = NULL;
