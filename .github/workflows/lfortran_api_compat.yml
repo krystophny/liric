@@ -29,7 +29,7 @@ jobs:
     env:
       LIRIC_BUILD: ${{ github.workspace }}/build
       LFORTRAN_REPO: https://github.com/krystophny/lfortran.git
-      LFORTRAN_REF: origin/liric-aot
+      LFORTRAN_REF: origin/liric-aot-minimal
 
     steps:
       - name: Checkout liric

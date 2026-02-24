@@ -174,6 +174,12 @@ public:
         return Type::wrap(lc_type_struct_field(t, i));
     }
 
+    Type *getArrayElementType() const {
+        lr_type_t *t = impl();
+        if (!t || t->kind != LR_TYPE_ARRAY) return nullptr;
+        return Type::wrap(t->array.elem);
+    }
+
     unsigned getStructNumElements() const {
         lr_type_t *t = impl();
         return t ? lc_type_struct_num_fields(t) : 0;

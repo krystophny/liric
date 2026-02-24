@@ -10,7 +10,7 @@ usage: lfortran_api_compat.sh [options]
   --fresh-workspace       remove existing workspace checkout/build and output root before running
   --lfortran-dir PATH     use an existing lfortran checkout (skip clone if present)
   --lfortran-repo URL     lfortran git URL (default: https://github.com/krystophny/lfortran.git)
-  --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot)
+  --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot-minimal)
   --lfortran-remote NAME  remote name for --lfortran-ref (default: origin)
   --skip-checkout         keep current lfortran checkout/ref
   --build-type TYPE       CMake build type (default: Release)
@@ -100,7 +100,7 @@ ensure_lfortran_generated_sources() {
     local repo_dir="$1"
     local generated_preprocessor="${repo_dir}/src/lfortran/parser/preprocessor.cpp"
     local tag_count="0"
-    local fallback_tag="v0.0.0-liric-aot"
+    local fallback_tag="v0.0.0-liric-aot-minimal"
 
     if [[ -f "$generated_preprocessor" ]]; then
         return 0
@@ -267,7 +267,7 @@ output_root=""
 liric_build=""
 lfortran_dir=""
 lfortran_repo="https://github.com/krystophny/lfortran.git"
-lfortran_ref="origin/liric-aot"
+lfortran_ref="origin/liric-aot-minimal"
 lfortran_remote="origin"
 build_type="Release"
 workers="$(detect_workers)"

@@ -19,7 +19,7 @@ ctest --test-dir build --output-on-failure
 - `build/deps/lfortran/build-llvm`: baseline `WITH_LLVM=yes`
 - `build/deps/lfortran/build-liric`: `WITH_LIRIC=yes` with `WITH_LLVM=OFF`
 
-The prepare step always checks out `origin/liric-aot` before rebuilding.
+The prepare step always checks out `origin/liric-aot-minimal` before rebuilding.
 
 ### WITH_LIRIC `-c` sidecars
 
