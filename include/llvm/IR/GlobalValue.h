@@ -2,7 +2,7 @@
 #define LLVM_IR_GLOBALVALUE_H
 
 #include "llvm/IR/Constants.h"
-#include <unordered_map>
+#include <liric/llvm_compat_c.h>
 
 namespace llvm {
 
@@ -10,33 +10,8 @@ class Module;
 class PointerType;
 
 namespace detail {
-    struct global_value_state {
-        int linkage = 0;
-        int visibility = 0;
-        int unnamed_addr = 0;
-    };
-
-    inline thread_local std::unordered_map<const void *, global_value_state>
-        global_value_states;
-
-    inline global_value_state &ensure_global_value_state(const void *obj) {
-        if (!obj) {
-            static thread_local global_value_state fallback;
-            return fallback;
-        }
-        return global_value_states[obj];
-    }
-
-    inline const global_value_state *lookup_global_value_state(const void *obj) {
-        auto it = global_value_states.find(obj);
-        if (it == global_value_states.end())
-            return nullptr;
-        return &it->second;
-    }
-
     inline void unregister_global_value_state(const void *obj) {
-        if (obj)
-            global_value_states.erase(obj);
+        lr_llvm_compat_unregister_global_value_state(obj);
     }
 } // namespace detail
 
@@ -71,36 +46,33 @@ public:
     Type *getValueType() const { return getType(); }
 
     void setLinkage(LinkageTypes lt) {
-        detail::ensure_global_value_state(this).linkage = (int)lt;
+        lr_llvm_compat_global_value_set_linkage(this, (int)lt);
     }
     LinkageTypes getLinkage() const {
-        const detail::global_value_state *state =
-            detail::lookup_global_value_state(this);
-        if (!state)
+        int linkage = 0;
+        if (!lr_llvm_compat_global_value_get_linkage(this, &linkage))
             return ExternalLinkage;
-        return (LinkageTypes)state->linkage;
+        return (LinkageTypes)linkage;
     }
 
     void setVisibility(VisibilityTypes vt) {
-        detail::ensure_global_value_state(this).visibility = (int)vt;
+        lr_llvm_compat_global_value_set_visibility(this, (int)vt);
     }
     VisibilityTypes getVisibility() const {
-        const detail::global_value_state *state =
-            detail::lookup_global_value_state(this);
-        if (!state)
+        int visibility = 0;
+        if (!lr_llvm_compat_global_value_get_visibility(this, &visibility))
             return DefaultVisibility;
-        return (VisibilityTypes)state->visibility;
+        return (VisibilityTypes)visibility;
     }
 
     void setUnnamedAddr(UnnamedAddr ua) {
-        detail::ensure_global_value_state(this).unnamed_addr = (int)ua;
+        lr_llvm_compat_global_value_set_unnamed_addr(this, (int)ua);
     }
     UnnamedAddr getUnnamedAddr() const {
-        const detail::global_value_state *state =
-            detail::lookup_global_value_state(this);
-        if (!state)
+        int unnamed_addr = 0;
+        if (!lr_llvm_compat_global_value_get_unnamed_addr(this, &unnamed_addr))
             return None;
-        return (UnnamedAddr)state->unnamed_addr;
+        return (UnnamedAddr)unnamed_addr;
     }
 
     bool isDeclaration() const { return false; }

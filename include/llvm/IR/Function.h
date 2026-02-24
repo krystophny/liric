@@ -8,6 +8,7 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/CallingConv.h"
 #include "llvm/ADT/StringRef.h"
+#include <liric/llvm_compat_c.h>
 #include <vector>
 
 namespace llvm {
@@ -62,11 +63,7 @@ public:
 
         unsigned size() const {
             lr_func_t *f = owner_ ? owner_->getIRFunc() : nullptr;
-            unsigned n = 0;
-            for (lr_block_t *b = f ? f->first_block : nullptr; b; b = b->next) {
-                ++n;
-            }
-            return n;
+            return lr_llvm_compat_function_block_count(f);
         }
 
         void push_back(BasicBlock *bb) {
@@ -224,26 +221,11 @@ public:
         if (!f || !compat_mod_ || !bb) return;
 
         lr_block_t *block = bb->impl_block();
-        if (!block || block->func != f) return;
-
-        bool attached = false;
-        for (lr_block_t *it = f->first_block; it; it = it->next) {
-            if (it == block) {
-                attached = true;
-                break;
-            }
-        }
-        if (!attached) {
-            if (lc_block_attach(compat_mod_, block) != 0) return;
-            detail::register_block_parent(block, this);
-        }
-
-        if (!insert_before || insert_before == bb) return;
-
-        lr_block_t *anchor = insert_before->impl_block();
-        if (!anchor || anchor->func != f || anchor == block) return;
-
-        bb->moveBefore(insert_before);
+        lr_block_t *anchor = insert_before ? insert_before->impl_block() : nullptr;
+        if (!block) return;
+        if (!lr_llvm_compat_function_insert_block(compat_mod_, f, block, anchor))
+            return;
+        detail::register_block_parent(block, this);
     }
 
     iterator begin() {

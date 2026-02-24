@@ -18,8 +18,8 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
+#include <liric/llvm_compat_c.h>
 #include <vector>
-#include <cstring>
 #include <string>
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -54,71 +54,28 @@ class IRBuilder {
         return nullptr;
     }
 
-    static std::string intrinsicTypeSuffix(Type *Ty) {
-        if (!Ty) return "";
-        if (Ty->isFloatTy()) return "f32";
-        if (Ty->isDoubleTy()) return "f64";
-        if (Ty->isIntegerTy())
-            return "i" + std::to_string(Ty->getIntegerBitWidth());
-        return "";
-    }
-
     static std::string intrinsicNameForID(Intrinsic::ID ID,
                                           ArrayRef<Type *> Types,
                                           ArrayRef<Value *> Args) {
         Type *over_ty = pickIntrinsicOverloadType(Types, Args);
-        std::string suffix = intrinsicTypeSuffix(over_ty);
-        auto with_suffix = [&](const char *base) -> std::string {
-            if (suffix.empty()) return "";
-            return std::string(base) + suffix;
-        };
+        Type *powi_i_ty = nullptr;
+        char name[128];
+        if (Args.size() > 1 && Args[1]) powi_i_ty = Args[1]->getType();
+        else if (Types.size() > 1 && Types[1]) powi_i_ty = Types[1];
+        unsigned powi_bits = 32;
+        if (powi_i_ty && powi_i_ty->isIntegerTy())
+            powi_bits = powi_i_ty->getIntegerBitWidth();
 
-        switch (ID) {
-        case Intrinsic::abs:      return with_suffix("llvm.abs.");
-        case Intrinsic::copysign: return with_suffix("llvm.copysign.");
-        case Intrinsic::cos:      return with_suffix("llvm.cos.");
-        case Intrinsic::ctlz:     return with_suffix("llvm.ctlz.");
-        case Intrinsic::ctpop:    return with_suffix("llvm.ctpop.");
-        case Intrinsic::cttz:     return with_suffix("llvm.cttz.");
-        case Intrinsic::exp:      return with_suffix("llvm.exp.");
-        case Intrinsic::exp2:     return with_suffix("llvm.exp2.");
-        case Intrinsic::fabs:     return with_suffix("llvm.fabs.");
-        case Intrinsic::floor:    return with_suffix("llvm.floor.");
-        case Intrinsic::ceil:     return with_suffix("llvm.ceil.");
-        case Intrinsic::round:    return with_suffix("llvm.round.");
-        case Intrinsic::trunc:    return with_suffix("llvm.trunc.");
-        case Intrinsic::fma:
-        case Intrinsic::fmuladd:  return with_suffix("llvm.fma.");
-        case Intrinsic::log:      return with_suffix("llvm.log.");
-        case Intrinsic::log2:     return with_suffix("llvm.log2.");
-        case Intrinsic::log10:    return with_suffix("llvm.log10.");
-        case Intrinsic::maximum:  return with_suffix("llvm.maximum.");
-        case Intrinsic::maxnum:   return with_suffix("llvm.maxnum.");
-        case Intrinsic::minimum:  return with_suffix("llvm.minimum.");
-        case Intrinsic::minnum:   return with_suffix("llvm.minnum.");
-        case Intrinsic::pow:      return with_suffix("llvm.pow.");
-        case Intrinsic::sin:      return with_suffix("llvm.sin.");
-        case Intrinsic::sqrt:     return with_suffix("llvm.sqrt.");
-        case Intrinsic::powi: {
-            if (suffix.empty()) return "";
-            Type *powi_i_ty = nullptr;
-            if (Args.size() > 1 && Args[1]) powi_i_ty = Args[1]->getType();
-            else if (Types.size() > 1 && Types[1]) powi_i_ty = Types[1];
-            unsigned ibits = 32;
-            if (powi_i_ty && powi_i_ty->isIntegerTy())
-                ibits = powi_i_ty->getIntegerBitWidth();
-            return std::string("llvm.powi.") + suffix + ".i" + std::to_string(ibits);
+        if (lr_llvm_compat_intrinsic_name(static_cast<unsigned>(ID),
+                                          over_ty && over_ty->isFloatTy(),
+                                          over_ty && over_ty->isDoubleTy(),
+                                          over_ty && over_ty->isIntegerTy(),
+                                          over_ty ? over_ty->getIntegerBitWidth() : 0,
+                                          powi_bits,
+                                          name, sizeof(name)) == 0) {
+            return "";
         }
-        default:
-            break;
-        }
-
-        {
-            const char *legacy = lc_intrinsic_name(static_cast<unsigned>(ID));
-            if (legacy && legacy[0] != '\0')
-                return std::string(legacy);
-        }
-        return "";
+        return std::string(name);
     }
 
 public:

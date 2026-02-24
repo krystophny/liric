@@ -4,8 +4,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include <liric/liric_compat.h>
+#include <liric/llvm_compat_c.h>
 #include <cstdio>
-#include <cstring>
 #include <string>
 #include <system_error>
 #include <type_traits>
@@ -25,8 +25,9 @@ public:
     virtual raw_ostream &write(const char *ptr, size_t size) = 0;
 
     raw_ostream &operator<<(const char *s) {
-        if (s == nullptr || s[0] == '\0') return *this;
-        return write(s, std::strlen(s));
+        size_t n = lr_llvm_compat_cstr_len(s);
+        if (n == 0) return *this;
+        return write(s, n);
     }
     raw_ostream &operator<<(char c) {
         return write(&c, 1);

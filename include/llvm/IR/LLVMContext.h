@@ -2,10 +2,10 @@
 #define LLVM_IR_LLVMCONTEXT_H
 
 #include <liric/liric_compat.h>
+#include <liric/llvm_compat_c.h>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <unordered_map>
 
 namespace llvm {
 
@@ -36,155 +36,98 @@ namespace detail {
         return value;
     }
 
-    inline std::unordered_map<const void *, lc_value_t *> &value_wrappers_ref() {
-        static thread_local std::unordered_map<const void *, lc_value_t *> value;
-        return value;
-    }
-
-    inline std::unordered_map<const lr_func_t *, Function *> &function_wrappers_ref() {
-        static thread_local std::unordered_map<const lr_func_t *, Function *> value;
-        return value;
-    }
-
-    inline std::unordered_map<const lr_block_t *, Function *> &block_parents_ref() {
-        static thread_local std::unordered_map<const lr_block_t *, Function *> value;
-        return value;
-    }
-
-    inline std::unordered_map<const lr_type_t *, const LLVMContext *> &type_contexts_ref() {
-        static thread_local std::unordered_map<const lr_type_t *, const LLVMContext *> value;
-        return value;
-    }
-
-    inline std::unordered_map<const lr_type_t *, vector_type_info> &vector_types_ref() {
-        static thread_local std::unordered_map<const lr_type_t *, vector_type_info> value;
-        return value;
-    }
-
-    inline std::unordered_map<const lc_module_compat_t *,
-        std::unordered_map<std::string, std::string>> &global_aliases_ref() {
-        static thread_local std::unordered_map<const lc_module_compat_t *,
-            std::unordered_map<std::string, std::string>> value;
-        return value;
-    }
-
     inline void register_value_wrapper(const void *obj, lc_value_t *v) {
-        if (obj && v) value_wrappers_ref()[obj] = v;
+        lr_llvm_compat_register_value_wrapper(obj, v);
     }
 
     inline lc_value_t *lookup_value_wrapper(const void *obj) {
-        auto &value_wrappers = value_wrappers_ref();
-        auto it = value_wrappers.find(obj);
-        return it == value_wrappers.end() ? nullptr : it->second;
+        return lr_llvm_compat_lookup_value_wrapper(obj);
     }
 
     inline void unregister_value_wrapper(const void *obj) {
-        if (obj) value_wrappers_ref().erase(obj);
+        lr_llvm_compat_unregister_value_wrapper(obj);
     }
 
     inline void register_global_alias(const lc_module_compat_t *mod,
                                       const std::string &logical_name,
                                       const std::string &actual_name) {
-        if (!mod || logical_name.empty() || actual_name.empty())
-            return;
-        global_aliases_ref()[mod][logical_name] = actual_name;
+        lr_llvm_compat_register_global_alias(mod, logical_name.c_str(),
+                                             actual_name.c_str());
     }
 
     inline std::string lookup_global_alias(const lc_module_compat_t *mod,
                                            const std::string &logical_name) {
-        if (!mod || logical_name.empty())
+        char alias[4096];
+        if (!lr_llvm_compat_lookup_global_alias(mod, logical_name.c_str(),
+                                                alias, sizeof(alias), nullptr))
             return std::string();
-        auto &global_aliases = global_aliases_ref();
-        auto mit = global_aliases.find(mod);
-        if (mit == global_aliases.end())
-            return std::string();
-        auto ait = mit->second.find(logical_name);
-        if (ait == mit->second.end())
-            return std::string();
-        return ait->second;
+        return std::string(alias);
     }
 
     inline void clear_global_aliases(const lc_module_compat_t *mod) {
-        if (mod)
-            global_aliases_ref().erase(mod);
+        lr_llvm_compat_clear_global_aliases(mod);
     }
 
     inline void register_function_wrapper(const lr_func_t *f, Function *fn) {
-        if (f && fn) function_wrappers_ref()[f] = fn;
+        lr_llvm_compat_register_function_wrapper(f, fn);
     }
 
     inline Function *lookup_function_wrapper(const lr_func_t *f) {
-        auto &function_wrappers = function_wrappers_ref();
-        auto it = function_wrappers.find(f);
-        return it == function_wrappers.end() ? nullptr : it->second;
+        return static_cast<Function *>(
+            lr_llvm_compat_lookup_function_wrapper(f));
     }
 
     inline void unregister_function_wrapper(const lr_func_t *f) {
-        if (f) function_wrappers_ref().erase(f);
+        lr_llvm_compat_unregister_function_wrapper(f);
     }
 
     inline void register_block_parent(const lr_block_t *b, Function *fn) {
-        if (b && fn) block_parents_ref()[b] = fn;
+        lr_llvm_compat_register_block_parent(b, fn);
     }
 
     inline Function *lookup_block_parent(const lr_block_t *b) {
-        auto &block_parents = block_parents_ref();
-        auto it = block_parents.find(b);
-        return it == block_parents.end() ? nullptr : it->second;
+        return static_cast<Function *>(lr_llvm_compat_lookup_block_parent(b));
     }
 
     inline void unregister_block_parent(const lr_block_t *b) {
-        if (b) block_parents_ref().erase(b);
+        lr_llvm_compat_unregister_block_parent(b);
     }
 
     inline void unregister_blocks_for_function(Function *fn) {
-        auto &block_parents = block_parents_ref();
-        for (auto it = block_parents.begin(); it != block_parents.end();) {
-            if (it->second == fn) {
-                it = block_parents.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        lr_llvm_compat_unregister_blocks_for_function(fn);
     }
 
     inline void register_type_context(const lr_type_t *ty,
                                       const LLVMContext *ctx) {
-        if (ty && ctx) type_contexts_ref()[ty] = ctx;
+        lr_llvm_compat_register_type_context(ty, ctx);
     }
 
     inline const LLVMContext *lookup_type_context(const lr_type_t *ty) {
-        auto &type_contexts = type_contexts_ref();
-        auto it = type_contexts.find(ty);
-        return it == type_contexts.end() ? nullptr : it->second;
+        return static_cast<const LLVMContext *>(
+            lr_llvm_compat_lookup_type_context(ty));
     }
 
     inline void register_vector_type(const lr_type_t *ty,
                                      const lr_type_t *element,
                                      unsigned num_elements,
                                      bool scalable) {
-        if (!ty || !element || num_elements == 0) return;
-        vector_types_ref()[ty] = vector_type_info{element, num_elements, scalable};
+        lr_llvm_compat_register_vector_type(ty, element, num_elements,
+                                            scalable ? 1 : 0);
     }
 
     inline const vector_type_info *lookup_vector_type(const lr_type_t *ty) {
-        auto &vector_types = vector_types_ref();
-        auto it = vector_types.find(ty);
-        return it == vector_types.end() ? nullptr : &it->second;
+        static thread_local vector_type_info info;
+        lr_llvm_compat_vector_type_info_t cinfo;
+        if (!lr_llvm_compat_lookup_vector_type(ty, &cinfo))
+            return nullptr;
+        info.element = cinfo.element;
+        info.num_elements = cinfo.num_elements;
+        info.scalable = cinfo.scalable != 0;
+        return &info;
     }
 
     inline void unregister_type_contexts(const LLVMContext *ctx) {
-        if (!ctx) return;
-        auto &type_contexts = type_contexts_ref();
-        auto &vector_types = vector_types_ref();
-        for (auto it = type_contexts.begin(); it != type_contexts.end();) {
-            if (it->second == ctx) {
-                vector_types.erase(it->first);
-                it = type_contexts.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        lr_llvm_compat_unregister_type_contexts(ctx);
     }
 }
 
@@ -223,6 +166,7 @@ public:
     ~LLVMContext() {
         if (detail::fallback_module_ref() == default_mod_)
             detail::fallback_module_ref() = nullptr;
+        detail::unregister_type_contexts(this);
         lc_module_destroy(default_mod_);
         lc_context_destroy(ctx_);
     }

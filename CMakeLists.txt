@@ -240,6 +240,7 @@ add_library(liric STATIC
     src/compiler.c
     src/liric_compat.c
     src/llvm_c_shim.c
+    src/llvm_compat_c.c
     src/stencil_data.c
     src/stencil_runtime.c
     src/session.c
