@@ -1860,14 +1860,22 @@ static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
     x86_direct_ctx_t *ctx = (x86_direct_ctx_t *)compile_ctx;
     if (!ctx)
         return -1;
+    /* Flush deferred terminators on block transitions so branch fixups
+       are emitted before binding the next block entry. This also guarantees
+       empty blocks are assigned offsets instead of leaving placeholder
+       branch displacements unresolved. */
+    if (ctx->deferred.pending &&
+        (!ctx->has_current_block || ctx->deferred.block_id != block_id)) {
+        if (flush_deferred_terminator(ctx) != 0)
+            return -1;
+    }
     if (direct_ensure_block_offsets(ctx, block_id) != 0)
         return -1;
-    /* Defer the previous block's terminator and this block's offset.
-       PHI instructions register phi copies before the deferred
-       terminator is flushed by the first non-PHI instruction. */
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
-    ctx->block_offset_pending = (ctx->cc.block_offsets[block_id] == SIZE_MAX);
+    if (ctx->cc.block_offsets[block_id] == SIZE_MAX)
+        ctx->cc.block_offsets[block_id] = ctx->cc.pos;
+    ctx->block_offset_pending = false;
     return 0;
 }
 

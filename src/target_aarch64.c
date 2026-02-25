@@ -1268,11 +1268,22 @@ static int aarch64_compile_set_block(void *compile_ctx, uint32_t block_id) {
     a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
     if (!ctx)
         return -1;
+    /* Flush deferred terminators on block transitions so branch fixups
+       are emitted before we bind the next block entry. This also ensures
+       empty blocks receive concrete offsets and don't leave unresolved
+       placeholder branches (which encode as self-loops on AArch64). */
+    if (ctx->deferred.pending &&
+        (!ctx->has_current_block || ctx->deferred.block_id != block_id)) {
+        if (a64_flush_deferred_terminator(ctx) != 0)
+            return -1;
+    }
     if (a64_direct_ensure_block_offsets(ctx, block_id) != 0)
         return -1;
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
-    ctx->block_offset_pending = (ctx->cc.block_offsets[block_id] == SIZE_MAX);
+    if (ctx->cc.block_offsets[block_id] == SIZE_MAX)
+        ctx->cc.block_offsets[block_id] = ctx->cc.pos;
+    ctx->block_offset_pending = false;
     return 0;
 }
 
@@ -2119,6 +2130,8 @@ static int aarch64_compile_emit(void *compile_ctx,
 static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
     a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
     a64_compile_ctx_t *cc;
+    bool dbg_fixups = getenv("LIRIC_DBG_A64_FIXUPS") != NULL;
+    uint32_t unresolved_fixups = 0;
     if (!ctx || !out_len)
         return -1;
 
@@ -2186,8 +2199,20 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
 
     for (uint32_t i = 0; i < cc->num_fixups; i++) {
         if (cc->fixups[i].target == UINT32_MAX) continue;
-        if (cc->fixups[i].target >= cc->num_block_offsets) continue;
-        if (cc->block_offsets[cc->fixups[i].target] == SIZE_MAX) continue;
+        if (cc->fixups[i].target >= cc->num_block_offsets ||
+            cc->block_offsets[cc->fixups[i].target] == SIZE_MAX) {
+            unresolved_fixups++;
+            if (dbg_fixups) {
+                fprintf(stderr,
+                        "a64 unresolved fixup func=%s src=%u tgt=%u insn=%zu blocks=%u\n",
+                        cc->func_name ? cc->func_name : "<anon>",
+                        cc->fixups[i].source,
+                        cc->fixups[i].target,
+                        cc->fixups[i].insn_pos,
+                        cc->num_block_offsets);
+            }
+            continue;
+        }
 
         int64_t target_pos = (int64_t)cc->block_offsets[cc->fixups[i].target];
         int64_t here = (int64_t)cc->fixups[i].insn_pos;
@@ -2210,6 +2235,11 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
 
     patch_prologue_stack_adjust(cc, ctx->prologue_patch_pos,
                                 (cc->stack_size + 15u) & ~15u);
+
+    if (unresolved_fixups != 0 && dbg_fixups) {
+        fprintf(stderr, "a64 unresolved fixup count func=%s count=%u\n",
+                cc->func_name ? cc->func_name : "<anon>", unresolved_fixups);
+    }
 
     *out_len = cc->pos;
     if (cc->pos > cc->buflen)

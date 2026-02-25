@@ -685,6 +685,134 @@ static void bc_store_le_bytes(uint8_t *buf, size_t buf_size,
     memcpy(buf + off, &raw, nbytes);
 }
 
+static bool bc_try_operand_from_const_bytes(lr_type_t *ty,
+                                            const uint8_t *bytes,
+                                            size_t nbytes,
+                                            lr_operand_t *out) {
+    size_t ty_sz;
+    uint64_t raw = 0;
+    if (!ty || !bytes || !out)
+        return false;
+    ty_sz = lr_type_size(ty);
+    if (ty_sz == 0 || ty_sz > 8 || nbytes < ty_sz)
+        return false;
+    memcpy(&raw, bytes, ty_sz);
+    if (ty->kind == LR_TYPE_FLOAT && ty_sz == 4) {
+        uint32_t raw32 = (uint32_t)raw;
+        float f32;
+        memcpy(&f32, &raw32, sizeof(f32));
+        *out = lr_op_imm_f64((double)f32, ty);
+        return true;
+    }
+    if (ty->kind == LR_TYPE_DOUBLE && ty_sz == 8) {
+        double f64;
+        memcpy(&f64, &raw, sizeof(f64));
+        *out = lr_op_imm_f64(f64, ty);
+        return true;
+    }
+    *out = lr_op_imm_i64((int64_t)raw, ty);
+    return true;
+}
+
+static bool bc_materialize_const_bytes(const bc_value_table_t *vt,
+                                       const lr_type_t *dst_ty,
+                                       const bc_value_t *cv,
+                                       uint8_t *buf,
+                                       size_t buf_size,
+                                       size_t base_off) {
+    size_t dst_sz;
+    if (!vt || !dst_ty || !cv || !buf)
+        return false;
+
+    if ((dst_ty->kind == LR_TYPE_STRUCT ||
+         dst_ty->kind == LR_TYPE_ARRAY ||
+         dst_ty->kind == LR_TYPE_VECTOR) &&
+        cv->agg_elem_ids && cv->agg_elem_count > 0) {
+        if (dst_ty->kind == LR_TYPE_STRUCT) {
+            uint32_t n = dst_ty->struc.num_fields;
+            if (n > cv->agg_elem_count)
+                n = cv->agg_elem_count;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t elem_id = cv->agg_elem_ids[i];
+                size_t elem_off = base_off + lr_struct_field_offset(dst_ty, i);
+                if (elem_id >= vt->count ||
+                    !bc_materialize_const_bytes(vt, dst_ty->struc.fields[i],
+                                                &vt->values[elem_id], buf,
+                                                buf_size, elem_off))
+                    return false;
+            }
+            return true;
+        }
+        if (dst_ty->array.elem) {
+            uint64_t n64 = dst_ty->array.count;
+            size_t elem_sz = lr_type_size(dst_ty->array.elem);
+            uint32_t n;
+            if (elem_sz == 0)
+                elem_sz = 8;
+            if (n64 > UINT32_MAX)
+                n = UINT32_MAX;
+            else
+                n = (uint32_t)n64;
+            if (n > cv->agg_elem_count)
+                n = cv->agg_elem_count;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t elem_id = cv->agg_elem_ids[i];
+                size_t elem_off = base_off + (size_t)i * elem_sz;
+                if (elem_id >= vt->count ||
+                    !bc_materialize_const_bytes(vt, dst_ty->array.elem,
+                                                &vt->values[elem_id], buf,
+                                                buf_size, elem_off))
+                    return false;
+            }
+            return true;
+        }
+    }
+
+    dst_sz = lr_type_size(dst_ty);
+    if (dst_sz == 0 && dst_ty->kind == LR_TYPE_PTR)
+        dst_sz = sizeof(uint64_t);
+    if (dst_sz == 0 || base_off >= buf_size)
+        return false;
+
+    if (cv->init_bytes && cv->init_size > 0) {
+        size_t copy_sz = cv->init_size < dst_sz ? cv->init_size : dst_sz;
+        if (base_off + copy_sz > buf_size)
+            copy_sz = buf_size - base_off;
+        memcpy(buf + base_off, cv->init_bytes, copy_sz);
+        return true;
+    }
+
+    if (cv->kind != BC_VAL_CONST)
+        return false;
+
+    switch (cv->operand.kind) {
+    case LR_VAL_NULL:
+        bc_store_le_bytes(buf, buf_size, base_off, 0, dst_sz);
+        return true;
+    case LR_VAL_IMM_I64:
+        bc_store_le_bytes(buf, buf_size, base_off,
+                          (uint64_t)cv->operand.imm_i64, dst_sz);
+        return true;
+    case LR_VAL_IMM_F64:
+        if (dst_ty->kind == LR_TYPE_FLOAT) {
+            float f32 = (float)cv->operand.imm_f64;
+            uint32_t raw32 = 0;
+            memcpy(&raw32, &f32, sizeof(raw32));
+            bc_store_le_bytes(buf, buf_size, base_off, (uint64_t)raw32, 4);
+            return true;
+        }
+        if (dst_ty->kind == LR_TYPE_DOUBLE) {
+            uint64_t raw64 = 0;
+            memcpy(&raw64, &cv->operand.imm_f64, sizeof(raw64));
+            bc_store_le_bytes(buf, buf_size, base_off, raw64, 8);
+            return true;
+        }
+        return false;
+    default:
+        return false;
+    }
+}
+
 static void bc_global_add_reloc(bc_decoder_t *d, lr_global_t *g,
                                 size_t offset, uint32_t sym_id,
                                 int64_t addend) {
@@ -975,6 +1103,12 @@ static lr_operand_t bc_make_operand_from_value(bc_decoder_t *d, bc_value_table_t
         break;
     case BC_VAL_CONST:
         op = v->operand;
+        if (op.kind == LR_VAL_UNDEF && v->init_bytes && v->init_size > 0) {
+            lr_operand_t packed;
+            if (bc_try_operand_from_const_bytes(v->type, v->init_bytes,
+                                                v->init_size, &packed))
+                op = packed;
+        }
         break;
     case BC_VAL_GLOBAL:
         op = lr_op_global(v->global_sym, d->module->type_ptr);
@@ -1718,6 +1852,61 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 cv.operand.kind = LR_VAL_UNDEF;
                 cv.operand.type = cur_type;
                 cv.operand.global_offset = 0;
+                if (code == CONST_CODE_DATA && cur_type &&
+                    (cur_type->kind == LR_TYPE_ARRAY ||
+                     cur_type->kind == LR_TYPE_VECTOR) &&
+                    cur_type->array.elem) {
+                    lr_type_t *elem_ty = cur_type->array.elem;
+                    size_t elem_sz = lr_type_size(elem_ty);
+                    uint64_t elem_count64 = cur_type->array.count;
+                    size_t packed_sz = lr_type_size(cur_type);
+                    uint32_t elem_count;
+                    if (elem_sz == 0 && elem_ty->kind == LR_TYPE_PTR)
+                        elem_sz = sizeof(uint64_t);
+                    if (elem_sz == 0 || elem_sz > 8)
+                        goto const_data_byte_fallback;
+                    if (elem_count64 > UINT32_MAX)
+                        elem_count = UINT32_MAX;
+                    else
+                        elem_count = (uint32_t)elem_count64;
+                    if (elem_count == 0)
+                        elem_count = (uint32_t)r->record_len;
+                    if (packed_sz == 0)
+                        packed_sz = elem_sz * (size_t)elem_count;
+                    if (packed_sz == 0)
+                        goto const_data_byte_fallback;
+                    bytes = lr_arena_array(d->arena, uint8_t, packed_sz);
+                    if (!bytes)
+                        goto const_data_byte_fallback;
+                    memset(bytes, 0, packed_sz);
+                    {
+                        size_t n = r->record_len;
+                        if (n > elem_count)
+                            n = elem_count;
+                        for (size_t i = 0; i < n; i++) {
+                            size_t off = i * elem_sz;
+                            uint64_t raw = r->record[i];
+                            if (off >= packed_sz)
+                                break;
+                            if (elem_ty->kind == LR_TYPE_FLOAT && elem_sz == 4) {
+                                bc_store_le_bytes(bytes, packed_sz, off,
+                                                  (uint64_t)(uint32_t)raw, 4);
+                            } else if (elem_ty->kind == LR_TYPE_DOUBLE && elem_sz == 8) {
+                                bc_store_le_bytes(bytes, packed_sz, off, raw, 8);
+                            } else {
+                                bc_store_le_bytes(bytes, packed_sz, off, raw, elem_sz);
+                            }
+                        }
+                    }
+                    cv.init_bytes = bytes;
+                    cv.init_size = packed_sz;
+                    if (cv.operand.kind == LR_VAL_UNDEF)
+                        (void)bc_try_operand_from_const_bytes(
+                            cur_type, bytes, packed_sz, &cv.operand);
+                    bc_value_push(vt, cv);
+                    break;
+                }
+const_data_byte_fallback:
                 if (nbytes > 0) {
                     bytes = lr_arena_array(d->arena, uint8_t, nbytes);
                     if (bytes) {
@@ -1752,6 +1941,8 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 size_t nbytes = 0;
                 uint8_t *bytes = NULL;
                 uint32_t *elem_ids = NULL;
+                size_t packed_sz = 0;
+                uint8_t *packed_bytes = NULL;
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
                 cv.init_bytes = NULL;
@@ -1790,6 +1981,23 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                             }
                             cv.init_bytes = bytes;
                             cv.init_size = nbytes;
+                        }
+                    }
+                }
+                if (cur_type) {
+                    packed_sz = lr_type_size(cur_type);
+                    if (packed_sz > 0) {
+                        packed_bytes = lr_arena_array(d->arena, uint8_t, packed_sz);
+                        if (packed_bytes) {
+                            memset(packed_bytes, 0, packed_sz);
+                            if (bc_materialize_const_bytes(vt, cur_type, &cv,
+                                                           packed_bytes, packed_sz, 0)) {
+                                cv.init_bytes = packed_bytes;
+                                cv.init_size = packed_sz;
+                                if (cv.operand.kind == LR_VAL_UNDEF)
+                                    (void)bc_try_operand_from_const_bytes(
+                                        cur_type, packed_bytes, packed_sz, &cv.operand);
+                            }
                         }
                     }
                 }
