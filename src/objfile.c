@@ -11,6 +11,10 @@
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
+#ifdef __APPLE__
+#include <fcntl.h>
+#include <limits.h>
+#endif
 
 #define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
 #define OBJ_DATA_BUF_SIZE (1 * 1024 * 1024)
@@ -159,13 +163,36 @@ static const char *normalize_external_lookup_name(const char *name) {
 
 static void *resolve_external_symbol_addr(const char *name, void *runtime_handle) {
     const char *lookup = normalize_external_lookup_name(name);
+    const char *intrinsic_lookup = NULL;
     void *addr = NULL;
     const int verbose = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
     if (!lookup || !lookup[0])
         return NULL;
-    addr = lr_platform_intrinsic_resolve_addr(lookup, runtime_handle);
-    if (addr)
-        return addr;
+
+    /* AOT emission must only embed process-stable symbol addresses.
+       Do not use builtin intrinsic fallbacks here: those are pointers to
+       functions in the liric compiler process and are invalid in emitted
+       executables. */
+    intrinsic_lookup = lr_platform_intrinsic_libc_name(lookup);
+    if (intrinsic_lookup && intrinsic_lookup[0] &&
+        strcmp(intrinsic_lookup, lookup) != 0) {
+        addr = lr_platform_dlsym_default(intrinsic_lookup);
+        if (!addr && intrinsic_lookup[0] == '_')
+            addr = lr_platform_dlsym_default(intrinsic_lookup + 1);
+        if (!addr && runtime_handle) {
+            addr = lr_platform_dlsym(runtime_handle, intrinsic_lookup);
+            if (!addr && intrinsic_lookup[0] == '_')
+                addr = lr_platform_dlsym(runtime_handle, intrinsic_lookup + 1);
+        }
+        if (verbose && !addr) {
+            fprintf(stderr,
+                    "macho_exec_payload: intrinsic dlsym miss '%s' (from '%s')\n",
+                    intrinsic_lookup, lookup);
+        }
+        if (addr)
+            return addr;
+    }
+
     if (verbose && name && name != lookup) {
         fprintf(stderr,
                 "macho_exec_payload: normalize external '%s' -> '%s'\n",
@@ -249,7 +276,13 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
     const int verbose = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
     const size_t page = 0x4000u;
     const size_t text_off = lr_macho_executable_text_offset_arm64();
-    const size_t text_file_size = obj_align_up(text_off + build->code_pos, page);
+    /* PIE slide fixups may append a text stub after code emission. Reserve
+       enough text-file space up front so data_base stays stable. */
+    const size_t max_slide_slots = (size_t)build->ctx.num_data_relocs;
+    const size_t max_stub_insns = max_slide_slots > 0 ? (13u + (8u * max_slide_slots)) : 0u;
+    const size_t max_stub_size = max_stub_insns * 4u;
+    const size_t text_file_size =
+        obj_align_up(text_off + build->code_pos + max_stub_size, page);
     const uint64_t text_base = MACHO_ARM64_EXEC_IMAGE_BASE + (uint64_t)text_off;
     const uint64_t data_base = MACHO_ARM64_EXEC_IMAGE_BASE + (uint64_t)text_file_size;
     const char *entry_name = (entry_symbol && entry_symbol[0])
@@ -561,9 +594,8 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
         init_fn_real_addr = sym_addr[init_fn_sym_idx];
 
         code_size = old_code_size + stub_size;
-        if (obj_align_up(text_off + code_size, page) != text_file_size) {
+        if (obj_align_up(text_off + code_size, page) != text_file_size)
             FAIL_BUILD("PIE slide stub crosses text page boundary");
-        }
         new_code = (uint8_t *)realloc(code_buf, code_size);
         if (!new_code)
             FAIL_BUILD("expanding code buffer failed");
@@ -1071,6 +1103,82 @@ static int copy_file_to_stream(const char *path, FILE *out) {
     fclose(in);
     return fflush(out) == 0 ? 0 : -1;
 }
+
+static int stream_get_path(FILE *out, char *path_buf, size_t path_cap) {
+    int fd;
+    if (!out || !path_buf || path_cap == 0)
+        return -1;
+    fd = fileno(out);
+    if (fd < 0)
+        return -1;
+    path_buf[0] = '\0';
+    if (fcntl(fd, F_GETPATH, path_buf) != 0)
+        return -1;
+    if (path_buf[0] == '\0')
+        return -1;
+    return 0;
+}
+
+static int write_signed_macho_exec_aarch64(FILE *out,
+                                           const uint8_t *code,
+                                           size_t code_size,
+                                           const uint8_t *data,
+                                           size_t data_size,
+                                           lr_objfile_ctx_t *ctx,
+                                           const char *entry_symbol) {
+    char out_path[PATH_MAX];
+    char exe_tpl[] = "/tmp/liric_exe_XXXXXX";
+    int exe_fd = -1;
+    FILE *exe_out = NULL;
+    int rc = -1;
+
+    if (!out || !ctx || !entry_symbol || !entry_symbol[0])
+        return -1;
+
+    if (stream_get_path(out, out_path, sizeof(out_path)) == 0) {
+        if (write_macho_executable_arm64(out, code, code_size, data, data_size,
+                                         ctx, entry_symbol) != 0)
+            return -1;
+        if (fflush(out) != 0)
+            return -1;
+        if (run_codesign_adhoc(out_path) != 0)
+            return -1;
+        return 0;
+    }
+
+    exe_fd = mkstemp(exe_tpl);
+    if (exe_fd < 0)
+        return -1;
+    exe_out = fdopen(exe_fd, "wb");
+    if (!exe_out) {
+        close(exe_fd);
+        unlink(exe_tpl);
+        return -1;
+    }
+    exe_fd = -1;
+
+    if (write_macho_executable_arm64(exe_out, code, code_size, data, data_size,
+                                     ctx, entry_symbol) != 0)
+        goto done;
+    if (fclose(exe_out) != 0)
+        goto done;
+    exe_out = NULL;
+
+    if (run_codesign_adhoc(exe_tpl) != 0)
+        goto done;
+    if (copy_file_to_stream(exe_tpl, out) != 0)
+        goto done;
+
+    rc = 0;
+
+done:
+    if (exe_out)
+        fclose(exe_out);
+    if (exe_fd >= 0)
+        close(exe_fd);
+    unlink(exe_tpl);
+    return rc;
+}
 #endif
 
 static int obj_build_module(lr_module_t *m, const lr_target_t *target,
@@ -1495,8 +1603,13 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
                                 out->ctx.symbols[rel->symbol_idx].name)
                                    ? out->ctx.symbols[rel->symbol_idx].name
                                    : "<invalid>";
-            fprintf(stderr, "  data[%u]: off=%u type=%u sym=%u (%s)\n",
-                    ri, rel->offset, rel->type, rel->symbol_idx, name);
+            uint64_t addend = 0;
+            if ((size_t)rel->offset + sizeof(uint64_t) <= out->data_pos) {
+                memcpy(&addend, out->data_buf + rel->offset, sizeof(addend));
+            }
+            fprintf(stderr, "  data[%u]: off=%u type=%u sym=%u (%s) addend=%lld\n",
+                    ri, rel->offset, rel->type, rel->symbol_idx, name,
+                    (long long)addend);
         }
     }
 
@@ -1585,47 +1698,31 @@ int lr_emit_executable_from_blobs(const lr_func_blob_t *blobs,
     }
 #else
     if (strcmp(target->name, "aarch64") == 0) {
-        char exe_tpl[] = "/tmp/liric_exe_XXXXXX";
-        int exe_fd = mkstemp(exe_tpl);
-        FILE *exe_out = NULL;
         uint8_t *exec_code = NULL;
         size_t exec_code_size = 0;
         uint8_t *exec_data = NULL;
         size_t exec_data_size = 0;
-        if (exe_fd < 0) goto blob_done;
-        exe_out = fdopen(exe_fd, "wb");
-        if (!exe_out) { close(exe_fd); goto blob_done; }
-        exe_fd = -1;
 #if !defined(_WIN32)
         if (build_macho_exec_payload_aarch64(&build, entry_symbol,
                                              &exec_code,
                                              &exec_code_size,
                                              &exec_data,
                                              &exec_data_size) != 0)
-            goto blob_done;
+            goto done;
 #else
-        goto blob_done;
+        goto done;
 #endif
-        result = write_macho_executable_arm64(
-            exe_out, exec_code, exec_code_size,
+        result = write_signed_macho_exec_aarch64(
+            out, exec_code, exec_code_size,
             exec_data, exec_data_size,
             &build.ctx, entry_symbol);
         free(exec_code);
         free(exec_data);
         exec_code = NULL;
         exec_data = NULL;
-        if (fclose(exe_out) != 0) result = -1;
-        exe_out = NULL;
-        if (result != 0) goto blob_done;
-        if (run_codesign_adhoc(exe_tpl) != 0) { result = -1; goto blob_done; }
-        if (copy_file_to_stream(exe_tpl, out) != 0) { result = -1; goto blob_done; }
-        result = 0;
-blob_done:
+done:
         free(exec_code);
         free(exec_data);
-        if (exe_out) fclose(exe_out);
-        if (exe_fd >= 0) close(exe_fd);
-        unlink(exe_tpl);
     }
 #endif
 
@@ -1708,26 +1805,10 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
     }
 #else
     if (strcmp(target->name, "aarch64") == 0) {
-        char exe_tpl[] = "/tmp/liric_exe_XXXXXX";
-        int exe_fd = -1;
-        FILE *exe_out = NULL;
-        int sign_rc;
-        int copy_rc;
         uint8_t *exec_code = NULL;
         size_t exec_code_size = 0;
         uint8_t *exec_data = NULL;
         size_t exec_data_size = 0;
-
-        exe_fd = mkstemp(exe_tpl);
-        if (exe_fd < 0)
-            goto done;
-        exe_out = fdopen(exe_fd, "wb");
-        if (!exe_out) {
-            close(exe_fd);
-            exe_fd = -1;
-            goto done;
-        }
-        exe_fd = -1;
 
 #if !defined(_WIN32)
         if (build_macho_exec_payload_aarch64(&build, entry_symbol,
@@ -1739,42 +1820,18 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
 #else
         goto done;
 #endif
-        result = write_macho_executable_arm64(
-            exe_out, exec_code, exec_code_size,
+        result = write_signed_macho_exec_aarch64(
+            out, exec_code, exec_code_size,
             exec_data, exec_data_size,
-            &build.ctx, entry_symbol
-        );
+            &build.ctx, entry_symbol);
         free(exec_code);
         free(exec_data);
         exec_code = NULL;
         exec_data = NULL;
-        if (fclose(exe_out) != 0)
-            result = -1;
-        exe_out = NULL;
-        if (result != 0)
-            goto done;
-
-        sign_rc = run_codesign_adhoc(exe_tpl);
-        if (sign_rc != 0) {
-            result = -1;
-            goto done;
-        }
-
-        copy_rc = copy_file_to_stream(exe_tpl, out);
-        if (copy_rc != 0) {
-            result = -1;
-            goto done;
-        }
-        result = 0;
 
 done:
         free(exec_code);
         free(exec_data);
-        if (exe_out)
-            fclose(exe_out);
-        if (exe_fd >= 0)
-            close(exe_fd);
-        unlink(exe_tpl);
     }
 #endif
 

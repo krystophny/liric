@@ -25,7 +25,12 @@
 #define FP_SCRATCH0  X86_XMM0
 #define FP_SCRATCH1  X86_XMM1
 
-typedef struct { size_t pos; uint32_t target; uint32_t source; } x86_fixup_t;
+typedef struct {
+    size_t pos;
+    size_t target_pos_hint;
+    uint32_t target;
+    uint32_t source;
+} x86_fixup_t;
 
 /* Backend-local compile context replacing the old MIR linked-list state */
 typedef struct {
@@ -39,6 +44,7 @@ typedef struct {
     int32_t *static_alloca_offsets;
     uint32_t num_static_alloca_offsets;
     size_t *block_offsets;
+    size_t *block_entry_offsets;
     uint32_t num_block_offsets;
     x86_fixup_t *fixups;
     uint32_t num_fixups;
@@ -558,6 +564,15 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
     if (op->kind == LR_VAL_IMM_I64) {
         emit_mov_imm(ctx, reg, op->imm_i64, preserve_flags);
     } else if (op->kind == LR_VAL_VREG) {
+        int32_t static_alloca_off = lr_target_lookup_static_alloca_offset(
+            ctx->static_alloca_offsets, ctx->num_static_alloca_offsets,
+            op->vreg);
+        if (static_alloca_off != 0) {
+            encode_mem(ctx->buf, &ctx->pos, ctx->buflen, 0x8D, reg,
+                       X86_RBP, static_alloca_off, 8);
+            set_cached_reg_vreg(ctx, reg, op->vreg);
+            return;
+        }
         if (cached_reg_holds_vreg(ctx, reg, op->vreg))
             return;
         if (emit_copy_from_cached_scratch(ctx, op->vreg, reg))
@@ -1162,6 +1177,11 @@ static void emit_jmp_sourced(x86_compile_ctx_t *ctx, uint32_t target_block,
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xE9);
     if (ctx->num_fixups < ctx->fixup_cap) {
         ctx->fixups[ctx->num_fixups].pos = ctx->pos;
+        if (target_block < ctx->num_block_offsets)
+            ctx->fixups[ctx->num_fixups].target_pos_hint =
+                ctx->block_entry_offsets[target_block];
+        else
+            ctx->fixups[ctx->num_fixups].target_pos_hint = SIZE_MAX;
         ctx->fixups[ctx->num_fixups].target = target_block;
         ctx->fixups[ctx->num_fixups].source = source_block;
         ctx->num_fixups++;
@@ -1356,14 +1376,21 @@ static int direct_ensure_block_offsets(x86_direct_ctx_t *ctx,
     while (new_cap <= block_id)
         new_cap *= 2u;
     size_t *nb = lr_arena_array_uninit(cc->arena, size_t, new_cap);
-    if (!nb)
+    size_t *ne = lr_arena_array_uninit(cc->arena, size_t, new_cap);
+    if (!nb || !ne)
         return -1;
-    if (cc->num_block_offsets > 0)
+    if (cc->num_block_offsets > 0) {
         memcpy(nb, cc->block_offsets,
                sizeof(size_t) * cc->num_block_offsets);
+        memcpy(ne, cc->block_entry_offsets,
+               sizeof(size_t) * cc->num_block_offsets);
+    }
     for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
         nb[i] = SIZE_MAX;
+    for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
+        ne[i] = SIZE_MAX;
     cc->block_offsets = nb;
+    cc->block_entry_offsets = ne;
     cc->num_block_offsets = new_cap;
     return 0;
 }
@@ -1704,8 +1731,10 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->static_alloca_offsets = NULL;
     cc->num_static_alloca_offsets = 0;
     cc->block_offsets = lr_arena_array_uninit(arena, size_t, 8);
+    cc->block_entry_offsets = lr_arena_array_uninit(arena, size_t, 8);
     cc->num_block_offsets = 8;
     for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = SIZE_MAX;
+    for (uint32_t i = 0; i < 8; i++) cc->block_entry_offsets[i] = SIZE_MAX;
     cc->fixups = lr_arena_array_uninit(arena, x86_fixup_t, 16);
     cc->num_fixups = 0;
     cc->fixup_cap = 16;
@@ -1873,8 +1902,10 @@ static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
         return -1;
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
-    if (ctx->cc.block_offsets[block_id] == SIZE_MAX)
+    if (ctx->cc.block_offsets[block_id] == SIZE_MAX) {
         ctx->cc.block_offsets[block_id] = ctx->cc.pos;
+        ctx->cc.block_entry_offsets[block_id] = ctx->cc.pos;
+    }
     /* Entering a new block must invalidate cached register mappings before
        emitting non-PHI instructions, but keep offsets bound for empty blocks. */
     ctx->block_offset_pending = true;
@@ -2890,13 +2921,17 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
 
     for (uint32_t i = 0; i < cc->num_fixups; i++) {
         size_t fix_pos = cc->fixups[i].pos;
+        size_t target_off = SIZE_MAX;
         uint32_t target = cc->fixups[i].target;
         if (target == UINT32_MAX)
             continue;
-        if (target < cc->num_block_offsets &&
-            cc->block_offsets[target] != SIZE_MAX &&
-            fix_pos + 4 <= cc->buflen) {
-            int32_t rel = (int32_t)((int64_t)cc->block_offsets[target] -
+        if (cc->fixups[i].target_pos_hint != SIZE_MAX)
+            target_off = cc->fixups[i].target_pos_hint;
+        else if (target < cc->num_block_offsets &&
+                 cc->block_entry_offsets[target] != SIZE_MAX)
+            target_off = cc->block_entry_offsets[target];
+        if (target_off != SIZE_MAX && fix_pos + 4 <= cc->buflen) {
+            int32_t rel = (int32_t)((int64_t)target_off -
                                     (int64_t)(fix_pos + 4));
             cc->buf[fix_pos + 0] = (uint8_t)(rel);
             cc->buf[fix_pos + 1] = (uint8_t)(rel >> 8);

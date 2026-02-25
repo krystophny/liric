@@ -78,6 +78,10 @@ extern const uint8_t lr_stub_llvm_exp2_f32_begin[];
 extern const uint8_t lr_stub_llvm_exp2_f32_end[];
 extern const uint8_t lr_stub_llvm_exp2_f64_begin[];
 extern const uint8_t lr_stub_llvm_exp2_f64_end[];
+extern const uint8_t lr_stub_llvm_exp10_f32_begin[];
+extern const uint8_t lr_stub_llvm_exp10_f32_end[];
+extern const uint8_t lr_stub_llvm_exp10_f64_begin[];
+extern const uint8_t lr_stub_llvm_exp10_f64_end[];
 extern const uint8_t lr_stub_llvm_floor_f32_begin[];
 extern const uint8_t lr_stub_llvm_floor_f32_end[];
 extern const uint8_t lr_stub_llvm_floor_f64_begin[];
@@ -122,8 +126,16 @@ extern const uint8_t lr_stub_llvm_maxnum_f64_begin[];
 extern const uint8_t lr_stub_llvm_maxnum_f64_end[];
 extern const uint8_t lr_stub_llvm_abs_i32_begin[];
 extern const uint8_t lr_stub_llvm_abs_i32_end[];
+extern const uint8_t lr_stub_llvm_abs_i8_begin[];
+extern const uint8_t lr_stub_llvm_abs_i8_end[];
+extern const uint8_t lr_stub_llvm_abs_i16_begin[];
+extern const uint8_t lr_stub_llvm_abs_i16_end[];
 extern const uint8_t lr_stub_llvm_abs_i64_begin[];
 extern const uint8_t lr_stub_llvm_abs_i64_end[];
+extern const uint8_t lr_stub_llvm_assume_begin[];
+extern const uint8_t lr_stub_llvm_assume_end[];
+extern const uint8_t lr_stub_llvm_trap_begin[];
+extern const uint8_t lr_stub_llvm_trap_end[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f32_begin[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f32_end[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f64_begin[];
@@ -155,18 +167,18 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.powi.f64.i32", LR_STUB_BLOB(lr_stub_llvm_powi_f64_i32_begin, lr_stub_llvm_powi_f64_i32_end) },
     { "llvm.powi.f32.i64", LR_STUB_BLOB(lr_stub_llvm_powi_f32_i64_begin, lr_stub_llvm_powi_f32_i64_end) },
     { "llvm.powi.f64.i64", LR_STUB_BLOB(lr_stub_llvm_powi_f64_i64_begin, lr_stub_llvm_powi_f64_i64_end) },
-    { "llvm.memset.p0i8.i32", LR_STUB_BLOB(lr_stub_llvm_memset_i32_begin, lr_stub_llvm_memset_i32_end) },
-    { "llvm.memset.p0i8.i64", LR_STUB_BLOB(lr_stub_llvm_memset_i64_begin, lr_stub_llvm_memset_i64_end) },
-    { "llvm.memset.p0.i32", LR_STUB_BLOB(lr_stub_llvm_memset_i32_begin, lr_stub_llvm_memset_i32_end) },
-    { "llvm.memset.p0.i64", LR_STUB_BLOB(lr_stub_llvm_memset_i64_begin, lr_stub_llvm_memset_i64_end) },
-    { "llvm.memcpy.p0i8.p0i8.i32", LR_STUB_BLOB(lr_stub_llvm_memcpy_i32_begin, lr_stub_llvm_memcpy_i32_end) },
-    { "llvm.memcpy.p0i8.p0i8.i64", LR_STUB_BLOB(lr_stub_llvm_memcpy_i64_begin, lr_stub_llvm_memcpy_i64_end) },
-    { "llvm.memcpy.p0.p0.i32", LR_STUB_BLOB(lr_stub_llvm_memcpy_i32_begin, lr_stub_llvm_memcpy_i32_end) },
-    { "llvm.memcpy.p0.p0.i64", LR_STUB_BLOB(lr_stub_llvm_memcpy_i64_begin, lr_stub_llvm_memcpy_i64_end) },
-    { "llvm.memmove.p0i8.p0i8.i32", LR_STUB_BLOB(lr_stub_llvm_memmove_i32_begin, lr_stub_llvm_memmove_i32_end) },
-    { "llvm.memmove.p0i8.p0i8.i64", LR_STUB_BLOB(lr_stub_llvm_memmove_i64_begin, lr_stub_llvm_memmove_i64_end) },
-    { "llvm.memmove.p0.p0.i32", LR_STUB_BLOB(lr_stub_llvm_memmove_i32_begin, lr_stub_llvm_memmove_i32_end) },
-    { "llvm.memmove.p0.p0.i64", LR_STUB_BLOB(lr_stub_llvm_memmove_i64_begin, lr_stub_llvm_memmove_i64_end) },
+    { "llvm.memset.p0i8.i32", NULL, NULL },
+    { "llvm.memset.p0i8.i64", NULL, NULL },
+    { "llvm.memset.p0.i32", NULL, NULL },
+    { "llvm.memset.p0.i64", NULL, NULL },
+    { "llvm.memcpy.p0i8.p0i8.i32", NULL, NULL },
+    { "llvm.memcpy.p0i8.p0i8.i64", NULL, NULL },
+    { "llvm.memcpy.p0.p0.i32", NULL, NULL },
+    { "llvm.memcpy.p0.p0.i64", NULL, NULL },
+    { "llvm.memmove.p0i8.p0i8.i32", NULL, NULL },
+    { "llvm.memmove.p0i8.p0i8.i64", NULL, NULL },
+    { "llvm.memmove.p0.p0.i32", NULL, NULL },
+    { "llvm.memmove.p0.p0.i64", NULL, NULL },
     { "llvm.sin.f32", LR_STUB_BLOB(lr_stub_llvm_sin_f32_begin, lr_stub_llvm_sin_f32_end) },
     { "llvm.sin.f64", LR_STUB_BLOB(lr_stub_llvm_sin_f64_begin, lr_stub_llvm_sin_f64_end) },
     { "llvm.cos.f32", LR_STUB_BLOB(lr_stub_llvm_cos_f32_begin, lr_stub_llvm_cos_f32_end) },
@@ -175,8 +187,8 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.log.f64", LR_STUB_BLOB(lr_stub_llvm_log_f64_begin, lr_stub_llvm_log_f64_end) },
     { "llvm.log2.f32", LR_STUB_BLOB(lr_stub_llvm_log2_f32_begin, lr_stub_llvm_log2_f32_end) },
     { "llvm.log2.f64", LR_STUB_BLOB(lr_stub_llvm_log2_f64_begin, lr_stub_llvm_log2_f64_end) },
-    { "llvm.log10.f32", LR_STUB_BLOB(lr_stub_llvm_log10_f32_begin, lr_stub_llvm_log10_f32_end) },
-    { "llvm.log10.f64", LR_STUB_BLOB(lr_stub_llvm_log10_f64_begin, lr_stub_llvm_log10_f64_end) },
+    { "llvm.log10.f32", NULL, NULL },
+    { "llvm.log10.f64", NULL, NULL },
     { "llvm.exp2.f32", LR_STUB_BLOB(lr_stub_llvm_exp2_f32_begin, lr_stub_llvm_exp2_f32_end) },
     { "llvm.exp2.f64", LR_STUB_BLOB(lr_stub_llvm_exp2_f64_begin, lr_stub_llvm_exp2_f64_end) },
     { "llvm.floor.f32", LR_STUB_BLOB(lr_stub_llvm_floor_f32_begin, lr_stub_llvm_floor_f32_end) },
@@ -202,8 +214,12 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.minnum.f64", LR_STUB_BLOB(lr_stub_llvm_minnum_f64_begin, lr_stub_llvm_minnum_f64_end) },
     { "llvm.maxnum.f32", LR_STUB_BLOB(lr_stub_llvm_maxnum_f32_begin, lr_stub_llvm_maxnum_f32_end) },
     { "llvm.maxnum.f64", LR_STUB_BLOB(lr_stub_llvm_maxnum_f64_begin, lr_stub_llvm_maxnum_f64_end) },
+    { "llvm.abs.i8", LR_STUB_BLOB(lr_stub_llvm_abs_i8_begin, lr_stub_llvm_abs_i8_end) },
+    { "llvm.abs.i16", LR_STUB_BLOB(lr_stub_llvm_abs_i16_begin, lr_stub_llvm_abs_i16_end) },
     { "llvm.abs.i32", LR_STUB_BLOB(lr_stub_llvm_abs_i32_begin, lr_stub_llvm_abs_i32_end) },
     { "llvm.abs.i64", LR_STUB_BLOB(lr_stub_llvm_abs_i64_begin, lr_stub_llvm_abs_i64_end) },
+    { "llvm.assume", LR_STUB_BLOB(lr_stub_llvm_assume_begin, lr_stub_llvm_assume_end) },
+    { "llvm.trap", LR_STUB_BLOB(lr_stub_llvm_trap_begin, lr_stub_llvm_trap_end) },
     { "llvm.is.fpclass.f32", LR_STUB_BLOB(lr_stub_llvm_is_fpclass_f32_begin, lr_stub_llvm_is_fpclass_f32_end) },
     { "llvm.is.fpclass.f64", LR_STUB_BLOB(lr_stub_llvm_is_fpclass_f64_begin, lr_stub_llvm_is_fpclass_f64_end) },
 };
@@ -441,8 +457,20 @@ static const char *intrinsic_libc_name_impl(const char *name) {
     if (strcmp(name, "llvm.tan.f64") == 0) return "tan";
     if (strcmp(name, "llvm.exp.f32") == 0) return "expf";
     if (strcmp(name, "llvm.exp.f64") == 0) return "exp";
-    if (strcmp(name, "llvm.exp10.f32") == 0) return "exp10f";
-    if (strcmp(name, "llvm.exp10.f64") == 0) return "exp10";
+    if (strcmp(name, "llvm.exp10.f32") == 0) {
+#if defined(__APPLE__)
+        return "__exp10f";
+#else
+        return "exp10f";
+#endif
+    }
+    if (strcmp(name, "llvm.exp10.f64") == 0) {
+#if defined(__APPLE__)
+        return "__exp10";
+#else
+        return "exp10";
+#endif
+    }
     if (strcmp(name, "llvm.exp2.f32") == 0) return "exp2f";
     if (strcmp(name, "llvm.exp2.f64") == 0) return "exp2";
     if (strcmp(name, "llvm.log.f32") == 0) return "logf";

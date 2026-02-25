@@ -562,6 +562,54 @@ lr_stub_llvm_exp2_f32_begin:
     ret
 lr_stub_llvm_exp2_f32_end:
 
+.globl lr_stub_llvm_exp10_f64_begin
+.globl lr_stub_llvm_exp10_f64_end
+lr_stub_llvm_exp10_f64_begin:
+    sub rsp, 8
+    movsd qword ptr [rsp], xmm0
+    fld qword ptr [rsp]
+    fldl2t
+    fmulp st(1), st(0)
+    fld st(0)
+    frndint
+    fsub st(1), st(0)
+    fxch st(1)
+    f2xm1
+    fld1
+    faddp st(1), st(0)
+    fscale
+    fstp st(1)
+    fstp qword ptr [rsp]
+    movsd xmm0, qword ptr [rsp]
+    add rsp, 8
+    ret
+lr_stub_llvm_exp10_f64_end:
+
+.globl lr_stub_llvm_exp10_f32_begin
+.globl lr_stub_llvm_exp10_f32_end
+lr_stub_llvm_exp10_f32_begin:
+    sub rsp, 8
+    cvtss2sd xmm0, xmm0
+    movsd qword ptr [rsp], xmm0
+    fld qword ptr [rsp]
+    fldl2t
+    fmulp st(1), st(0)
+    fld st(0)
+    frndint
+    fsub st(1), st(0)
+    fxch st(1)
+    f2xm1
+    fld1
+    faddp st(1), st(0)
+    fscale
+    fstp st(1)
+    fstp qword ptr [rsp]
+    movsd xmm0, qword ptr [rsp]
+    cvtsd2ss xmm0, xmm0
+    add rsp, 8
+    ret
+lr_stub_llvm_exp10_f32_end:
+
 .globl lr_stub_llvm_floor_f64_begin
 .globl lr_stub_llvm_floor_f64_end
 lr_stub_llvm_floor_f64_begin:
@@ -749,6 +797,28 @@ lr_stub_llvm_abs_i32_begin:
     ret
 lr_stub_llvm_abs_i32_end:
 
+.globl lr_stub_llvm_abs_i8_begin
+.globl lr_stub_llvm_abs_i8_end
+lr_stub_llvm_abs_i8_begin:
+    mov al, dil
+    test al, al
+    jns .Labs_i8_done
+    neg al
+.Labs_i8_done:
+    ret
+lr_stub_llvm_abs_i8_end:
+
+.globl lr_stub_llvm_abs_i16_begin
+.globl lr_stub_llvm_abs_i16_end
+lr_stub_llvm_abs_i16_begin:
+    mov ax, di
+    test ax, ax
+    jns .Labs_i16_done
+    neg ax
+.Labs_i16_done:
+    ret
+lr_stub_llvm_abs_i16_end:
+
 .globl lr_stub_llvm_abs_i64_begin
 .globl lr_stub_llvm_abs_i64_end
 lr_stub_llvm_abs_i64_begin:
@@ -757,6 +827,19 @@ lr_stub_llvm_abs_i64_begin:
     cmovl rax, rdi
     ret
 lr_stub_llvm_abs_i64_end:
+
+.globl lr_stub_llvm_assume_begin
+.globl lr_stub_llvm_assume_end
+lr_stub_llvm_assume_begin:
+    ret
+lr_stub_llvm_assume_end:
+
+.globl lr_stub_llvm_trap_begin
+.globl lr_stub_llvm_trap_end
+lr_stub_llvm_trap_begin:
+    ud2
+    ret
+lr_stub_llvm_trap_end:
 
 .globl lr_stub_llvm_is_fpclass_f64_begin
 .globl lr_stub_llvm_is_fpclass_f64_end

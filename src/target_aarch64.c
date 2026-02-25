@@ -26,7 +26,14 @@
 #define FP_SCRATCH0  A64_D0
 #define FP_SCRATCH1  A64_D1
 
-typedef struct { size_t insn_pos; uint32_t target; uint32_t source; uint8_t kind; uint8_t cond; } a64_fixup_t;
+typedef struct {
+    size_t insn_pos;
+    size_t target_pos_hint;
+    uint32_t target;
+    uint32_t source;
+    uint8_t kind;
+    uint8_t cond;
+} a64_fixup_t;
 
 typedef struct {
     uint8_t *buf;
@@ -39,6 +46,7 @@ typedef struct {
     int32_t *static_alloca_offsets;
     uint32_t num_static_alloca_offsets;
     size_t *block_offsets;
+    size_t *block_entry_offsets;
     uint32_t num_block_offsets;
     a64_fixup_t *fixups;
     uint32_t num_fixups;
@@ -56,6 +64,12 @@ typedef struct {
     int32_t vararg_stack_start_off;
     const char *func_name;
 } a64_compile_ctx_t;
+
+static size_t align_up_size(size_t value, size_t align) {
+    if (align <= 1)
+        return value;
+    return ((value + align - 1) / align) * align;
+}
 
 static bool is_fp_abi_type(const lr_type_t *type) {
     return type &&
@@ -107,13 +121,22 @@ static int32_t alloc_slot(a64_compile_ctx_t *ctx, uint32_t vreg, size_t size) {
         ctx->num_stack_slots = new_cap;
     }
 
-    if (ctx->stack_slots[vreg] != 0)
-        return ctx->stack_slots[vreg];
+    if (ctx->stack_slots[vreg] != 0) {
+        if ((uint32_t)size <= ctx->stack_slot_sizes[vreg])
+            return ctx->stack_slots[vreg];
+        /* Existing slot too small; allocate a larger one and rebind vreg. */
+    }
 
     if (size < 8) size = 8;
+    ctx->stack_size = (uint32_t)align_up_size(ctx->stack_size, 8);
     ctx->stack_size += (uint32_t)size;
-    ctx->stack_size = (ctx->stack_size + (uint32_t)size - 1) & ~(uint32_t)(size - 1);
     int32_t offset = -(int32_t)ctx->stack_size;
+    if (getenv("LIRIC_DBG_A64_SLOTS") != NULL) {
+        fprintf(stderr,
+                "[a64 slot] func=%s vreg=%u off=%d size=%zu\n",
+                ctx->func_name ? ctx->func_name : "<anon>",
+                vreg, offset, size);
+    }
     ctx->stack_slots[vreg] = offset;
     ctx->stack_slot_sizes[vreg] = (uint32_t)size;
     return offset;
@@ -448,12 +471,32 @@ static uint8_t lr_fp_cc_to_a64(uint8_t cc) {
 
 static void emit_load_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
     int32_t off = alloc_slot(ctx, vreg, 8);
+    {
+        const char *watch_off = getenv("LIRIC_DBG_A64_WATCH_OFF");
+        if (watch_off && watch_off[0] != '\0' &&
+            off == (int32_t)strtol(watch_off, NULL, 10)) {
+            fprintf(stderr,
+                    "[a64 slot-use] func=%s kind=load vreg=%u off=%d pos=%zu\n",
+                    ctx->func_name ? ctx->func_name : "<anon>",
+                    vreg, off, ctx->pos);
+        }
+    }
     emit_load(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, off, 8);
     set_cached_reg_vreg_a64(ctx, reg, vreg);
 }
 
 static void emit_store_slot(a64_compile_ctx_t *ctx, uint32_t vreg, uint8_t reg) {
     int32_t off = alloc_slot(ctx, vreg, 8);
+    {
+        const char *watch_off = getenv("LIRIC_DBG_A64_WATCH_OFF");
+        if (watch_off && watch_off[0] != '\0' &&
+            off == (int32_t)strtol(watch_off, NULL, 10)) {
+            fprintf(stderr,
+                    "[a64 slot-use] func=%s kind=store vreg=%u off=%d pos=%zu\n",
+                    ctx->func_name ? ctx->func_name : "<anon>",
+                    vreg, off, ctx->pos);
+        }
+    }
     emit_store(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, off, 8);
     set_cached_reg_vreg_a64(ctx, reg, vreg);
 }
@@ -504,22 +547,48 @@ static bool direct_call_uses_external_fp_abi(
     if (callee_op->kind == LR_VAL_GLOBAL) {
         if (callee_op->global_id < cc->sym_count && cc->sym_funcs)
             callee_func = cc->sym_funcs[callee_op->global_id];
-        if (!callee_func) {
-            const char *sym_name = lr_module_symbol_name(cc->mod,
-                                                         callee_op->global_id);
-            if (sym_name)
-                callee_func = find_module_function(cc->mod, sym_name);
-        }
         if (callee_func) {
+            bool callee_vararg = callee_func->vararg || call_vararg;
             if (out_vararg)
-                *out_vararg = callee_func->vararg || call_vararg;
+                *out_vararg = callee_vararg;
             if (out_fixed_args && *out_fixed_args == 0u &&
                 callee_func->num_params > 0u) {
                 *out_fixed_args = callee_func->num_params;
             }
+            /* Keep C varargs ABI-compatible even for module-defined callees.
+               Internal direct ABI does not model platform va_list register
+               spill areas (notably Darwin stack-only variadics). */
+            if (callee_vararg)
+                return true;
+            return callee_func->first_block == NULL ||
+                   callee_func->uses_llvm_abi;
         }
-        /* Global symbol calls use the external LLVM ABI path on AArch64. */
-        return true;
+        if (callee_op->global_id < cc->sym_count) {
+            if (cc->sym_defined)
+                return cc->sym_defined[callee_op->global_id] == 0;
+            return true;
+        }
+        {
+            const char *sym_name = lr_module_symbol_name(cc->mod,
+                                                         callee_op->global_id);
+            if (!sym_name)
+                return call_external_abi;
+            callee_func = find_module_function(cc->mod, sym_name);
+            if (callee_func) {
+                bool callee_vararg = callee_func->vararg || call_vararg;
+                if (out_vararg)
+                    *out_vararg = callee_vararg;
+                if (out_fixed_args && *out_fixed_args == 0u &&
+                    callee_func->num_params > 0u) {
+                    *out_fixed_args = callee_func->num_params;
+                }
+                if (callee_vararg)
+                    return true;
+                return callee_func->first_block == NULL ||
+                       callee_func->uses_llvm_abi;
+            }
+            return !is_symbol_defined_in_module(cc->mod, sym_name);
+        }
     }
 
     return call_external_abi;
@@ -546,6 +615,21 @@ static bool is_llvm_va_end_name(const char *name) {
 static bool is_llvm_va_copy_name(const char *name) {
     name = normalize_llvm_symbol_name(name);
     return name && strncmp(name, "llvm.va_copy", 12) == 0;
+}
+
+static uint8_t llvm_objectsize_bits(const char *name) {
+    name = normalize_llvm_symbol_name(name);
+    if (!name)
+        return 0;
+    if (strcmp(name, "llvm.objectsize.i64") == 0 ||
+        strncmp(name, "llvm.objectsize.i64.", 20) == 0) {
+        return 64;
+    }
+    if (strcmp(name, "llvm.objectsize.i32") == 0 ||
+        strncmp(name, "llvm.objectsize.i32.", 20) == 0) {
+        return 32;
+    }
+    return 0;
 }
 
 typedef enum a64_int_cmp_intrinsic_kind {
@@ -639,6 +723,37 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
     if (op->kind == LR_VAL_IMM_I64) {
         emit_move_imm_ctx(ctx, reg, op->imm_i64, true);
     } else if (op->kind == LR_VAL_VREG) {
+        int32_t static_alloca_off = lr_target_lookup_static_alloca_offset(
+            ctx->static_alloca_offsets, ctx->num_static_alloca_offsets,
+            op->vreg);
+        {
+            const char *watch_env = getenv("LIRIC_DBG_A64_WATCH_VREG");
+            if (watch_env && watch_env[0] != '\0') {
+                uint32_t watch = (uint32_t)strtoul(watch_env, NULL, 10);
+                if (op->vreg == watch) {
+                    fprintf(stderr,
+                            "[a64 watch-load] func=%s vreg=%u static_off=%d nstatic=%u pos=%zu\n",
+                            ctx->func_name ? ctx->func_name : "<anon>",
+                            op->vreg,
+                            static_alloca_off,
+                            ctx->num_static_alloca_offsets,
+                            ctx->pos);
+                }
+            }
+        }
+        if (static_alloca_off != 0 &&
+            getenv("LIRIC_DISABLE_STATIC_ALLOCA_ADDR") == NULL) {
+            if (getenv("LIRIC_DBG_A64_STATIC_ALLOCA") != NULL) {
+                fprintf(stderr,
+                        "[a64 static-alloca-load] func=%s vreg=%u off=%d pos=%zu\n",
+                        ctx->func_name ? ctx->func_name : "<anon>",
+                        op->vreg, static_alloca_off, ctx->pos);
+            }
+            emit_addr(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP,
+                      static_alloca_off);
+            set_cached_reg_vreg_a64(ctx, reg, op->vreg);
+            return;
+        }
         if (cached_reg_holds_vreg_a64(ctx, reg, op->vreg))
             return;
         if (emit_copy_from_cached_scratch_a64(ctx, op->vreg, reg))
@@ -768,7 +883,19 @@ static void emit_epilogue_a64(a64_compile_ctx_t *ctx) {
 
 static void emit_jmp_a64(a64_compile_ctx_t *ctx, uint32_t target_block) {
     if (ctx->num_fixups < ctx->fixup_cap) {
+        size_t hint = SIZE_MAX;
         ctx->fixups[ctx->num_fixups].insn_pos = ctx->pos;
+        if (target_block < ctx->num_block_offsets) {
+            size_t entry = ctx->block_entry_offsets[target_block];
+            size_t off = ctx->block_offsets[target_block];
+            if (entry != SIZE_MAX && off != SIZE_MAX)
+                hint = entry < off ? entry : off;
+            else if (entry != SIZE_MAX)
+                hint = entry;
+            else if (off != SIZE_MAX)
+                hint = off;
+        }
+        ctx->fixups[ctx->num_fixups].target_pos_hint = hint;
         ctx->fixups[ctx->num_fixups].target = target_block;
         ctx->fixups[ctx->num_fixups].kind = 0;
         ctx->fixups[ctx->num_fixups].cond = 0;
@@ -842,6 +969,101 @@ static void emit_load_vreg_mem_sized(a64_compile_ctx_t *ctx, uint32_t src_vreg,
                                      int32_t add_off, uint8_t reg, uint8_t size) {
     int32_t src_off = alloc_slot(ctx, src_vreg, 8) + add_off;
     emit_load(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, src_off, size);
+}
+
+static size_t vreg_slot_size(const a64_compile_ctx_t *ctx, uint32_t vreg) {
+    if (!ctx || vreg >= ctx->num_stack_slots || ctx->stack_slot_sizes[vreg] == 0)
+        return 8;
+    return (size_t)ctx->stack_slot_sizes[vreg];
+}
+
+static bool vreg_uses_indirect_aggregate_storage(a64_compile_ctx_t *ctx,
+                                                 uint32_t vreg,
+                                                 size_t logical_size) {
+    int32_t alloca_off;
+    size_t slot_sz;
+    if (!ctx || logical_size <= 8)
+        return false;
+    alloca_off = lr_target_lookup_static_alloca_offset(
+        ctx->static_alloca_offsets, ctx->num_static_alloca_offsets, vreg);
+    if (alloca_off != 0)
+        return false;
+    slot_sz = vreg_slot_size(ctx, vreg);
+    return slot_sz == 8;
+}
+
+static void emit_copy_vreg_value_bytes_to_base(a64_compile_ctx_t *ctx,
+                                               uint32_t src_vreg,
+                                               size_t value_sz,
+                                               uint8_t dst_base,
+                                               int32_t dst_disp) {
+    int32_t alloca_off;
+    int32_t src_off;
+    size_t src_sz;
+    if (!ctx || value_sz == 0)
+        return;
+
+    alloca_off = lr_target_lookup_static_alloca_offset(
+        ctx->static_alloca_offsets, ctx->num_static_alloca_offsets, src_vreg);
+    if (alloca_off != 0) {
+        emit_mem_copy_base_to_base(ctx, dst_base, dst_disp,
+                                   A64_FP, alloca_off, value_sz);
+        return;
+    }
+
+    src_off = alloc_slot(ctx, src_vreg, 8);
+    src_sz = vreg_slot_size(ctx, src_vreg);
+    if (src_sz >= value_sz) {
+        emit_mem_copy_base_to_base(ctx, dst_base, dst_disp,
+                                   A64_FP, src_off, value_sz);
+        return;
+    }
+
+    if (src_sz == 8 && value_sz > 8) {
+        emit_load(ctx->buf, &ctx->pos, ctx->buflen, A64_X10, A64_FP, src_off, 8);
+        emit_mem_copy_base_to_base(ctx, dst_base, dst_disp,
+                                   A64_X10, 0, value_sz);
+        return;
+    }
+
+    if (src_sz > 0) {
+        emit_mem_copy_base_to_base(ctx, dst_base, dst_disp,
+                                   A64_FP, src_off, src_sz);
+    }
+    if (src_sz < value_sz) {
+        emit_mem_zero_base(ctx, dst_base, dst_disp + (int32_t)src_sz,
+                           value_sz - src_sz);
+    }
+}
+
+static void emit_phi_copy_value(a64_compile_ctx_t *cc,
+                                uint32_t dest_vreg,
+                                const lr_operand_t *src_op) {
+    size_t dst_sz;
+    int32_t dst_off;
+    if (!cc || !src_op)
+        return;
+    dst_sz = vreg_slot_size(cc, dest_vreg);
+    if (dst_sz <= 8) {
+        emit_load_operand(cc, src_op, A64_X9);
+        emit_store_slot(cc, dest_vreg, A64_X9);
+        return;
+    }
+
+    dst_off = alloc_slot(cc, dest_vreg, dst_sz);
+    if (src_op->kind == LR_VAL_VREG) {
+        emit_copy_vreg_value_bytes_to_base(cc, src_op->vreg, dst_sz,
+                                           A64_FP, dst_off);
+        return;
+    }
+    if (src_op->kind == LR_VAL_UNDEF || src_op->kind == LR_VAL_NULL) {
+        emit_mem_zero_base(cc, A64_FP, dst_off, dst_sz);
+        return;
+    }
+
+    emit_load_operand(cc, src_op, A64_X9);
+    emit_store(cc->buf, &cc->pos, cc->buflen, A64_X9, A64_FP, dst_off, 8);
+    emit_mem_zero_base(cc, A64_FP, dst_off + 8, dst_sz - 8);
 }
 
 static void emit_signext_index_reg(a64_compile_ctx_t *ctx, uint8_t reg,
@@ -979,14 +1201,21 @@ static int a64_direct_ensure_block_offsets(a64_direct_ctx_t *ctx,
     while (new_cap <= block_id)
         new_cap *= 2u;
     size_t *nb = lr_arena_array_uninit(cc->arena, size_t, new_cap);
-    if (!nb)
+    size_t *ne = lr_arena_array_uninit(cc->arena, size_t, new_cap);
+    if (!nb || !ne)
         return -1;
-    if (cc->num_block_offsets > 0)
+    if (cc->num_block_offsets > 0) {
         memcpy(nb, cc->block_offsets,
                sizeof(size_t) * cc->num_block_offsets);
+        memcpy(ne, cc->block_entry_offsets,
+               sizeof(size_t) * cc->num_block_offsets);
+    }
     for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
         nb[i] = SIZE_MAX;
+    for (uint32_t i = cc->num_block_offsets; i < new_cap; i++)
+        ne[i] = SIZE_MAX;
     cc->block_offsets = nb;
+    cc->block_entry_offsets = ne;
     cc->num_block_offsets = new_cap;
     return 0;
 }
@@ -1016,12 +1245,46 @@ static void a64_direct_emit_phi_copies_for_edge(a64_direct_ctx_t *ctx,
 
     /* PHI inputs are parallel: stage sources first, then write destinations. */
     for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
+        size_t dst_sz;
+        uint32_t tmp_vreg;
+        int32_t tmp_off;
+        const lr_operand_t *src_op;
         if (ctx->phi_copies[i].pred_block_id != pred ||
             ctx->phi_copies[i].succ_block_id != succ)
             continue;
-        ctx->next_vreg = stage_base + staged + 1u;
-        emit_load_operand(cc, &ctx->phi_copies[i].src_op, A64_X9);
-        emit_store_slot(cc, stage_base + staged, A64_X9);
+        src_op = &ctx->phi_copies[i].src_op;
+        dst_sz = vreg_slot_size(cc, ctx->phi_copies[i].dest_vreg);
+        if (dst_sz < 8)
+            dst_sz = 8;
+        if (getenv("LIRIC_DBG_A64_PHI") != NULL) {
+            fprintf(stderr,
+                    "[a64 phi edge] func=%s pred=%u succ=%u phase=stage dest=%u src_kind=%d src_vreg=%u\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    pred, succ,
+                    ctx->phi_copies[i].dest_vreg,
+                    (int)ctx->phi_copies[i].src_op.kind,
+                    ctx->phi_copies[i].src_op.kind == LR_VAL_VREG
+                        ? ctx->phi_copies[i].src_op.vreg
+                        : 0u);
+        }
+        tmp_vreg = stage_base + staged;
+        ctx->next_vreg = tmp_vreg + 1u;
+        tmp_off = alloc_slot(cc, tmp_vreg, dst_sz);
+        if (dst_sz <= 8) {
+            emit_load_operand(cc, src_op, A64_X9);
+            emit_store_slot(cc, tmp_vreg, A64_X9);
+        } else if (src_op->kind == LR_VAL_VREG) {
+            emit_copy_vreg_value_bytes_to_base(cc, src_op->vreg, dst_sz,
+                                               A64_FP, tmp_off);
+        } else if (src_op->kind == LR_VAL_UNDEF ||
+                   src_op->kind == LR_VAL_NULL) {
+            emit_mem_zero_base(cc, A64_FP, tmp_off, dst_sz);
+        } else {
+            emit_load_operand(cc, src_op, A64_X9);
+            emit_store(cc->buf, &cc->pos, cc->buflen, A64_X9,
+                       A64_FP, tmp_off, 8);
+            emit_mem_zero_base(cc, A64_FP, tmp_off + 8, dst_sz - 8);
+        }
         staged++;
     }
 
@@ -1030,11 +1293,23 @@ static void a64_direct_emit_phi_copies_for_edge(a64_direct_ctx_t *ctx,
 
     staged = 0;
     for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
+        lr_operand_t staged_src;
         if (ctx->phi_copies[i].pred_block_id != pred ||
             ctx->phi_copies[i].succ_block_id != succ)
             continue;
-        emit_load_slot(cc, stage_base + staged, A64_X9);
-        emit_store_slot(cc, ctx->phi_copies[i].dest_vreg, A64_X9);
+        if (getenv("LIRIC_DBG_A64_PHI") != NULL) {
+            fprintf(stderr,
+                    "[a64 phi edge] func=%s pred=%u succ=%u phase=apply dest=%u staged=%u\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    pred, succ,
+                    ctx->phi_copies[i].dest_vreg,
+                    stage_base + staged);
+        }
+        memset(&staged_src, 0, sizeof(staged_src));
+        staged_src.kind = LR_VAL_VREG;
+        staged_src.type = ctx->phi_copies[i].src_op.type;
+        staged_src.vreg = stage_base + staged;
+        emit_phi_copy_value(cc, ctx->phi_copies[i].dest_vreg, &staged_src);
         ctx->phi_copies[i].emitted = true;
         staged++;
     }
@@ -1043,12 +1318,14 @@ static void a64_direct_emit_phi_copies_for_edge(a64_direct_ctx_t *ctx,
 static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
     a64_compile_ctx_t *cc;
     a64_deferred_term_t *dt;
+    bool dbg_term;
 
     if (!ctx || !ctx->deferred.pending)
         return 0;
 
     cc = &ctx->cc;
     dt = &ctx->deferred;
+    dbg_term = getenv("LIRIC_DBG_A64_TERM") != NULL;
     dt->pending = false;
 
     switch (dt->op) {
@@ -1067,6 +1344,12 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
         emit_epilogue_a64(cc);
         break;
     case LR_OP_BR: {
+        if (dbg_term) {
+            fprintf(stderr,
+                    "[a64 term] func=%s op=br pred=%u succ=%u\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    dt->block_id, dt->ops[0].block_id);
+        }
         a64_direct_emit_phi_copies_for_edge(ctx, dt->block_id,
                                             dt->ops[0].block_id);
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
@@ -1086,6 +1369,12 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
                  enc_ands_reg(false, A64_X9, A64_X9));
         true_id = dt->ops[1].block_id;
         false_id = dt->ops[2].block_id;
+        if (dbg_term) {
+            fprintf(stderr,
+                    "[a64 term] func=%s op=condbr pred=%u t=%u f=%u\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    dt->block_id, true_id, false_id);
+        }
 
         /* Emit edge-specific copies:
            cmp; b.ne true_path; false_copies; b false; true_path: true_copies; b true */
@@ -1168,8 +1457,10 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->static_alloca_offsets = NULL;
     cc->num_static_alloca_offsets = 0;
     cc->block_offsets = lr_arena_array_uninit(arena, size_t, 8);
+    cc->block_entry_offsets = lr_arena_array_uninit(arena, size_t, 8);
     cc->num_block_offsets = 8;
     for (uint32_t i = 0; i < 8; i++) cc->block_offsets[i] = SIZE_MAX;
+    for (uint32_t i = 0; i < 8; i++) cc->block_entry_offsets[i] = SIZE_MAX;
     cc->fixups = lr_arena_array_uninit(arena, a64_fixup_t, 16);
     cc->num_fixups = 0;
     cc->fixup_cap = 16;
@@ -1226,11 +1517,25 @@ static int aarch64_compile_begin(void **compile_ctx,
         for (uint32_t i = 0; i < num_params; i++) {
             const lr_type_t *pty = param_types ? param_types[i] : NULL;
             if (is_fp_abi_type(pty) && fp_used < 8) {
+                if (getenv("LIRIC_DBG_A64_PARAMS")) {
+                    fprintf(stderr,
+                            "[a64 param] func=%s idx=%u vreg=%u src=fpr%u ty=%d\n",
+                            cc->func_name ? cc->func_name : "<anon>",
+                            i, param_vregs[i], fp_used,
+                            pty ? (int)pty->kind : -1);
+                }
                 emit_store_fp_slot(cc, param_vregs[i],
                                    param_fp_regs[fp_used],
                                    fp_abi_size(pty));
                 fp_used++;
             } else if (!is_fp_abi_type(pty) && gp_used < 8) {
+                if (getenv("LIRIC_DBG_A64_PARAMS")) {
+                    fprintf(stderr,
+                            "[a64 param] func=%s idx=%u vreg=%u src=gpr%u ty=%d\n",
+                            cc->func_name ? cc->func_name : "<anon>",
+                            i, param_vregs[i], gp_used,
+                            pty ? (int)pty->kind : -1);
+                }
                 emit_store_slot(cc, param_vregs[i], param_regs[gp_used]);
                 gp_used++;
             } else {
@@ -1281,8 +1586,19 @@ static int aarch64_compile_set_block(void *compile_ctx, uint32_t block_id) {
         return -1;
     ctx->current_block_id = block_id;
     ctx->has_current_block = true;
-    if (ctx->cc.block_offsets[block_id] == SIZE_MAX)
+    if (ctx->cc.block_offsets[block_id] == SIZE_MAX) {
         ctx->cc.block_offsets[block_id] = ctx->cc.pos;
+        ctx->cc.block_entry_offsets[block_id] = ctx->cc.pos;
+    }
+    if (getenv("LIRIC_DBG_A64_BLOCKS") != NULL) {
+        fprintf(stderr,
+                "[a64 block] func=%s block=%u pos=%zu off=%zu entry=%zu\n",
+                ctx->cc.func_name ? ctx->cc.func_name : "<anon>",
+                block_id,
+                ctx->cc.pos,
+                ctx->cc.block_offsets[block_id],
+                ctx->cc.block_entry_offsets[block_id]);
+    }
     /* Entering a new block must invalidate cached register mappings before
        emitting non-PHI instructions, but keep offsets bound for empty blocks. */
     ctx->block_offset_pending = true;
@@ -1314,7 +1630,6 @@ static int aarch64_compile_emit(void *compile_ctx,
                 return -1;
         }
         if (ctx->block_offset_pending) {
-            ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
             invalidate_cached_gprs_a64(&ctx->cc);
         }
         ctx->block_offset_pending = false;
@@ -1327,6 +1642,40 @@ static int aarch64_compile_emit(void *compile_ctx,
         return -1;
 
     uint32_t nops = desc->num_operands;
+    {
+        const char *watch_env = getenv("LIRIC_DBG_A64_WATCH_VREG");
+        if (watch_env && watch_env[0] != '\0') {
+            uint32_t watch = (uint32_t)strtoul(watch_env, NULL, 10);
+            bool hit = (desc->dest == watch);
+            if (!hit) {
+                for (uint32_t i = 0; i < nops; i++) {
+                    if (desc->operands[i].kind == LR_OP_KIND_VREG &&
+                        desc->operands[i].vreg == watch) {
+                        hit = true;
+                        break;
+                    }
+                }
+            }
+            if (hit) {
+                fprintf(stderr,
+                        "[a64 watch] func=%s block=%u op=%d dest=%u nops=%u",
+                        cc->func_name ? cc->func_name : "<anon>",
+                        ctx->current_block_id,
+                        (int)desc->op,
+                        desc->dest,
+                        nops);
+                for (uint32_t i = 0; i < nops; i++) {
+                    if (desc->operands[i].kind == LR_OP_KIND_VREG) {
+                        fprintf(stderr, " op%u=v%u", i, desc->operands[i].vreg);
+                    } else {
+                        fprintf(stderr, " op%u=k%d", i, (int)desc->operands[i].kind);
+                    }
+                }
+                fprintf(stderr, "\n");
+            }
+        }
+    }
+
     if (nops > 16) {
         ops_ptr = lr_arena_array_uninit(cc->arena, lr_operand_t, nops);
         if (!ops_ptr)
@@ -1527,18 +1876,26 @@ static int aarch64_compile_emit(void *compile_ctx,
     }
     case LR_OP_ALLOCA: {
         size_t elem_sz = lr_type_size(desc->type);
-        if (elem_sz < 8) elem_sz = 8;
+        size_t elem_align = lr_type_align(desc->type);
+        if (elem_sz < 1) elem_sz = 1;
+        if (elem_align < 8) elem_align = 8;
 
         bool use_static = (nops == 0) ||
-            (ops[0].kind == LR_VAL_IMM_I64 && ops[0].imm_i64 == 1);
+            (ops[0].kind == LR_VAL_IMM_I64);
 
         if (use_static) {
+            int64_t count = (nops > 0) ? ops[0].imm_i64 : 1;
+            size_t total_sz;
             int32_t off = lr_target_lookup_static_alloca_offset(
                 cc->static_alloca_offsets, cc->num_static_alloca_offsets,
                 desc->dest);
+            if (count < 1)
+                count = 1;
+            total_sz = elem_sz * (size_t)count;
             if (off == 0) {
-                cc->stack_size += (uint32_t)elem_sz;
-                cc->stack_size = (cc->stack_size + 7u) & ~7u;
+                cc->stack_size = (uint32_t)align_up_size(cc->stack_size,
+                                                         elem_align);
+                cc->stack_size += (uint32_t)total_sz;
                 off = -(int32_t)cc->stack_size;
                 lr_target_set_static_alloca_offset(
                     cc->arena, &cc->static_alloca_offsets,
@@ -1571,10 +1928,38 @@ static int aarch64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_LOAD: {
+        bool dbg_ls = getenv("LIRIC_DBG_A64_LOADSTORE") != NULL;
+        {
+            const char *watch_env = getenv("LIRIC_DBG_A64_WATCH_VREG");
+            if (watch_env && watch_env[0] != '\0') {
+                uint32_t watch = (uint32_t)strtoul(watch_env, NULL, 10);
+                if (nops > 0 && ops[0].kind == LR_VAL_VREG &&
+                    ops[0].vreg == watch) {
+                    fprintf(stderr,
+                            "[a64 load-op] func=%s block=%u src_vreg=%u src_kind=%d pos=%zu\n",
+                            cc->func_name ? cc->func_name : "<anon>",
+                            ctx->current_block_id,
+                            ops[0].vreg,
+                            (int)ops[0].kind,
+                            cc->pos);
+                }
+            }
+        }
         emit_load_operand(cc, &ops[0], A64_X9);
         size_t load_sz = lr_type_size(desc->type);
         if (load_sz == 0)
             load_sz = 8;
+        if (dbg_ls) {
+            fprintf(stderr,
+                    "[a64 load] func=%s block=%u dest=%u src_kind=%d src_vreg=%u desc_ty=%d load_sz=%zu\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    ctx->current_block_id,
+                    desc->dest,
+                    (int)ops[0].kind,
+                    ops[0].kind == LR_VAL_VREG ? ops[0].vreg : 0u,
+                    desc->type ? (int)desc->type->kind : -1,
+                    load_sz);
+        }
         if (load_sz > 8) {
             int32_t dst_off = alloc_slot(cc, desc->dest, load_sz);
             emit_mem_copy_base_to_base(cc, A64_FP, dst_off, A64_X9, 0, load_sz);
@@ -1586,29 +1971,48 @@ static int aarch64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_STORE: {
+        bool dbg_ls = getenv("LIRIC_DBG_A64_LOADSTORE") != NULL;
+        {
+            const char *watch_env = getenv("LIRIC_DBG_A64_WATCH_VREG");
+            if (watch_env && watch_env[0] != '\0') {
+                uint32_t watch = (uint32_t)strtoul(watch_env, NULL, 10);
+                if (nops > 1 && ops[1].kind == LR_VAL_VREG &&
+                    ops[1].vreg == watch) {
+                    fprintf(stderr,
+                            "[a64 store-op] func=%s block=%u ptr_vreg=%u ptr_kind=%d pos=%zu\n",
+                            cc->func_name ? cc->func_name : "<anon>",
+                            ctx->current_block_id,
+                            ops[1].vreg,
+                            (int)ops[1].kind,
+                            cc->pos);
+                }
+            }
+        }
         emit_load_operand(cc, &ops[1], A64_X10);
         size_t store_sz = lr_type_size(ops[0].type);
         if (store_sz == 0)
             store_sz = 8;
+        if (dbg_ls) {
+            fprintf(stderr,
+                    "[a64 store] func=%s block=%u src_kind=%d src_vreg=%u src_ty=%d ptr_kind=%d ptr_vreg=%u ptr_ty=%d store_sz=%zu\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    ctx->current_block_id,
+                    (int)ops[0].kind,
+                    ops[0].kind == LR_VAL_VREG ? ops[0].vreg : 0u,
+                    ops[0].type ? (int)ops[0].type->kind : -1,
+                    (int)ops[1].kind,
+                    ops[1].kind == LR_VAL_VREG ? ops[1].vreg : 0u,
+                    ops[1].type ? (int)ops[1].type->kind : -1,
+                    store_sz);
+        }
         if (store_sz > 8) {
             if (ops[0].kind == LR_VAL_IMM_I64 && ops[0].imm_i64 == 0) {
                 emit_mem_zero_base(cc, A64_X10, 0, store_sz);
                 break;
             }
-            if (ops[0].kind == LR_VAL_VREG &&
-                ops[0].vreg < cc->num_stack_slots &&
-                cc->stack_slot_sizes[ops[0].vreg] > 0) {
-                uint32_t vreg = ops[0].vreg;
-                int32_t src_off = alloc_slot(cc, vreg, 8);
-                size_t src_sz = cc->stack_slot_sizes[vreg];
-                if (src_sz > store_sz)
-                    src_sz = store_sz;
-                if (src_sz > 0)
-                    emit_mem_copy_base_to_base(cc, A64_X10, 0, A64_FP,
-                                               src_off, src_sz);
-                if (src_sz < store_sz)
-                    emit_mem_zero_base(cc, A64_X10, (int32_t)src_sz,
-                                       store_sz - src_sz);
+            if (ops[0].kind == LR_VAL_VREG) {
+                emit_copy_vreg_value_bytes_to_base(cc, ops[0].vreg, store_sz,
+                                                   A64_X10, 0);
                 break;
             }
             emit_mem_zero_base(cc, A64_X10, 0, store_sz);
@@ -1782,27 +2186,49 @@ static int aarch64_compile_emit(void *compile_ctx,
         const lr_type_t *field_ty = NULL;
         size_t field_sz = 8;
         bool have_path = false;
+        size_t agg_sz = 0;
 
         if (nops > 0 && ops[0].type)
             have_path = lr_aggregate_index_path(
                 ops[0].type, desc->indices, desc->num_indices,
                 &field_off, &field_ty);
+        if (nops > 0 && ops[0].type)
+            agg_sz = lr_type_size(ops[0].type);
         if (field_ty)
             field_sz = lr_type_size(field_ty);
         if (field_sz == 0)
             field_sz = 8;
 
         if (have_path && nops > 0 && ops[0].kind == LR_VAL_VREG) {
+            bool src_indirect = vreg_uses_indirect_aggregate_storage(
+                cc, ops[0].vreg, agg_sz);
             if (field_sz > 8) {
                 int32_t dst_off = alloc_slot(cc, desc->dest, field_sz);
-                int32_t src_off = alloc_slot(cc, ops[0].vreg, 8) +
-                                  (int32_t)field_off;
-                emit_mem_copy_base_to_base(cc, A64_FP, dst_off,
-                                           A64_FP, src_off, field_sz);
+                if (src_indirect) {
+                    int32_t src_off = alloc_slot(cc, ops[0].vreg, 8);
+                    emit_load(cc->buf, &cc->pos, cc->buflen,
+                              A64_X10, A64_FP, src_off, 8);
+                    emit_mem_copy_base_to_base(cc, A64_FP, dst_off,
+                                               A64_X10, (int32_t)field_off,
+                                               field_sz);
+                } else {
+                    int32_t src_off = alloc_slot(cc, ops[0].vreg, 8) +
+                                      (int32_t)field_off;
+                    emit_mem_copy_base_to_base(cc, A64_FP, dst_off,
+                                               A64_FP, src_off, field_sz);
+                }
             } else {
-                emit_load_vreg_mem_sized(cc, ops[0].vreg,
-                                         (int32_t)field_off, A64_X9,
-                                         (uint8_t)field_sz);
+                if (src_indirect) {
+                    int32_t src_off = alloc_slot(cc, ops[0].vreg, 8);
+                    emit_load(cc->buf, &cc->pos, cc->buflen,
+                              A64_X10, A64_FP, src_off, 8);
+                    emit_load(cc->buf, &cc->pos, cc->buflen, A64_X9,
+                              A64_X10, (int32_t)field_off, (uint8_t)field_sz);
+                } else {
+                    emit_load_vreg_mem_sized(cc, ops[0].vreg,
+                                             (int32_t)field_off, A64_X9,
+                                             (uint8_t)field_sz);
+                }
                 emit_store_slot(cc, desc->dest, A64_X9);
             }
             break;
@@ -1833,18 +2259,8 @@ static int aarch64_compile_emit(void *compile_ctx,
 
         if (nops > 0) {
             if (ops[0].kind == LR_VAL_VREG) {
-                size_t src_sz = 0;
-                int32_t src_off = alloc_slot(cc, ops[0].vreg, 8);
-                if (ops[0].vreg < cc->num_stack_slots)
-                    src_sz = cc->stack_slot_sizes[ops[0].vreg];
-                if (src_sz > agg_sz) src_sz = agg_sz;
-                if (src_sz > 0)
-                    emit_mem_copy_base_to_base(cc, A64_FP, dst_off,
-                                               A64_FP, src_off, src_sz);
-                if (src_sz < agg_sz)
-                    emit_mem_zero_base(cc, A64_FP,
-                                       dst_off + (int32_t)src_sz,
-                                       agg_sz - src_sz);
+                emit_copy_vreg_value_bytes_to_base(cc, ops[0].vreg, agg_sz,
+                                                   A64_FP, dst_off);
             } else if (ops[0].kind == LR_VAL_UNDEF ||
                        ops[0].kind == LR_VAL_NULL) {
                 emit_mem_zero_base(cc, A64_FP, dst_off, agg_sz);
@@ -1869,21 +2285,9 @@ static int aarch64_compile_emit(void *compile_ctx,
             if (field_sz == 0) break;
             if (field_sz > 8) {
                 if (ops[1].kind == LR_VAL_VREG) {
-                    size_t src_sz = 0;
-                    int32_t src_off = alloc_slot(cc, ops[1].vreg, 8);
-                    if (ops[1].vreg < cc->num_stack_slots)
-                        src_sz = cc->stack_slot_sizes[ops[1].vreg];
-                    if (src_sz > field_sz) src_sz = field_sz;
-                    if (src_sz > 0)
-                        emit_mem_copy_base_to_base(
-                            cc, A64_FP,
-                            dst_off + (int32_t)field_off,
-                            A64_FP, src_off, src_sz);
-                    if (src_sz < field_sz)
-                        emit_mem_zero_base(
-                            cc, A64_FP,
-                            dst_off + (int32_t)field_off + (int32_t)src_sz,
-                            field_sz - src_sz);
+                    emit_copy_vreg_value_bytes_to_base(
+                        cc, ops[1].vreg, field_sz, A64_FP,
+                        dst_off + (int32_t)field_off);
                 } else {
                     emit_mem_zero_base(cc, A64_FP,
                                        dst_off + (int32_t)field_off,
@@ -1907,6 +2311,7 @@ static int aarch64_compile_emit(void *compile_ctx,
             bool cmp_is64 = true;
             a64_int_cmp_intrinsic_kind_t cmp_intrin =
                 classify_llvm_int_cmp_intrinsic(cname, &cmp_is64);
+            uint8_t objsize_bits = llvm_objectsize_bits(cname);
             if (cmp_intrin != A64_INT_CMP_INTRIN_NONE) {
                 uint8_t cond = 0;
                 if (nops >= 3) {
@@ -1925,6 +2330,17 @@ static int aarch64_compile_emit(void *compile_ctx,
                              enc_csel(cmp_is64, A64_X9, A64_X9, A64_X10, cond));
                     if (desc->type && desc->type->kind != LR_TYPE_VOID)
                         emit_store_slot(cc, desc->dest, A64_X9);
+                }
+                invalidate_cached_gprs_a64(cc);
+                break;
+            }
+            if (objsize_bits != 0) {
+                if (desc->type && desc->type->kind != LR_TYPE_VOID) {
+                    int64_t unknown = (objsize_bits == 32)
+                                      ? (int64_t)(uint32_t)UINT32_MAX
+                                      : (int64_t)UINT64_MAX;
+                    emit_move_imm_ctx(cc, A64_X9, unknown, true);
+                    emit_store_slot(cc, desc->dest, A64_X9);
                 }
                 invalidate_cached_gprs_a64(cc);
                 break;
@@ -2118,7 +2534,12 @@ static int aarch64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_PHI:
-        (void)alloc_slot(cc, desc->dest, 8);
+        {
+            size_t phi_sz = desc->type ? lr_type_size(desc->type) : 8;
+            if (phi_sz < 8)
+                phi_sz = 8;
+            (void)alloc_slot(cc, desc->dest, phi_sz);
+        }
         break;
     case LR_OP_UNREACHABLE:
         break;
@@ -2133,13 +2554,11 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
     a64_direct_ctx_t *ctx = (a64_direct_ctx_t *)compile_ctx;
     a64_compile_ctx_t *cc;
     bool dbg_fixups = getenv("LIRIC_DBG_A64_FIXUPS") != NULL;
+    bool dbg_late_phi = getenv("LIRIC_DBG_A64_LATE_PHI") != NULL;
     uint32_t unresolved_fixups = 0;
     if (!ctx || !out_len)
         return -1;
 
-    if (ctx->block_offset_pending) {
-        ctx->cc.block_offsets[ctx->current_block_id] = ctx->cc.pos;
-    }
     ctx->block_offset_pending = false;
     if (a64_flush_deferred_terminator(ctx) != 0)
         return -1;
@@ -2166,14 +2585,35 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
             }
             if (!has_late)
                 continue;
+            if (dbg_late_phi) {
+                fprintf(stderr,
+                        "[a64 late-phi] func=%s source=%u target=%u fixup_insn=%zu kind=%u\n",
+                        cc->func_name ? cc->func_name : "<anon>",
+                        source, target, cc->fixups[fi].insn_pos,
+                        (unsigned)cc->fixups[fi].kind);
+            }
             size_t stub_pos = cc->pos;
+            /* Late stubs are reached from runtime control-flow edges, so any
+               compile-time register cache assumptions are invalid here. */
+            invalidate_cached_gprs_a64(cc);
             for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
                 if (ctx->phi_copies[pi].pred_block_id != source ||
                     ctx->phi_copies[pi].succ_block_id != target)
                     continue;
-                emit_load_operand(cc, &ctx->phi_copies[pi].src_op, A64_X9);
-                emit_store_slot(cc, ctx->phi_copies[pi].dest_vreg, A64_X9);
+                if (dbg_late_phi) {
+                    const lr_operand_t *sop = &ctx->phi_copies[pi].src_op;
+                    long long imm = (long long)(sop->kind == LR_VAL_IMM_I64
+                                                    ? sop->imm_i64
+                                                    : 0LL);
+                    fprintf(stderr,
+                            "[a64 late-phi copy] dest=%u src_kind=%d src_vreg=%u imm=%lld\n",
+                            ctx->phi_copies[pi].dest_vreg, (int)sop->kind,
+                            sop->kind == LR_VAL_VREG ? sop->vreg : 0u, imm);
+                }
+                emit_phi_copy_value(cc, ctx->phi_copies[pi].dest_vreg,
+                                    &ctx->phi_copies[pi].src_op);
             }
+            invalidate_cached_gprs_a64(cc);
             if (a64_direct_ensure_fixup_cap(ctx) != 0)
                 return -1;
             emit_jmp_a64(cc, target);
@@ -2200,9 +2640,21 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
     }
 
     for (uint32_t i = 0; i < cc->num_fixups; i++) {
+        size_t target_off = SIZE_MAX;
         if (cc->fixups[i].target == UINT32_MAX) continue;
-        if (cc->fixups[i].target >= cc->num_block_offsets ||
-            cc->block_offsets[cc->fixups[i].target] == SIZE_MAX) {
+        if (cc->fixups[i].target_pos_hint != SIZE_MAX) {
+            target_off = cc->fixups[i].target_pos_hint;
+        } else if (cc->fixups[i].target < cc->num_block_offsets) {
+            size_t entry = cc->block_entry_offsets[cc->fixups[i].target];
+            size_t off = cc->block_offsets[cc->fixups[i].target];
+            if (entry != SIZE_MAX && off != SIZE_MAX)
+                target_off = entry < off ? entry : off;
+            else if (entry != SIZE_MAX)
+                target_off = entry;
+            else if (off != SIZE_MAX)
+                target_off = off;
+        }
+        if (target_off == SIZE_MAX) {
             unresolved_fixups++;
             if (dbg_fixups) {
                 fprintf(stderr,
@@ -2215,8 +2667,20 @@ static int aarch64_compile_end(void *compile_ctx, size_t *out_len) {
             }
             continue;
         }
+        if (getenv("LIRIC_DBG_A64_FIXUPS") != NULL) {
+            fprintf(stderr,
+                    "[a64 patch] func=%s idx=%u src=%u tgt=%u insn=%zu hint=%zu off=%zu kind=%u\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    i,
+                    cc->fixups[i].source,
+                    cc->fixups[i].target,
+                    cc->fixups[i].insn_pos,
+                    cc->fixups[i].target_pos_hint,
+                    target_off,
+                    (unsigned)cc->fixups[i].kind);
+        }
 
-        int64_t target_pos = (int64_t)cc->block_offsets[cc->fixups[i].target];
+        int64_t target_pos = (int64_t)target_off;
         int64_t here = (int64_t)cc->fixups[i].insn_pos;
         int64_t imm = (target_pos - here) / 4;
 
@@ -2260,7 +2724,12 @@ static int aarch64_compile_add_phi_copy(void *compile_ctx,
     if (a64_direct_ensure_phi_copy_cap(ctx) != 0)
         return -1;
 
-    (void)alloc_slot(&ctx->cc, dest_vreg, 8);
+    {
+        size_t copy_sz = src_op->type ? lr_type_size(src_op->type) : 8;
+        if (copy_sz < 8)
+            copy_sz = 8;
+        (void)alloc_slot(&ctx->cc, dest_vreg, copy_sz);
+    }
 
     a64_stream_phi_copy_t *entry = &ctx->phi_copies[ctx->phi_copy_count++];
     entry->pred_block_id = pred_block_id;
@@ -2268,6 +2737,14 @@ static int aarch64_compile_add_phi_copy(void *compile_ctx,
     entry->dest_vreg = dest_vreg;
     entry->src_op = a64_operand_from_desc(src_op);
     entry->emitted = false;
+    if (getenv("LIRIC_DBG_A64_PHI") != NULL) {
+        fprintf(stderr,
+                "[a64 phi add] func=%s pred=%u succ=%u dest=%u src_kind=%d src_vreg=%u\n",
+                ctx->cc.func_name ? ctx->cc.func_name : "<anon>",
+                pred_block_id, succ_block_id, dest_vreg,
+                (int)entry->src_op.kind,
+                entry->src_op.kind == LR_VAL_VREG ? entry->src_op.vreg : 0u);
+    }
     return 0;
 }
 

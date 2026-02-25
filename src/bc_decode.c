@@ -74,6 +74,7 @@ typedef struct {
     uint32_t blockinfo_cap;
 
     uint64_t *record;
+    uint8_t *record_is_char6;
     uint32_t record_len;
     uint32_t record_cap;
     const uint8_t *blob_data;
@@ -142,18 +143,28 @@ static void bc_align32(bc_reader_t *r) {
 }
 
 
-static void bc_record_push(bc_reader_t *r, uint64_t val) {
+static void bc_record_push(bc_reader_t *r, uint64_t val, bool is_char6) {
     if (r->record_len == r->record_cap) {
         uint32_t new_cap = r->record_cap ? r->record_cap * 2 : 64;
-        uint64_t *tmp = (uint64_t *)realloc(r->record, (size_t)new_cap * sizeof(uint64_t));
+        uint64_t *tmp = NULL;
+        uint8_t *tmp_char6 = (uint8_t *)realloc(
+            r->record_is_char6, (size_t)new_cap * sizeof(uint8_t));
+        if (!tmp_char6) {
+            bc_error(r, "out of memory in record metadata buffer");
+            return;
+        }
+        tmp = (uint64_t *)realloc(r->record, (size_t)new_cap * sizeof(uint64_t));
         if (!tmp) {
+            r->record_is_char6 = tmp_char6;
             bc_error(r, "out of memory in record buffer");
             return;
         }
         r->record = tmp;
+        r->record_is_char6 = tmp_char6;
         r->record_cap = new_cap;
     }
     r->record[r->record_len++] = val;
+    r->record_is_char6[r->record_len - 1] = is_char6 ? 1u : 0u;
 }
 
 static void bc_abbrev_list_push(bc_abbrev_t **list, uint32_t *count,
@@ -252,7 +263,7 @@ static uint32_t bc_read_record(bc_reader_t *r, uint32_t abbrev_id) {
         code = (uint32_t)bc_read_vbr(r, 6);
         numops = (uint32_t)bc_read_vbr(r, 6);
         for (i = 0; i < numops && !r->has_error; i++)
-            bc_record_push(r, bc_read_vbr(r, 6));
+            bc_record_push(r, bc_read_vbr(r, 6), false);
         return code;
     }
 
@@ -272,25 +283,25 @@ static uint32_t bc_read_record(bc_reader_t *r, uint32_t abbrev_id) {
                 if (i == 0)
                     code = (uint32_t)op->value;
                 else
-                    bc_record_push(r, op->value);
+                    bc_record_push(r, op->value, false);
             } else if (op->kind == BC_OP_FIXED) {
                 uint64_t val = bc_read_fixed(r, (uint32_t)op->value);
                 if (i == 0)
                     code = (uint32_t)val;
                 else
-                    bc_record_push(r, val);
+                    bc_record_push(r, val, false);
             } else if (op->kind == BC_OP_VBR) {
                 uint64_t val = bc_read_vbr(r, (uint32_t)op->value);
                 if (i == 0)
                     code = (uint32_t)val;
                 else
-                    bc_record_push(r, val);
+                    bc_record_push(r, val, false);
             } else if (op->kind == BC_OP_CHAR6) {
                 uint64_t val = bc_read_fixed(r, 6);
                 if (i == 0)
                     code = (uint32_t)val;
                 else
-                    bc_record_push(r, val);
+                    bc_record_push(r, val, true);
             } else if (op->kind == BC_OP_ARRAY) {
                 uint32_t count = (uint32_t)bc_read_vbr(r, 6);
                 uint32_t j;
@@ -310,7 +321,7 @@ static uint32_t bc_read_record(bc_reader_t *r, uint32_t abbrev_id) {
                         val = bc_read_fixed(r, 6);
                     else
                         val = bc_read_vbr(r, 6);
-                    bc_record_push(r, val);
+                    bc_record_push(r, val, elem_op->kind == BC_OP_CHAR6);
                 }
                 i++;
             } else if (op->kind == BC_OP_BLOB) {
@@ -574,6 +585,7 @@ typedef struct {
     lr_bc_stream_callback_t on_inst;
     void *on_inst_ctx;
     uint32_t cur_func_code;
+    const char *cur_func_name;
     bc_global_init_ref_t *global_inits;
     uint32_t global_init_count;
     uint32_t global_init_cap;
@@ -583,11 +595,22 @@ typedef struct {
 
 static void bc_dec_error(bc_decoder_t *d, const char *fmt, ...) {
     va_list ap;
+    size_t used;
     if (!d || !d->err || d->errlen == 0)
         return;
     va_start(ap, fmt);
     vsnprintf(d->err, d->errlen, fmt, ap);
     va_end(ap);
+    used = strlen(d->err);
+    if (d->cur_func_name && d->cur_func_name[0] != '\0') {
+        if (used + 64u < d->errlen) {
+            snprintf(d->err + used, d->errlen - used, " (func=%s code=%u)",
+                     d->cur_func_name, d->cur_func_code);
+        }
+    } else if (d->cur_func_code != 0u && used + 24u < d->errlen) {
+        snprintf(d->err + used, d->errlen - used, " (code=%u)",
+                 d->cur_func_code);
+    }
 }
 
 static void bc_type_table_push(bc_type_table_t *t, lr_type_t *ty) {
@@ -1916,7 +1939,8 @@ const_data_byte_fallback:
                             code == CONST_CODE_CSTRING) {
                             decode_char6 = true;
                             for (i = 0; i < nbytes; i++) {
-                                if (r->record[i] > 63u) {
+                                if (!r->record_is_char6 ||
+                                    !r->record_is_char6[i]) {
                                     decode_char6 = false;
                                     break;
                                 }
@@ -2228,7 +2252,8 @@ static lr_opcode_t bc_map_binop(uint32_t opc, bool is_fp) {
         case 0: return LR_OP_FADD;
         case 1: return LR_OP_FSUB;
         case 2: return LR_OP_FMUL;
-        case 3: return LR_OP_FDIV;
+        case 3: return LR_OP_FDIV; /* legacy/older producer encoding */
+        case 4: return LR_OP_FDIV; /* LLVM 17+/21 bitcode uses signed-div slot */
         default: return LR_OP_FADD;
         }
     }
@@ -2423,9 +2448,13 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
     uint32_t switch_fixup_count = 0;
     uint32_t switch_fixup_cap = 0;
     uint32_t i;
+    bool dbg_switch = getenv("LIRIC_DBG_BC_SWITCH") != NULL;
+    bool disable_switch_phi_fixups =
+        getenv("LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS") != NULL;
     bool ok = true;
 
     memset(&local_vt, 0, sizeof(local_vt));
+    d->cur_func_name = (func && func->name) ? func->name : NULL;
 
     /* Pre-populate with global values */
     for (i = 0; i < d->global_values.count; i++)
@@ -3096,6 +3125,9 @@ cmp_emit_done:
                 uint32_t dest;
                 lr_inst_t *inst;
                 lr_type_t *base_ptr_ty = NULL;
+                bool parse_ok = true;
+                bool use_pair_encoding = true;
+                bool retry_value_only = false;
 
                 if (r->record_len < 3) {
                     bc_dec_error(d, "malformed gep record");
@@ -3107,36 +3139,109 @@ cmp_emit_done:
                 src_ty_idx = (uint32_t)r->record[op_num++];
                 base_ty = bc_get_type(d, src_ty_idx);
                 if (!base_ty) { ok = false; break; }
-                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
-                                                   &op_num, next_value_id, &base_vid,
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record,
+                                                   r->record_len, &op_num,
+                                                   next_value_id, &base_vid,
                                                    &base_ptr_ty)) {
-                    ok = false;
-                    break;
+                    use_pair_encoding = false;
+                    parse_ok = true;
+                    if (d->err && d->errlen > 0)
+                        d->err[0] = '\0';
+                    op_num = 2;
+                    if (!bc_record_get_value(d, r->record, r->record_len,
+                                             &op_num, next_value_id,
+                                             &base_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    base_ptr_ty = d->module->type_ptr;
                 }
-                nops_total = 1u + (r->record_len - op_num);
 
-                ops = (lr_operand_t *)malloc((size_t)nops_total * sizeof(lr_operand_t));
+                nops_total = 1u + (r->record_len - op_num);
+                ops = (lr_operand_t *)malloc((size_t)nops_total *
+                                             sizeof(lr_operand_t));
                 if (!ops) {
                     bc_dec_error(d, "out of memory for gep operands");
                     ok = false;
                     break;
                 }
-                ops[0] = bc_make_operand_from_value(d, &local_vt, base_vid, func,
-                                                    base_ptr_ty ? base_ptr_ty : d->module->type_ptr);
+                ops[0] = bc_make_operand_from_value(
+                    d, &local_vt, base_vid, func,
+                    base_ptr_ty ? base_ptr_ty : d->module->type_ptr);
+
                 for (j = 1; j < nops_total; j++) {
                     uint32_t vid = 0;
                     lr_type_t *idx_ty = NULL;
-                    if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
-                                                       &op_num, next_value_id, &vid, &idx_ty)) {
+                    if (use_pair_encoding) {
+                        if (!bc_record_get_value_type_pair(
+                                d, &local_vt, r->record, r->record_len,
+                                &op_num, next_value_id, &vid, &idx_ty)) {
+                            parse_ok = false;
+                            if (d->err &&
+                                (strstr(d->err, "missing forward type id") != NULL ||
+                                 strstr(d->err, "missing value operand") != NULL)) {
+                                retry_value_only = true;
+                            }
+                            break;
+                        }
+                    } else {
+                        if (!bc_record_get_value(d, r->record, r->record_len,
+                                                 &op_num, next_value_id,
+                                                 &vid)) {
+                            parse_ok = false;
+                            break;
+                        }
+                        if (vid < local_vt.count)
+                            idx_ty = local_vt.values[vid].type;
+                        if (!idx_ty)
+                            idx_ty = d->module->type_i64;
+                    }
+                    ops[j] = bc_make_operand_from_value(d, &local_vt, vid, func,
+                                                        idx_ty);
+                    ops[j] = lr_canonicalize_gep_index(d->module,
+                                                       blocks[cur_block], func,
+                                                       ops[j]);
+                }
+
+                if (!parse_ok && retry_value_only) {
+                    uint32_t op_num_retry = 2;
+                    if (d->err && d->errlen > 0)
+                        d->err[0] = '\0';
+                    if (!bc_record_get_value(d, r->record, r->record_len,
+                                             &op_num_retry, next_value_id,
+                                             &base_vid)) {
+                        free(ops);
                         ok = false;
                         break;
                     }
-                    ops[j] = bc_make_operand_from_value(d, &local_vt, vid, func, idx_ty);
-                    ops[j] = lr_canonicalize_gep_index(d->module, blocks[cur_block],
-                                                       func, ops[j]);
+                    ops[0] = bc_make_operand_from_value(d, &local_vt, base_vid,
+                                                        func,
+                                                        d->module->type_ptr);
+                    for (j = 1; j < nops_total; j++) {
+                        uint32_t vid = 0;
+                        lr_type_t *idx_ty = NULL;
+                        if (!bc_record_get_value(d, r->record, r->record_len,
+                                                 &op_num_retry, next_value_id,
+                                                 &vid)) {
+                            parse_ok = false;
+                            break;
+                        }
+                        if (vid < local_vt.count)
+                            idx_ty = local_vt.values[vid].type;
+                        if (!idx_ty)
+                            idx_ty = d->module->type_i64;
+                        ops[j] = bc_make_operand_from_value(d, &local_vt, vid,
+                                                            func, idx_ty);
+                        ops[j] = lr_canonicalize_gep_index(d->module,
+                                                           blocks[cur_block],
+                                                           func, ops[j]);
+                    }
+                    parse_ok = (j == nops_total);
                 }
-                if (!ok) {
+
+                if (!parse_ok) {
                     free(ops);
+                    ok = false;
                     break;
                 }
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
@@ -3739,12 +3844,31 @@ cmp_emit_done:
                         ok = false;
                         break;
                     }
-                    /*
-                     * SWITCH case values are stored as absolute value IDs in
-                     * the function value table (see LLVM BitcodeReader
-                     * getFnValueByID usage for old switch records), unlike
-                     * most opvals that use relative IDs.
-                     */
+                    if (dbg_switch) {
+                        if (case_val_id < local_vt.count &&
+                            local_vt.values[case_val_id].kind == BC_VAL_CONST &&
+                            local_vt.values[case_val_id].operand.kind == LR_VAL_IMM_I64) {
+                            fprintf(stderr,
+                                    "bc switch: func=%s base=%u raw_case=%u imm=%lld case_bb=%u default_bb=%u\n",
+                                    func && func->name ? func->name : "<anon>",
+                                    next_value_id,
+                                    (unsigned)case_val_id,
+                                    (long long)local_vt.values[case_val_id].operand.imm_i64,
+                                    (unsigned)case_bb,
+                                    (unsigned)default_bb);
+                        } else {
+                            fprintf(stderr,
+                                    "bc switch: func=%s base=%u raw_case=%u kind=%d case_bb=%u default_bb=%u\n",
+                                    func && func->name ? func->name : "<anon>",
+                                    next_value_id,
+                                    (unsigned)case_val_id,
+                                    (case_val_id < local_vt.count)
+                                        ? (int)local_vt.values[case_val_id].kind
+                                        : -1,
+                                    (unsigned)case_bb,
+                                    (unsigned)default_bb);
+                        }
+                    }
                     case_op = bc_make_operand_from_value(d, &local_vt, case_val_id,
                                                          func, switch_ty);
 
@@ -3843,36 +3967,38 @@ cmp_emit_done:
                     if (!ok)
                         break;
 
-                    if (!has_old_pred) {
-                        if (!bc_push_switch_phi_fixup(d, &switch_fixups,
-                                                      &switch_fixup_count,
-                                                      &switch_fixup_cap,
-                                                      target_bb,
-                                                      old_switch_pred,
-                                                      false,
-                                                      target_preds,
-                                                      pred_count)) {
-                            ok = false;
-                            break;
-                        }
-                    } else if (pred_count > 1u) {
-                        uint32_t extra_count = 0;
-                        for (uint32_t pi = 0; pi < pred_count; pi++) {
-                            if (target_preds[pi] == old_switch_pred)
-                                continue;
-                            target_preds[extra_count++] = target_preds[pi];
-                        }
-                        if (extra_count > 0u &&
-                            !bc_push_switch_phi_fixup(d, &switch_fixups,
-                                                      &switch_fixup_count,
-                                                      &switch_fixup_cap,
-                                                      target_bb,
-                                                      old_switch_pred,
-                                                      true,
-                                                      target_preds,
-                                                      extra_count)) {
-                            ok = false;
-                            break;
+                    if (!disable_switch_phi_fixups) {
+                        if (!has_old_pred) {
+                            if (!bc_push_switch_phi_fixup(d, &switch_fixups,
+                                                          &switch_fixup_count,
+                                                          &switch_fixup_cap,
+                                                          target_bb,
+                                                          old_switch_pred,
+                                                          false,
+                                                          target_preds,
+                                                          pred_count)) {
+                                ok = false;
+                                break;
+                            }
+                        } else if (pred_count > 1u) {
+                            uint32_t extra_count = 0;
+                            for (uint32_t pi = 0; pi < pred_count; pi++) {
+                                if (target_preds[pi] == old_switch_pred)
+                                    continue;
+                                target_preds[extra_count++] = target_preds[pi];
+                            }
+                            if (extra_count > 0u &&
+                                !bc_push_switch_phi_fixup(d, &switch_fixups,
+                                                          &switch_fixup_count,
+                                                          &switch_fixup_cap,
+                                                          target_bb,
+                                                          old_switch_pred,
+                                                          true,
+                                                          target_preds,
+                                                          extra_count)) {
+                                ok = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -3922,6 +4048,8 @@ cmp_emit_done:
     free(switch_fixups);
     free(blocks);
     free(local_vt.values);
+    d->cur_func_name = NULL;
+    d->cur_func_code = 0;
     return ok && !r->has_error;
 }
 
@@ -4107,6 +4235,10 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                     bc_dec_error(d, "failed to create function '%s'", name);
                     return false;
                 }
+                /* LLVM bitcode modules use the LLVM-compatible C ABI for all
+                   function declarations/definitions. Keep call/param lowering
+                   consistent across caller and callee. */
+                fn->uses_llvm_abi = true;
 
                 fv.kind = BC_VAL_FUNC;
                 fv.type = d->module->type_ptr;
@@ -4423,6 +4555,7 @@ lr_module_t *lr_parse_bc_streaming(const uint8_t *data, size_t len,
 
     /* Success */
     free(reader.record);
+    free(reader.record_is_char6);
     bc_free_abbrev_list(reader.abbrevs, reader.num_abbrevs);
     {
         uint32_t i;
@@ -4438,6 +4571,7 @@ lr_module_t *lr_parse_bc_streaming(const uint8_t *data, size_t len,
 
 cleanup_fail:
     free(reader.record);
+    free(reader.record_is_char6);
     bc_free_abbrev_list(reader.abbrevs, reader.num_abbrevs);
     {
         uint32_t i;

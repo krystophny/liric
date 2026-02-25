@@ -868,6 +868,11 @@ lr_operand_t lr_op_vreg(uint32_t vreg, lr_type_t *type) {
 }
 
 lr_operand_t lr_op_imm_i64(int64_t val, lr_type_t *type) {
+    /* Canonicalize i1 immediates to {0,1}. LLVM textual/bitcode may
+       represent true as -1, but liric integer ops execute in wider
+       registers and require canonical boolean lane values. */
+    if (type && type->kind == LR_TYPE_I1)
+        val = (val != 0) ? 1 : 0;
     return (lr_operand_t){
         .kind = LR_VAL_IMM_I64, .imm_i64 = val, .type = type, .global_offset = 0
     };

@@ -4086,6 +4086,7 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
 static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
     const char *dump_path;
     FILE *f;
+    lr_module_t *session_mod = NULL;
     if (!mod || !mod->mod)
         return;
     dump_path = getenv("LIRIC_COMPAT_DUMP_FINAL_IR");
@@ -4096,6 +4097,13 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
         return;
     fprintf(f, "; ---- module ----\n");
     compat_dump_module(mod->mod, f);
+    if (mod->session) {
+        session_mod = lr_session_module(mod->session);
+        if (session_mod && session_mod != mod->mod) {
+            fprintf(f, "\n; ---- session module ----\n");
+            compat_dump_module(session_mod, f);
+        }
+    }
     fprintf(f, "\n");
     fclose(f);
 }
