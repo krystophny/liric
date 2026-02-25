@@ -938,6 +938,10 @@ int lr_llvm_compat_function_insert_block(lc_module_compat_t *mod,
     int attached = 0;
     if (!mod || !func || !block)
         return 0;
+    if (!block->func) {
+        if (lc_block_bind_func(mod, block, func) != 0)
+            return 0;
+    }
     if (block->func != func)
         return 0;
 
@@ -950,8 +954,17 @@ int lr_llvm_compat_function_insert_block(lc_module_compat_t *mod,
     if (!attached && lc_block_attach(mod, block) != 0)
         return 0;
 
-    if (!insert_before || insert_before == block)
+    if (!insert_before || insert_before == block) {
+        /* LLVM iplist insert(end, bb) moves an already-attached block
+           to the function tail; it is not a no-op unless bb is already
+           the last node. */
+        if (!insert_before && attached && func->last_block &&
+            func->last_block != block) {
+            if (!lr_llvm_compat_block_move_after(block, func->last_block))
+                return 0;
+        }
         return 1;
+    }
     if (insert_before->func != func)
         return 0;
     if (!lr_llvm_compat_block_move_before(block, insert_before))

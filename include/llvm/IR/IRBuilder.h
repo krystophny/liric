@@ -586,33 +586,46 @@ public:
     }
 
     BranchInst *CreateBr(BasicBlock *Dest) {
+        lr_block_t *dest_block = Dest ? Dest->impl_block() : nullptr;
         if (!B()) return nullptr;
-        if (Dest && Dest->impl_block() && M()) {
-            lc_block_attach(M(), Dest->impl_block());
+        if (dest_block && M() && !dest_block->func && B()->func) {
+            (void)lc_block_bind_func(M(), dest_block, B()->func);
         }
-        if (!Dest || !Dest->impl_block()) {
+        if (dest_block && M()) {
+            lc_block_attach(M(), dest_block);
+        }
+        if (!dest_block) {
             lc_create_unreachable(M(), B());
             return nullptr;
         }
-        lc_create_br(M(), B(), Dest->impl_block());
+        lc_create_br(M(), B(), dest_block);
         return nullptr;
     }
 
     BranchInst *CreateCondBr(Value *Cond, BasicBlock *True,
                              BasicBlock *False) {
+        lr_block_t *true_block = True ? True->impl_block() : nullptr;
+        lr_block_t *false_block = False ? False->impl_block() : nullptr;
         if (!B()) return nullptr;
-        if (True && True->impl_block() && M()) {
-            lc_block_attach(M(), True->impl_block());
+        if (M() && B()->func) {
+            if (true_block && !true_block->func) {
+                (void)lc_block_bind_func(M(), true_block, B()->func);
+            }
+            if (false_block && !false_block->func) {
+                (void)lc_block_bind_func(M(), false_block, B()->func);
+            }
         }
-        if (False && False->impl_block() && M()) {
-            lc_block_attach(M(), False->impl_block());
+        if (true_block && M()) {
+            lc_block_attach(M(), true_block);
         }
-        if (!Cond || !True || !False || !True->impl_block() || !False->impl_block()) {
+        if (false_block && M()) {
+            lc_block_attach(M(), false_block);
+        }
+        if (!Cond || !true_block || !false_block) {
             lc_create_unreachable(M(), B());
             return nullptr;
         }
-        lc_create_cond_br(M(), B(), Cond->impl(),
-                          True->impl_block(), False->impl_block());
+        lc_create_cond_br(M(), B(), Cond->impl(), true_block, false_block);
         return nullptr;
     }
 

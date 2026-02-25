@@ -2383,21 +2383,65 @@ static void detached_block_remove_idx(lc_module_compat_t *mod, uint32_t idx) {
     mod->detached_count--;
 }
 
+static int block_linked_in_func(const lr_func_t *func, const lr_block_t *block) {
+    const lr_block_t *it;
+    if (!func || !block)
+        return 0;
+    for (it = func->first_block; it; it = it->next) {
+        if (it == block)
+            return 1;
+    }
+    return 0;
+}
+
+static int block_bind_func_internal(lc_module_compat_t *mod,
+                                    lr_block_t *block,
+                                    lr_func_t *func) {
+    if (!mod || !block || !func)
+        return -1;
+    if (block->func == func) {
+        if (block->id == UINT32_MAX)
+            block->id = func->num_blocks++;
+        return 0;
+    }
+    if (block->func != NULL)
+        return -1;
+    block->func = func;
+    block->id = func->num_blocks++;
+    func->block_array = NULL;
+    func->linear_inst_array = NULL;
+    func->block_inst_offsets = NULL;
+    func->num_linear_insts = 0;
+    return 0;
+}
+
+int lc_block_bind_func(lc_module_compat_t *mod, lr_block_t *block,
+                       lr_func_t *func) {
+    return block_bind_func_internal(mod, block, func);
+}
+
 lc_value_t *lc_block_create_detached(lc_module_compat_t *mod, lr_func_t *func,
                                       const char *name) {
-    if (!mod || !func) return safe_undef(mod);
+    if (!mod) return safe_undef(mod);
     if (!name) name = "";
     lr_arena_t *arena = mod->mod->arena;
     lr_block_t *b = lr_arena_new(arena, lr_block_t);
     if (!b) return safe_undef(mod);
     b->name = lr_arena_strdup(arena, name, strlen(name));
-    b->id = func->num_blocks++;
-    b->func = func;
+    if (func) {
+        b->id = func->num_blocks++;
+        b->func = func;
+    } else {
+        b->id = UINT32_MAX;
+        b->func = NULL;
+    }
     b->next = NULL;
-    func->block_array = NULL;
-    func->linear_inst_array = NULL;
-    func->block_inst_offsets = NULL;
-    func->num_linear_insts = 0;
+    if (func) {
+        func->block_array = NULL;
+        func->linear_inst_array = NULL;
+        func->block_inst_offsets = NULL;
+        func->num_linear_insts = 0;
+    }
     if (detached_block_add(mod, b) != 0)
         return safe_undef(mod);
     lc_value_t *v = lc_value_block_ref(mod, b);
@@ -2414,6 +2458,10 @@ int lc_block_attach(lc_module_compat_t *mod, lr_block_t *block) {
     if (!func) {
         detached_block_remove_idx(mod, (uint32_t)idx);
         return -1;
+    }
+    if (block_linked_in_func(func, block)) {
+        detached_block_remove_idx(mod, (uint32_t)idx);
+        return 0;
     }
     block->next = NULL;
     if (!func->first_block) {
@@ -3431,7 +3479,11 @@ void lc_create_br(lc_module_compat_t *mod, lr_block_t *b,
                   lr_block_t *target) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[1];
-    if (!mod || !b || !target) return;
+    if (!mod || !b || !target || !b->func) return;
+    if (!target->func && block_bind_func_internal(mod, target, b->func) != 0)
+        return;
+    if (target->func != b->func)
+        return;
     memset(&inst, 0, sizeof(inst));
     ops[0] = block_operand_desc(target);
     inst.op = LR_OP_BR;
@@ -3446,7 +3498,13 @@ void lc_create_cond_br(lc_module_compat_t *mod, lr_block_t *b,
                        lr_block_t *false_bb) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[3];
-    if (!mod || !b || !cond || !true_bb || !false_bb) return;
+    if (!mod || !b || !cond || !true_bb || !false_bb || !b->func) return;
+    if (!true_bb->func && block_bind_func_internal(mod, true_bb, b->func) != 0)
+        return;
+    if (!false_bb->func && block_bind_func_internal(mod, false_bb, b->func) != 0)
+        return;
+    if (true_bb->func != b->func || false_bb->func != b->func)
+        return;
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(cond);
     ops[1] = block_operand_desc(true_bb);

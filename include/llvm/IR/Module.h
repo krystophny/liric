@@ -547,12 +547,9 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        BasicBlock *InsertBefore) {
     (void)Context;
     Function *fn = Parent;
-    if (!fn && InsertBefore) {
+    if (!fn && InsertBefore)
         fn = InsertBefore->getParent();
-    }
-    if (!fn) {
-        fn = detail::current_function_ref();
-    }
+
     lc_module_compat_t *mod = nullptr;
     lr_func_t *f = nullptr;
     if (fn) {
@@ -560,22 +557,43 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         mod = fn->getCompatMod();
         f = fn->getIRFunc();
     }
-    if ((!mod || !f) && InsertBefore) {
+
+    if (!mod)
+        mod = Module::getCurrentModule();
+
+    if (InsertBefore && !f) {
         f = lc_value_get_block_func(InsertBefore->impl());
         if (!fn && f) {
             fn = detail::lookup_function_wrapper(f);
             if (fn) detail::current_function_ref() = fn;
         }
-        if (!mod) {
-            mod = Module::getCurrentModule();
-        }
     }
-    if (!mod || !f) return BasicBlock::wrap(nullptr);
-    lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
-    if (fn) {
+    if (!mod) return BasicBlock::wrap(nullptr);
+    if ((Parent || InsertBefore) && !f) return BasicBlock::wrap(nullptr);
+
+    lc_value_t *bv = nullptr;
+    /* Match LLVM semantics:
+       - Parent == nullptr and InsertBefore == nullptr -> detached block with
+         no parent function until inserted.
+       - InsertBefore provided -> create detached, then insert before anchor.
+       - Parent provided and no InsertBefore -> append to parent immediately. */
+    if (!Parent && !InsertBefore) {
+        bv = lc_block_create_detached(mod, nullptr, Name.c_str());
+    } else if (InsertBefore) {
+        bv = lc_block_create_detached(mod, f, Name.c_str());
+    } else {
+        bv = lc_block_create(mod, f, Name.c_str());
+    }
+    if (!bv) return BasicBlock::wrap(nullptr);
+
+    BasicBlock *bb = BasicBlock::wrap(bv);
+    if (fn && (Parent || InsertBefore)) {
         detail::register_block_parent(lc_value_get_block(bv), fn);
     }
-    return BasicBlock::wrap(bv);
+    if (InsertBefore && fn) {
+        fn->insert(InsertBefore, bb);
+    }
+    return bb;
 }
 
 inline bool legacy::PassManager::run(Module &M) {
