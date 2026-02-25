@@ -295,6 +295,9 @@ lc_value_t *lc_create_fmul(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_fdiv(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name);
+lc_value_t *lc_create_frem(lc_module_compat_t *mod, lr_block_t *b,
+                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
+                            const char *name);
 lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *val, const char *name);
 

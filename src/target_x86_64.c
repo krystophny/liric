@@ -3,6 +3,7 @@
 #include "target_shared.h"
 #include "objfile.h"
 #include "jit.h"
+#include <math.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -896,6 +897,16 @@ static void emit_idiv_r(x86_compile_ctx_t *ctx, uint8_t src, uint8_t size) {
                   rex(size == 8, false, false, src >= 8));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xF7);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 7, src));
+    invalidate_cached_gprs(ctx);
+}
+
+static void emit_div_r(x86_compile_ctx_t *ctx, uint8_t src, uint8_t size) {
+    bool need_rex = (size == 8) || (src >= 8);
+    if (need_rex)
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                  rex(size == 8, false, false, src >= 8));
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xF7);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, 6, src));
     invalidate_cached_gprs(ctx);
 }
 
@@ -2104,6 +2115,18 @@ static int x86_64_compile_emit(void *compile_ctx,
         emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
         break;
     }
+    case LR_OP_FREM: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], X86_XMM0, fsize);
+        emit_load_fp_operand(cc, &ops[1], X86_XMM1, fsize);
+        uintptr_t fn = fsize == 4 ? (uintptr_t)fmodf : (uintptr_t)fmod;
+        emit_mov_imm(cc, X86_R10, (int64_t)fn, false);
+        emit_call_r10(cc);
+        invalidate_cached_gprs(cc);
+        emit_store_fp_slot(cc, desc->dest, X86_XMM0, fsize);
+        break;
+    }
     case LR_OP_SDIV: case LR_OP_SREM: {
         emit_load_operand(cc, &ops[0], X86_RAX);
         emit_load_operand(cc, &ops[1], X86_RCX);
@@ -2123,6 +2146,33 @@ static int x86_64_compile_emit(void *compile_ctx,
         }
         {
             uint8_t res_reg = (desc->op == LR_OP_SREM) ?
+                              X86_RDX : X86_RAX;
+            emit_store_slot(cc, desc->dest, res_reg);
+        }
+        break;
+    }
+    case LR_OP_UDIV: case LR_OP_UREM: {
+        emit_load_operand(cc, &ops[0], X86_RAX);
+        emit_load_operand(cc, &ops[1], X86_RCX);
+        {
+            uint8_t bits = int_type_width_bits(desc->type);
+            if (bits < 64) {
+                uint64_t mask = ((uint64_t)1 << bits) - 1u;
+                emit_mov_imm(cc, X86_R11, (int64_t)mask, false);
+                encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x21,
+                              X86_RAX, X86_R11, 8);
+                encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x21,
+                              X86_RCX, X86_R11, 8);
+            }
+            emit_byte(cc->buf, &cc->pos, cc->buflen,
+                      rex(true, false, false, false));
+            emit_byte(cc->buf, &cc->pos, cc->buflen, 0x31);
+            emit_byte(cc->buf, &cc->pos, cc->buflen,
+                      modrm(3, X86_RDX, X86_RDX));
+            emit_div_r(cc, X86_RCX, 8);
+        }
+        {
+            uint8_t res_reg = (desc->op == LR_OP_UREM) ?
                               X86_RDX : X86_RAX;
             emit_store_slot(cc, desc->dest, res_reg);
         }

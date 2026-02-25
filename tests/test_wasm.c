@@ -282,24 +282,24 @@ int test_wasm_ir_i64_unsigned_div_rem_lower_to_integer_ops(void) {
     lr_module_t *m = lr_wasm_build_module(wmod, arena, err, sizeof(err));
     TEST_ASSERT(m != NULL, "build module i64.div_u");
     lr_func_t *f = m->first_func;
-    bool found_sdiv = false;
+    bool found_udiv = false;
     TEST_ASSERT(f != NULL && f->first_block, "has i64.div_u body");
     for (lr_inst_t *inst = f->first_block->first; inst; inst = inst->next)
-        if (inst->op == LR_OP_SDIV)
-            found_sdiv = true;
-    TEST_ASSERT(found_sdiv, "i64.div_u lowers to integer div op");
+        if (inst->op == LR_OP_UDIV)
+            found_udiv = true;
+    TEST_ASSERT(found_udiv, "i64.div_u lowers to unsigned div op");
 
     wmod = lr_wasm_decode(rem_wasm, sizeof(rem_wasm), arena, err, sizeof(err));
     TEST_ASSERT(wmod != NULL, "decode i64.rem_u");
     m = lr_wasm_build_module(wmod, arena, err, sizeof(err));
     TEST_ASSERT(m != NULL, "build module i64.rem_u");
     f = m->first_func;
-    bool found_srem = false;
+    bool found_urem = false;
     TEST_ASSERT(f != NULL && f->first_block, "has i64.rem_u body");
     for (lr_inst_t *inst = f->first_block->first; inst; inst = inst->next)
-        if (inst->op == LR_OP_SREM)
-            found_srem = true;
-    TEST_ASSERT(found_srem, "i64.rem_u lowers to integer rem op");
+        if (inst->op == LR_OP_UREM)
+            found_urem = true;
+    TEST_ASSERT(found_urem, "i64.rem_u lowers to unsigned rem op");
 
     lr_arena_destroy(arena);
     return 0;

@@ -3051,16 +3051,14 @@ lc_value_t *lc_create_udiv(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
     (void)name;
-    /* liric does not have a distinct udiv opcode; use sdiv as approximation */
-    return compat_binop(mod, b, f, LR_OP_SDIV, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_UDIV, lhs, rhs);
 }
 
 lc_value_t *lc_create_urem(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
     (void)name;
-    /* liric does not have a distinct urem opcode; use srem as approximation */
-    return compat_binop(mod, b, f, LR_OP_SREM, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_UREM, lhs, rhs);
 }
 
 lc_value_t *lc_create_neg(lc_module_compat_t *mod, lr_block_t *b,
@@ -3158,6 +3156,13 @@ lc_value_t *lc_create_fdiv(lc_module_compat_t *mod, lr_block_t *b,
                             const char *name) {
     (void)name;
     return compat_binop(mod, b, f, LR_OP_FDIV, lhs, rhs);
+}
+
+lc_value_t *lc_create_frem(lc_module_compat_t *mod, lr_block_t *b,
+                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
+                            const char *name) {
+    (void)name;
+    return compat_binop(mod, b, f, LR_OP_FREM, lhs, rhs);
 }
 
 lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,

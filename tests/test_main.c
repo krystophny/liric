@@ -54,6 +54,8 @@ int test_parser_store_with_struct_constant(void);
 int test_parser_store_packed_struct_float_pair(void);
 int test_parser_store_packed_struct_double_pair(void);
 int test_parser_urem_instruction(void);
+int test_parser_udiv_instruction(void);
+int test_parser_frem_instruction(void);
 int test_parser_canonical_phi_pairs(void);
 int test_parser_phi_many_incoming_pairs(void);
 int test_parser_select_with_ptr_operands(void);
@@ -344,6 +346,8 @@ int main(void) {
     RUN_TEST(test_parser_store_packed_struct_float_pair);
     RUN_TEST(test_parser_store_packed_struct_double_pair);
     RUN_TEST(test_parser_urem_instruction);
+    RUN_TEST(test_parser_udiv_instruction);
+    RUN_TEST(test_parser_frem_instruction);
     RUN_TEST(test_parser_canonical_phi_pairs);
     RUN_TEST(test_parser_phi_many_incoming_pairs);
     RUN_TEST(test_parser_select_with_ptr_operands);

@@ -602,7 +602,57 @@ int test_parser_urem_instruction(void) {
     TEST_ASSERT(b != NULL, "entry block exists");
     lr_inst_t *inst = b->first;
     TEST_ASSERT(inst != NULL, "instruction exists");
-    TEST_ASSERT_EQ(inst->op, LR_OP_SREM, "urem parsed with integer rem opcode");
+    TEST_ASSERT_EQ(inst->op, LR_OP_UREM, "urem parsed as unsigned rem opcode");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_udiv_instruction(void) {
+    const char *src =
+        "define i32 @f(i32 %a, i32 %b) {\n"
+        "entry:\n"
+        "  %r = udiv i32 %a, %b\n"
+        "  ret i32 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *inst = b->first;
+    TEST_ASSERT(inst != NULL, "instruction exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_UDIV, "udiv parsed as unsigned div opcode");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_frem_instruction(void) {
+    const char *src =
+        "define double @f(double %a, double %b) {\n"
+        "entry:\n"
+        "  %r = frem double %a, %b\n"
+        "  ret double %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    TEST_ASSERT(f != NULL, "function exists");
+    lr_block_t *b = f->first_block;
+    TEST_ASSERT(b != NULL, "entry block exists");
+    lr_inst_t *inst = b->first;
+    TEST_ASSERT(inst != NULL, "instruction exists");
+    TEST_ASSERT_EQ(inst->op, LR_OP_FREM, "frem parsed as FP rem opcode");
 
     lr_arena_destroy(arena);
     return 0;

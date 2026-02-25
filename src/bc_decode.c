@@ -2252,8 +2252,8 @@ static lr_opcode_t bc_map_binop(uint32_t opc, bool is_fp) {
         case 0: return LR_OP_FADD;
         case 1: return LR_OP_FSUB;
         case 2: return LR_OP_FMUL;
-        case 3: return LR_OP_FDIV; /* legacy/older producer encoding */
-        case 4: return LR_OP_FDIV; /* LLVM 17+/21 bitcode uses signed-div slot */
+        case 4: return LR_OP_FDIV;
+        case 5: return LR_OP_FREM;
         default: return LR_OP_FADD;
         }
     }
@@ -2261,9 +2261,9 @@ static lr_opcode_t bc_map_binop(uint32_t opc, bool is_fp) {
     case 0:  return LR_OP_ADD;
     case 1:  return LR_OP_SUB;
     case 2:  return LR_OP_MUL;
-    case 3:  return LR_OP_SDIV;
+    case 3:  return LR_OP_UDIV;
     case 4:  return LR_OP_SDIV;
-    case 5:  return LR_OP_SREM;
+    case 5:  return LR_OP_UREM;
     case 6:  return LR_OP_SREM;
     case 7:  return LR_OP_SHL;
     case 8:  return LR_OP_LSHR;
@@ -2449,8 +2449,6 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
     uint32_t switch_fixup_cap = 0;
     uint32_t i;
     bool dbg_switch = getenv("LIRIC_DBG_BC_SWITCH") != NULL;
-    bool disable_switch_phi_fixups =
-        getenv("LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS") != NULL;
     bool ok = true;
 
     memset(&local_vt, 0, sizeof(local_vt));
@@ -3967,38 +3965,36 @@ cmp_emit_done:
                     if (!ok)
                         break;
 
-                    if (!disable_switch_phi_fixups) {
-                        if (!has_old_pred) {
-                            if (!bc_push_switch_phi_fixup(d, &switch_fixups,
-                                                          &switch_fixup_count,
-                                                          &switch_fixup_cap,
-                                                          target_bb,
-                                                          old_switch_pred,
-                                                          false,
-                                                          target_preds,
-                                                          pred_count)) {
-                                ok = false;
-                                break;
-                            }
-                        } else if (pred_count > 1u) {
-                            uint32_t extra_count = 0;
-                            for (uint32_t pi = 0; pi < pred_count; pi++) {
-                                if (target_preds[pi] == old_switch_pred)
-                                    continue;
-                                target_preds[extra_count++] = target_preds[pi];
-                            }
-                            if (extra_count > 0u &&
-                                !bc_push_switch_phi_fixup(d, &switch_fixups,
-                                                          &switch_fixup_count,
-                                                          &switch_fixup_cap,
-                                                          target_bb,
-                                                          old_switch_pred,
-                                                          true,
-                                                          target_preds,
-                                                          extra_count)) {
-                                ok = false;
-                                break;
-                            }
+                    if (!has_old_pred) {
+                        if (!bc_push_switch_phi_fixup(d, &switch_fixups,
+                                                      &switch_fixup_count,
+                                                      &switch_fixup_cap,
+                                                      target_bb,
+                                                      old_switch_pred,
+                                                      false,
+                                                      target_preds,
+                                                      pred_count)) {
+                            ok = false;
+                            break;
+                        }
+                    } else if (pred_count > 1u) {
+                        uint32_t extra_count = 0;
+                        for (uint32_t pi = 0; pi < pred_count; pi++) {
+                            if (target_preds[pi] == old_switch_pred)
+                                continue;
+                            target_preds[extra_count++] = target_preds[pi];
+                        }
+                        if (extra_count > 0u &&
+                            !bc_push_switch_phi_fixup(d, &switch_fixups,
+                                                      &switch_fixup_count,
+                                                      &switch_fixup_cap,
+                                                      target_bb,
+                                                      old_switch_pred,
+                                                      true,
+                                                      target_preds,
+                                                      extra_count)) {
+                            ok = false;
+                            break;
                         }
                     }
                 }

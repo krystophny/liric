@@ -86,6 +86,7 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"mul", LR_TOK_MUL},
     {"sdiv", LR_TOK_SDIV},
     {"srem", LR_TOK_SREM},
+    {"udiv", LR_TOK_UDIV},
     {"urem", LR_TOK_UREM},
     {"and", LR_TOK_AND},
     {"or", LR_TOK_OR},
@@ -97,6 +98,7 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"fsub", LR_TOK_FSUB},
     {"fmul", LR_TOK_FMUL},
     {"fdiv", LR_TOK_FDIV},
+    {"frem", LR_TOK_FREM},
     {"fneg", LR_TOK_FNEG},
     {"icmp", LR_TOK_ICMP},
     {"fcmp", LR_TOK_FCMP},
@@ -389,6 +391,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
     case 0x7f795119u:
         if (len == 8 && memcmp(s, "ptrtoint", 8) == 0) return LR_TOK_PTRTOINT;
         break;
+    case 0x91b3e243u:
+        if (len == 4 && memcmp(s, "frem", 4) == 0) return LR_TOK_FREM;
+        break;
     case 0x91fa8f16u:
         if (len == 9 && memcmp(s, "writeonly", 9) == 0) return LR_TOK_WRITEONLY;
         break;
@@ -418,6 +423,9 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
         break;
     case 0xaaedf37fu:
         if (len == 8 && memcmp(s, "inbounds", 8) == 0) return LR_TOK_INBOUNDS;
+        break;
+    case 0xaaefa29bu:
+        if (len == 4 && memcmp(s, "udiv", 4) == 0) return LR_TOK_UDIV;
         break;
     case 0xad2b82a6u:
         if (len == 3 && memcmp(s, "olt", 3) == 0) return LR_TOK_OLT;
@@ -786,6 +794,7 @@ const char *lr_tok_name(lr_tok_t kind) {
     case LR_TOK_MUL:       return "mul";
     case LR_TOK_SDIV:      return "sdiv";
     case LR_TOK_SREM:      return "srem";
+    case LR_TOK_UDIV:      return "udiv";
     case LR_TOK_UREM:      return "urem";
     case LR_TOK_CALL:      return "call";
     case LR_TOK_SWITCH:    return "switch";

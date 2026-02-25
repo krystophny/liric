@@ -23,7 +23,9 @@
 #define RV_FUNCT3_SLL      0x1u
 #define RV_FUNCT3_SRL_SRA  0x5u
 #define RV_FUNCT3_DIV      0x4u
+#define RV_FUNCT3_DIVU     0x5u
 #define RV_FUNCT3_REM      0x6u
+#define RV_FUNCT3_REMU     0x7u
 
 #define RV_FUNCT7_ADD     0x00u
 #define RV_FUNCT7_SUB     0x20u
@@ -436,6 +438,7 @@ static int rv_compile_emit(void *compile_ctx,
     case LR_OP_EXTRACTVALUE:
     case LR_OP_FCMP:
     case LR_OP_FPTOUI:
+    case LR_OP_FREM:
     case LR_OP_GEP:
     case LR_OP_ICMP:
     case LR_OP_INSERTVALUE:
@@ -449,12 +452,14 @@ static int rv_compile_emit(void *compile_ctx,
         return RV_ERR_UNSUPPORTED_OP;
     case LR_OP_ADD: case LR_OP_SUB: case LR_OP_MUL:
     case LR_OP_SDIV: case LR_OP_SREM:
+    case LR_OP_UDIV: case LR_OP_UREM:
     case LR_OP_AND: case LR_OP_OR: case LR_OP_XOR:
     case LR_OP_SHL: case LR_OP_LSHR: case LR_OP_ASHR: {
         if (!rv_type_is_intlike(desc->type) || nops != 2)
             return -1;
         if ((desc->op == LR_OP_MUL || desc->op == LR_OP_SDIV ||
-             desc->op == LR_OP_SREM) && !feat->ext_m)
+             desc->op == LR_OP_SREM || desc->op == LR_OP_UDIV ||
+             desc->op == LR_OP_UREM) && !feat->ext_m)
             return -1;
         if (ctx->gpr_next >= sizeof(rv_gpr_tmp_pool))
             return -1;
@@ -474,6 +479,8 @@ static int rv_compile_emit(void *compile_ctx,
         case LR_OP_MUL: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_ADD_SUB, rd, RV_OPCODE_OP); break;
         case LR_OP_SDIV: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_DIV, rd, RV_OPCODE_OP); break;
         case LR_OP_SREM: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_REM, rd, RV_OPCODE_OP); break;
+        case LR_OP_UDIV: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_DIVU, rd, RV_OPCODE_OP); break;
+        case LR_OP_UREM: enc = rv_enc_r(RV_FUNCT7_MULDIV, rs2, rs1, RV_FUNCT3_REMU, rd, RV_OPCODE_OP); break;
         case LR_OP_AND: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_AND, rd, RV_OPCODE_OP); break;
         case LR_OP_OR: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_OR, rd, RV_OPCODE_OP); break;
         case LR_OP_XOR: enc = rv_enc_r(RV_FUNCT7_ADD, rs2, rs1, RV_FUNCT3_XOR, rd, RV_OPCODE_OP); break;

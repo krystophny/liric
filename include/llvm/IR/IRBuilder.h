@@ -345,6 +345,11 @@ public:
                            LHS->impl(), RHS->impl(), Name.c_str()));
     }
 
+    Value *CreateFRem(Value *LHS, Value *RHS, const Twine &Name = "") {
+        return Value::wrap(lc_create_frem(M(), B(), F(),
+                           LHS->impl(), RHS->impl(), Name.c_str()));
+    }
+
     Value *CreateFNeg(Value *V, const Twine &Name = "") {
         return Value::wrap(lc_create_fneg(M(), B(), F(),
                            V->impl(), Name.c_str()));

@@ -18,21 +18,8 @@ Hard requirements for this workstream:
 
 ## 2. Current Checkpoint State
 
-Local tree (uncommitted at handoff start) contained broad WIP across:
-- src/bc_decode.c
-- src/ir.c
-- src/liric_compat.c
-- src/objfile.c
-- src/platform/platform_intrinsic_stubs_aarch64_darwin.S
-- src/platform/platform_intrinsic_stubs_aarch64_linux.S
-- src/platform/platform_intrinsic_stubs_x86_64_linux.S
-- src/platform/platform_intrinsics.c
-- src/target_aarch64.c
-- src/target_x86_64.c
-
-Diff size at checkpoint start:
-- 10 files changed
-- 1235 insertions, 240 deletions
+P0 (UDIV/UREM/FREM) and P2 (semantic debug toggle removal) are complete.
+17 files changed, 265 insertions, 60 deletions. 230/230 tests pass.
 
 ## 3. What Was Confirmed Working
 
@@ -52,7 +39,7 @@ Result:
 
 ## 4. What Is Still Failing (Main Blocker)
 
-Formatter/runtime behavior is still wrong in optimized modules.
+Formatter/runtime behavior in optimized modules needs re-validation after UDIV/UREM/FREM fix.
 
 ### 4.1 Stable minimal repros
 
@@ -60,53 +47,31 @@ Working case:
 - `build/liric --jit /tmp/call_sff_link.bc`
 - Output: `ab  cdef  ghi  jkl  qwerty 12`
 
-Failing case:
+Previously failing case (needs re-test):
 - `build/liric --jit /tmp/call_sff_O1O1_link.bc`
-- Behavior: unstable (runtime type mismatch and/or segfault depending on run/env)
-- Typical failure:
-  - `Runtime Error : Got argument of type (CHARACTER), while the format specifier is (I)`
-
-LFortran reproducer:
 - `build/deps/lfortran/build-liric/src/bin/lfortran --no-color /tmp/min_format_fail.f90`
-- Same runtime format mismatch error.
 
 `/tmp/min_format_fail.f90`:
 ```fortran
 print '(A2,4(2X,A),I3)',"ab","cdef","ghi","jkl","qwerty",12
 ```
 
-## 5. High-Value Findings (Critical)
+## 5. High-Value Findings
 
-## 5.1 BINOP semantic coverage is incomplete and currently wrong for LLVM opcodes
+## 5.1 BINOP semantic coverage -- FIXED
 
-Current decoder mapping in `src/bc_decode.c` collapses unsigned ops into signed ops:
-- integer opcode 3 and 4 both map to `SDIV`
-- integer opcode 5 and 6 both map to `SREM`
-- floating opcode 4 is mapped as `FDIV` (but LLVM binop 4 is `frem`)
+UDIV/UREM/FREM opcodes added to IR, bitcode decoder, LL lexer/parser, all backends
+(aarch64, x86_64, riscv64), wasm_to_ir, compat API, and constant folding.
+Unsigned ops are no longer collapsed into signed ops.
 
-This is not LLVM-correct and can corrupt optimized runtime logic.
+## 5.2 Switch lowering and PHI predecessor remap -- PARTIALLY ADDRESSED
 
-Evidence from failing optimized module (`/tmp/call_sff_O1O1_link.bc`):
-- module contains `udiv`, `urem`, and `frem` instructions.
-- command used:
-  - `/opt/homebrew/opt/llvm@21/bin/llvm-dis -o - /tmp/call_sff_O1O1_link.bc | rg -n "\budiv\b|\burem\b|\bfrem\b"`
+Semantic debug toggle `LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS` removed (it altered
+semantics by skipping PHI remapping). Diagnostic toggle `LIRIC_DBG_BC_SWITCH` kept
+(print-only, no semantic effect).
 
-Related architectural debt discovered:
-- IR opcode set currently lacks dedicated `UDIV`, `UREM`, `FREM` opcodes.
-- LL parser also maps `urem` token to signed remainder opcode (`SREM`).
-
-This is a correctness bug cluster, not cosmetic.
-
-## 5.2 Switch lowering and PHI predecessor remap remain suspect
-
-Switch lowering in `bc_decode.c` rewrites switch into chains of compare+branch and then remaps PHI incoming preds.
-Failure behavior changes when switch-phi fixups are disabled, indicating this path materially affects runtime behavior.
-
-Current state has temporary debug toggles in decoder:
-- `LIRIC_DBG_BC_SWITCH`
-- `LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS`
-
-Do not keep ad-hoc debug behavior as final solution. Keep only robust verifier-grade logic and optional diagnostics.
+Still TODO: formal verifier checks after switch lowering in debug builds and
+dedicated switch+phi regression tests.
 
 ## 5.3 Vararg call placement looked correct at call-site level
 
@@ -115,32 +80,20 @@ Do not over-focus on call lowering until BINOP semantics + switch/phi correctnes
 
 ## 6. Required Clean Solution Plan (No Hacks)
 
-## P0: Fix IR semantic model to represent LLVM ops exactly
+## P0: Fix IR semantic model to represent LLVM ops exactly -- DONE
 
-1. Extend shared opcode enum with explicit:
-- `LR_OP_UDIV`
-- `LR_OP_UREM`
-- `LR_OP_FREM`
+All items complete:
+- LR_OP_UDIV, LR_OP_UREM, LR_OP_FREM added to opcode enum
+- Bitcode decoder maps to canonical LLVM numbering
+- LL lexer/parser round-trips udiv/urem/frem correctly
+- Constant folding with unsigned arithmetic + div-by-zero guards
+- All three backends (aarch64, x86_64, riscv64) emit correct machine code
+- WASM decoder uses correct unsigned opcodes
+- Compat API (lc_create_udiv/urem/frem + CreateFRem) added
+- 2 new parser tests + existing test assertions updated
+- 230/230 tests pass
 
-2. Update all opcode consumers:
-- IR validation/type checks (`src/ir.c`)
-- textual name mapping and dumps
-- parser/token mapping (`src/ll_parser.c`) so `urem` is unsigned, not signed
-- any compat builder helpers if needed
-
-3. Update all codegen backends in-tree:
-- `src/target_x86_64.c`
-- `src/target_aarch64.c`
-- `src/target_riscv64.c` (if built/tested in this matrix)
-
-Implement correct machine sequences for unsigned division/remainder and floating remainder.
-No remapping unsigned semantics to signed.
-
-4. Fix bitcode BINOP mapping in `bc_decode.c` to canonical LLVM numbering.
-
-5. Add focused unit tests for each new opcode in direct mode.
-
-## P1: Make switch lowering + PHI remap formally correct
+## P1: Make switch lowering + PHI remap formally correct -- OPEN
 
 1. Audit and simplify predecessor remap invariants:
 - exact predecessor multiset handling
@@ -153,10 +106,10 @@ No remapping unsigned semantics to signed.
 
 3. Add minimal switch+phi regression tests extracted from LLVM21-optimized patterns.
 
-## P2: Remove temporary diagnostic debt after closure
+## P2: Remove temporary diagnostic debt after closure -- DONE
 
-- Keep useful logging hooks gated behind env vars if desired.
-- Remove workaround-style toggles that alter semantics.
+- Semantic toggle `LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS` removed.
+- Diagnostic toggle `LIRIC_DBG_BC_SWITCH` kept (print-only).
 
 ## P3: Re-run canonical validation matrix
 

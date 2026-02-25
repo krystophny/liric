@@ -3,6 +3,7 @@
 #include "target_shared.h"
 #include "objfile.h"
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -206,6 +207,11 @@ static uint32_t enc_mul(bool is64, uint8_t rd, uint8_t rn, uint8_t rm) {
 
 static uint32_t enc_sdiv(bool is64, uint8_t rd, uint8_t rn, uint8_t rm) {
     return (is64 ? 0x9AC00C00u : 0x1AC00C00u) | ((uint32_t)rm << 16)
+         | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_udiv(bool is64, uint8_t rd, uint8_t rn, uint8_t rm) {
+    return (is64 ? 0x9AC00800u : 0x1AC00800u) | ((uint32_t)rm << 16)
          | ((uint32_t)rn << 5) | rd;
 }
 
@@ -1785,6 +1791,19 @@ static int aarch64_compile_emit(void *compile_ctx,
         emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
         break;
     }
+    case LR_OP_FREM: {
+        uint8_t fsize = (desc->type &&
+                         desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
+        emit_load_fp_operand(cc, &ops[0], A64_D0, fsize);
+        emit_load_fp_operand(cc, &ops[1], A64_D1, fsize);
+        uintptr_t fn = fsize == 4 ? (uintptr_t)fmodf : (uintptr_t)fmod;
+        emit_move_imm_ctx(cc, A64_X16, (int64_t)fn, true);
+        emit_u32(cc->buf, &cc->pos, cc->buflen,
+                 0xD63F0000u | ((uint32_t)A64_X16 << 5));
+        invalidate_cached_gprs_a64(cc);
+        emit_store_fp_slot(cc, desc->dest, A64_D0, fsize);
+        break;
+    }
     case LR_OP_FNEG: {
         uint8_t fsize = (desc->type &&
                          desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
@@ -1794,17 +1813,21 @@ static int aarch64_compile_emit(void *compile_ctx,
         emit_store_fp_slot(cc, desc->dest, FP_SCRATCH0, fsize);
         break;
     }
-    case LR_OP_SDIV: case LR_OP_SREM: {
+    case LR_OP_SDIV: case LR_OP_SREM:
+    case LR_OP_UDIV: case LR_OP_UREM: {
         emit_load_operand(cc, &ops[0], A64_X9);
         emit_load_operand(cc, &ops[1], A64_X10);
         bool is64 = lr_type_size(desc->type) > 4;
+        bool is_unsigned = (desc->op == LR_OP_UDIV ||
+                            desc->op == LR_OP_UREM);
         emit_mov_reg(cc->buf, &cc->pos, cc->buflen, A64_X11, A64_X9, is64);
         emit_u32(cc->buf, &cc->pos, cc->buflen,
-                 enc_sdiv(is64, A64_X9, A64_X9, A64_X10));
+                 is_unsigned ? enc_udiv(is64, A64_X9, A64_X9, A64_X10)
+                             : enc_sdiv(is64, A64_X9, A64_X9, A64_X10));
         emit_u32(cc->buf, &cc->pos, cc->buflen,
                  enc_msub(is64, A64_X11, A64_X9, A64_X10, A64_X11));
         invalidate_cached_reg_a64(cc, A64_X9);
-        if (desc->op == LR_OP_SREM)
+        if (desc->op == LR_OP_SREM || desc->op == LR_OP_UREM)
             emit_store_slot(cc, desc->dest, A64_X11);
         else
             emit_store_slot(cc, desc->dest, A64_X9);
