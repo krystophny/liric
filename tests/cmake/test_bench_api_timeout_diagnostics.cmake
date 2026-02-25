@@ -7,6 +7,7 @@ set(bench_dir "${root}/bench")
 set(test_dir "${root}/integration_tests")
 set(fake_llvm "${root}/fake_lfortran_llvm.sh")
 set(fake_liric "${root}/fake_lfortran_liric.sh")
+set(timeout_ms 3000)
 
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${bench_dir}")
@@ -55,7 +56,7 @@ file(WRITE "${fake_liric}" "#!/usr/bin/env bash\n"
 "  echo \"File reading: 1.0\"\n"
 "  echo \"Src -> ASR: 2.0\"\n"
 "  echo \"heartbeat: parsing module\" >&2\n"
-"  sleep 2\n"
+"  sleep 5\n"
 "  exit 0\n"
 "fi\n"
 "cat <<'OUT'\n"
@@ -83,7 +84,7 @@ execute_process(
         --lfortran-liric "${fake_liric}"
         --test-dir "${test_dir}"
         --bench-dir "${bench_dir}"
-        --timeout-ms 200
+        --timeout-ms ${timeout_ms}
         --min-completed 1
     RESULT_VARIABLE rc
     OUTPUT_VARIABLE out
@@ -115,7 +116,7 @@ endif()
 if(NOT jsonl_text MATCHES "\"name\":\"timeout_case\".*\"status\":\"skipped\".*\"reason\":\"liric_jit_timeout\".*\"timed_out\":true")
     message(FATAL_ERROR "jsonl missing timeout classification row:\n${jsonl_text}")
 endif()
-if(NOT jsonl_text MATCHES "\"name\":\"timeout_case\".*\"timeout_ms\":200")
+if(NOT jsonl_text MATCHES "\"name\":\"timeout_case\".*\"timeout_ms\":${timeout_ms}")
     message(FATAL_ERROR "jsonl missing timeout_ms diagnostics:\n${jsonl_text}")
 endif()
 if(NOT jsonl_text MATCHES "\"name\":\"timeout_case\".*\"timeout_silent\":false")
