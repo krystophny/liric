@@ -36,6 +36,11 @@ namespace detail {
         return value;
     }
 
+    inline bool &insertion_point_active_ref() {
+        static thread_local bool value = false;
+        return value;
+    }
+
     inline void register_value_wrapper(const void *obj, lc_value_t *v) {
         lr_llvm_compat_register_value_wrapper(obj, v);
     }

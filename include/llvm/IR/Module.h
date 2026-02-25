@@ -527,10 +527,10 @@ inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Li
        what to compile vs. leave as an undefined symbol. */
     (void)Linkage;
     Function *fn = M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
-    if (fn && !detail::current_function_ref()) {
-        /* Keep a fallback implicit owner only when no active build context
-           exists. Declarations created via getOrInsertFunction() must not
-           steal ownership from a function currently being built. */
+    if (fn && !detail::insertion_point_active_ref()) {
+        /* Keep a fallback implicit owner when there is no active insertion
+           context. While a builder has an insertion point, declarations
+           must not steal ownership from the function currently being built. */
         detail::current_function_ref() = fn;
     }
     return fn;
@@ -571,12 +571,7 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         }
     }
     if (!mod || !f) return BasicBlock::wrap(nullptr);
-    lc_value_t *bv = nullptr;
-    if (!Parent && !InsertBefore && !f->first_block) {
-        bv = lc_block_create_detached(mod, f, Name.c_str());
-    } else {
-        bv = lc_block_create(mod, f, Name.c_str());
-    }
+    lc_value_t *bv = lc_block_create(mod, f, Name.c_str());
     if (fn) {
         detail::register_block_parent(lc_value_get_block(bv), fn);
     }

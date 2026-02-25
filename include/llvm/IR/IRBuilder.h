@@ -102,9 +102,12 @@ public:
         if (!BB) {
             block_ = nullptr;
             func_ = nullptr;
+            detail::insertion_point_active_ref() = false;
+            detail::current_function_ref() = nullptr;
             return;
         }
         block_ = BB->impl_block();
+        detail::insertion_point_active_ref() = true;
         if (block_ && M()) {
             lc_block_attach(M(), block_);
         }
@@ -150,6 +153,7 @@ public:
 
     void SetFunction(lr_func_t *f) {
         func_ = f;
+        detail::insertion_point_active_ref() = (f != nullptr);
         Function *fn = detail::lookup_function_wrapper(func_);
         if (fn) {
             mod_ = fn->getCompatMod();
@@ -162,10 +166,16 @@ public:
         mod_ = fn->getCompatMod();
         func_ = fn->getIRFunc();
         block_ = nullptr;
+        detail::insertion_point_active_ref() = true;
         detail::current_function_ref() = fn;
     }
 
-    void ClearInsertionPoint() { block_ = nullptr; }
+    void ClearInsertionPoint() {
+        block_ = nullptr;
+        func_ = nullptr;
+        detail::insertion_point_active_ref() = false;
+        detail::current_function_ref() = nullptr;
+    }
 
     void SetCurrentDebugLocation(const DebugLoc &) {}
 

@@ -1875,7 +1875,9 @@ static int x86_64_compile_set_block(void *compile_ctx, uint32_t block_id) {
     ctx->has_current_block = true;
     if (ctx->cc.block_offsets[block_id] == SIZE_MAX)
         ctx->cc.block_offsets[block_id] = ctx->cc.pos;
-    ctx->block_offset_pending = false;
+    /* Entering a new block must invalidate cached register mappings before
+       emitting non-PHI instructions, but keep offsets bound for empty blocks. */
+    ctx->block_offset_pending = true;
     return 0;
 }
 
