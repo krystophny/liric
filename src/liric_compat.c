@@ -4191,14 +4191,15 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
     if (compat_sync_session_module(mod, &err) != 0)
         return -1;
     compat_maybe_dump_final_ir(mod);
+
     if ((runtime_bc && runtime_bc[0]) || !runtime_ll || runtime_len == 0) {
         int rt_rc = compat_try_attach_runtime_bc(mod->session);
         if (rt_rc <= 0) {
             if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
                 fprintf(stderr,
-                        "lc_module_emit_executable: runtime bitcode unavailable; "
-                        "set LIRIC_RUNTIME_BC or provide lfortran runtime source "
-                        "for auto-discovery\n");
+                        "lc_module_emit_executable: runtime unavailable; "
+                        "set LIRIC_RUNTIME_LL or LIRIC_RUNTIME_BC, or provide "
+                        "lfortran runtime source for auto-discovery\n");
             }
             return -1;
         }

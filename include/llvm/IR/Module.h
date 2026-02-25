@@ -527,10 +527,10 @@ inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Li
        what to compile vs. leave as an undefined symbol. */
     (void)Linkage;
     Function *fn = M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
-    if (fn) {
-        /* LLVM allows creating detached basic blocks immediately after
-           Function::Create(...). Keep that workflow by tracking the
-           most recently created function as the implicit owner context. */
+    if (fn && !detail::current_function_ref()) {
+        /* Keep a fallback implicit owner only when no active build context
+           exists. Declarations created via getOrInsertFunction() must not
+           steal ownership from a function currently being built. */
         detail::current_function_ref() = fn;
     }
     return fn;

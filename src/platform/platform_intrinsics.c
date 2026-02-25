@@ -273,6 +273,19 @@ static void lr_intrin_noop(void) { }
 static void lr_intrin_assume_i1(uint8_t cond) { (void)cond; }
 static void lr_intrin_trap(void) { abort(); }
 
+/* Unknown object size sentinel for llvm.objectsize.* intrinsics.
+   Returning all-ones matches "unknown size" semantics used by fortified libc
+   lowering paths and avoids rejecting host-clang generated IR in no-link mode. */
+static uint64_t lr_intrin_objectsize_i64_unknown(const void *ptr, ...) {
+    (void)ptr;
+    return UINT64_MAX;
+}
+
+static uint32_t lr_intrin_objectsize_i32_unknown(const void *ptr, ...) {
+    (void)ptr;
+    return UINT32_MAX;
+}
+
 static double lr_intrin_exp10_f64(double x) { return pow(10.0, x); }
 static float lr_intrin_exp10_f32(float x) { return powf(10.0f, x); }
 
@@ -508,6 +521,15 @@ static void *resolve_builtin_intrinsic_addr(const char *name) {
         return (void *)(uintptr_t)lr_intrin_exp10_f64;
     if (strcmp(name, "llvm.exp10.f32") == 0 || strcmp(name, "exp10f") == 0)
         return (void *)(uintptr_t)lr_intrin_exp10_f32;
+
+    if (strcmp(name, "llvm.objectsize.i64") == 0 ||
+        starts_with(name, "llvm.objectsize.i64.")) {
+        return (void *)(uintptr_t)lr_intrin_objectsize_i64_unknown;
+    }
+    if (strcmp(name, "llvm.objectsize.i32") == 0 ||
+        starts_with(name, "llvm.objectsize.i32.")) {
+        return (void *)(uintptr_t)lr_intrin_objectsize_i32_unknown;
+    }
 
     if (parse_int_suffix_bits(name, "llvm.ctpop.i", &bits)) {
         if (bits == 8) return (void *)(uintptr_t)lr_intrin_ctpop_i8;

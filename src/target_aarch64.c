@@ -47,6 +47,7 @@ typedef struct {
     lr_objfile_ctx_t *obj_ctx;
     lr_module_t *mod;
     uint8_t *sym_defined;
+    lr_func_t **sym_funcs;
     uint32_t sym_count;
     uint32_t x9_holds_vreg;
     uint32_t x10_holds_vreg;
@@ -469,6 +470,61 @@ static bool is_symbol_defined_in_module(lr_module_t *mod, const char *name) {
     return false;
 }
 
+static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
+    if (!mod || !name)
+        return NULL;
+    for (lr_func_t *f = mod->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static void attach_obj_symbol_meta_cache(a64_compile_ctx_t *ctx) {
+    if (!ctx || !ctx->obj_ctx)
+        return;
+    ctx->sym_defined = ctx->obj_ctx->module_sym_defined;
+    ctx->sym_funcs = ctx->obj_ctx->module_sym_funcs;
+    ctx->sym_count = ctx->obj_ctx->module_sym_count;
+}
+
+static bool direct_call_uses_external_fp_abi(
+    a64_compile_ctx_t *cc, const lr_operand_t *callee_op, bool call_external_abi,
+    bool call_vararg, uint32_t call_fixed_args, bool *out_vararg,
+    uint32_t *out_fixed_args) {
+    lr_func_t *callee_func = NULL;
+    if (out_vararg)
+        *out_vararg = call_vararg;
+    if (out_fixed_args)
+        *out_fixed_args = call_fixed_args;
+
+    if (!cc || !cc->mod || !callee_op)
+        return call_external_abi;
+
+    if (callee_op->kind == LR_VAL_GLOBAL) {
+        if (callee_op->global_id < cc->sym_count && cc->sym_funcs)
+            callee_func = cc->sym_funcs[callee_op->global_id];
+        if (!callee_func) {
+            const char *sym_name = lr_module_symbol_name(cc->mod,
+                                                         callee_op->global_id);
+            if (sym_name)
+                callee_func = find_module_function(cc->mod, sym_name);
+        }
+        if (callee_func) {
+            if (out_vararg)
+                *out_vararg = callee_func->vararg || call_vararg;
+            if (out_fixed_args && *out_fixed_args == 0u &&
+                callee_func->num_params > 0u) {
+                *out_fixed_args = callee_func->num_params;
+            }
+        }
+        /* Global symbol calls use the external LLVM ABI path on AArch64. */
+        return true;
+    }
+
+    return call_external_abi;
+}
+
 static const char *normalize_llvm_symbol_name(const char *name) {
     if (!name)
         return NULL;
@@ -721,18 +777,6 @@ static void emit_jmp_a64(a64_compile_ctx_t *ctx, uint32_t target_block) {
     emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x14000000u);
 }
 
-static void emit_jcc_a64(a64_compile_ctx_t *ctx, uint8_t cc, uint32_t target_block) {
-    uint8_t cond = lr_cc_to_a64(cc);
-    if (ctx->num_fixups < ctx->fixup_cap) {
-        ctx->fixups[ctx->num_fixups].insn_pos = ctx->pos;
-        ctx->fixups[ctx->num_fixups].target = target_block;
-        ctx->fixups[ctx->num_fixups].kind = 1;
-        ctx->fixups[ctx->num_fixups].cond = cond;
-        ctx->num_fixups++;
-    }
-    emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0x54000000u);
-}
-
 static void emit_mem_copy_base_to_base(a64_compile_ctx_t *ctx,
                                        uint8_t dst_base, int32_t dst_disp,
                                        uint8_t src_base, int32_t src_disp,
@@ -963,14 +1007,36 @@ static int a64_direct_ensure_phi_copy_cap(a64_direct_ctx_t *ctx) {
     return 0;
 }
 
-static void a64_direct_emit_phi_copies(a64_direct_ctx_t *ctx, uint32_t pred) {
+static void a64_direct_emit_phi_copies_for_edge(a64_direct_ctx_t *ctx,
+                                                uint32_t pred,
+                                                uint32_t succ) {
     a64_compile_ctx_t *cc = &ctx->cc;
+    uint32_t stage_base = ctx->next_vreg;
+    uint32_t staged = 0;
+
+    /* PHI inputs are parallel: stage sources first, then write destinations. */
     for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
-        if (ctx->phi_copies[i].pred_block_id != pred)
+        if (ctx->phi_copies[i].pred_block_id != pred ||
+            ctx->phi_copies[i].succ_block_id != succ)
             continue;
+        ctx->next_vreg = stage_base + staged + 1u;
         emit_load_operand(cc, &ctx->phi_copies[i].src_op, A64_X9);
+        emit_store_slot(cc, stage_base + staged, A64_X9);
+        staged++;
+    }
+
+    if (staged == 0)
+        return;
+
+    staged = 0;
+    for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
+        if (ctx->phi_copies[i].pred_block_id != pred ||
+            ctx->phi_copies[i].succ_block_id != succ)
+            continue;
+        emit_load_slot(cc, stage_base + staged, A64_X9);
         emit_store_slot(cc, ctx->phi_copies[i].dest_vreg, A64_X9);
         ctx->phi_copies[i].emitted = true;
+        staged++;
     }
 }
 
@@ -984,8 +1050,6 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
     cc = &ctx->cc;
     dt = &ctx->deferred;
     dt->pending = false;
-
-    a64_direct_emit_phi_copies(ctx, dt->block_id);
 
     switch (dt->op) {
     case LR_OP_RET:
@@ -1003,20 +1067,47 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
         emit_epilogue_a64(cc);
         break;
     case LR_OP_BR: {
+        a64_direct_emit_phi_copies_for_edge(ctx, dt->block_id,
+                                            dt->ops[0].block_id);
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_a64(cc, dt->ops[0].block_id);
         cc->fixups[cc->num_fixups - 1].source = dt->block_id;
         break;
     }
     case LR_OP_CONDBR: {
+        size_t true_path_pos;
+        size_t jcc_insn_pos;
+        int64_t jcc_imm;
+        uint8_t cond;
+        uint32_t true_id;
+        uint32_t false_id;
         emit_load_operand(cc, &dt->ops[0], A64_X9);
         emit_u32(cc->buf, &cc->pos, cc->buflen,
                  enc_ands_reg(false, A64_X9, A64_X9));
+        true_id = dt->ops[1].block_id;
+        false_id = dt->ops[2].block_id;
+
+        /* Emit edge-specific copies:
+           cmp; b.ne true_path; false_copies; b false; true_path: true_copies; b true */
+        cond = lr_cc_to_a64(LR_CC_NE);
+        jcc_insn_pos = cc->pos;
+        emit_u32(cc->buf, &cc->pos, cc->buflen, 0x54000000u | cond);
+
+        a64_direct_emit_phi_copies_for_edge(ctx, dt->block_id, false_id);
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
-        emit_jcc_a64(cc, LR_CC_NE, dt->ops[1].block_id);
+        emit_jmp_a64(cc, false_id);
         cc->fixups[cc->num_fixups - 1].source = dt->block_id;
+
+        true_path_pos = cc->pos;
+        jcc_imm = ((int64_t)true_path_pos - (int64_t)jcc_insn_pos) / 4;
+        patch_u32(cc->buf, cc->buflen, jcc_insn_pos,
+                  0x54000000u |
+                  (((uint32_t)jcc_imm & 0x7FFFFu) << 5) |
+                  cond);
+
+        a64_direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id);
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
-        emit_jmp_a64(cc, dt->ops[2].block_id);
+        emit_jmp_a64(cc, true_id);
         cc->fixups[cc->num_fixups - 1].source = dt->block_id;
         break;
     }
@@ -1086,6 +1177,7 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->obj_ctx = mod ? mod->obj_ctx : NULL;
     cc->mod = mod;
     cc->sym_defined = NULL;
+    cc->sym_funcs = NULL;
     cc->sym_count = 0;
     cc->x9_holds_vreg = UINT32_MAX;
     cc->x10_holds_vreg = UINT32_MAX;
@@ -1095,6 +1187,8 @@ static int aarch64_compile_begin(void **compile_ctx,
     cc->func_name = (func_meta->func && func_meta->func->name)
                         ? func_meta->func->name
                         : "<anon>";
+
+    attach_obj_symbol_meta_cache(cc);
 
     if (cc->func_is_vararg) {
         uint32_t stack_used = 0;
@@ -1874,17 +1968,36 @@ static int aarch64_compile_emit(void *compile_ctx,
         uint32_t nargs = nops - 1;
         uint32_t gp_used = 0, stack_args = 0;
         uint32_t stack_bytes;
+        const char *call_sym_name = NULL;
 
-        bool use_fp_abi = desc->call_external_abi;
+        bool use_fp_abi;
+        bool call_vararg = desc->call_vararg;
+        uint32_t call_fixed_args = desc->call_fixed_args;
         bool darwin_stack_varargs = false;
         uint32_t fixed_args = 0;
-        if (ops_ptr[0].kind == LR_VAL_GLOBAL)
-            use_fp_abi = true;
+        use_fp_abi = direct_call_uses_external_fp_abi(
+            cc, &ops_ptr[0], desc->call_external_abi, desc->call_vararg,
+            desc->call_fixed_args, &call_vararg, &call_fixed_args);
+        if (ops_ptr[0].kind == LR_VAL_GLOBAL && cc->mod)
+            call_sym_name = lr_module_symbol_name(cc->mod, ops_ptr[0].global_id);
+        if (getenv("LIRIC_VERBOSE_CALL_ABI")) {
+            fprintf(stderr,
+                    "aarch64 call-abi: fn=%s callee=%s nargs=%u ext=%d vararg=%d/%d fixed=%u/%u fp_abi=%d\n",
+                    cc->func_name ? cc->func_name : "<anon>",
+                    call_sym_name ? call_sym_name : "<indirect>",
+                    nargs,
+                    desc->call_external_abi ? 1 : 0,
+                    desc->call_vararg ? 1 : 0,
+                    call_vararg ? 1 : 0,
+                    desc->call_fixed_args,
+                    call_fixed_args,
+                    use_fp_abi ? 1 : 0);
+        }
 
 #if defined(__APPLE__)
-        if (use_fp_abi && desc->call_vararg) {
+        if (use_fp_abi && call_vararg) {
             darwin_stack_varargs = true;
-            fixed_args = desc->call_fixed_args;
+            fixed_args = call_fixed_args;
             if (fixed_args > nargs)
                 fixed_args = nargs;
         }

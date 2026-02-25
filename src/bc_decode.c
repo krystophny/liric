@@ -463,7 +463,7 @@ enum {
     TYPE_CODE_TOKEN        = 22,
     TYPE_CODE_BFLOAT       = 23,
     TYPE_CODE_X86_AMX      = 24,
-    TYPE_CODE_METADATA     = 25,
+    TYPE_CODE_METADATA     = 16,
     TYPE_CODE_OPAQUE_PTR   = 25,
     TYPE_CODE_TARGET_TYPE  = 26
 };
@@ -473,9 +473,19 @@ enum {
     CONST_CODE_NULL      = 2,
     CONST_CODE_UNDEF     = 3,
     CONST_CODE_INTEGER   = 4,
+    CONST_CODE_WIDE_INTEGER = 5,
+    CONST_CODE_CE_CAST   = 11,
+    CONST_CODE_CE_GEP_OLD = 12,
     CONST_CODE_FLOAT     = 6,
     CONST_CODE_AGGREGATE = 7,
-    CONST_CODE_POISON    = 26
+    CONST_CODE_STRING    = 8,
+    CONST_CODE_CSTRING   = 9,
+    CONST_CODE_CE_INBOUNDS_GEP = 20,
+    CONST_CODE_DATA      = 22,
+    CONST_CODE_CE_GEP_WITH_INRANGE_INDEX_OLD = 24,
+    CONST_CODE_POISON    = 26,
+    CONST_CODE_CE_GEP_WITH_INRANGE = 31,
+    CONST_CODE_CE_GEP    = 32
 };
 
 enum {
@@ -486,6 +496,7 @@ enum {
     FUNC_CODE_INST_EXTRACTELT = 6,
     FUNC_CODE_INST_INSERTELT = 7,
     FUNC_CODE_INST_SHUFFLEVEC = 8,
+    FUNC_CODE_INST_CMP      = 9,
     FUNC_CODE_INST_RET      = 10,
     FUNC_CODE_INST_BR       = 11,
     FUNC_CODE_INST_SWITCH   = 12,
@@ -493,6 +504,7 @@ enum {
     FUNC_CODE_INST_PHI      = 16,
     FUNC_CODE_INST_ALLOCA   = 19,
     FUNC_CODE_INST_LOAD     = 20,
+    FUNC_CODE_INST_VAARG    = 23,
     FUNC_CODE_INST_STORE_OLD = 24,
     FUNC_CODE_INST_EXTRACTVALUE = 26,
     FUNC_CODE_INST_INSERTVALUE = 27,
@@ -520,6 +532,10 @@ typedef struct {
 typedef struct {
     enum { BC_VAL_VREG, BC_VAL_CONST, BC_VAL_GLOBAL, BC_VAL_FUNC } kind;
     lr_type_t *type;
+    uint8_t *init_bytes;
+    size_t init_size;
+    uint32_t *agg_elem_ids;
+    uint32_t agg_elem_count;
     union {
         uint32_t vreg;
         lr_operand_t operand;
@@ -541,6 +557,11 @@ typedef struct {
 } bc_func_list_t;
 
 typedef struct {
+    lr_global_t *global;
+    uint32_t init_id;
+} bc_global_init_ref_t;
+
+typedef struct {
     bc_reader_t *reader;
     lr_module_t *module;
     lr_arena_t *arena;
@@ -553,6 +574,9 @@ typedef struct {
     lr_bc_stream_callback_t on_inst;
     void *on_inst_ctx;
     uint32_t cur_func_code;
+    bc_global_init_ref_t *global_inits;
+    uint32_t global_init_count;
+    uint32_t global_init_cap;
     char *err;
     size_t errlen;
 } bc_decoder_t;
@@ -602,6 +626,308 @@ static void bc_func_list_push(bc_func_list_t *fl, lr_func_t *f) {
     fl->funcs[fl->count++] = f;
 }
 
+static void bc_global_init_ref_push(bc_decoder_t *d, lr_global_t *global,
+                                    uint32_t init_id) {
+    bc_global_init_ref_t *tmp;
+    uint32_t new_cap;
+    if (!d || !global || init_id == 0u)
+        return;
+    if (d->global_init_count == d->global_init_cap) {
+        new_cap = d->global_init_cap ? d->global_init_cap * 2u : 32u;
+        tmp = (bc_global_init_ref_t *)realloc(
+            d->global_inits, (size_t)new_cap * sizeof(*tmp));
+        if (!tmp)
+            return;
+        d->global_inits = tmp;
+        d->global_init_cap = new_cap;
+    }
+    d->global_inits[d->global_init_count].global = global;
+    d->global_inits[d->global_init_count].init_id = init_id;
+    d->global_init_count++;
+}
+
+static void bc_try_set_i8_array_initializer(lr_global_t *g, const bc_value_t *cv,
+                                            lr_arena_t *arena) {
+    uint8_t *buf;
+    size_t gsz, copy_sz;
+    if (!g || !cv || !arena || !g->type)
+        return;
+    if (g->type->kind != LR_TYPE_ARRAY || !g->type->array.elem ||
+        g->type->array.elem->kind != LR_TYPE_I8)
+        return;
+    if (!cv->init_bytes || cv->init_size == 0)
+        return;
+    gsz = lr_type_size(g->type);
+    if (gsz == 0)
+        gsz = g->type->array.count;
+    if (gsz == 0)
+        return;
+    buf = lr_arena_array(arena, uint8_t, gsz);
+    if (!buf)
+        return;
+    memset(buf, 0, gsz);
+    copy_sz = cv->init_size < gsz ? cv->init_size : gsz;
+    memcpy(buf, cv->init_bytes, copy_sz);
+    g->init_data = buf;
+    g->init_size = gsz;
+}
+
+static void bc_store_le_bytes(uint8_t *buf, size_t buf_size,
+                              size_t off, uint64_t raw, size_t width) {
+    size_t nbytes;
+    if (!buf || width == 0 || off >= buf_size)
+        return;
+    nbytes = width;
+    if (nbytes > sizeof(raw))
+        nbytes = sizeof(raw);
+    if (off + nbytes > buf_size)
+        nbytes = buf_size - off;
+    memcpy(buf + off, &raw, nbytes);
+}
+
+static void bc_global_add_reloc(bc_decoder_t *d, lr_global_t *g,
+                                size_t offset, uint32_t sym_id,
+                                int64_t addend) {
+    const char *sym_name;
+    lr_reloc_t *r;
+    if (!d || !g)
+        return;
+    sym_name = lr_module_symbol_name(d->module, sym_id);
+    if (!sym_name || !sym_name[0])
+        return;
+    r = lr_arena_new(d->arena, lr_reloc_t);
+    if (!r)
+        return;
+    r->offset = offset;
+    r->addend = addend;
+    r->symbol_name = lr_arena_strdup(d->arena, sym_name, strlen(sym_name));
+    r->next = g->relocs;
+    g->relocs = r;
+}
+
+static void bc_apply_global_init_value(bc_decoder_t *d,
+                                       const bc_value_table_t *vt,
+                                       lr_global_t *g,
+                                       const lr_type_t *dst_ty,
+                                       size_t base_off,
+                                       uint8_t *buf,
+                                       size_t buf_size,
+                                       const bc_value_t *cv) {
+    size_t dst_sz;
+    if (!d || !vt || !g || !dst_ty || !buf || !cv)
+        return;
+
+    if ((dst_ty->kind == LR_TYPE_STRUCT ||
+         dst_ty->kind == LR_TYPE_ARRAY ||
+         dst_ty->kind == LR_TYPE_VECTOR) &&
+        cv->agg_elem_ids && cv->agg_elem_count > 0) {
+        if (dst_ty->kind == LR_TYPE_STRUCT) {
+            uint32_t n = dst_ty->struc.num_fields;
+            if (n > cv->agg_elem_count)
+                n = cv->agg_elem_count;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t elem_id = cv->agg_elem_ids[i];
+                size_t elem_off = base_off + lr_struct_field_offset(dst_ty, i);
+                if (elem_id >= vt->count)
+                    continue;
+                bc_apply_global_init_value(d, vt, g, dst_ty->struc.fields[i],
+                                           elem_off, buf, buf_size,
+                                           &vt->values[elem_id]);
+            }
+            return;
+        }
+        if (dst_ty->array.elem) {
+            uint64_t n64 = dst_ty->array.count;
+            size_t elem_sz = lr_type_size(dst_ty->array.elem);
+            uint32_t n;
+            if (elem_sz == 0)
+                elem_sz = 8;
+            if (n64 > UINT32_MAX)
+                n = UINT32_MAX;
+            else
+                n = (uint32_t)n64;
+            if (n > cv->agg_elem_count)
+                n = cv->agg_elem_count;
+            for (uint32_t i = 0; i < n; i++) {
+                uint32_t elem_id = cv->agg_elem_ids[i];
+                size_t elem_off = base_off + (size_t)i * elem_sz;
+                if (elem_id >= vt->count)
+                    continue;
+                bc_apply_global_init_value(d, vt, g, dst_ty->array.elem,
+                                           elem_off, buf, buf_size,
+                                           &vt->values[elem_id]);
+            }
+            return;
+        }
+    }
+
+    dst_sz = lr_type_size(dst_ty);
+    if (dst_sz == 0 && dst_ty->kind == LR_TYPE_PTR)
+        dst_sz = sizeof(uint64_t);
+
+    if (cv->init_bytes && cv->init_size > 0 && dst_sz > 0 && base_off < buf_size) {
+        size_t copy_sz = cv->init_size < dst_sz ? cv->init_size : dst_sz;
+        if (base_off + copy_sz > buf_size)
+            copy_sz = buf_size - base_off;
+        memcpy(buf + base_off, cv->init_bytes, copy_sz);
+    }
+
+    if (cv->kind == BC_VAL_GLOBAL) {
+        bc_global_add_reloc(d, g, base_off, cv->global_sym, 0);
+        return;
+    }
+    if (cv->kind == BC_VAL_FUNC) {
+        if (cv->func && cv->func->name) {
+            uint32_t sym_id = lr_frontend_intern_symbol(d->module, cv->func->name);
+            bc_global_add_reloc(d, g, base_off, sym_id, 0);
+        }
+        return;
+    }
+    if (cv->kind != BC_VAL_CONST)
+        return;
+
+    switch (cv->operand.kind) {
+    case LR_VAL_GLOBAL:
+        bc_global_add_reloc(d, g, base_off, cv->operand.global_id,
+                            cv->operand.global_offset);
+        break;
+    case LR_VAL_IMM_I64:
+        if (dst_sz > 0)
+            bc_store_le_bytes(buf, buf_size, base_off,
+                              (uint64_t)cv->operand.imm_i64, dst_sz);
+        break;
+    case LR_VAL_IMM_F64:
+        if (dst_ty->kind == LR_TYPE_FLOAT) {
+            float f32 = (float)cv->operand.imm_f64;
+            uint32_t raw32 = 0;
+            memcpy(&raw32, &f32, sizeof(raw32));
+            bc_store_le_bytes(buf, buf_size, base_off, (uint64_t)raw32, 4);
+        } else if (dst_ty->kind == LR_TYPE_DOUBLE) {
+            uint64_t raw64 = 0;
+            memcpy(&raw64, &cv->operand.imm_f64, sizeof(raw64));
+            bc_store_le_bytes(buf, buf_size, base_off, raw64, 8);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+static uint32_t bc_resolve_global_init_value_index(const bc_decoder_t *d,
+                                                   uint32_t init_id,
+                                                   uint32_t constants_base) {
+    uint32_t cands[4];
+    uint32_t n = 0;
+    uint32_t i;
+    const int verbose = (getenv("LIRIC_VERBOSE_BC_GLOBALS") != NULL);
+    if (!d || init_id == 0u)
+        return UINT32_MAX;
+    if (init_id > 0u)
+        cands[n++] = init_id - 1u;
+    cands[n++] = init_id;
+    if (init_id > 0u)
+        cands[n++] = constants_base + init_id - 1u;
+    cands[n++] = constants_base + init_id;
+    if (verbose) {
+        fprintf(stderr, "bc global-init-resolve: init_id=%u base=%u cands=", init_id, constants_base);
+        for (i = 0; i < n; i++) {
+            uint32_t idx = cands[i];
+            int kind = (idx < d->global_values.count)
+                           ? (int)d->global_values.values[idx].kind
+                           : -1;
+            fprintf(stderr, "%s%u(kind=%d)", (i == 0) ? "" : ",", idx, kind);
+        }
+        fprintf(stderr, "\n");
+    }
+    for (i = 0; i < n; i++) {
+        uint32_t idx = cands[i];
+        if (idx >= d->global_values.count)
+            continue;
+        if (d->global_values.values[idx].kind == BC_VAL_CONST ||
+            d->global_values.values[idx].kind == BC_VAL_GLOBAL ||
+            d->global_values.values[idx].kind == BC_VAL_FUNC)
+            return idx;
+    }
+    return UINT32_MAX;
+}
+
+static void bc_apply_global_initializers(bc_decoder_t *d, uint32_t constants_base) {
+    uint32_t i;
+    const int verbose = (getenv("LIRIC_VERBOSE_BC_GLOBALS") != NULL);
+    if (!d)
+        return;
+    for (i = 0; i < d->global_init_count; i++) {
+        bc_global_init_ref_t *ref = &d->global_inits[i];
+        uint32_t val_idx;
+        if (!ref->global || ref->init_id == 0u)
+            continue;
+        val_idx = bc_resolve_global_init_value_index(d, ref->init_id, constants_base);
+        if (verbose) {
+            fprintf(stderr,
+                    "bc global-init: name=%s init_id=%u base=%u chosen=%u count=%u\n",
+                    ref->global->name ? ref->global->name : "<null>",
+                    ref->init_id,
+                    constants_base,
+                    val_idx,
+                    d->global_values.count);
+            if (d->global_values.count > 0) {
+                uint32_t start = (ref->init_id > 2u) ? ref->init_id - 2u : 0u;
+                uint32_t end = ref->init_id + 3u;
+                if (end > d->global_values.count)
+                    end = d->global_values.count;
+                for (uint32_t vi = start; vi < end; vi++) {
+                    const bc_value_t *cv = &d->global_values.values[vi];
+                    unsigned first = (cv->init_bytes && cv->init_size > 0)
+                                         ? (unsigned)cv->init_bytes[0]
+                                         : 0u;
+                    int tkind = cv->type ? (int)cv->type->kind : -1;
+                    unsigned long long tsize =
+                        (unsigned long long)(cv->type ? lr_type_size(cv->type) : 0u);
+                    unsigned long long tcount =
+                        (unsigned long long)((cv->type &&
+                                              (cv->type->kind == LR_TYPE_ARRAY ||
+                                               cv->type->kind == LR_TYPE_VECTOR))
+                                                 ? cv->type->array.count
+                                                 : 0u);
+                    fprintf(stderr,
+                            "bc global-init:   val[%u] kind=%d type=%d size=%llu count=%llu init_size=%zu first=%u\n",
+                            vi, (int)cv->kind, tkind, tsize, tcount, cv->init_size, first);
+                }
+            }
+        }
+        if (val_idx == UINT32_MAX)
+            continue;
+        {
+            const bc_value_t *cv = &d->global_values.values[val_idx];
+            size_t gsz = lr_type_size(ref->global->type);
+            uint8_t *buf;
+            if (gsz == 0)
+                gsz = 8;
+            buf = lr_arena_array(d->arena, uint8_t, gsz);
+            if (!buf) {
+                ref->init_id = 0u;
+                continue;
+            }
+            memset(buf, 0, gsz);
+            ref->global->init_data = buf;
+            ref->global->init_size = gsz;
+            ref->global->relocs = NULL;
+            bc_apply_global_init_value(d, &d->global_values, ref->global,
+                                       ref->global->type, 0, buf, gsz, cv);
+            /* Fast path retained for exact i8 arrays from string/data constants. */
+            bc_try_set_i8_array_initializer(ref->global, cv, d->arena);
+        }
+        if (verbose && ref->global->init_data && ref->global->init_size > 0) {
+            fprintf(stderr,
+                    "bc global-init: applied name=%s size=%zu first=%u\n",
+                    ref->global->name ? ref->global->name : "<null>",
+                    ref->global->init_size,
+                    (unsigned)ref->global->init_data[0]);
+        }
+        ref->init_id = 0u;
+    }
+}
+
 static lr_type_t *bc_get_type(bc_decoder_t *d, uint32_t idx) {
     if (idx >= d->types.count) {
         bc_dec_error(d, "type index %u out of range (have %u, func_code=%u)",
@@ -629,6 +955,10 @@ static lr_operand_t bc_make_operand_from_value(bc_decoder_t *d, bc_value_table_t
         uint32_t before = vt->count;
         fwd.kind = BC_VAL_VREG;
         fwd.type = type_hint ? type_hint : d->module->type_i32;
+        fwd.init_bytes = NULL;
+        fwd.init_size = 0;
+        fwd.agg_elem_ids = NULL;
+        fwd.agg_elem_count = 0;
         fwd.vreg = func ? lr_vreg_new(func) : 0;
         bc_value_push(vt, fwd);
         if (vt->count == before) {
@@ -659,6 +989,35 @@ static lr_operand_t bc_make_operand_from_value(bc_decoder_t *d, bc_value_table_t
     return op;
 }
 
+static bool bc_const_gep_try_compute_offset(lr_type_t *source_ty,
+                                            const lr_operand_t *idx_ops,
+                                            uint32_t num_indices,
+                                            int64_t *out_offset) {
+    const lr_type_t *cur_ty = source_ty;
+    int64_t total = 0;
+    uint32_t i;
+
+    if (!source_ty || !out_offset)
+        return false;
+    for (i = 0; i < num_indices; i++) {
+        lr_gep_step_t step;
+        if (!lr_gep_analyze_step(cur_ty, i == 0u, &idx_ops[i], &step))
+            return false;
+        if (!step.is_const)
+            return false;
+        if ((step.const_byte_offset > 0 &&
+             total > INT64_MAX - step.const_byte_offset) ||
+            (step.const_byte_offset < 0 &&
+             total < INT64_MIN - step.const_byte_offset)) {
+            return false;
+        }
+        total += step.const_byte_offset;
+        cur_ty = step.next_type ? step.next_type : cur_ty;
+    }
+    *out_offset = total;
+    return true;
+}
+
 static int64_t bc_decode_signed_vbr(uint64_t v) {
     if ((v & 1) == 0)
         return (int64_t)(v >> 1);
@@ -667,28 +1026,41 @@ static int64_t bc_decode_signed_vbr(uint64_t v) {
     return INT64_MIN;
 }
 
+static uint8_t bc_decode_char6(uint64_t v) {
+    if (v < 26u)
+        return (uint8_t)('a' + (uint8_t)v);
+    if (v < 52u)
+        return (uint8_t)('A' + (uint8_t)(v - 26u));
+    if (v < 62u)
+        return (uint8_t)('0' + (uint8_t)(v - 52u));
+    if (v == 62u)
+        return (uint8_t)'.';
+    return (uint8_t)'_';
+}
+
 static bool bc_resolve_rel_value_id(bc_decoder_t *d, uint32_t base_value_id,
                                     uint32_t rel, uint32_t *out_val_id) {
-    (void)d;
-    if (rel > base_value_id) {
-        /* LLVM may encode forward references using absolute value ids. */
+    if (d->bc_version >= 1) {
+        *out_val_id = base_value_id - rel;
+    } else {
         *out_val_id = rel;
-        return true;
     }
-    *out_val_id = base_value_id - rel;
     return true;
 }
 
 static bool bc_resolve_phi_value_id(bc_decoder_t *d, uint32_t base_before_def,
                                     int64_t rel_signed, uint32_t *out_val_id) {
     if (rel_signed >= 0) {
-        uint32_t rel = (uint32_t)rel_signed;
-        if (rel > base_before_def) {
-            /* LLVM may encode forward references using absolute value ids. */
-            *out_val_id = rel;
-            return true;
+        if (d->bc_version >= 1) {
+            if ((uint64_t)rel_signed > (uint64_t)base_before_def) {
+                bc_dec_error(d, "invalid PHI relative value id: rel=%lld base=%u",
+                             (long long)rel_signed, base_before_def);
+                return false;
+            }
+            *out_val_id = base_before_def - (uint32_t)rel_signed;
+        } else {
+            *out_val_id = (uint32_t)rel_signed;
         }
-        *out_val_id = base_before_def - rel;
         return true;
     }
 
@@ -708,6 +1080,59 @@ static bool bc_resolve_phi_value_id(bc_decoder_t *d, uint32_t base_before_def,
     return true;
 }
 
+static bool bc_record_get_value(bc_decoder_t *d, const uint64_t *record,
+                                uint32_t record_len, uint32_t *slot,
+                                uint32_t base_value_id, uint32_t *out_val_id) {
+    uint32_t raw;
+    if (*slot >= record_len) {
+        bc_dec_error(d, "malformed record: missing value operand");
+        return false;
+    }
+    raw = (uint32_t)record[*slot];
+    (*slot)++;
+    if (d->bc_version >= 1)
+        *out_val_id = base_value_id - raw;
+    else
+        *out_val_id = raw;
+    return true;
+}
+
+static bool bc_record_get_value_type_pair(bc_decoder_t *d, bc_value_table_t *vt,
+                                          const uint64_t *record, uint32_t record_len,
+                                          uint32_t *slot, uint32_t base_value_id,
+                                          uint32_t *out_val_id, lr_type_t **out_type) {
+    uint32_t val_id;
+    if (!bc_record_get_value(d, record, record_len, slot, base_value_id, &val_id))
+        return false;
+
+    if (val_id < base_value_id) {
+        if (val_id >= vt->count) {
+            bc_dec_error(d, "invalid backward value id: id=%u base=%u have=%u",
+                         val_id, base_value_id, vt->count);
+            return false;
+        }
+        *out_type = vt->values[val_id].type;
+    } else {
+        uint32_t ty_idx;
+        lr_type_t *ty;
+        if (*slot >= record_len) {
+            bc_dec_error(d, "malformed record: missing forward type id");
+            return false;
+        }
+        ty_idx = (uint32_t)record[*slot];
+        (*slot)++;
+        ty = bc_get_type(d, ty_idx);
+        if (!ty)
+            return false;
+        *out_type = ty;
+    }
+
+    if (!*out_type)
+        *out_type = d->module->type_i32;
+    *out_val_id = val_id;
+    return true;
+}
+
 static bool bc_define_vreg_value(bc_decoder_t *d, bc_value_table_t *vt, lr_func_t *func,
                                  uint32_t value_id, lr_type_t *type, uint32_t *out_vreg) {
     while (value_id >= vt->count) {
@@ -715,6 +1140,10 @@ static bool bc_define_vreg_value(bc_decoder_t *d, bc_value_table_t *vt, lr_func_
         uint32_t before = vt->count;
         fwd.kind = BC_VAL_VREG;
         fwd.type = d->module->type_i32;
+        fwd.init_bytes = NULL;
+        fwd.init_size = 0;
+        fwd.agg_elem_ids = NULL;
+        fwd.agg_elem_count = 0;
         fwd.vreg = lr_vreg_new(func);
         bc_value_push(vt, fwd);
         if (vt->count == before) {
@@ -742,6 +1171,10 @@ static bool bc_define_undef_value(bc_decoder_t *d, bc_value_table_t *vt,
         uint32_t before = vt->count;
         fwd.kind = BC_VAL_VREG;
         fwd.type = d->module->type_i32;
+        fwd.init_bytes = NULL;
+        fwd.init_size = 0;
+        fwd.agg_elem_ids = NULL;
+        fwd.agg_elem_count = 0;
         fwd.vreg = 0;
         bc_value_push(vt, fwd);
         if (vt->count == before) {
@@ -754,6 +1187,10 @@ static bool bc_define_undef_value(bc_decoder_t *d, bc_value_table_t *vt,
         bc_value_t *slot = &vt->values[value_id];
         slot->kind = BC_VAL_CONST;
         slot->type = type ? type : d->module->type_i32;
+        slot->init_bytes = NULL;
+        slot->init_size = 0;
+        slot->agg_elem_ids = NULL;
+        slot->agg_elem_count = 0;
         slot->operand.kind = LR_VAL_UNDEF;
         slot->operand.type = slot->type;
         slot->operand.global_offset = 0;
@@ -769,6 +1206,10 @@ static bool bc_define_alias_value(bc_decoder_t *d, bc_value_table_t *vt,
         uint32_t before = vt->count;
         fwd.kind = BC_VAL_VREG;
         fwd.type = d->module->type_i32;
+        fwd.init_bytes = NULL;
+        fwd.init_size = 0;
+        fwd.agg_elem_ids = NULL;
+        fwd.agg_elem_count = 0;
         fwd.vreg = 0;
         bc_value_push(vt, fwd);
         if (vt->count == before) {
@@ -784,6 +1225,10 @@ static bool bc_define_alias_value(bc_decoder_t *d, bc_value_table_t *vt,
             alias_type = d->module->type_i32;
         slot->kind = BC_VAL_CONST;
         slot->type = alias_type;
+        slot->init_bytes = NULL;
+        slot->init_size = 0;
+        slot->agg_elem_ids = NULL;
+        slot->agg_elem_count = 0;
         slot->operand = op;
         slot->operand.type = alias_type;
     }
@@ -799,6 +1244,153 @@ static bool bc_call_is_nop_intrinsic(const lr_module_t *m, lr_operand_t callee_o
         return false;
     return strncmp(name, "llvm.lifetime.start", 19) == 0 ||
            strncmp(name, "llvm.lifetime.end", 17) == 0;
+}
+
+static bool bc_append_unique_u32(uint32_t *vals, uint32_t *count,
+                                 uint32_t cap, uint32_t v) {
+    uint32_t i;
+    if (!vals || !count || *count > cap)
+        return false;
+    for (i = 0; i < *count; i++) {
+        if (vals[i] == v)
+            return true;
+    }
+    if (*count >= cap)
+        return false;
+    vals[*count] = v;
+    (*count)++;
+    return true;
+}
+
+static bool bc_switch_remap_phi_preds(bc_decoder_t *d, lr_block_t *succ,
+                                      uint32_t old_pred,
+                                      const uint32_t *new_preds,
+                                      uint32_t new_pred_count,
+                                      bool keep_old_pred) {
+    lr_inst_t *inst;
+    if (!d || !succ)
+        return false;
+    for (inst = succ->first; inst; inst = inst->next) {
+        uint32_t i;
+        uint32_t old_hits = 0;
+        uint32_t new_pairs;
+        uint32_t out_i = 0;
+        lr_operand_t *rewritten;
+
+        if (inst->op != LR_OP_PHI)
+            continue;
+        if (inst->num_operands < 2 || (inst->num_operands & 1u) != 0u) {
+            bc_dec_error(d, "malformed phi node in switch successor");
+            return false;
+        }
+
+        for (i = 0; i + 1 < inst->num_operands; i += 2) {
+            const lr_operand_t *pred = &inst->operands[i + 1];
+            if (pred->kind == LR_VAL_BLOCK && pred->block_id == old_pred)
+                old_hits++;
+        }
+        if (old_hits == 0)
+            continue;
+
+        if (!keep_old_pred && new_pred_count == 0) {
+            bc_dec_error(d, "switch lowering removed predecessor with no replacement");
+            return false;
+        }
+
+        {
+            uint32_t delta_pairs;
+            if (keep_old_pred) {
+                delta_pairs = old_hits * new_pred_count;
+            } else {
+                delta_pairs = old_hits * (new_pred_count - 1u);
+            }
+            new_pairs = (inst->num_operands / 2u) + delta_pairs;
+        }
+
+        rewritten = lr_arena_array(d->arena, lr_operand_t, new_pairs * 2u);
+        if (!rewritten) {
+            bc_dec_error(d, "out of memory remapping switch phi operands");
+            return false;
+        }
+
+        for (i = 0; i + 1 < inst->num_operands; i += 2) {
+            const lr_operand_t val = inst->operands[i];
+            const lr_operand_t pred = inst->operands[i + 1];
+            if (pred.kind == LR_VAL_BLOCK && pred.block_id == old_pred) {
+                uint32_t pi;
+                if (keep_old_pred) {
+                    rewritten[out_i++] = val;
+                    rewritten[out_i++] = pred;
+                }
+                for (pi = 0; pi < new_pred_count; pi++) {
+                    rewritten[out_i++] = val;
+                    rewritten[out_i++] = lr_op_block(new_preds[pi]);
+                }
+            } else {
+                rewritten[out_i++] = val;
+                rewritten[out_i++] = pred;
+            }
+        }
+        if (out_i != new_pairs * 2u) {
+            bc_dec_error(d, "internal error while remapping switch phi operands");
+            return false;
+        }
+        inst->operands = rewritten;
+        inst->num_operands = new_pairs * 2u;
+    }
+    return true;
+}
+
+typedef struct bc_switch_phi_fixup {
+    uint32_t succ_bb;
+    uint32_t old_pred;
+    bool keep_old_pred;
+    uint32_t *new_preds;
+    uint32_t new_pred_count;
+} bc_switch_phi_fixup_t;
+
+static bool bc_push_switch_phi_fixup(bc_decoder_t *d,
+                                     bc_switch_phi_fixup_t **arr,
+                                     uint32_t *count,
+                                     uint32_t *cap,
+                                     uint32_t succ_bb,
+                                     uint32_t old_pred,
+                                     bool keep_old_pred,
+                                     const uint32_t *new_preds,
+                                     uint32_t new_pred_count) {
+    bc_switch_phi_fixup_t *grown;
+    uint32_t new_cap;
+    uint32_t *pred_copy;
+
+    if (!d || !arr || !count || !cap || !new_preds || new_pred_count == 0)
+        return false;
+
+    if (*count == *cap) {
+        new_cap = (*cap == 0u) ? 8u : (*cap * 2u);
+        grown = (bc_switch_phi_fixup_t *)realloc(*arr,
+                                                 (size_t)new_cap * sizeof(*grown));
+        if (!grown) {
+            bc_dec_error(d, "out of memory growing switch phi fixups");
+            return false;
+        }
+        *arr = grown;
+        *cap = new_cap;
+    }
+
+    pred_copy = (uint32_t *)malloc((size_t)new_pred_count * sizeof(uint32_t));
+    if (!pred_copy) {
+        bc_dec_error(d, "out of memory storing switch phi fixup preds");
+        return false;
+    }
+    memcpy(pred_copy, new_preds, (size_t)new_pred_count * sizeof(uint32_t));
+
+    (*arr)[*count].succ_bb = succ_bb;
+    (*arr)[*count].old_pred = old_pred;
+    (*arr)[*count].keep_old_pred = keep_old_pred;
+    (*arr)[*count].new_preds = pred_copy;
+    (*arr)[*count].new_pred_count = new_pred_count;
+    (*count)++;
+    return true;
 }
 
 /* ---- Type block decoder ------------------------------------------------ */
@@ -871,6 +1463,7 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
                 break;
             }
             case TYPE_CODE_POINTER:
+            case TYPE_CODE_OPAQUE_PTR:
                 bc_type_table_push(&d->types, d->module->type_ptr);
                 break;
             case TYPE_CODE_ARRAY: {
@@ -1033,6 +1626,10 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 bc_value_t cv;
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
                 if (cur_type->kind == LR_TYPE_PTR)
                     cv.operand = lr_op_null(cur_type);
                 else
@@ -1045,6 +1642,10 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 bc_value_t cv;
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
                 cv.operand.kind = LR_VAL_UNDEF;
                 cv.operand.type = cur_type;
                 cv.operand.global_offset = 0;
@@ -1057,6 +1658,25 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 int64_t val = bc_decode_signed_vbr(raw);
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
+                cv.operand = lr_op_imm_i64(val, cur_type);
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_WIDE_INTEGER: {
+                bc_value_t cv;
+                int64_t val = 0;
+                if (r->record_len > 0)
+                    val = bc_decode_signed_vbr(r->record[0]);
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
                 cv.operand = lr_op_imm_i64(val, cur_type);
                 bc_value_push(vt, cv);
                 break;
@@ -1067,6 +1687,10 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 double fval;
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
                 if (cur_type->kind == LR_TYPE_FLOAT) {
                     uint32_t raw32 = (uint32_t)raw;
                     float f32;
@@ -1079,13 +1703,243 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 bc_value_push(vt, cv);
                 break;
             }
-            case CONST_CODE_AGGREGATE: {
+            case CONST_CODE_STRING:
+            case CONST_CODE_CSTRING:
+            case CONST_CODE_DATA: {
                 bc_value_t cv;
+                size_t nbytes = r->record_len;
+                uint8_t *bytes = NULL;
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
                 cv.operand.kind = LR_VAL_UNDEF;
                 cv.operand.type = cur_type;
                 cv.operand.global_offset = 0;
+                if (nbytes > 0) {
+                    bytes = lr_arena_array(d->arena, uint8_t, nbytes);
+                    if (bytes) {
+                        size_t i;
+                        bool decode_char6 = false;
+                        if (code == CONST_CODE_STRING ||
+                            code == CONST_CODE_CSTRING) {
+                            decode_char6 = true;
+                            for (i = 0; i < nbytes; i++) {
+                                if (r->record[i] > 63u) {
+                                    decode_char6 = false;
+                                    break;
+                                }
+                            }
+                        }
+                        for (i = 0; i < nbytes; i++) {
+                            if (decode_char6) {
+                                bytes[i] = bc_decode_char6(r->record[i]);
+                            } else {
+                                bytes[i] = (uint8_t)r->record[i];
+                            }
+                        }
+                        cv.init_bytes = bytes;
+                        cv.init_size = nbytes;
+                    }
+                }
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_AGGREGATE: {
+                bc_value_t cv;
+                size_t nbytes = 0;
+                uint8_t *bytes = NULL;
+                uint32_t *elem_ids = NULL;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
+                cv.operand.kind = LR_VAL_UNDEF;
+                cv.operand.type = cur_type;
+                cv.operand.global_offset = 0;
+                if (r->record_len > 0 && r->record_len <= UINT32_MAX) {
+                    elem_ids = lr_arena_array(d->arena, uint32_t, (uint32_t)r->record_len);
+                    if (elem_ids) {
+                        for (size_t i = 0; i < r->record_len; i++)
+                            elem_ids[i] = (uint32_t)r->record[i];
+                        cv.agg_elem_ids = elem_ids;
+                        cv.agg_elem_count = (uint32_t)r->record_len;
+                    }
+                }
+                if (cur_type && cur_type->kind == LR_TYPE_ARRAY &&
+                    cur_type->array.elem &&
+                    cur_type->array.elem->kind == LR_TYPE_I8) {
+                    nbytes = (size_t)cur_type->array.count;
+                    if (nbytes == 0)
+                        nbytes = r->record_len;
+                    if (nbytes > 0) {
+                        bytes = lr_arena_array(d->arena, uint8_t, nbytes);
+                        if (bytes) {
+                            size_t i;
+                            memset(bytes, 0, nbytes);
+                            for (i = 0; i < r->record_len && i < nbytes; i++) {
+                                lr_operand_t elem = bc_make_operand_from_value(
+                                    d, vt, (uint32_t)r->record[i], NULL,
+                                    cur_type->array.elem);
+                                if (elem.kind == LR_VAL_IMM_I64)
+                                    bytes[i] = (uint8_t)elem.imm_i64;
+                            }
+                            cv.init_bytes = bytes;
+                            cv.init_size = nbytes;
+                        }
+                    }
+                }
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_CE_CAST: {
+                bc_value_t cv;
+                uint32_t op_ty_idx;
+                uint32_t op_vid;
+                lr_type_t *op_ty;
+                lr_operand_t op;
+                if (r->record_len < 3) {
+                    cv.kind = BC_VAL_CONST;
+                    cv.type = cur_type;
+                    cv.init_bytes = NULL;
+                    cv.init_size = 0;
+                    cv.agg_elem_ids = NULL;
+                    cv.agg_elem_count = 0;
+                    cv.operand.kind = LR_VAL_UNDEF;
+                    cv.operand.type = cur_type;
+                    cv.operand.global_offset = 0;
+                    bc_value_push(vt, cv);
+                    break;
+                }
+                op_ty_idx = (uint32_t)r->record[1];
+                op_vid = (uint32_t)r->record[2];
+                op_ty = bc_get_type(d, op_ty_idx);
+                if (!op_ty)
+                    op_ty = d->module->type_ptr;
+                op = bc_make_operand_from_value(d, vt, op_vid, NULL, op_ty);
+                op.type = cur_type;
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
+                cv.operand = op;
+                bc_value_push(vt, cv);
+                break;
+            }
+            case CONST_CODE_CE_GEP_OLD:
+            case CONST_CODE_CE_INBOUNDS_GEP:
+            case CONST_CODE_CE_GEP_WITH_INRANGE_INDEX_OLD:
+            case CONST_CODE_CE_GEP_WITH_INRANGE:
+            case CONST_CODE_CE_GEP: {
+                bc_value_t cv;
+                uint32_t op_num = 0;
+                lr_type_t *pointee_ty = NULL;
+                lr_type_t *source_ty = NULL;
+                uint32_t base_ty_idx, base_vid;
+                lr_operand_t base_op;
+                bool folded = false;
+                int64_t const_offset = 0;
+
+                memset(&base_op, 0, sizeof(base_op));
+                base_op.kind = LR_VAL_UNDEF;
+                base_op.type = cur_type;
+
+                if (code == CONST_CODE_CE_GEP_WITH_INRANGE_INDEX_OLD ||
+                    code == CONST_CODE_CE_GEP_WITH_INRANGE ||
+                    code == CONST_CODE_CE_GEP ||
+                    ((r->record_len & 1u) != 0u)) {
+                    if (op_num >= r->record_len)
+                        goto const_gep_fallback;
+                    pointee_ty = bc_get_type(d, (uint32_t)r->record[op_num++]);
+                }
+                if (code == CONST_CODE_CE_GEP_WITH_INRANGE_INDEX_OLD ||
+                    code == CONST_CODE_CE_GEP) {
+                    if (op_num >= r->record_len)
+                        goto const_gep_fallback;
+                    op_num++; /* flags */
+                } else if (code == CONST_CODE_CE_GEP_WITH_INRANGE) {
+                    /* InRange payload is variable-size; unsupported for now. */
+                    goto const_gep_fallback;
+                }
+                if (op_num + 1 >= r->record_len)
+                    goto const_gep_fallback;
+
+                base_ty_idx = (uint32_t)r->record[op_num++];
+                source_ty = pointee_ty;
+                if (!source_ty)
+                    source_ty = bc_get_type(d, base_ty_idx);
+                if (r->has_error)
+                    return false;
+                base_vid = (uint32_t)r->record[op_num++];
+                base_op = bc_make_operand_from_value(d, vt, base_vid, NULL, d->module->type_ptr);
+
+                if (base_op.kind == LR_VAL_GLOBAL) {
+                    uint32_t idx_words = r->record_len - op_num;
+                    uint32_t num_indices = idx_words / 2u;
+                    lr_operand_t *idx_ops = NULL;
+                    uint32_t i;
+                    if ((idx_words & 1u) != 0u) {
+                        goto const_gep_fallback;
+                    }
+                    if (num_indices > 0) {
+                        idx_ops = (lr_operand_t *)malloc((size_t)num_indices * sizeof(lr_operand_t));
+                        if (!idx_ops)
+                            goto const_gep_fallback;
+                        for (i = 0; i < num_indices; i++) {
+                            uint32_t idx_ty_idx = (uint32_t)r->record[op_num++];
+                            uint32_t idx_vid = (uint32_t)r->record[op_num++];
+                            lr_type_t *idx_ty = bc_get_type(d, idx_ty_idx);
+                            if (r->has_error) {
+                                free(idx_ops);
+                                return false;
+                            }
+                            idx_ops[i] = bc_make_operand_from_value(
+                                d, vt, idx_vid, NULL, idx_ty ? idx_ty : d->module->type_i64);
+                        }
+                    }
+
+                    if (op_num == r->record_len && source_ty &&
+                        bc_const_gep_try_compute_offset(source_ty, idx_ops,
+                                                        num_indices, &const_offset)) {
+                        folded = true;
+                    }
+                    free(idx_ops);
+                    if (folded) {
+                        cv.kind = BC_VAL_CONST;
+                        cv.type = cur_type;
+                        cv.init_bytes = NULL;
+                        cv.init_size = 0;
+                        cv.agg_elem_ids = NULL;
+                        cv.agg_elem_count = 0;
+                        cv.operand = base_op;
+                        cv.operand.type = cur_type;
+                        cv.operand.global_offset += const_offset;
+                        bc_value_push(vt, cv);
+                        break;
+                    }
+                }
+
+const_gep_fallback:
+                cv.kind = BC_VAL_CONST;
+                cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
+                if (base_op.kind == LR_VAL_GLOBAL) {
+                    cv.operand = base_op;
+                    cv.operand.type = cur_type;
+                } else {
+                    cv.operand.kind = LR_VAL_UNDEF;
+                    cv.operand.type = cur_type;
+                    cv.operand.global_offset = 0;
+                }
                 bc_value_push(vt, cv);
                 break;
             }
@@ -1093,6 +1947,10 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                 bc_value_t cv;
                 cv.kind = BC_VAL_CONST;
                 cv.type = cur_type;
+                cv.init_bytes = NULL;
+                cv.init_size = 0;
+                cv.agg_elem_ids = NULL;
+                cv.agg_elem_count = 0;
                 cv.operand.kind = LR_VAL_UNDEF;
                 cv.operand.type = cur_type;
                 cv.operand.global_offset = 0;
@@ -1353,6 +2211,9 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
     uint32_t num_blocks = 0;
     uint32_t cur_block = 0;
     uint32_t next_value_id = 0;
+    bc_switch_phi_fixup_t *switch_fixups = NULL;
+    uint32_t switch_fixup_count = 0;
+    uint32_t switch_fixup_cap = 0;
     uint32_t i;
     bool ok = true;
 
@@ -1478,14 +2339,17 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                     inst = lr_inst_create(d->arena, LR_OP_RET_VOID,
                                           d->module->type_void, 0, NULL, 0);
                 } else {
-                    uint32_t rel = (uint32_t)r->record[0];
                     uint32_t vid = 0;
                     lr_operand_t op;
-                    if (!bc_resolve_rel_value_id(d, next_value_id, rel, &vid)) {
+                    lr_type_t *ret_ty = NULL;
+                    uint32_t op_num = 0;
+                    if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                       &op_num, next_value_id, &vid, &ret_ty)) {
                         ok = false;
                         break;
                     }
-                    op = bc_make_operand_from_value(d, &local_vt, vid, func, func->ret_type);
+                    op = bc_make_operand_from_value(d, &local_vt, vid, func,
+                                                    ret_ty ? ret_ty : func->ret_type);
                     inst = lr_inst_create(d->arena, LR_OP_RET, op.type, 0, &op, 1);
                 }
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
@@ -1541,63 +2405,31 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_BINOP: {
-                uint32_t lhs_rel;
-                uint32_t rhs_rel;
-                uint32_t opc;
-                uint32_t ty_idx = UINT32_MAX;
+                uint32_t op_num = 0;
                 uint32_t lhs_vid = 0;
                 uint32_t rhs_vid = 0;
+                uint32_t opc;
                 lr_operand_t ops[2];
                 lr_type_t *res_type;
                 uint32_t dest;
                 lr_inst_t *inst;
                 bool is_fp;
+                lr_type_t *lhs_ty = NULL;
 
-                if (r->record_len >= 4) {
-                    uint32_t r0 = (uint32_t)r->record[0];
-                    uint32_t r1 = (uint32_t)r->record[1];
-                    uint32_t r2 = (uint32_t)r->record[2];
-                    uint32_t r3 = (uint32_t)r->record[3];
-                    bool canonical = (r1 < d->types.count) &&
-                                     (r2 <= next_value_id) &&
-                                     (r3 <= next_value_id);
-                    bool legacy = (r0 <= next_value_id) &&
-                                  (r1 <= next_value_id);
-                    if (canonical && !legacy) {
-                        /* LLVM canonical: [opcode, ty, lhs, rhs] */
-                        opc = r0;
-                        ty_idx = r1;
-                        lhs_rel = r2;
-                        rhs_rel = r3;
-                    } else {
-                        /* Legacy/internal: [lhs, rhs, opcode, ...flags] */
-                        lhs_rel = r0;
-                        rhs_rel = r1;
-                        opc = r2;
-                    }
-                } else {
-                    /* Legacy/internal: [lhs, rhs, opcode] */
-                    lhs_rel = (uint32_t)r->record[0];
-                    rhs_rel = (uint32_t)r->record[1];
-                    opc = (uint32_t)r->record[2];
-                }
-
-                if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid)) {
+                /* LLVM canonical: [lhs pair, rhs, opcode, flags?] */
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &lhs_vid, &lhs_ty) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &rhs_vid) ||
+                    op_num >= r->record_len) {
+                    bc_dec_error(d, "malformed binop record");
                     ok = false;
                     break;
                 }
-                ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
+                opc = (uint32_t)r->record[op_num++];
+                ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, lhs_ty);
                 ops[1] = bc_make_operand_from_value(d, &local_vt, rhs_vid, func, ops[0].type);
-                if (ty_idx != UINT32_MAX) {
-                    res_type = bc_get_type(d, ty_idx);
-                    if (!res_type) {
-                        ok = false;
-                        break;
-                    }
-                } else {
-                    res_type = ops[0].type;
-                }
+                res_type = ops[0].type;
                 is_fp = bc_type_is_fp(res_type);
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, res_type, &dest)) {
                     ok = false;
@@ -1614,32 +2446,27 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 break;
             }
             case FUNC_CODE_INST_CAST: {
-                uint32_t src_rel;
+                uint32_t op_num = 0;
+                uint32_t src_vid = 0;
                 uint32_t dest_ty_idx;
                 uint32_t cast_opc;
-                uint32_t src_vid = 0;
                 lr_operand_t op;
                 lr_type_t *dest_type;
+                lr_type_t *src_type = NULL;
                 uint32_t dest;
                 lr_inst_t *inst;
 
-                if (r->record_len >= 4) {
-                    /* LLVM canonical: [opcode, dest_ty, src_ty, src] */
-                    cast_opc = (uint32_t)r->record[0];
-                    dest_ty_idx = (uint32_t)r->record[1];
-                    src_rel = (uint32_t)r->record[3];
-                } else {
-                    /* Legacy/internal: [src, dest_ty, opcode] */
-                    src_rel = (uint32_t)r->record[0];
-                    dest_ty_idx = (uint32_t)r->record[1];
-                    cast_opc = (uint32_t)r->record[2];
-                }
-
-                if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
+                /* LLVM canonical: [op pair, dest_ty, cast_opc, flags?] */
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &src_vid, &src_type) ||
+                    op_num + 1 >= r->record_len) {
+                    bc_dec_error(d, "malformed cast record");
                     ok = false;
                     break;
                 }
-                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, NULL);
+                dest_ty_idx = (uint32_t)r->record[op_num++];
+                cast_opc = (uint32_t)r->record[op_num++];
+                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, src_type);
                 dest_type = bc_get_type(d, dest_ty_idx);
                 if (!dest_type) { ok = false; break; }
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, dest_type, &dest)) {
@@ -1656,34 +2483,31 @@ static bool bc_decode_function_block(bc_decoder_t *d, bc_reader_t *r,
                 }
                 break;
             }
+            case FUNC_CODE_INST_CMP:
             case FUNC_CODE_INST_CMP2: {
-                uint32_t lhs_rel;
-                uint32_t rhs_rel;
-                uint32_t pred;
                 uint32_t lhs_vid = 0;
                 uint32_t rhs_vid = 0;
+                uint32_t pred = 0;
                 lr_operand_t ops[2];
                 uint32_t dest;
                 lr_inst_t *inst;
+                lr_type_t *lhs_ty = NULL;
+                uint32_t op_num = 0;
 
-                if (r->record_len >= 4) {
-                    /* LLVM canonical: [op_ty, lhs, rhs, pred] */
-                    lhs_rel = (uint32_t)r->record[1];
-                    rhs_rel = (uint32_t)r->record[2];
-                    pred = (uint32_t)r->record[3];
-                } else {
-                    /* Legacy/internal: [lhs, rhs, pred] */
-                    lhs_rel = (uint32_t)r->record[0];
-                    rhs_rel = (uint32_t)r->record[1];
-                    pred = (uint32_t)r->record[2];
-                }
-
-                if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid)) {
+                /* Mirror LLVM BitcodeReader:
+                   CMP/CMP2: [opty, opval, opval, pred, ...optional flags] via
+                   getValueTypePair + popValue semantics. */
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &lhs_vid, &lhs_ty) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &rhs_vid) ||
+                    op_num >= r->record_len) {
+                    bc_dec_error(d, "malformed cmp record");
                     ok = false;
                     break;
                 }
-                ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
+                pred = (uint32_t)r->record[op_num++];
+                ops[0] = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, lhs_ty);
                 ops[1] = bc_make_operand_from_value(d, &local_vt, rhs_vid, func, ops[0].type);
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
                                           d->module->type_i1, &dest)) {
@@ -1740,13 +2564,29 @@ cmp_emit_done:
             case FUNC_CODE_INST_PHI: {
                 uint32_t ty_idx = (uint32_t)r->record[0];
                 lr_type_t *phi_type = bc_get_type(d, ty_idx);
-                uint32_t npairs = (r->record_len - 1) / 2;
+                uint32_t payload_len;
+                uint32_t npairs;
                 lr_operand_t *ops;
                 uint32_t dest, j;
                 uint32_t phi_base_before_def;
                 lr_inst_t *inst;
 
                 if (!phi_type) { ok = false; break; }
+                if (r->record_len < 1) {
+                    bc_dec_error(d, "malformed phi record");
+                    ok = false;
+                    break;
+                }
+                payload_len = r->record_len - 1;
+                if ((payload_len & 1u) != 0u) {
+                    if (!bc_type_is_fp(phi_type)) {
+                        bc_dec_error(d, "invalid phi record");
+                        ok = false;
+                        break;
+                    }
+                    payload_len -= 1u; /* trailing FMF */
+                }
+                npairs = payload_len / 2;
                 ops = (lr_operand_t *)malloc((size_t)(npairs * 2) * sizeof(lr_operand_t));
                 if (!ops) {
                     bc_dec_error(d, "out of memory for phi operands");
@@ -1788,33 +2628,31 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_ALLOCA: {
-                uint32_t inst_ty_idx, op_ty_idx, align_raw;
+                uint32_t inst_ty_idx, op_ty_idx;
                 lr_type_t *elem_ty;
+                lr_type_t *op_ty;
                 lr_operand_t size_op;
                 uint32_t dest;
                 lr_inst_t *inst;
 
+                if (r->record_len != 4 && r->record_len != 5) {
+                    bc_dec_error(d, "malformed alloca record");
+                    ok = false;
+                    break;
+                }
+
                 inst_ty_idx = (uint32_t)r->record[0];
-                op_ty_idx = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
-                (void)op_ty_idx;
-                align_raw = r->record_len > 3 ? (uint32_t)r->record[3] : 0;
-                (void)align_raw;
+                op_ty_idx = (uint32_t)r->record[1];
 
                 elem_ty = bc_get_type(d, inst_ty_idx);
                 if (!elem_ty) { ok = false; break; }
+                op_ty = bc_get_type(d, op_ty_idx);
+                if (!op_ty)
+                    op_ty = d->module->type_i64;
 
-                if (r->record_len > 2) {
-                    uint32_t sz_rel = (uint32_t)r->record[2];
-                    uint32_t sz_vid = 0;
-                    if (!bc_resolve_rel_value_id(d, next_value_id, sz_rel, &sz_vid)) {
-                        ok = false;
-                        break;
-                    }
-                    size_op = bc_make_operand_from_value(d, &local_vt, sz_vid,
-                                                         func, d->module->type_i64);
-                } else {
-                    size_op = lr_op_imm_i64(1, d->module->type_i64);
-                }
+                /* ALLOCA uses absolute value IDs for the size operand. */
+                size_op = bc_make_operand_from_value(d, &local_vt, (uint32_t)r->record[2],
+                                                     func, op_ty);
 
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
                                           d->module->type_ptr, &dest)) {
@@ -1834,48 +2672,31 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_LOAD: {
-                uint32_t ptr_rel;
-                uint32_t ty_idx;
+                uint32_t op_num = 0;
                 uint32_t ptr_vid = 0;
                 lr_operand_t op;
                 lr_type_t *load_ty;
+                lr_type_t *ptr_ty = NULL;
                 uint32_t dest;
                 lr_inst_t *inst;
 
-                if (r->record_len >= 2) {
-                    uint32_t a = (uint32_t)r->record[0];
-                    uint32_t b = (uint32_t)r->record[1];
-                    bool a_is_ty = a < d->types.count;
-                    bool b_is_ty = b < d->types.count;
-                    if (a_is_ty && !b_is_ty) {
-                        /* LLVM canonical: [val_ty, ptr, ...] */
-                        ty_idx = a;
-                        ptr_rel = b;
-                    } else if (!a_is_ty && b_is_ty) {
-                        /* Legacy/internal: [ptr, val_ty, ...] */
-                        ptr_rel = a;
-                        ty_idx = b;
-                    } else if (a_is_ty) {
-                        /* Ambiguous: prefer canonical on modern streams. */
-                        ty_idx = a;
-                        ptr_rel = b;
-                    } else {
-                        ptr_rel = a;
-                        ty_idx = b;
-                    }
-                } else {
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &ptr_vid, &ptr_ty) ||
+                    (op_num + 2 != r->record_len && op_num + 3 != r->record_len)) {
                     bc_dec_error(d, "malformed load record");
                     ok = false;
                     break;
                 }
 
-                if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid)) {
-                    ok = false;
-                    break;
-                }
                 op = bc_make_operand_from_value(d, &local_vt, ptr_vid, func, d->module->type_ptr);
-                load_ty = bc_get_type(d, ty_idx);
-                if (!load_ty) { ok = false; break; }
+                if (op_num + 3 == r->record_len) {
+                    uint32_t ty_idx = (uint32_t)r->record[op_num++];
+                    load_ty = bc_get_type(d, ty_idx);
+                    if (!load_ty) { ok = false; break; }
+                } else {
+                    /* Opaque-pointer mode should provide explicit load type. */
+                    load_ty = d->module->type_i8;
+                }
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id, load_ty, &dest)) {
                     ok = false;
                     break;
@@ -1893,51 +2714,44 @@ cmp_emit_done:
             case FUNC_CODE_INST_STORE_OLD: {
                 lr_operand_t ops[2];
                 lr_inst_t *inst;
-                if (code == FUNC_CODE_INST_STORE) {
-                    uint32_t ptr_rel;
-                    uint32_t val_rel;
-                    uint32_t ptr_vid = 0, val_vid = 0;
-                    if (r->record_len >= 6) {
-                        /* LLVM canonical: [ptr_ty, ptr, val_ty, val, align, vol, ...] */
-                        ptr_rel = (uint32_t)r->record[1];
-                        val_rel = (uint32_t)r->record[3];
-                    } else {
-                        /* Legacy/internal: [ptr, val, ...] */
-                        ptr_rel = (uint32_t)r->record[0];
-                        val_rel = (uint32_t)r->record[1];
-                    }
-                    if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
-                        ok = false;
-                        break;
-                    }
-                    ops[0] = bc_make_operand_from_value(d, &local_vt, val_vid, func, NULL);
-                    ops[1] = bc_make_operand_from_value(d, &local_vt, ptr_vid,
-                                                        func, d->module->type_ptr);
-                } else {
-                    uint32_t ptr_rel;
-                    uint32_t val_rel;
-                    uint32_t ptr_vid = 0, val_vid = 0;
-                    if (r->record_len >= 5) {
-                        /* LLVM canonical old: [ptr_ty, ptr, val, align, vol] */
-                        ptr_rel = (uint32_t)r->record[1];
-                        val_rel = (uint32_t)r->record[2];
-                    } else {
-                        /* Legacy/internal: [ptr, val, ...] */
-                        ptr_rel = (uint32_t)r->record[0];
-                        val_rel = (uint32_t)r->record[1];
-                    }
-                    if (!bc_resolve_rel_value_id(d, next_value_id, ptr_rel, &ptr_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
-                        ok = false;
-                        break;
-                    }
-                    ops[0] = bc_make_operand_from_value(d, &local_vt, val_vid, func, NULL);
-                    ops[1] = bc_make_operand_from_value(d, &local_vt, ptr_vid,
-                                                        func, d->module->type_ptr);
-                }
-                if (!ok)
+                uint32_t op_num = 0;
+                uint32_t ptr_vid = 0;
+                uint32_t val_vid = 0;
+                lr_type_t *ptr_ty = NULL;
+                lr_type_t *val_ty = NULL;
+                lr_type_t *implied_val_ty = NULL;
+
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &ptr_vid, &ptr_ty)) {
+                    ok = false;
                     break;
+                }
+                (void)ptr_ty;
+
+                if (code == FUNC_CODE_INST_STORE) {
+                    if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                       &op_num, next_value_id, &val_vid, &val_ty)) {
+                        ok = false;
+                        break;
+                    }
+                } else {
+                    if (!implied_val_ty)
+                        implied_val_ty = d->module->type_i64;
+                    if (!bc_record_get_value(d, r->record, r->record_len,
+                                             &op_num, next_value_id, &val_vid)) {
+                        ok = false;
+                        break;
+                    }
+                    val_ty = implied_val_ty;
+                }
+                if (op_num + 2 != r->record_len) {
+                    bc_dec_error(d, "malformed store record");
+                    ok = false;
+                    break;
+                }
+                ops[0] = bc_make_operand_from_value(d, &local_vt, val_vid, func, val_ty);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, ptr_vid,
+                                                    func, d->module->type_ptr);
                 inst = lr_inst_create(d->arena, LR_OP_STORE,
                                        d->module->type_void, 0, ops, 2);
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
@@ -1946,19 +2760,152 @@ cmp_emit_done:
                 }
                 break;
             }
+            case FUNC_CODE_INST_VAARG: {
+                uint32_t op_num = 0;
+                uint32_t valist_ty_idx;
+                uint32_t valist_vid = 0;
+                uint32_t value_ty_idx;
+                lr_type_t *valist_ty;
+                lr_type_t *value_ty;
+                lr_operand_t valist_addr_op;
+                lr_operand_t cursor_op;
+                lr_operand_t ptr_i64_op;
+                lr_operand_t next_ptr_op;
+                uint32_t cursor_vreg;
+                uint32_t ptr_i64_vreg;
+                uint32_t add_vreg;
+                uint32_t next_ptr_vreg;
+                uint32_t dest;
+                lr_inst_t *inst;
+                size_t stride;
+
+                if (r->record_len < 3) {
+                    bc_dec_error(d, "malformed va_arg record");
+                    ok = false;
+                    break;
+                }
+
+                valist_ty_idx = (uint32_t)r->record[op_num++];
+                valist_ty = bc_get_type(d, valist_ty_idx);
+                value_ty_idx = (uint32_t)r->record[op_num + 1];
+                value_ty = bc_get_type(d, value_ty_idx);
+                if (!value_ty) {
+                    ok = false;
+                    break;
+                }
+                if (!bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &valist_vid)) {
+                    ok = false;
+                    break;
+                }
+                op_num++; /* consumed instty */
+                valist_addr_op = bc_make_operand_from_value(
+                    d, &local_vt, valist_vid, func, valist_ty ? valist_ty : d->module->type_ptr);
+
+                /* Load current vararg cursor pointer from va_list storage. */
+                cursor_vreg = lr_vreg_new(func);
+                inst = lr_inst_create(d->arena, LR_OP_LOAD, d->module->type_ptr,
+                                      cursor_vreg, &valist_addr_op, 1);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
+                cursor_op = lr_op_vreg(cursor_vreg, d->module->type_ptr);
+
+                if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
+                                          value_ty, &dest)) {
+                    ok = false;
+                    break;
+                }
+                next_value_id++;
+                inst = lr_inst_create(d->arena, LR_OP_LOAD, value_ty, dest, &cursor_op, 1);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
+
+                stride = lr_type_size(value_ty);
+                if (stride < 8)
+                    stride = 8;
+                stride = (stride + 7u) & ~(size_t)7u;
+
+                ptr_i64_vreg = lr_vreg_new(func);
+                inst = lr_inst_create(d->arena, LR_OP_PTRTOINT, d->module->type_i64,
+                                      ptr_i64_vreg, &cursor_op, 1);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
+                ptr_i64_op = lr_op_vreg(ptr_i64_vreg, d->module->type_i64);
+
+                {
+                    lr_operand_t add_ops[2];
+                    add_vreg = lr_vreg_new(func);
+                    add_ops[0] = ptr_i64_op;
+                    add_ops[1] = lr_op_imm_i64((int64_t)stride, d->module->type_i64);
+                    inst = lr_inst_create(d->arena, LR_OP_ADD, d->module->type_i64,
+                                          add_vreg, add_ops, 2);
+                    if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (!ok)
+                    break;
+
+                ptr_i64_op = lr_op_vreg(add_vreg, d->module->type_i64);
+                next_ptr_vreg = lr_vreg_new(func);
+                inst = lr_inst_create(d->arena, LR_OP_INTTOPTR, d->module->type_ptr,
+                                      next_ptr_vreg, &ptr_i64_op, 1);
+                if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                    ok = false;
+                    break;
+                }
+                next_ptr_op = lr_op_vreg(next_ptr_vreg, d->module->type_ptr);
+
+                {
+                    lr_operand_t store_ops[2];
+                    store_ops[0] = next_ptr_op;
+                    store_ops[1] = valist_addr_op;
+                    inst = lr_inst_create(d->arena, LR_OP_STORE, d->module->type_void,
+                                          0, store_ops, 2);
+                    if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                break;
+            }
             case FUNC_CODE_INST_GEP: {
-                uint32_t inbounds = (uint32_t)r->record[0];
+                uint32_t op_num = 0;
+                uint32_t gep_flags;
                 uint32_t src_ty_idx = (uint32_t)r->record[1];
-                uint32_t nops_total = (r->record_len - 2);
+                uint32_t base_vid = 0;
+                uint32_t nops_total;
                 uint32_t j;
                 lr_type_t *base_ty;
                 lr_operand_t *ops;
                 uint32_t dest;
                 lr_inst_t *inst;
+                lr_type_t *base_ptr_ty = NULL;
 
-                (void)inbounds;
+                if (r->record_len < 3) {
+                    bc_dec_error(d, "malformed gep record");
+                    ok = false;
+                    break;
+                }
+                gep_flags = (uint32_t)r->record[op_num++];
+                (void)gep_flags;
+                src_ty_idx = (uint32_t)r->record[op_num++];
                 base_ty = bc_get_type(d, src_ty_idx);
                 if (!base_ty) { ok = false; break; }
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &base_vid,
+                                                   &base_ptr_ty)) {
+                    ok = false;
+                    break;
+                }
+                nops_total = 1u + (r->record_len - op_num);
 
                 ops = (lr_operand_t *)malloc((size_t)nops_total * sizeof(lr_operand_t));
                 if (!ops) {
@@ -1966,17 +2913,19 @@ cmp_emit_done:
                     ok = false;
                     break;
                 }
-                for (j = 0; j < nops_total; j++) {
-                    uint32_t rel = (uint32_t)r->record[2 + j];
+                ops[0] = bc_make_operand_from_value(d, &local_vt, base_vid, func,
+                                                    base_ptr_ty ? base_ptr_ty : d->module->type_ptr);
+                for (j = 1; j < nops_total; j++) {
                     uint32_t vid = 0;
-                    if (!bc_resolve_rel_value_id(d, next_value_id, rel, &vid)) {
+                    lr_type_t *idx_ty = NULL;
+                    if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                       &op_num, next_value_id, &vid, &idx_ty)) {
                         ok = false;
                         break;
                     }
-                    ops[j] = bc_make_operand_from_value(d, &local_vt, vid, func, NULL);
-                    if (j > 0)
-                        ops[j] = lr_canonicalize_gep_index(d->module, blocks[cur_block],
-                                                            func, ops[j]);
+                    ops[j] = bc_make_operand_from_value(d, &local_vt, vid, func, idx_ty);
+                    ops[j] = lr_canonicalize_gep_index(d->module, blocks[cur_block],
+                                                       func, ops[j]);
                 }
                 if (!ok) {
                     free(ops);
@@ -2002,59 +2951,145 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_CALL: {
-                uint32_t cc_flags, fn_ty_idx;
-                lr_type_t *fn_type;
-                uint32_t callee_rel, callee_vid;
+                uint32_t op_num = 0;
+                uint32_t cc_flags;
+                uint32_t fn_ty_idx = UINT32_MAX;
+                bool explicit_fn_ty = false;
+                lr_type_t *fn_type = NULL;
+                uint32_t callee_vid = 0;
+                lr_type_t *callee_value_ty = NULL;
+                lr_type_t *callee_ty = NULL;
                 lr_operand_t callee_op;
-                uint32_t nargs, j;
+                uint32_t fixed_args = 0;
+                uint32_t nargs = 0;
+                uint32_t cap = 0;
+                uint32_t i;
                 lr_operand_t *ops;
                 lr_type_t *ret_type;
                 uint32_t dest = 0;
                 lr_inst_t *inst;
+                const uint32_t CALL_EXPLICIT_TYPE_BIT = 15u;
+                const uint32_t CALL_FMF_BIT = 17u;
 
-                (void)r->record[0]; /* attr */
-                cc_flags = (uint32_t)r->record[1];
-                fn_ty_idx = (uint32_t)r->record[2];
-                fn_type = bc_get_type(d, fn_ty_idx);
-                if (!fn_type || fn_type->kind != LR_TYPE_FUNC) {
-                    bc_dec_error(d, "call references non-function type");
+                if (r->record_len < 2) {
+                    bc_dec_error(d, "malformed call record");
                     ok = false;
                     break;
                 }
+                op_num++; /* attr */
+                cc_flags = (uint32_t)r->record[op_num++];
+                if (((cc_flags >> CALL_FMF_BIT) & 1u) != 0u) {
+                    if (op_num >= r->record_len) {
+                        bc_dec_error(d, "malformed call record");
+                        ok = false;
+                        break;
+                    }
+                    op_num++; /* fast-math flags payload */
+                }
+                explicit_fn_ty = ((cc_flags >> CALL_EXPLICIT_TYPE_BIT) & 1u) != 0u;
 
-                callee_rel = (uint32_t)r->record[3];
-                if (!bc_resolve_rel_value_id(d, next_value_id, callee_rel, &callee_vid)) {
+                if (explicit_fn_ty) {
+                    if (op_num >= r->record_len) {
+                        bc_dec_error(d, "malformed call record");
+                        ok = false;
+                        break;
+                    }
+                    fn_ty_idx = (uint32_t)r->record[op_num++];
+                    fn_type = bc_get_type(d, fn_ty_idx);
+                    if (!fn_type || fn_type->kind != LR_TYPE_FUNC) {
+                        bc_dec_error(d, "call references non-function type");
+                        ok = false;
+                        break;
+                    }
+                }
+
+                if (op_num >= r->record_len) {
+                    bc_dec_error(d, "malformed call record");
                     ok = false;
                     break;
                 }
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &callee_vid,
+                                                   &callee_ty)) {
+                    ok = false;
+                    break;
+                }
+                if (callee_vid < local_vt.count)
+                    callee_value_ty = local_vt.values[callee_vid].type;
                 callee_op = bc_make_operand_from_value(d, &local_vt, callee_vid,
-                                                       func, d->module->type_ptr);
+                                                       func,
+                                                       callee_ty ? callee_ty : d->module->type_ptr);
+
+                if (!fn_type) {
+                    if (callee_value_ty && callee_value_ty->kind == LR_TYPE_FUNC) {
+                        fn_type = callee_value_ty;
+                    } else if (callee_vid < local_vt.count &&
+                               local_vt.values[callee_vid].kind == BC_VAL_FUNC &&
+                               local_vt.values[callee_vid].func &&
+                               local_vt.values[callee_vid].func->type &&
+                               local_vt.values[callee_vid].func->type->kind == LR_TYPE_FUNC) {
+                        fn_type = local_vt.values[callee_vid].func->type;
+                    } else {
+                        bc_dec_error(d, "call without explicit function type is unsupported");
+                        ok = false;
+                        break;
+                    }
+                }
+                fixed_args = fn_type->func.num_params;
+                if (r->record_len < op_num + fixed_args) {
+                    bc_dec_error(d, "insufficient operands in call record");
+                    ok = false;
+                    break;
+                }
 
                 if (bc_call_is_nop_intrinsic(d->module, callee_op))
                     break;
 
-                nargs = 0;
-                for (j = 4; j < r->record_len; j++) {
-                    uint32_t rel = (uint32_t)r->record[j];
-                    if (rel > next_value_id)
-                        break;
-                    nargs++;
-                }
-                ops = (lr_operand_t *)malloc((size_t)(nargs + 1) * sizeof(lr_operand_t));
+                cap = 1 + fixed_args;
+                if (fn_type->func.vararg)
+                    cap += (r->record_len - (uint32_t)op_num);
+                ops = (lr_operand_t *)malloc((size_t)cap * sizeof(lr_operand_t));
                 if (!ops) {
                     bc_dec_error(d, "out of memory for call operands");
                     ok = false;
                     break;
                 }
                 ops[0] = callee_op;
-                for (j = 0; j < nargs; j++) {
-                    uint32_t rel = (uint32_t)r->record[4 + j];
-                    uint32_t vid = 0;
-                    if (!bc_resolve_rel_value_id(d, next_value_id, rel, &vid)) {
+                for (i = 0; i < fixed_args; i++) {
+                    uint32_t arg_vid = 0;
+                    lr_type_t *param_ty = fn_type->func.params[i];
+                    if (!bc_record_get_value(d, r->record, r->record_len,
+                                             &op_num, next_value_id, &arg_vid)) {
                         ok = false;
                         break;
                     }
-                    ops[j + 1] = bc_make_operand_from_value(d, &local_vt, vid, func, NULL);
+                    ops[nargs + 1] = bc_make_operand_from_value(d, &local_vt, arg_vid,
+                                                                 func, param_ty);
+                    nargs++;
+                }
+                if (!ok) {
+                    free(ops);
+                    break;
+                }
+
+                if (!fn_type->func.vararg && op_num != r->record_len) {
+                    free(ops);
+                    bc_dec_error(d, "extra operands in non-vararg call");
+                    ok = false;
+                    break;
+                }
+                while (fn_type->func.vararg && op_num < r->record_len) {
+                    uint32_t arg_vid = 0;
+                    lr_type_t *arg_ty = NULL;
+                    if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                       &op_num, next_value_id, &arg_vid,
+                                                       &arg_ty)) {
+                        ok = false;
+                        break;
+                    }
+                    ops[nargs + 1] = bc_make_operand_from_value(d, &local_vt, arg_vid,
+                                                                 func, arg_ty);
+                    nargs++;
                 }
                 if (!ok) {
                     free(ops);
@@ -2075,6 +3110,10 @@ cmp_emit_done:
                 inst = lr_inst_create(d->arena, LR_OP_CALL,
                                        ret_type, dest, ops, nargs + 1);
                 free(ops);
+                if (inst) {
+                    inst->call_vararg = fn_type->func.vararg;
+                    inst->call_fixed_args = fixed_args;
+                }
                 (void)cc_flags;
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
                     ok = false;
@@ -2083,10 +3122,7 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_SELECT: {
-                uint32_t base_idx = r->record_len >= 4 ? 1u : 0u;
-                uint32_t true_rel;
-                uint32_t false_rel;
-                uint32_t cond_rel;
+                uint32_t op_num = 0;
                 uint32_t true_vid = 0;
                 uint32_t false_vid = 0;
                 uint32_t cond_vid = 0;
@@ -2094,25 +3130,22 @@ cmp_emit_done:
                 lr_type_t *res_type;
                 uint32_t dest;
                 lr_inst_t *inst;
+                lr_type_t *true_ty = NULL;
 
-                if (r->record_len < base_idx + 3) {
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &true_vid, &true_ty) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &false_vid) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &cond_vid) ||
+                    op_num != r->record_len) {
                     bc_dec_error(d, "malformed select record");
-                    ok = false;
-                    break;
-                }
-                true_rel = (uint32_t)r->record[base_idx + 0];
-                false_rel = (uint32_t)r->record[base_idx + 1];
-                cond_rel = (uint32_t)r->record[base_idx + 2];
-
-                if (!bc_resolve_rel_value_id(d, next_value_id, true_rel, &true_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, false_rel, &false_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
                     ok = false;
                     break;
                 }
                 ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid,
                                                     func, d->module->type_i1);
-                ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, NULL);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, true_ty);
                 ops[2] = bc_make_operand_from_value(d, &local_vt, false_vid,
                                                     func, ops[1].type);
                 res_type = ops[1].type;
@@ -2131,35 +3164,25 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_EXTRACTELT: {
-                if (r->record_len >= 2) {
-                    uint32_t vec_rel;
-                    uint32_t idx_rel;
-                    uint32_t vec_vid = 0;
-                    uint32_t idx_vid = 0;
-                    lr_operand_t vec_op;
-                    (void)idx_vid;
-                    if (r->record_len >= 3) {
-                        /* LLVM canonical: [vec_ty, vec, idx] */
-                        vec_rel = (uint32_t)r->record[1];
-                        idx_rel = (uint32_t)r->record[2];
-                    } else {
-                        /* Legacy/internal: [vec, idx] */
-                        vec_rel = (uint32_t)r->record[0];
-                        idx_rel = (uint32_t)r->record[1];
-                    }
-                    if (!bc_resolve_rel_value_id(d, next_value_id, vec_rel, &vec_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, idx_rel, &idx_vid)) {
-                        ok = false;
-                        break;
-                    }
-                    vec_op = bc_make_operand_from_value(d, &local_vt, vec_vid, func, NULL);
-                    if (!bc_define_undef_value(d, &local_vt, next_value_id,
-                                               vec_op.type ? vec_op.type : d->module->type_i32)) {
-                        ok = false;
-                        break;
-                    }
-                } else if (!bc_define_undef_value(d, &local_vt, next_value_id,
-                                                   d->module->type_i32)) {
+                uint32_t op_num = 0;
+                uint32_t vec_vid = 0;
+                uint32_t idx_vid = 0;
+                lr_type_t *vec_ty = NULL;
+                lr_type_t *idx_ty = NULL;
+                lr_type_t *res_ty = d->module->type_i32;
+                (void)idx_vid;
+                (void)idx_ty;
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &vec_vid, &vec_ty) ||
+                    !bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &idx_vid, &idx_ty)) {
+                    bc_dec_error(d, "malformed extractelt record");
+                    ok = false;
+                    break;
+                }
+                if (vec_ty && vec_ty->kind == LR_TYPE_VECTOR && vec_ty->array.elem)
+                    res_ty = vec_ty->array.elem;
+                if (!bc_define_undef_value(d, &local_vt, next_value_id, res_ty)) {
                     ok = false;
                     break;
                 }
@@ -2167,39 +3190,25 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_INSERTELT: {
-                if (r->record_len >= 3) {
-                    uint32_t vec_rel;
-                    uint32_t val_rel;
-                    uint32_t idx_rel;
-                    uint32_t vec_vid = 0, val_vid = 0, idx_vid = 0;
-                    lr_operand_t vec_op;
-                    (void)val_vid;
-                    (void)idx_vid;
-                    if (r->record_len >= 4) {
-                        /* LLVM canonical: [vec_ty, vec, val, idx] */
-                        vec_rel = (uint32_t)r->record[1];
-                        val_rel = (uint32_t)r->record[2];
-                        idx_rel = (uint32_t)r->record[3];
-                    } else {
-                        /* Legacy/internal: [vec, val, idx] */
-                        vec_rel = (uint32_t)r->record[0];
-                        val_rel = (uint32_t)r->record[1];
-                        idx_rel = (uint32_t)r->record[2];
-                    }
-                    if (!bc_resolve_rel_value_id(d, next_value_id, vec_rel, &vec_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, idx_rel, &idx_vid)) {
-                        ok = false;
-                        break;
-                    }
-                    vec_op = bc_make_operand_from_value(d, &local_vt, vec_vid, func, NULL);
-                    if (!bc_define_undef_value(d, &local_vt, next_value_id,
-                                               vec_op.type ? vec_op.type : d->module->type_i32)) {
-                        ok = false;
-                        break;
-                    }
-                } else if (!bc_define_undef_value(d, &local_vt, next_value_id,
-                                                   d->module->type_i32)) {
+                uint32_t op_num = 0;
+                uint32_t vec_vid = 0, val_vid = 0, idx_vid = 0;
+                lr_type_t *vec_ty = NULL;
+                lr_type_t *idx_ty = NULL;
+                (void)val_vid;
+                (void)idx_vid;
+                (void)idx_ty;
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &vec_vid, &vec_ty) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &val_vid) ||
+                    !bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &idx_vid, &idx_ty)) {
+                    bc_dec_error(d, "malformed insertelt record");
+                    ok = false;
+                    break;
+                }
+                if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                           vec_ty ? vec_ty : d->module->type_i32)) {
                     ok = false;
                     break;
                 }
@@ -2207,39 +3216,25 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_SHUFFLEVEC: {
-                if (r->record_len >= 3) {
-                    uint32_t lhs_rel;
-                    uint32_t rhs_rel;
-                    uint32_t mask_rel;
-                    uint32_t lhs_vid = 0, rhs_vid = 0, mask_vid = 0;
-                    lr_operand_t lhs_op;
-                    (void)rhs_vid;
-                    (void)mask_vid;
-                    if (r->record_len >= 4) {
-                        /* LLVM canonical: [vec_ty, lhs, rhs, mask] */
-                        lhs_rel = (uint32_t)r->record[1];
-                        rhs_rel = (uint32_t)r->record[2];
-                        mask_rel = (uint32_t)r->record[3];
-                    } else {
-                        /* Legacy/internal: [lhs, rhs, mask] */
-                        lhs_rel = (uint32_t)r->record[0];
-                        rhs_rel = (uint32_t)r->record[1];
-                        mask_rel = (uint32_t)r->record[2];
-                    }
-                    if (!bc_resolve_rel_value_id(d, next_value_id, lhs_rel, &lhs_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, rhs_rel, &rhs_vid) ||
-                        !bc_resolve_rel_value_id(d, next_value_id, mask_rel, &mask_vid)) {
-                        ok = false;
-                        break;
-                    }
-                    lhs_op = bc_make_operand_from_value(d, &local_vt, lhs_vid, func, NULL);
-                    if (!bc_define_undef_value(d, &local_vt, next_value_id,
-                                               lhs_op.type ? lhs_op.type : d->module->type_i32)) {
-                        ok = false;
-                        break;
-                    }
-                } else if (!bc_define_undef_value(d, &local_vt, next_value_id,
-                                                   d->module->type_i32)) {
+                uint32_t op_num = 0;
+                uint32_t lhs_vid = 0, rhs_vid = 0, mask_vid = 0;
+                lr_type_t *lhs_ty = NULL;
+                lr_type_t *mask_ty = NULL;
+                (void)rhs_vid;
+                (void)mask_vid;
+                (void)mask_ty;
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &lhs_vid, &lhs_ty) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &rhs_vid) ||
+                    !bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &mask_vid, &mask_ty)) {
+                    bc_dec_error(d, "malformed shufflevector record");
+                    ok = false;
+                    break;
+                }
+                if (!bc_define_undef_value(d, &local_vt, next_value_id,
+                                           lhs_ty ? lhs_ty : d->module->type_i32)) {
                     ok = false;
                     break;
                 }
@@ -2247,9 +3242,7 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_VSELECT: {
-                uint32_t true_rel;
-                uint32_t false_rel;
-                uint32_t cond_rel;
+                uint32_t op_num = 0;
                 uint32_t true_vid = 0;
                 uint32_t false_vid = 0;
                 uint32_t cond_vid = 0;
@@ -2257,28 +3250,22 @@ cmp_emit_done:
                 lr_type_t *res_type;
                 uint32_t dest;
                 lr_inst_t *inst;
-                if (r->record_len >= 5) {
-                    true_rel = (uint32_t)r->record[1];
-                    false_rel = (uint32_t)r->record[2];
-                    cond_rel = (uint32_t)r->record[4];
-                } else if (r->record_len >= 3) {
-                    true_rel = (uint32_t)r->record[0];
-                    false_rel = (uint32_t)r->record[1];
-                    cond_rel = (uint32_t)r->record[2];
-                } else {
+                lr_type_t *true_ty = NULL;
+                lr_type_t *cond_ty = NULL;
+
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &true_vid, &true_ty) ||
+                    !bc_record_get_value(d, r->record, r->record_len,
+                                         &op_num, next_value_id, &false_vid) ||
+                    !bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &cond_vid, &cond_ty) ||
+                    op_num != r->record_len) {
                     bc_dec_error(d, "malformed vselect record");
                     ok = false;
                     break;
                 }
-
-                if (!bc_resolve_rel_value_id(d, next_value_id, true_rel, &true_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, false_rel, &false_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
-                    ok = false;
-                    break;
-                }
-                ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid, func, NULL);
-                ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, NULL);
+                ops[0] = bc_make_operand_from_value(d, &local_vt, cond_vid, func, cond_ty);
+                ops[1] = bc_make_operand_from_value(d, &local_vt, true_vid, func, true_ty);
                 ops[2] = bc_make_operand_from_value(d, &local_vt, false_vid,
                                                     func, ops[1].type);
                 res_type = ops[1].type;
@@ -2297,32 +3284,48 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_EXTRACTVALUE: {
-                uint32_t agg_rel = (uint32_t)r->record[0];
+                uint32_t op_num = 0;
                 uint32_t agg_vid = 0;
                 lr_operand_t op;
-                uint32_t nidx = r->record_len > 1 ? r->record_len - 1 : 0;
+                lr_type_t *agg_ty = NULL;
+                lr_type_t *res_ty = NULL;
+                uint32_t nidx;
                 uint32_t *idx_copy = NULL;
                 uint32_t dest, j;
                 lr_inst_t *inst;
 
-                if (!bc_resolve_rel_value_id(d, next_value_id, agg_rel, &agg_vid)) {
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &agg_vid, &agg_ty)) {
+                    bc_dec_error(d, "malformed extractvalue record");
                     ok = false;
                     break;
                 }
-                op = bc_make_operand_from_value(d, &local_vt, agg_vid, func, NULL);
+                nidx = r->record_len > op_num ? r->record_len - op_num : 0;
+                op = bc_make_operand_from_value(d, &local_vt, agg_vid, func, agg_ty);
+                res_ty = agg_ty ? agg_ty : d->module->type_i32;
+                for (j = 0; j < nidx; j++) {
+                    uint32_t idx = (uint32_t)r->record[op_num + j];
+                    if (res_ty->kind == LR_TYPE_STRUCT && idx < res_ty->struc.num_fields) {
+                        res_ty = res_ty->struc.fields[idx];
+                    } else if (res_ty->kind == LR_TYPE_ARRAY) {
+                        res_ty = res_ty->array.elem;
+                    } else if (res_ty->kind == LR_TYPE_VECTOR) {
+                        res_ty = res_ty->array.elem;
+                    }
+                }
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
-                                          d->module->type_i32, &dest)) {
+                                          res_ty ? res_ty : d->module->type_i32, &dest)) {
                     ok = false;
                     break;
                 }
                 next_value_id++;
 
                 inst = lr_inst_create(d->arena, LR_OP_EXTRACTVALUE,
-                                       d->module->type_i32, dest, &op, 1);
+                                       res_ty ? res_ty : d->module->type_i32, dest, &op, 1);
                 if (inst && nidx > 0) {
                     idx_copy = lr_arena_array(d->arena, uint32_t, nidx);
                     for (j = 0; j < nidx; j++)
-                        idx_copy[j] = (uint32_t)r->record[1 + j];
+                        idx_copy[j] = (uint32_t)r->record[op_num + j];
                     inst->indices = idx_copy;
                     inst->num_indices = nidx;
                 }
@@ -2333,24 +3336,29 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_INSERTVALUE: {
-                uint32_t agg_rel = (uint32_t)r->record[0];
-                uint32_t val_rel = (uint32_t)r->record[1];
+                uint32_t op_num = 0;
                 uint32_t agg_vid = 0;
                 uint32_t val_vid = 0;
                 lr_operand_t ops[2];
-                uint32_t nidx = r->record_len > 2 ? r->record_len - 2 : 0;
+                lr_type_t *agg_ty = NULL;
+                lr_type_t *val_ty = NULL;
+                uint32_t nidx;
                 uint32_t *idx_copy = NULL;
                 uint32_t dest, j;
                 lr_inst_t *inst;
 
-                if (!bc_resolve_rel_value_id(d, next_value_id, agg_rel, &agg_vid) ||
-                    !bc_resolve_rel_value_id(d, next_value_id, val_rel, &val_vid)) {
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &agg_vid, &agg_ty) ||
+                    !bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &val_vid, &val_ty)) {
+                    bc_dec_error(d, "malformed insertvalue record");
                     ok = false;
                     break;
                 }
-                ops[0] = bc_make_operand_from_value(d, &local_vt, agg_vid, func, NULL);
+                nidx = r->record_len > op_num ? r->record_len - op_num : 0;
+                ops[0] = bc_make_operand_from_value(d, &local_vt, agg_vid, func, agg_ty);
                 ops[1] = bc_make_operand_from_value(d, &local_vt, val_vid,
-                                                    func, ops[0].type);
+                                                    func, val_ty);
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
                                           ops[0].type, &dest)) {
                     ok = false;
@@ -2363,7 +3371,7 @@ cmp_emit_done:
                 if (inst && nidx > 0) {
                     idx_copy = lr_arena_array(d->arena, uint32_t, nidx);
                     for (j = 0; j < nidx; j++)
-                        idx_copy[j] = (uint32_t)r->record[2 + j];
+                        idx_copy[j] = (uint32_t)r->record[op_num + j];
                     inst->indices = idx_copy;
                     inst->num_indices = nidx;
                 }
@@ -2374,28 +3382,23 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_UNOP: {
-                uint32_t src_rel;
+                uint32_t op_num = 0;
                 uint32_t unopc;
                 uint32_t src_vid = 0;
                 lr_operand_t op;
+                lr_type_t *src_ty = NULL;
                 uint32_t dest;
                 lr_inst_t *inst;
 
-                if (r->record_len >= 3) {
-                    /* LLVM canonical: [opcode, ty, src] */
-                    unopc = (uint32_t)r->record[0];
-                    src_rel = (uint32_t)r->record[2];
-                } else {
-                    /* Legacy/internal: [src, opcode] */
-                    src_rel = (uint32_t)r->record[0];
-                    unopc = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
-                }
-
-                if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &src_vid, &src_ty) ||
+                    op_num >= r->record_len) {
+                    bc_dec_error(d, "malformed unop record");
                     ok = false;
                     break;
                 }
-                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, NULL);
+                unopc = (uint32_t)r->record[op_num++];
+                op = bc_make_operand_from_value(d, &local_vt, src_vid, func, src_ty);
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
                                           op.type, &dest)) {
                     ok = false;
@@ -2413,17 +3416,16 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_FREEZE: {
-                uint32_t ty_idx = (uint32_t)r->record[0];
-                uint32_t src_rel = r->record_len > 1 ? (uint32_t)r->record[1] : 0;
+                uint32_t op_num = 0;
                 uint32_t src_vid = 0;
-                lr_type_t *freeze_ty = bc_get_type(d, ty_idx);
+                lr_type_t *freeze_ty = NULL;
                 lr_operand_t op;
 
-                if (!freeze_ty) {
-                    ok = false;
-                    break;
-                }
-                if (!bc_resolve_rel_value_id(d, next_value_id, src_rel, &src_vid)) {
+                if (!bc_record_get_value_type_pair(d, &local_vt, r->record, r->record_len,
+                                                   &op_num, next_value_id, &src_vid,
+                                                   &freeze_ty) ||
+                    op_num != r->record_len) {
+                    bc_dec_error(d, "malformed freeze record");
                     ok = false;
                     break;
                 }
@@ -2436,20 +3438,55 @@ cmp_emit_done:
                 break;
             }
             case FUNC_CODE_INST_SWITCH: {
-                uint32_t ty_idx = (uint32_t)r->record[0];
-                uint32_t cond_rel = (uint32_t)r->record[1];
-                uint32_t default_bb = (uint32_t)r->record[2];
+                uint32_t ty_idx;
+                uint32_t cond_rel;
+                uint32_t default_bb;
                 uint32_t cond_vid = 0;
+                uint32_t cases_payload;
+                uint32_t num_cases;
+                lr_type_t *switch_ty;
                 lr_operand_t cond_op;
-                (void)ty_idx;
+                lr_block_t *test_block;
+                uint32_t ci;
+                uint32_t old_switch_pred;
+                uint32_t edge_count = 0;
+                uint32_t edge_cap = 0;
+                uint32_t *edge_targets = NULL;
+                uint32_t *edge_preds = NULL;
+                uint32_t *target_preds = NULL;
+
+                if (r->record_len < 3) {
+                    bc_dec_error(d, "malformed switch record");
+                    ok = false;
+                    break;
+                }
+                ty_idx = (uint32_t)r->record[0];
+                cond_rel = (uint32_t)r->record[1];
+                default_bb = (uint32_t)r->record[2];
+                if (default_bb >= num_blocks) {
+                    bc_dec_error(d, "switch default block %u out of range (have %u)",
+                                 default_bb, num_blocks);
+                    ok = false;
+                    break;
+                }
+                switch_ty = bc_get_type(d, ty_idx);
+                if (!switch_ty) {
+                    ok = false;
+                    break;
+                }
                 if (!bc_resolve_rel_value_id(d, next_value_id, cond_rel, &cond_vid)) {
                     ok = false;
                     break;
                 }
-                cond_op = bc_make_operand_from_value(d, &local_vt, cond_vid, func, NULL);
-                (void)cond_op;
-
-                {
+                cond_op = bc_make_operand_from_value(d, &local_vt, cond_vid, func, switch_ty);
+                cases_payload = r->record_len - 3u;
+                if ((cases_payload & 1u) != 0u) {
+                    bc_dec_error(d, "malformed switch record payload");
+                    ok = false;
+                    break;
+                }
+                num_cases = cases_payload / 2u;
+                if (num_cases == 0u) {
                     lr_operand_t op = lr_op_block(default_bb);
                     lr_inst_t *inst = lr_inst_create(d->arena, LR_OP_BR,
                                                      d->module->type_void, 0, &op, 1);
@@ -2457,11 +3494,193 @@ cmp_emit_done:
                         ok = false;
                         break;
                     }
+                    cur_block++;
+                    break;
                 }
+
+                old_switch_pred = blocks[cur_block]->id;
+                edge_cap = num_cases + 1u; /* each case true-edge + final default edge */
+                edge_targets = (uint32_t *)malloc((size_t)edge_cap * sizeof(uint32_t));
+                edge_preds = (uint32_t *)malloc((size_t)edge_cap * sizeof(uint32_t));
+                target_preds = (uint32_t *)malloc((size_t)edge_cap * sizeof(uint32_t));
+                if (!edge_targets || !edge_preds || !target_preds) {
+                    free(edge_targets);
+                    free(edge_preds);
+                    free(target_preds);
+                    bc_dec_error(d, "out of memory lowering switch");
+                    ok = false;
+                    break;
+                }
+
+                test_block = blocks[cur_block];
+                for (ci = 0; ci < num_cases; ci++) {
+                    uint32_t case_val_id = (uint32_t)r->record[3u + (ci * 2u)];
+                    uint32_t case_bb = (uint32_t)r->record[4u + (ci * 2u)];
+                    uint32_t false_bb = default_bb;
+                    uint32_t test_block_id = test_block->id;
+                    lr_operand_t case_op;
+                    lr_operand_t cmp_ops[2];
+                    lr_operand_t br_ops[3];
+                    lr_inst_t *icmp;
+                    lr_inst_t *brinst;
+                    uint32_t cmp_vreg;
+
+                    if (case_bb >= num_blocks) {
+                        bc_dec_error(d, "switch case block %u out of range (have %u)",
+                                     case_bb, num_blocks);
+                        ok = false;
+                        break;
+                    }
+                    /*
+                     * SWITCH case values are stored as absolute value IDs in
+                     * the function value table (see LLVM BitcodeReader
+                     * getFnValueByID usage for old switch records), unlike
+                     * most opvals that use relative IDs.
+                     */
+                    case_op = bc_make_operand_from_value(d, &local_vt, case_val_id,
+                                                         func, switch_ty);
+
+                    if (ci + 1u < num_cases) {
+                        char bb_name[32];
+                        lr_block_t *next_test;
+                        snprintf(bb_name, sizeof(bb_name), "bb.sw.%u", func->num_blocks);
+                        next_test = lr_block_create(func, d->arena, bb_name);
+                        if (!next_test) {
+                            bc_dec_error(d, "out of memory creating switch test block");
+                            ok = false;
+                            break;
+                        }
+                        false_bb = next_test->id;
+                    }
+
+                    cmp_vreg = lr_vreg_new(func);
+                    cmp_ops[0] = cond_op;
+                    cmp_ops[1] = case_op;
+                    icmp = lr_inst_create(d->arena, LR_OP_ICMP,
+                                          d->module->type_i1, cmp_vreg, cmp_ops, 2);
+                    if (icmp)
+                        icmp->icmp_pred = LR_ICMP_EQ;
+                    if (!bc_emit_inst(d, func, test_block, icmp)) {
+                        ok = false;
+                        break;
+                    }
+
+                    br_ops[0] = lr_op_vreg(cmp_vreg, d->module->type_i1);
+                    br_ops[1] = lr_op_block(case_bb);
+                    br_ops[2] = lr_op_block(false_bb);
+                    brinst = lr_inst_create(d->arena, LR_OP_CONDBR,
+                                            d->module->type_void, 0, br_ops, 3);
+                    if (!bc_emit_inst(d, func, test_block, brinst)) {
+                        ok = false;
+                        break;
+                    }
+                    if (edge_count >= edge_cap) {
+                        bc_dec_error(d, "internal switch edge accounting overflow");
+                        ok = false;
+                        break;
+                    }
+                    edge_targets[edge_count] = case_bb;
+                    edge_preds[edge_count] = test_block_id;
+                    edge_count++;
+
+                    if (ci + 1u < num_cases)
+                        test_block = func->last_block;
+                }
+                if (!ok) {
+                    free(edge_targets);
+                    free(edge_preds);
+                    free(target_preds);
+                    break;
+                }
+
+                if (edge_count >= edge_cap) {
+                    free(edge_targets);
+                    free(edge_preds);
+                    free(target_preds);
+                    bc_dec_error(d, "internal switch edge accounting overflow");
+                    ok = false;
+                    break;
+                }
+                edge_targets[edge_count] = default_bb;
+                edge_preds[edge_count] = test_block->id;
+                edge_count++;
+
+                for (uint32_t ei = 0; ei < edge_count && ok; ei++) {
+                    uint32_t target_bb = edge_targets[ei];
+                    uint32_t pred_count = 0;
+                    bool seen_target = false;
+                    bool has_old_pred = false;
+
+                    for (uint32_t pi = 0; pi < ei; pi++) {
+                        if (edge_targets[pi] == target_bb) {
+                            seen_target = true;
+                            break;
+                        }
+                    }
+                    if (seen_target)
+                        continue;
+
+                    for (uint32_t pi = 0; pi < edge_count; pi++) {
+                        if (edge_targets[pi] != target_bb)
+                            continue;
+                        if (!bc_append_unique_u32(target_preds, &pred_count,
+                                                  edge_cap, edge_preds[pi])) {
+                            bc_dec_error(d, "internal switch predecessor overflow");
+                            ok = false;
+                            break;
+                        }
+                        if (edge_preds[pi] == old_switch_pred)
+                            has_old_pred = true;
+                    }
+                    if (!ok)
+                        break;
+
+                    if (!has_old_pred) {
+                        if (!bc_push_switch_phi_fixup(d, &switch_fixups,
+                                                      &switch_fixup_count,
+                                                      &switch_fixup_cap,
+                                                      target_bb,
+                                                      old_switch_pred,
+                                                      false,
+                                                      target_preds,
+                                                      pred_count)) {
+                            ok = false;
+                            break;
+                        }
+                    } else if (pred_count > 1u) {
+                        uint32_t extra_count = 0;
+                        for (uint32_t pi = 0; pi < pred_count; pi++) {
+                            if (target_preds[pi] == old_switch_pred)
+                                continue;
+                            target_preds[extra_count++] = target_preds[pi];
+                        }
+                        if (extra_count > 0u &&
+                            !bc_push_switch_phi_fixup(d, &switch_fixups,
+                                                      &switch_fixup_count,
+                                                      &switch_fixup_cap,
+                                                      target_bb,
+                                                      old_switch_pred,
+                                                      true,
+                                                      target_preds,
+                                                      extra_count)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+
+                free(edge_targets);
+                free(edge_preds);
+                free(target_preds);
+                if (!ok)
+                    break;
                 cur_block++;
                 break;
             }
             default:
+                bc_dec_error(d, "unsupported FUNC record code %u (len=%u)",
+                             code, r->record_len);
+                ok = false;
                 break;
             }
 
@@ -2470,6 +3689,29 @@ cmp_emit_done:
         }
     }
 
+    if (ok && !r->has_error) {
+        for (i = 0; i < switch_fixup_count; i++) {
+            bc_switch_phi_fixup_t *fx = &switch_fixups[i];
+            if (fx->succ_bb >= num_blocks) {
+                bc_dec_error(d, "switch phi fixup target block %u out of range",
+                             fx->succ_bb);
+                ok = false;
+                break;
+            }
+            if (!bc_switch_remap_phi_preds(d, blocks[fx->succ_bb],
+                                           fx->old_pred,
+                                           fx->new_preds,
+                                           fx->new_pred_count,
+                                           fx->keep_old_pred)) {
+                ok = false;
+                break;
+            }
+        }
+    }
+
+    for (i = 0; i < switch_fixup_count; i++)
+        free(switch_fixups[i].new_preds);
+    free(switch_fixups);
     free(blocks);
     free(local_vt.values);
     return ok && !r->has_error;
@@ -2536,7 +3778,10 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
             if (block_id == BC_TYPE_BLOCK) {
                 ok = bc_decode_type_block(d, r, sub_end);
             } else if (block_id == BC_CONSTANTS_BLOCK) {
+                uint32_t constants_base = d->global_values.count;
                 ok = bc_decode_constants_block(d, r, sub_end, &d->global_values);
+                if (ok)
+                    bc_apply_global_initializers(d, constants_base);
             } else if (block_id == BC_FUNCTION_BLOCK) {
                 lr_func_t *target = NULL;
                 while (func_body_idx < d->func_list.count) {
@@ -2629,6 +3874,13 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                     name = lr_arena_strdup(d->arena, (const char *)d->strtab_data + strtab_off,
                                            strtab_size);
                 }
+                if (!name) {
+                    char fallback[32];
+                    int n = snprintf(fallback, sizeof(fallback), "unknown.%u",
+                                     d->func_list.count);
+                    if (n > 0 && (size_t)n < sizeof(fallback))
+                        name = lr_arena_strdup(d->arena, fallback, (size_t)n);
+                }
                 if (!name)
                     name = lr_arena_strdup(d->arena, "unknown", 7);
 
@@ -2650,6 +3902,10 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
 
                 fv.kind = BC_VAL_FUNC;
                 fv.type = d->module->type_ptr;
+                fv.init_bytes = NULL;
+                fv.init_size = 0;
+                fv.agg_elem_ids = NULL;
+                fv.agg_elem_count = 0;
                 fv.func = fn;
                 bc_value_push(&d->global_values, fv);
                 bc_func_list_push(&d->func_list, fn);
@@ -2658,7 +3914,8 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
             case MODULE_CODE_GLOBALVAR: {
                 uint32_t strtab_off = 0, strtab_size = 0;
                 uint32_t type_idx;
-                uint32_t isconst_plus1, linkage;
+                uint32_t linkage = 0;
+                uint32_t init_id = 0;
                 lr_type_t *gtype;
                 char *gname = NULL;
                 lr_global_t *g;
@@ -2666,15 +3923,23 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 bool is_const, is_external;
 
                 if (d->bc_version >= 2 && r->record_len >= 2) {
+                    uint32_t flags = 0;
                     strtab_off = (uint32_t)r->record[0];
                     strtab_size = (uint32_t)r->record[1];
                     type_idx = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
-                    isconst_plus1 = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
-                    linkage = r->record_len > 6 ? (uint32_t)r->record[6] : 0;
+                    flags = r->record_len > 3 ? (uint32_t)r->record[3] : 0;
+                    init_id = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
+                    linkage = r->record_len > 5 ? (uint32_t)r->record[5] : 0;
+                    /* Bit 0 carries "is constant"; higher bits contain
+                       extra GLOBALVAR flags (for example explicit type). */
+                    is_const = (flags & 1u) != 0u;
                 } else {
+                    uint32_t isconst_plus1 = 0;
                     type_idx = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
                     isconst_plus1 = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
+                    init_id = r->record_len > 3 ? (uint32_t)r->record[3] : 0;
                     linkage = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
+                    is_const = (isconst_plus1 > 1);
                 }
 
                 gtype = bc_get_type(d, type_idx);
@@ -2686,11 +3951,17 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                     gname = lr_arena_strdup(d->arena, (const char *)d->strtab_data + strtab_off,
                                              strtab_size);
                 }
+                if (!gname) {
+                    char fallback[32];
+                    int n = snprintf(fallback, sizeof(fallback), "global.%u",
+                                     d->global_values.count);
+                    if (n > 0 && (size_t)n < sizeof(fallback))
+                        gname = lr_arena_strdup(d->arena, fallback, (size_t)n);
+                }
                 if (!gname)
                     gname = lr_arena_strdup(d->arena, "global", 6);
 
-                is_const = (isconst_plus1 > 1);
-                is_external = (linkage == 0 && isconst_plus1 == 0);
+                is_external = (init_id == 0 && linkage != 8u /* common */);
 
                 g = lr_global_create(d->module, gname, gtype, is_const);
                 if (g)
@@ -2700,8 +3971,13 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
 
                 gv.kind = BC_VAL_GLOBAL;
                 gv.type = d->module->type_ptr;
+                gv.init_bytes = NULL;
+                gv.init_size = 0;
+                gv.agg_elem_ids = NULL;
+                gv.agg_elem_count = 0;
                 gv.global_sym = lr_frontend_intern_symbol(d->module, gname);
                 bc_value_push(&d->global_values, gv);
+                bc_global_init_ref_push(d, g, init_id);
                 break;
             }
             case MODULE_CODE_SOURCE_FILENAME:
@@ -2949,6 +4225,7 @@ lr_module_t *lr_parse_bc_streaming(const uint8_t *data, size_t len,
     free(decoder.types.types);
     free(decoder.global_values.values);
     free(decoder.func_list.funcs);
+    free(decoder.global_inits);
     return decoder.module;
 
 cleanup_fail:
@@ -2963,6 +4240,7 @@ cleanup_fail:
     free(decoder.types.types);
     free(decoder.global_values.values);
     free(decoder.func_list.funcs);
+    free(decoder.global_inits);
     if (err && errlen > 0 && err[0] == '\0')
         lr_frontend_set_error(err, errlen, "failed to parse LLVM bitcode");
     return NULL;

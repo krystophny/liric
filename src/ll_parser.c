@@ -2852,6 +2852,7 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
 static void parse_global(lr_parser_t *p) {
     char *name = tok_name(p, &p->cur);
     bool saw_initializer = false;
+    bool linkage_external = false;
     next(p);
     expect(p, LR_TOK_EQUALS);
 
@@ -2859,8 +2860,11 @@ static void parse_global(lr_parser_t *p) {
     while (check(p, LR_TOK_EXTERNAL) || check(p, LR_TOK_INTERNAL) ||
            check(p, LR_TOK_PRIVATE) || check(p, LR_TOK_COMMON) ||
            check(p, LR_TOK_LINKONCE_ODR) || check(p, LR_TOK_DSOLOCAL) ||
-           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR))
+           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) {
+        if (check(p, LR_TOK_EXTERNAL))
+            linkage_external = true;
         next(p);
+    }
 
     bool is_const = false;
     if (check(p, LR_TOK_GLOBAL)) {
@@ -3039,6 +3043,12 @@ static void parse_global(lr_parser_t *p) {
     }
 
     if (saw_initializer) {
+        skip_line(p);
+    } else {
+        if (linkage_external) {
+            /* `@g = external global ...` is a declaration, not a definition. */
+            g->is_external = true;
+        }
         skip_line(p);
     }
 }
