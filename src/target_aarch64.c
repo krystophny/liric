@@ -704,6 +704,11 @@ static uint8_t int_type_width_bits(const lr_type_t *type) {
     return (uint8_t)fallback_bits;
 }
 
+static bool icmp_pred_is_signed(lr_icmp_pred_t pred) {
+    return pred == LR_ICMP_SGT || pred == LR_ICMP_SGE ||
+           pred == LR_ICMP_SLT || pred == LR_ICMP_SLE;
+}
+
 static bool emit_copy_from_cached_scratch_a64(a64_compile_ctx_t *ctx,
                                               uint32_t vreg, uint8_t dst_reg) {
     uint8_t src_reg;
@@ -1856,8 +1861,26 @@ static int aarch64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_ICMP: {
+        uint8_t ibits;
         emit_load_operand(cc, &ops[0], A64_X9);
         emit_load_operand(cc, &ops[1], A64_X10);
+        ibits = int_type_width_bits(ops[0].type);
+        if (ibits > 0 && ibits < 32) {
+            uint8_t shift = (uint8_t)(64u - ibits);
+            emit_move_imm_ctx(cc, A64_X11, (int64_t)shift, true);
+            emit_u32(cc->buf, &cc->pos, cc->buflen,
+                     enc_lslv(true, A64_X9, A64_X9, A64_X11));
+            emit_u32(cc->buf, &cc->pos, cc->buflen,
+                     icmp_pred_is_signed((lr_icmp_pred_t)desc->icmp_pred)
+                         ? enc_asrv(true, A64_X9, A64_X9, A64_X11)
+                         : enc_lsrv(true, A64_X9, A64_X9, A64_X11));
+            emit_u32(cc->buf, &cc->pos, cc->buflen,
+                     enc_lslv(true, A64_X10, A64_X10, A64_X11));
+            emit_u32(cc->buf, &cc->pos, cc->buflen,
+                     icmp_pred_is_signed((lr_icmp_pred_t)desc->icmp_pred)
+                         ? enc_asrv(true, A64_X10, A64_X10, A64_X11)
+                         : enc_lsrv(true, A64_X10, A64_X10, A64_X11));
+        }
         bool is64 = lr_type_size(ops[0].type) > 4;
         emit_u32(cc->buf, &cc->pos, cc->buflen,
                  enc_subs_reg(is64, A64_X9, A64_X10));

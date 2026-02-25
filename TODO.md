@@ -1,173 +1,163 @@
-# TODO: LIRIC Direct-Mode Runtime/BC Correctness Closure (Checkpoint Handoff)
+# TODO: LIRIC Direct-Mode Closure Plan (Exact Next Actions)
 
 Date: 2026-02-25
-Repository: /Users/ert/code/liric
+Repo: /Users/ert/code/liric
 Branch: fix/lfortran-runtime-exe-emission
-Checkpoint base commit: 97b9457 (`jit: normalize LLVM \x01 external symbol names in provider lookup`)
+Current HEAD: 5f21f48 (`ir: add UDIV, UREM, FREM opcodes with full backend + decoder support`)
 
-## 1. Mission (Non-Negotiable)
+## 1. Non-Negotiable Constraints
 
-LIRIC must be a drop-in LLVM 21 replacement via compat APIs, with clean implementation inside LIRIC.
-No downstream hacks in LFortran are acceptable for LIRIC incompatibilities.
+- LIRIC must remain a drop-in LLVM 21 compatibility layer.
+- Fixes belong in LIRIC, not LFortran downstream.
+- Direct mode only for this lane; no hidden policy fallback.
+- No no-link fallback removal in behavior: WITH_LIRIC executable flow stays no-link AOT.
+- No hacks, no test-specific special casing, no quick patches that weaken semantics.
 
-Hard requirements for this workstream:
-- No hacks, no quick fixes, no special-casing individual test programs.
-- No fallback to IR policy for this lane; direct mode must be correct.
-- No linker fallback path for WITH_LIRIC executable generation.
-- No semantic downgrades vs LLVM IR/BC behavior.
+## 2. Checkpoint Snapshot
 
-## 2. Current Checkpoint State
+Local uncommitted code currently exists in:
+- `src/bc_decode.c`
+- `src/target_aarch64.c`
+- `src/jit.c`
 
-P0 (UDIV/UREM/FREM) and P2 (semantic debug toggle removal) are complete.
-17 files changed, 265 insertions, 60 deletions. 230/230 tests pass.
+Purpose of those local edits:
+- `bc_decode.c`: resolve call callee function metadata and set vararg/fixed-arg call metadata from resolved callee where needed.
+- `target_aarch64.c`: normalize sub-32-bit integer `icmp` operands before compare so signed/unsigned predicates match LLVM semantics.
+- `jit.c`: temporary debug instrumentation (`jit_debug_strlen`, env-gated symbol logging/wrapping).
 
-## 3. What Was Confirmed Working
+## 3. What Is Confirmed Working
 
-### 3.1 Optimized BC parse no longer fails at GEP record
+- Build compiles.
+- Baseline linked bitcode repro executes correctly:
+  - `build/liric --jit /tmp/call_sff_link.bc`
+- Optimized parser failure on GEP compact form was previously fixed.
 
-A prior parse error for LLVM21 optimized linked module was fixed:
-- Before: `parse error: malformed record: missing value operand`
-- Trigger site: `FUNC_CODE_INST_GEP` in optimized runtime-heavy module.
+## 4. Primary Remaining Failure
 
-Fix direction already in tree:
-- Added fallback decoding for compact/value-only GEP operand form when value-type pair decode fails.
-- Added record CHAR6 tracking (`record_is_char6`) to avoid mis-decoding char data.
-- Added richer decoder error context (`func name`, `record code`) to improve triage.
-
-Result:
-- `build/liric --dump-ir /tmp/call_sff_O1O1_link.bc` now succeeds (no earlier parser abort).
-
-## 4. What Is Still Failing (Main Blocker)
-
-Formatter/runtime behavior in optimized modules needs re-validation after UDIV/UREM/FREM fix.
-
-### 4.1 Stable minimal repros
-
-Working case:
-- `build/liric --jit /tmp/call_sff_link.bc`
-- Output: `ab  cdef  ghi  jkl  qwerty 12`
-
-Previously failing case (needs re-test):
-- `build/liric --jit /tmp/call_sff_O1O1_link.bc`
-- `build/deps/lfortran/build-liric/src/bin/lfortran --no-color /tmp/min_format_fail.f90`
-
-`/tmp/min_format_fail.f90`:
-```fortran
-print '(A2,4(2X,A),I3)',"ab","cdef","ghi","jkl","qwerty",12
-```
-
-## 5. High-Value Findings
-
-## 5.1 BINOP semantic coverage -- FIXED
-
-UDIV/UREM/FREM opcodes added to IR, bitcode decoder, LL lexer/parser, all backends
-(aarch64, x86_64, riscv64), wasm_to_ir, compat API, and constant folding.
-Unsigned ops are no longer collapsed into signed ops.
-
-## 5.2 Switch lowering and PHI predecessor remap -- PARTIALLY ADDRESSED
-
-Semantic debug toggle `LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS` removed (it altered
-semantics by skipping PHI remapping). Diagnostic toggle `LIRIC_DBG_BC_SWITCH` kept
-(print-only, no semantic effect).
-
-Still TODO: formal verifier checks after switch lowering in debug builds and
-dedicated switch+phi regression tests.
-
-## 5.3 Vararg call placement looked correct at call-site level
-
-Prior triage verified stack/register vararg placement for the repro call looked ABI-correct (AArch64 Darwin).
-Do not over-focus on call lowering until BINOP semantics + switch/phi correctness are closed.
-
-## 6. Required Clean Solution Plan (No Hacks)
-
-## P0: Fix IR semantic model to represent LLVM ops exactly -- DONE
-
-All items complete:
-- LR_OP_UDIV, LR_OP_UREM, LR_OP_FREM added to opcode enum
-- Bitcode decoder maps to canonical LLVM numbering
-- LL lexer/parser round-trips udiv/urem/frem correctly
-- Constant folding with unsigned arithmetic + div-by-zero guards
-- All three backends (aarch64, x86_64, riscv64) emit correct machine code
-- WASM decoder uses correct unsigned opcodes
-- Compat API (lc_create_udiv/urem/frem + CreateFRem) added
-- 2 new parser tests + existing test assertions updated
-- 230/230 tests pass
-
-## P1: Make switch lowering + PHI remap formally correct -- OPEN
-
-1. Audit and simplify predecessor remap invariants:
-- exact predecessor multiset handling
-- deterministic handling when old predecessor already present
-- duplicate edge behavior correctness
-
-2. Add internal verifier checks after switch lowering in debug/test builds:
-- PHI predecessor count matches CFG predecessor count
-- no dangling predecessor block IDs
-
-3. Add minimal switch+phi regression tests extracted from LLVM21-optimized patterns.
-
-## P2: Remove temporary diagnostic debt after closure -- DONE
-
-- Semantic toggle `LIRIC_DBG_BC_DISABLE_SWITCH_PHI_FIXUPS` removed.
-- Diagnostic toggle `LIRIC_DBG_BC_SWITCH` kept (print-only).
-
-## P3: Re-run canonical validation matrix
-
-Minimum required re-check:
-- `build/liric --jit /tmp/call_sff_link.bc`
+Optimized formatter path still fails/hangs:
 - `build/liric --jit /tmp/call_sff_O1_link.bc`
 - `build/liric --jit /tmp/call_sff_O1O1_link.bc`
-- `build/deps/lfortran/build-liric/src/bin/lfortran --no-color /tmp/min_format_fail.f90`
-- LFortran format integration tests that previously timed out/failed (`format1`, `format_26`, `format_34`).
 
-Then run broader suites:
-- `cmake --build build -j$(sysctl -n hw.ncpu)`
-- `ctest --test-dir build --output-on-failure`
-- `./build/bench_matrix --timeout 15`
+Observed behavior:
+- Runtime mismatch (`Got argument of type (CHARACTER), while the format specifier is (I)`) and/or hang patterns in LFortran integration runs.
+- In hanging executable samples (`format_26.out`, `format_34.out`), hotspots map predominantly inside `_lcompilers_string_format_fortran`-related code paths.
 
-Performance/behavior policy:
-- direct mode must stay authoritative for this lane
-- no degradation via hidden fallback paths
+## 5. Exact Plan To Finish Cleanly
 
-## 7. Guardrails for Next LLM
+### P0. Freeze and sanitize observability (must do first)
 
-Do NOT do any of the following:
-- patch LFortran downstream to mask LIRIC bugs
-- special-case `_lcompilers_string_format_fortran`
-- force tests to pass by changing expected outputs
-- add IR fallback/linker fallback to bypass direct-mode correctness
+1. Keep diagnostics only if they are non-semantic and env-gated.
+2. Remove aborting debug hooks before final merge quality:
+   - delete `jit_debug_strlen` wrapper path or move to a strict compile-time debug-only block not enabled in normal builds.
+3. Keep `LIRIC_VERBOSE_*` logging only when zero semantic impact.
 
-Do this instead:
-- fix semantic completeness in LIRIC IR + decoder + backends
-- prove correctness with minimized reproducer tests
-- keep changes architecture-consistent and ABI-correct
+Acceptance:
+- No default behavior change from diagnostics.
+- No unconditional debug wrappers on libc/runtime symbols.
 
-## 8. Practical Triage Commands
+### P1. Isolate correctness delta between `call_sff_link.bc` and optimized modules
 
-Use these exact commands for quick signal:
+Commands:
 
 ```bash
-# Parse check (optimized linked module)
-build/liric --dump-ir /tmp/call_sff_O1O1_link.bc >/tmp/sff_dump.ll
+# 1) Produce IR for triage
+a=/tmp/call_sff_link.bc
+b=/tmp/call_sff_O1_link.bc
+c=/tmp/call_sff_O1O1_link.bc
+/opt/homebrew/opt/llvm@21/bin/llvm-dis -o /tmp/sff_base.ll "$a"
+/opt/homebrew/opt/llvm@21/bin/llvm-dis -o /tmp/sff_o1.ll "$b"
+/opt/homebrew/opt/llvm@21/bin/llvm-dis -o /tmp/sff_o1o1.ll "$c"
 
-# Behavior checks
-build/liric --jit /tmp/call_sff_link.bc
-build/liric --jit /tmp/call_sff_O1_link.bc
-build/liric --jit /tmp/call_sff_O1O1_link.bc
+# 2) Focus on formatter/runtime functions
+rg -n "define .*(_lcompilers_string_format_fortran|parse_fortran_format|move_to_next_element|append_to_string_NTI|handle_integer)" /tmp/sff_*.ll
 
-# LFortran repro
-build/deps/lfortran/build-liric/src/bin/lfortran --no-color /tmp/min_format_fail.f90
-
-# Find unsigned/frem ops in BC module
-/opt/homebrew/opt/llvm@21/bin/llvm-dis -o - /tmp/call_sff_O1O1_link.bc | rg -n "\\budiv\\b|\\burem\\b|\\bfrem\\b"
+# 3) Run direct execution checks
+build/liric --jit "$a"
+build/liric --jit "$b"
+build/liric --jit "$c"
 ```
 
-## 9. Definition of Done
+Instructions:
+- Compare optimized function bodies to baseline for opcode classes that may still be mis-modeled in direct AArch64 lowering.
+- Prioritize integer width semantics, compares, select/phi interactions, and pointer/index arithmetic semantics under optimization.
 
-This checkpoint thread is done only when all of the following are true:
-- Optimized runtime-linked formatter repro produces correct output (no mismatch, no crash).
-- LFortran format repro no longer errors.
-- LFortran unit/integration tests for affected area pass in WITH_LIRIC direct mode.
-- No downstream hacks added.
-- No quick-fix toggles left as semantic crutches.
-- Changes are cleanly reviewable and LLVM-compat semantics are explicit.
+Acceptance:
+- A concrete IR pattern is identified that diverges between baseline and optimized runs.
+
+### P2. Validate direct-mode semantics at IR->machine boundaries
+
+1. Audit AArch64 lowering for the exact opcodes used in the divergent path.
+2. For each suspected opcode, prove correctness for:
+   - signed/unsigned behavior
+   - sub-32-bit behavior (extension/truncation rules)
+   - poison/undef-safe operational assumptions (do not invent non-LLVM semantics)
+3. Add unit-level regression test(s) in LIRIC that exercise the minimal failing IR pattern.
+
+Suggested target files:
+- `src/target_aarch64.c`
+- `src/ir_validate.c` (if invariant checks are needed)
+- `tests/*` for new semantic regression coverage
+
+Acceptance:
+- `build/liric --jit /tmp/call_sff_O1_link.bc` and `...O1O1...` both produce correct output.
+- New regression tests fail before fix and pass after fix.
+
+### P3. Re-run LFortran API compat lane locally (authoritative)
+
+Commands:
+
+```bash
+cmake --build build -j$(sysctl -n hw.ncpu)
+ctest --test-dir build --output-on-failure
+cmake --build build --target lfortran_api_compat -j$(sysctl -n hw.ncpu)
+```
+
+If compat stalls:
+
+```bash
+# Identify stuck tests quickly
+ps -Ao pid,ppid,etime,command | rg "format_26|format_34|lfortran_api_compat|ctest"
+
+# Reproduce one test with timeout wrapper
+timeout 40 build/deps/lfortran/build-liric/src/bin/lfortran --no-color \
+  build/deps/lfortran/src/lfortran/integration_tests/format_26.f90 -o /tmp/format_26.out
+```
+
+Acceptance:
+- No hang in formatter integration tests.
+- `lfortran_api_compat` target completes successfully.
+
+### P4. Final cleanup and proof
+
+1. Remove temporary diagnostics that are no longer needed.
+2. Keep only permanent, low-overhead debug toggles with zero semantic effect.
+3. Run benchmark matrix to confirm no direct-lane regression:
+
+```bash
+./build/bench_matrix --timeout 15
+```
+
+Acceptance:
+- Clean diff with only semantic fixes + durable tests.
+- All relevant tests green.
+- Benchmarks complete; direct mode remains authoritative.
+
+## 6. Commit Discipline
+
+- Commit in small logical chunks:
+  1. semantic fix
+  2. regression tests
+  3. cleanup
+- Push each green checkpoint.
+- Commit message format should state semantic area and proof target (example: `aarch64: fix i16 signed icmp normalization in direct lowering`).
+
+## 7. Done Criteria
+
+This task is complete only when all are true:
+- Optimized linked formatter repros run correctly:
+  - `build/liric --jit /tmp/call_sff_O1_link.bc`
+  - `build/liric --jit /tmp/call_sff_O1O1_link.bc`
+- LFortran compat target passes locally (`lfortran_api_compat`).
+- No downstream LFortran hacks added for LIRIC compatibility.
+- No semantic fallback paths added.
+- Added regression tests cover the root-cause pattern.

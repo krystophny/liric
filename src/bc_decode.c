@@ -1403,6 +1403,37 @@ static bool bc_call_is_nop_intrinsic(const lr_module_t *m, lr_operand_t callee_o
            strncmp(name, "llvm.lifetime.end", 17) == 0;
 }
 
+static lr_func_t *bc_find_module_function(const lr_module_t *m,
+                                          const char *name) {
+    lr_func_t *f;
+    if (!m || !name || !name[0])
+        return NULL;
+    for (f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static lr_func_t *bc_resolve_call_callee_func(const bc_decoder_t *d,
+                                              const bc_value_table_t *local_vt,
+                                              uint32_t callee_vid,
+                                              lr_operand_t callee_op) {
+    const char *name = NULL;
+    if (!d || !d->module || !local_vt)
+        return NULL;
+    if (callee_vid < local_vt->count) {
+        const bc_value_t *cv = &local_vt->values[callee_vid];
+        if (cv->kind == BC_VAL_FUNC && cv->func)
+            return cv->func;
+        if (cv->kind == BC_VAL_GLOBAL)
+            name = lr_module_symbol_name(d->module, cv->global_sym);
+    }
+    if (!name && callee_op.kind == LR_VAL_GLOBAL)
+        name = lr_module_symbol_name(d->module, callee_op.global_id);
+    return name ? bc_find_module_function(d->module, name) : NULL;
+}
+
 static bool bc_append_unique_u32(uint32_t *vals, uint32_t *count,
                                  uint32_t cap, uint32_t v) {
     uint32_t i;
@@ -3279,6 +3310,9 @@ cmp_emit_done:
                 lr_type_t *ret_type;
                 uint32_t dest = 0;
                 lr_inst_t *inst;
+                lr_func_t *callee_func = NULL;
+                bool call_vararg_meta;
+                uint32_t call_fixed_args_meta;
                 const uint32_t CALL_EXPLICIT_TYPE_BIT = 15u;
                 const uint32_t CALL_FMF_BIT = 17u;
 
@@ -3346,6 +3380,8 @@ cmp_emit_done:
                         break;
                     }
                 }
+                callee_func = bc_resolve_call_callee_func(d, &local_vt, callee_vid,
+                                                          callee_op);
                 fixed_args = fn_type->func.num_params;
                 if (r->record_len < op_num + fixed_args) {
                     bc_dec_error(d, "insufficient operands in call record");
@@ -3408,6 +3444,12 @@ cmp_emit_done:
                 }
 
                 ret_type = fn_type->func.ret;
+                call_vararg_meta = fn_type->func.vararg;
+                call_fixed_args_meta = fixed_args;
+                if (callee_func && callee_func->vararg) {
+                    call_vararg_meta = true;
+                    call_fixed_args_meta = callee_func->num_params;
+                }
                 if (ret_type->kind != LR_TYPE_VOID) {
                     if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
                                               ret_type, &dest)) {
@@ -3422,8 +3464,8 @@ cmp_emit_done:
                                        ret_type, dest, ops, nargs + 1);
                 free(ops);
                 if (inst) {
-                    inst->call_vararg = fn_type->func.vararg;
-                    inst->call_fixed_args = fixed_args;
+                    inst->call_vararg = call_vararg_meta;
+                    inst->call_fixed_args = call_fixed_args_meta;
                 }
                 (void)cc_flags;
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {

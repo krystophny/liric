@@ -141,6 +141,20 @@ static uint32_t symbol_hash(const char *name) {
     return h;
 }
 
+static size_t jit_debug_strlen(const char *s) {
+    uintptr_t p = (uintptr_t)s;
+    void *ret = __builtin_return_address(0);
+    size_t n = 0;
+    fprintf(stderr, "jit_debug_strlen: p=%p ret=%p\n", (void *)p, ret);
+    if (p < 0x100000000ULL) {
+        fprintf(stderr, "jit_debug_strlen: low-pointer abort\n");
+        abort();
+    }
+    while (s && s[n] != '\0')
+        n++;
+    return n;
+}
+
 static uint64_t hash64_extend(uint64_t h, const void *data, size_t n) {
     const uint8_t *p = (const uint8_t *)data;
     for (size_t i = 0; i < n; i++) {
@@ -846,6 +860,10 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     }
 
     register_builtin_symbols(j);
+    if (getenv("LIRIC_DBG_WRAP_STRLEN") != NULL) {
+        lr_jit_add_symbol(j, "strlen", (void *)(uintptr_t)jit_debug_strlen);
+        lr_jit_add_symbol(j, "_strlen", (void *)(uintptr_t)jit_debug_strlen);
+    }
 
     return j;
 }
@@ -1031,6 +1049,9 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     if (existing) {
         existing->addr = addr;
         update_last_symbol_lookup(j, existing, hash);
+        if (getenv("LIRIC_VERBOSE_JIT_SYMBOLS") != NULL) {
+            fprintf(stderr, "jit_symbol update %s -> %p\n", name, addr);
+        }
         return;
     }
 
@@ -1048,6 +1069,9 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
         e->bucket_next = NULL;
     }
     update_last_symbol_lookup(j, e, hash);
+    if (getenv("LIRIC_VERBOSE_JIT_SYMBOLS") != NULL) {
+        fprintf(stderr, "jit_symbol add %s -> %p\n", name, addr);
+    }
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
