@@ -1120,16 +1120,30 @@ int lr_jit_load_library(lr_jit_t *j, const char *path) {
 }
 
 int lr_jit_set_runtime_bc(lr_jit_t *j, const uint8_t *bc_data, size_t bc_len) {
-    uint8_t *owned = NULL;
+    return lr_jit_set_runtime_bc_borrowed(j, bc_data, bc_len, false);
+}
+
+int lr_jit_set_runtime_bc_borrowed(lr_jit_t *j, const uint8_t *bc_data,
+                                   size_t bc_len, bool borrowed) {
     if (!j || !bc_data || bc_len == 0)
         return -1;
-    owned = (uint8_t *)malloc(bc_len);
-    if (!owned)
-        return -1;
-    memcpy(owned, bc_data, bc_len);
-    free(j->runtime_bc_owned);
-    j->runtime_bc_owned = owned;
-    j->runtime_bc_data = owned;
+    if (borrowed) {
+        if (!j->runtime_bc_borrowed)
+            free(j->runtime_bc_owned);
+        j->runtime_bc_owned = NULL;
+        j->runtime_bc_data = bc_data;
+        j->runtime_bc_borrowed = true;
+    } else {
+        uint8_t *owned = (uint8_t *)malloc(bc_len);
+        if (!owned)
+            return -1;
+        memcpy(owned, bc_data, bc_len);
+        if (!j->runtime_bc_borrowed)
+            free(j->runtime_bc_owned);
+        j->runtime_bc_owned = owned;
+        j->runtime_bc_data = owned;
+        j->runtime_bc_borrowed = false;
+    }
     j->runtime_bc_len = bc_len;
     j->runtime_bc_loaded = false;
     return 0;
@@ -2659,7 +2673,8 @@ void lr_jit_destroy(lr_jit_t *j) {
     free(j->lazy_func_buckets);
     free(j->miss_buckets);
     free(j->sym_buckets);
-    free(j->runtime_bc_owned);
+    if (!j->runtime_bc_borrowed)
+        free(j->runtime_bc_owned);
     lr_arena_destroy(j->arena);
     free(j);
 }

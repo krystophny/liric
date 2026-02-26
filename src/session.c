@@ -162,8 +162,10 @@ struct lr_session {
     uint32_t blob_count;
     uint32_t blob_cap;
     bool ir_module_jit_ready;
+    bool jit_borrowed;  /* true = JIT owned externally, skip destroy */
     uint8_t *runtime_bc_data;
     size_t runtime_bc_len;
+    bool runtime_bc_borrowed;  /* true = process-lifetime pointer, skip free */
     bool runtime_bc_registered_with_jit;
     bool runtime_bc_merged_into_main_module;
 };
@@ -359,7 +361,7 @@ static int preload_runtime_bc_into_jit(struct lr_session *s,
     if (s->runtime_bc_registered_with_jit)
         return 0;
 
-    arena = lr_arena_create(0);
+    arena = lr_arena_create(s->runtime_bc_len * 3);
     if (!arena) {
         err_set(err, S_ERR_BACKEND, "runtime arena allocation failed");
         return -1;
@@ -1905,11 +1907,21 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     return s;
 }
 
+void lr_session_replace_jit(struct lr_session *s, lr_jit_t *jit,
+                            bool borrowed) {
+    if (!s)
+        return;
+    if (s->jit && s->jit != jit && !s->jit_borrowed)
+        lr_jit_destroy(s->jit);
+    s->jit = jit;
+    s->jit_borrowed = borrowed;
+}
+
 void lr_session_destroy(struct lr_session *s) {
     lr_owned_module_t *it = NULL;
     if (!s)
         return;
-    if (s->jit)
+    if (s->jit && !s->jit_borrowed)
         lr_jit_destroy(s->jit);
     if (s->owned_module)
         lr_module_free(s->owned_module);
@@ -1934,7 +1946,8 @@ void lr_session_destroy(struct lr_session *s) {
     free(s->block_terminated);
     free(s->block_seen);
     free(s->blocks);
-    free(s->runtime_bc_data);
+    if (!s->runtime_bc_borrowed)
+        free(s->runtime_bc_data);
     free(s);
 }
 
@@ -1962,9 +1975,9 @@ int lr_session_load_library(struct lr_session *s, const char *path,
     return 0;
 }
 
-int lr_session_set_runtime_bc(struct lr_session *s, const uint8_t *bc_data,
-                              size_t bc_len, session_error_t *err) {
-    uint8_t *owned = NULL;
+static int session_set_runtime_bc_impl(struct lr_session *s,
+                                       const uint8_t *bc_data, size_t bc_len,
+                                       bool borrowed, session_error_t *err) {
     err_clear(err);
     if (!s || !s->jit || !bc_data || bc_len == 0) {
         err_set(err, S_ERR_ARGUMENT, "invalid runtime bc arguments");
@@ -1974,21 +1987,30 @@ int lr_session_set_runtime_bc(struct lr_session *s, const uint8_t *bc_data,
         err_set(err, S_ERR_STATE, "runtime bc already configured");
         return -1;
     }
-    owned = (uint8_t *)malloc(bc_len);
-    if (!owned) {
-        err_set(err, S_ERR_BACKEND, "runtime bc allocation failed");
-        return -1;
+    if (borrowed) {
+        s->runtime_bc_data = (uint8_t *)bc_data;
+        s->runtime_bc_borrowed = true;
+    } else {
+        uint8_t *owned = (uint8_t *)malloc(bc_len);
+        if (!owned) {
+            err_set(err, S_ERR_BACKEND, "runtime bc allocation failed");
+            return -1;
+        }
+        memcpy(owned, bc_data, bc_len);
+        s->runtime_bc_data = owned;
+        s->runtime_bc_borrowed = false;
     }
-    memcpy(owned, bc_data, bc_len);
-    s->runtime_bc_data = owned;
     s->runtime_bc_len = bc_len;
     s->runtime_bc_registered_with_jit = false;
     s->runtime_bc_merged_into_main_module = false;
 
-    if (lr_jit_set_runtime_bc(s->jit, bc_data, bc_len) != 0) {
-        free(s->runtime_bc_data);
+    if (lr_jit_set_runtime_bc_borrowed(s->jit, bc_data, bc_len, borrowed)
+        != 0) {
+        if (!s->runtime_bc_borrowed)
+            free(s->runtime_bc_data);
         s->runtime_bc_data = NULL;
         s->runtime_bc_len = 0;
+        s->runtime_bc_borrowed = false;
         err_set(err, S_ERR_BACKEND, "jit runtime bc configuration failed");
         return -1;
     }
@@ -1996,6 +2018,30 @@ int lr_session_set_runtime_bc(struct lr_session *s, const uint8_t *bc_data,
     if (preload_runtime_bc_into_jit(s, err) != 0)
         return -1;
     return 0;
+}
+
+int lr_session_set_runtime_bc(struct lr_session *s, const uint8_t *bc_data,
+                              size_t bc_len, session_error_t *err) {
+    return session_set_runtime_bc_impl(s, bc_data, bc_len, false, err);
+}
+
+int lr_session_set_runtime_bc_borrowed(struct lr_session *s,
+                                       const uint8_t *bc_data, size_t bc_len,
+                                       session_error_t *err) {
+    return session_set_runtime_bc_impl(s, bc_data, bc_len, true, err);
+}
+
+void lr_session_set_runtime_bc_preloaded(struct lr_session *s,
+                                         const uint8_t *bc_data,
+                                         size_t bc_len) {
+    if (!s || !bc_data || bc_len == 0)
+        return;
+    if (s->runtime_bc_data)
+        return;
+    s->runtime_bc_data = (uint8_t *)bc_data;
+    s->runtime_bc_len = bc_len;
+    s->runtime_bc_borrowed = true;
+    s->runtime_bc_registered_with_jit = true;
 }
 
 void *lr_session_lookup(struct lr_session *s, const char *name) {

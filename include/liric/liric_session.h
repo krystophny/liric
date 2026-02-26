@@ -79,6 +79,7 @@ typedef struct lr_inst_desc {
 lr_session_t *lr_session_create(const lr_session_config_t *cfg,
                                 lr_error_t *err);
 void lr_session_destroy(lr_session_t *s);
+void lr_session_replace_jit(lr_session_t *s, lr_jit_t *jit, bool borrowed);
 
 /* ---- Symbols ----------------------------------------------------------- */
 
@@ -91,6 +92,12 @@ int lr_session_load_library(lr_session_t *s, const char *path,
                             lr_error_t *err);
 int lr_session_set_runtime_bc(lr_session_t *s, const uint8_t *bc_data,
                               size_t bc_len, lr_error_t *err);
+int lr_session_set_runtime_bc_borrowed(lr_session_t *s,
+                                       const uint8_t *bc_data, size_t bc_len,
+                                       lr_error_t *err);
+void lr_session_set_runtime_bc_preloaded(lr_session_t *s,
+                                         const uint8_t *bc_data,
+                                         size_t bc_len);
 
 /* ---- Types (session-scoped singletons) --------------------------------- */
 

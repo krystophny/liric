@@ -88,6 +88,11 @@ static compat_runtime_bc_cache_t g_runtime_bc_cache = {0, NULL, 0};
 static const uint8_t *g_embedded_runtime_bc = NULL;
 static size_t g_embedded_runtime_bc_len = 0;
 
+/* Singleton JIT reused across lc_module_create() calls to avoid
+   repeated 32MB mmap + hash table init per file. */
+static lr_jit_t *g_shared_jit = NULL;
+static lr_session_backend_t g_shared_jit_backend = LR_SESSION_BACKEND_DEFAULT;
+
 static int compat_path_exists(const char *path) {
     FILE *f = NULL;
     if (!path || !path[0])
@@ -194,20 +199,21 @@ static uint32_t compat_u32_le(const uint8_t *p) {
            ((uint32_t)p[3] << 24);
 }
 
-static int compat_extract_raw_bitcode(const uint8_t *data, size_t len,
-                                      uint8_t **out_data, size_t *out_len) {
-    uint8_t *copy = NULL;
-    size_t payload_off = 0;
-    size_t payload_len = 0;
-    if (!data || len < 4 || !out_data || !out_len)
+/* Locate the raw BC payload within a possibly-wrapped bitcode buffer.
+   Returns 0 on success, storing offset and length of the raw payload. */
+static int compat_locate_raw_bitcode(const uint8_t *data, size_t len,
+                                     size_t *out_off, size_t *out_len) {
+    if (!data || len < 4 || !out_off || !out_len)
         return -1;
 
     if (data[0] == 'B' && data[1] == 'C' && data[2] == 0xC0 && data[3] == 0xDE) {
-        payload_off = 0;
-        payload_len = len;
-    } else if (len >= 20 &&
-               data[0] == 0xDE && data[1] == 0xC0 &&
-               data[2] == 0x17 && data[3] == 0x0B) {
+        *out_off = 0;
+        *out_len = len;
+        return 0;
+    }
+    if (len >= 20 &&
+        data[0] == 0xDE && data[1] == 0xC0 &&
+        data[2] == 0x17 && data[3] == 0x0B) {
         uint32_t off = compat_u32_le(data + 8);
         uint32_t size = compat_u32_le(data + 12);
         if ((size_t)off + (size_t)size > len || size < 4)
@@ -215,12 +221,23 @@ static int compat_extract_raw_bitcode(const uint8_t *data, size_t len,
         if (!(data[off + 0] == 'B' && data[off + 1] == 'C' &&
               data[off + 2] == 0xC0 && data[off + 3] == 0xDE))
             return -1;
-        payload_off = off;
-        payload_len = size;
-    } else {
-        return -1;
+        *out_off = off;
+        *out_len = size;
+        return 0;
     }
+    return -1;
+}
 
+/* Extract raw bitcode with a copy (for file-read paths). */
+static int compat_extract_raw_bitcode(const uint8_t *data, size_t len,
+                                      uint8_t **out_data, size_t *out_len) {
+    size_t payload_off = 0;
+    size_t payload_len = 0;
+    uint8_t *copy = NULL;
+    if (!out_data || !out_len)
+        return -1;
+    if (compat_locate_raw_bitcode(data, len, &payload_off, &payload_len) != 0)
+        return -1;
     copy = (uint8_t *)malloc(payload_len);
     if (!copy)
         return -1;
@@ -405,10 +422,11 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
         return -1;
 
     /* Prefer embedded BC set by lr_compat_set_embedded_runtime_bc() --
-       no file I/O, no wrapper extraction needed. */
+       no file I/O, no wrapper extraction, no copy needed. */
     if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
-        if (lr_session_set_runtime_bc(session, g_embedded_runtime_bc,
-                                      g_embedded_runtime_bc_len, &rt_err) != 0) {
+        if (lr_session_set_runtime_bc_borrowed(session, g_embedded_runtime_bc,
+                                               g_embedded_runtime_bc_len,
+                                               &rt_err) != 0) {
             if (rt_err.code == LR_ERR_STATE)
                 return 1;
             return -1;
@@ -438,8 +456,10 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
 
     if (compat_prepare_runtime_bc_cache() != 0)
         return 0;
-    if (lr_session_set_runtime_bc(session, g_runtime_bc_cache.data,
-                                  g_runtime_bc_cache.len, &rt_err) != 0) {
+    /* Cache data is process-lifetime, use borrowed path. */
+    if (lr_session_set_runtime_bc_borrowed(session, g_runtime_bc_cache.data,
+                                           g_runtime_bc_cache.len,
+                                           &rt_err) != 0) {
         if (rt_err.code == LR_ERR_STATE)
             return 1;
         return -1;
@@ -448,16 +468,16 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
 }
 
 void lr_compat_set_embedded_runtime_bc(const uint8_t *data, size_t len) {
-    uint8_t *raw = NULL;
+    size_t off = 0;
     size_t raw_len = 0;
 
     if (!data || len < 4)
         return;
 
-    /* If wrapped (Mach-O bitcode wrapper), extract the raw payload once.
-       The extracted copy is intentionally leaked (process-lifetime). */
-    if (compat_extract_raw_bitcode(data, len, &raw, &raw_len) == 0) {
-        g_embedded_runtime_bc = raw;
+    /* Zero-copy: the Mach-O section data has process lifetime, so just
+       store a pointer at the right offset instead of malloc+memcpy. */
+    if (compat_locate_raw_bitcode(data, len, &off, &raw_len) == 0) {
+        g_embedded_runtime_bc = data + off;
         g_embedded_runtime_bc_len = raw_len;
     }
 }
@@ -527,6 +547,8 @@ typedef struct lc_module_compat {
     uint32_t func_value_count;
     uint32_t func_value_cap;
     lr_session_t *session;
+    lr_session_config_t deferred_cfg; /* stored until ensure_session() */
+    bool session_init_failed;
     lr_block_t **detached_blocks;
     uint32_t detached_count;
     uint32_t detached_cap;
@@ -1046,11 +1068,67 @@ int lc_value_replace_all_uses_with(lc_value_t *from, lc_value_t *to) {
     return replacements;
 }
 
+/* Lazily create the session + JIT on first codegen use.  For --show-ast
+   etc. paths this is never called, saving ~4ms of mmap/hash init. */
+static lr_session_t *ensure_session(lc_module_compat_t *mod) {
+    if (mod->session)
+        return mod->session;
+    if (mod->session_init_failed)
+        return NULL;
+    mod->session = lr_session_create(&mod->deferred_cfg, NULL);
+    if (!mod->session) {
+        mod->session_init_failed = true;
+        return NULL;
+    }
+    /* Reuse process-global singleton JIT to avoid 32MB mmap + hash table
+       init per file.  Only share when the backend matches. */
+    if (!g_shared_jit &&
+        mod->deferred_cfg.backend != LR_SESSION_BACKEND_LLVM) {
+        /* First session: adopt its JIT as the global singleton.
+           Just mark it borrowed so session destroy does not free it. */
+        g_shared_jit = lr_session_jit(mod->session);
+        g_shared_jit_backend = mod->deferred_cfg.backend;
+        lr_session_replace_jit(mod->session, g_shared_jit, true);
+        {
+            int rt_rc = compat_try_attach_runtime_bc(mod->session);
+            if (rt_rc < 0) {
+                lr_session_destroy(mod->session);
+                mod->session = NULL;
+                mod->session_init_failed = true;
+                return NULL;
+            }
+        }
+    } else if (g_shared_jit &&
+               mod->deferred_cfg.backend == g_shared_jit_backend) {
+        /* Subsequent sessions with same backend: reuse the shared JIT.
+           Runtime BC is already loaded, so just store the data pointer
+           for merge paths (no re-parse). */
+        lr_session_replace_jit(mod->session, g_shared_jit, true);
+        if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
+            lr_session_set_runtime_bc_preloaded(mod->session,
+                                                g_embedded_runtime_bc,
+                                                g_embedded_runtime_bc_len);
+        }
+    } else {
+        /* Backend mismatch or LLVM mode: use the session's own JIT. */
+        int rt_rc = compat_try_attach_runtime_bc(mod->session);
+        if (rt_rc < 0) {
+            lr_session_destroy(mod->session);
+            mod->session = NULL;
+            mod->session_init_failed = true;
+            return NULL;
+        }
+    }
+    return mod->session;
+}
+
 static int compat_finish_one_func(lc_module_compat_t *mod) {
     lr_error_t err;
     int rc;
-    if (!mod || !mod->session)
+    if (!mod)
         return -1;
+    if (!mod->session)
+        return 0;
     if (!lr_session_cur_func(mod->session))
         return 0;
     memset(&err, 0, sizeof(err));
@@ -1065,8 +1143,10 @@ static int compat_finish_active_func(lc_module_compat_t *mod) {
     lr_error_t err;
     int suspended_idx;
 
-    if (!mod || !mod->session)
+    if (!mod)
         return -1;
+    if (!mod->session)
+        return 0;
 
     /* Finalize the currently active function */
     if (compat_finish_one_func(mod) != 0)
@@ -1091,7 +1171,9 @@ static int compat_finish_active_func(lc_module_compat_t *mod) {
 }
 
 static int compat_sync_session_module(lc_module_compat_t *mod, lr_error_t *err) {
-    if (!mod || !mod->session || !mod->mod)
+    if (!mod || !mod->mod)
+        return -1;
+    if (!ensure_session(mod))
         return -1;
     if (lr_session_module(mod->session) == mod->mod)
         return 0;
@@ -1103,7 +1185,9 @@ static int compat_bind_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f
     lr_session_t *s;
     lr_func_t *active;
     int suspended_idx;
-    if (!mod || !mod->session || !b)
+    if (!mod || !b)
+        return -1;
+    if (!ensure_session(mod))
         return -1;
     if (!f)
         f = b->func;
@@ -1231,7 +1315,6 @@ int lc_context_get_backend(const lc_context_t *ctx) {
 lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     lc_module_compat_t *cm = (lc_module_compat_t *)calloc(
         1, sizeof(lc_module_compat_t));
-    lr_session_config_t cfg;
     lr_arena_t *arena;
     if (!cm) return NULL;
 
@@ -1240,41 +1323,30 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
 
     cm->mod = lr_module_create(arena);
     if (!cm->mod) { lr_arena_destroy(arena); free(cm); return NULL; }
-    memset(&cfg, 0, sizeof(cfg));
-    /* Unified policy: DIRECT default, explicit IR via LIRIC_POLICY=ir. */
-    if (compat_policy_from_env(&cfg.mode) != 0) {
+
+    /* Store config for deferred session creation (ensure_session). */
+    memset(&cm->deferred_cfg, 0, sizeof(cm->deferred_cfg));
+    if (compat_policy_from_env(&cm->deferred_cfg.mode) != 0) {
         lr_arena_destroy(arena);
         free(cm);
         return NULL;
     }
     switch (ctx ? ctx->backend : LC_BACKEND_ISEL) {
     case LC_BACKEND_COPY_PATCH:
-        cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
+        cm->deferred_cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
         break;
     case LC_BACKEND_LLVM:
-        cfg.backend = LR_SESSION_BACKEND_LLVM;
+        cm->deferred_cfg.backend = LR_SESSION_BACKEND_LLVM;
         break;
     case LC_BACKEND_DEFAULT:
     case LC_BACKEND_ISEL:
     default:
-        cfg.backend = LR_SESSION_BACKEND_ISEL;
+        cm->deferred_cfg.backend = LR_SESSION_BACKEND_ISEL;
         break;
     }
-    cm->session = lr_session_create(&cfg, NULL);
-    if (!cm->session) {
-        lr_arena_destroy(arena);
-        free(cm);
-        return NULL;
-    }
-    {
-        int rt_rc = compat_try_attach_runtime_bc(cm->session);
-        if (rt_rc < 0) {
-            lr_session_destroy(cm->session);
-            lr_arena_destroy(arena);
-            free(cm);
-            return NULL;
-        }
-    }
+    /* Session created lazily by ensure_session() on first codegen use. */
+    cm->session = NULL;
+    cm->session_init_failed = false;
     cm->cache_owner_mod = cm->mod;
 
     cm->ctx = ctx;
@@ -1301,7 +1373,8 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
 void lc_module_destroy(lc_module_compat_t *mod) {
     if (!mod) return;
     lr_arena_destroy(mod->mod->arena);
-    lr_session_destroy(mod->session);
+    if (mod->session)
+        lr_session_destroy(mod->session);
     value_pool_free(mod);
     free(mod->func_values);
     free(mod->detached_blocks);
@@ -4148,6 +4221,7 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
 
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (!mod || !jit) return -1;
+    if (!ensure_session(mod)) return -1;
     compat_maybe_dump_final_ir(mod);
     if (lr_session_is_direct(mod->session)) {
         lr_module_t *session_mod = lr_session_module(mod->session);
@@ -4166,6 +4240,8 @@ int lc_module_finalize_for_execution(lc_module_compat_t *mod) {
 void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name) {
     if (!mod || !name || !name[0])
         return NULL;
+    if (!ensure_session(mod))
+        return NULL;
     if (compat_finish_active_func(mod) != 0)
         return NULL;
     return lr_session_lookup(mod->session, name);
@@ -4175,12 +4251,16 @@ void lc_module_add_external_symbol(lc_module_compat_t *mod, const char *name,
                                    void *addr) {
     if (!mod || !name || !name[0])
         return;
+    if (!ensure_session(mod))
+        return;
     lr_session_add_symbol(mod->session, name, addr);
 }
 
 int lc_module_load_library(lc_module_compat_t *mod, const char *path) {
     lr_error_t err = {0};
-    if (!mod || !mod->session || !path || !path[0])
+    if (!mod || !path || !path[0])
+        return -1;
+    if (!ensure_session(mod))
         return -1;
     return lr_session_load_library(mod->session, path, &err);
 }
