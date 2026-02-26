@@ -88,6 +88,12 @@ typedef struct lc_alloca_inst {
 
 typedef struct lc_switch_builder lc_switch_builder_t;
 
+/* ---- Embedded runtime BC ---- */
+/* Register pre-extracted raw LLVM bitcode for use as the runtime BC.
+   The data must remain valid for the lifetime of the process.
+   This is checked before LIRIC_RUNTIME_BC and before auto-build. */
+void lr_compat_set_embedded_runtime_bc(const uint8_t *data, size_t len);
+
 /* ---- Context ---- */
 lc_context_t *lc_context_create(void);
 void lc_context_destroy(lc_context_t *ctx);

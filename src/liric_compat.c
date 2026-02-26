@@ -82,6 +82,12 @@ typedef struct compat_runtime_bc_cache {
 
 static compat_runtime_bc_cache_t g_runtime_bc_cache = {0, NULL, 0};
 
+/* Embedded runtime BC set by the host binary via
+   lr_compat_set_embedded_runtime_bc().  Points to raw LLVM bitcode
+   (already unwrapped from any Mach-O wrapper). */
+static const uint8_t *g_embedded_runtime_bc = NULL;
+static size_t g_embedded_runtime_bc_len = 0;
+
 static int compat_path_exists(const char *path) {
     FILE *f = NULL;
     if (!path || !path[0])
@@ -398,6 +404,18 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
     if (!session)
         return -1;
 
+    /* Prefer embedded BC set by lr_compat_set_embedded_runtime_bc() --
+       no file I/O, no wrapper extraction needed. */
+    if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
+        if (lr_session_set_runtime_bc(session, g_embedded_runtime_bc,
+                                      g_embedded_runtime_bc_len, &rt_err) != 0) {
+            if (rt_err.code == LR_ERR_STATE)
+                return 1;
+            return -1;
+        }
+        return 1;
+    }
+
     if (runtime_bc && runtime_bc[0]) {
         if (read_file_bytes(runtime_bc, &bc_data, &bc_len) != 0)
             return -1;
@@ -427,6 +445,21 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
         return -1;
     }
     return 1;
+}
+
+void lr_compat_set_embedded_runtime_bc(const uint8_t *data, size_t len) {
+    uint8_t *raw = NULL;
+    size_t raw_len = 0;
+
+    if (!data || len < 4)
+        return;
+
+    /* If wrapped (Mach-O bitcode wrapper), extract the raw payload once.
+       The extracted copy is intentionally leaked (process-lifetime). */
+    if (compat_extract_raw_bitcode(data, len, &raw, &raw_len) == 0) {
+        g_embedded_runtime_bc = raw;
+        g_embedded_runtime_bc_len = raw_len;
+    }
 }
 
 /* ---- Compat types (must match the public header exactly) ---- */
