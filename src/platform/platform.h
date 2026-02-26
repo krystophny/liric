@@ -54,4 +54,14 @@ const char *lr_platform_intrinsic_name(size_t idx);
    "fabsf").  Returns the original name when no mapping exists. */
 const char *lr_platform_intrinsic_libc_name(const char *name);
 
+/* Target-aware blob lookup: retrieve blobs matching a specific target ISA
+   (e.g. "riscv64gc", "aarch64", "x86_64") rather than the host platform.
+   Returns true when a blob is available for the named target. */
+bool lr_platform_intrinsic_supported_for_target(const char *name,
+                                                 const char *target_name);
+bool lr_platform_intrinsic_blob_lookup_for_target(const char *name,
+                                                   const char *target_name,
+                                                   const uint8_t **begin,
+                                                   const uint8_t **end);
+
 #endif

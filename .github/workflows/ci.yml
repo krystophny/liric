@@ -62,10 +62,13 @@ jobs:
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
             -D__linux__ -D__riscv -D__riscv_xlen=64 src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -DLR_PLATFORM_SKIP_HOST_BLOB_CHECK \
             -D__APPLE__ -D__MACH__ -D__x86_64__ src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
             -D__APPLE__ -D__MACH__ -D__aarch64__ src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -DLR_PLATFORM_SKIP_HOST_BLOB_CHECK \
             -D_WIN32 -D_M_X64 src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -DLR_PLATFORM_SKIP_HOST_BLOB_CHECK \
             -D_WIN32 -D_M_ARM64 src/platform/platform_intrinsics.c

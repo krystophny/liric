@@ -25,6 +25,11 @@ enum {
     LR_RELOC_X86_64_64       = 23,
 };
 
+/* RISC-V 64 relocation types */
+enum {
+    LR_RELOC_RISCV64_JAL = 40,
+};
+
 typedef struct lr_obj_reloc {
     uint32_t offset;
     uint32_t symbol_idx;

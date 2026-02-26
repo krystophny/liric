@@ -265,6 +265,9 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_aarch64_linux.S)
 endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_riscv64_linux.S)
+endif()
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_aarch64_darwin.S)
 endif()
@@ -744,6 +747,30 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 -DTARGET=riscv64gc
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=9
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_exe_riscv64gc_qemu_intrinsic_math
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_intrinsic_math.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64gc_qemu_intrinsic_math
+                -DTARGET=riscv64gc
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_exe_riscv64gc_qemu_intrinsic_trig
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_intrinsic_trig.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64gc_qemu_intrinsic_trig
+                -DTARGET=riscv64gc
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=42
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
         )
     endif()

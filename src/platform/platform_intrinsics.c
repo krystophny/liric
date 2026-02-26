@@ -5,13 +5,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Pre-assembled riscv64 blobs as C byte arrays -- always available on every
+   host so that cross-compilation (x86_64 host -> riscv64 target) works. */
+#include "platform_intrinsic_blobs_riscv64.h"
+
 typedef struct {
     const char *name;
     const uint8_t *blob_begin;
     const uint8_t *blob_end;
 } lr_platform_intrinsic_desc_t;
 
-#if (defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))) || \
+#if (defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__) || \
+     (defined(__riscv) && __riscv_xlen == 64))) || \
     (defined(__APPLE__) && defined(__aarch64__))
 #define LR_PLATFORM_HAS_INTRINSIC_BLOBS 1
 extern const uint8_t lr_stub_llvm_fabs_f32_begin[];
@@ -142,6 +147,9 @@ extern const uint8_t lr_stub_llvm_is_fpclass_f64_begin[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f64_end[];
 #else
 #define LR_PLATFORM_HAS_INTRINSIC_BLOBS 0
+#if !defined(LR_PLATFORM_SKIP_HOST_BLOB_CHECK)
+#error "unsupported host platform for intrinsic blobs"
+#endif
 #endif
 
 #if LR_PLATFORM_HAS_INTRINSIC_BLOBS
@@ -745,4 +753,147 @@ const char *lr_platform_intrinsic_libc_name(const char *name) {
     if (mapped)
         return mapped;
     return name;
+}
+
+/* --- Target-specific riscv64 blob table (from pre-assembled byte arrays) --- */
+
+#define LR_RV_BLOB(name) \
+    lr_rvblob_##name, lr_rvblob_##name + sizeof(lr_rvblob_##name)
+
+static const lr_platform_intrinsic_desc_t g_riscv64_intrinsics[] = {
+    { "llvm.fabs.f32", LR_RV_BLOB(llvm_fabs_f32) },
+    { "llvm.fabs.f64", LR_RV_BLOB(llvm_fabs_f64) },
+    { "llvm.sqrt.f32", LR_RV_BLOB(llvm_sqrt_f32) },
+    { "llvm.sqrt.f64", LR_RV_BLOB(llvm_sqrt_f64) },
+    { "llvm.exp.f32", LR_RV_BLOB(llvm_exp_f32) },
+    { "llvm.exp.f64", LR_RV_BLOB(llvm_exp_f64) },
+    { "llvm.pow.f32", LR_RV_BLOB(llvm_pow_f32) },
+    { "llvm.pow.f64", LR_RV_BLOB(llvm_pow_f64) },
+    { "llvm.copysign.f32", LR_RV_BLOB(llvm_copysign_f32) },
+    { "llvm.copysign.f64", LR_RV_BLOB(llvm_copysign_f64) },
+    { "llvm.powi.f32", LR_RV_BLOB(llvm_powi_f32_i32) },
+    { "llvm.powi.f64", LR_RV_BLOB(llvm_powi_f64_i32) },
+    { "llvm.powi.f32.i32", LR_RV_BLOB(llvm_powi_f32_i32) },
+    { "llvm.powi.f64.i32", LR_RV_BLOB(llvm_powi_f64_i32) },
+    { "llvm.powi.f32.i64", LR_RV_BLOB(llvm_powi_f32_i64) },
+    { "llvm.powi.f64.i64", LR_RV_BLOB(llvm_powi_f64_i64) },
+    { "llvm.memset.p0i8.i32", LR_RV_BLOB(llvm_memset_i32) },
+    { "llvm.memset.p0i8.i64", LR_RV_BLOB(llvm_memset_i64) },
+    { "llvm.memset.p0.i32", LR_RV_BLOB(llvm_memset_i32) },
+    { "llvm.memset.p0.i64", LR_RV_BLOB(llvm_memset_i64) },
+    { "llvm.memcpy.p0i8.p0i8.i32", LR_RV_BLOB(llvm_memcpy_i32) },
+    { "llvm.memcpy.p0i8.p0i8.i64", LR_RV_BLOB(llvm_memcpy_i64) },
+    { "llvm.memcpy.p0.p0.i32", LR_RV_BLOB(llvm_memcpy_i32) },
+    { "llvm.memcpy.p0.p0.i64", LR_RV_BLOB(llvm_memcpy_i64) },
+    { "llvm.memmove.p0i8.p0i8.i32", LR_RV_BLOB(llvm_memmove_i32) },
+    { "llvm.memmove.p0i8.p0i8.i64", LR_RV_BLOB(llvm_memmove_i64) },
+    { "llvm.memmove.p0.p0.i32", LR_RV_BLOB(llvm_memmove_i32) },
+    { "llvm.memmove.p0.p0.i64", LR_RV_BLOB(llvm_memmove_i64) },
+    { "llvm.sin.f32", LR_RV_BLOB(llvm_sin_f32) },
+    { "llvm.sin.f64", LR_RV_BLOB(llvm_sin_f64) },
+    { "llvm.cos.f32", LR_RV_BLOB(llvm_cos_f32) },
+    { "llvm.cos.f64", LR_RV_BLOB(llvm_cos_f64) },
+    { "llvm.log.f32", LR_RV_BLOB(llvm_log_f32) },
+    { "llvm.log.f64", LR_RV_BLOB(llvm_log_f64) },
+    { "llvm.log2.f32", LR_RV_BLOB(llvm_log2_f32) },
+    { "llvm.log2.f64", LR_RV_BLOB(llvm_log2_f64) },
+    { "llvm.log10.f32", LR_RV_BLOB(llvm_log10_f32) },
+    { "llvm.log10.f64", LR_RV_BLOB(llvm_log10_f64) },
+    { "llvm.exp2.f32", LR_RV_BLOB(llvm_exp2_f32) },
+    { "llvm.exp2.f64", LR_RV_BLOB(llvm_exp2_f64) },
+    { "llvm.floor.f32", LR_RV_BLOB(llvm_floor_f32) },
+    { "llvm.floor.f64", LR_RV_BLOB(llvm_floor_f64) },
+    { "llvm.ceil.f32", LR_RV_BLOB(llvm_ceil_f32) },
+    { "llvm.ceil.f64", LR_RV_BLOB(llvm_ceil_f64) },
+    { "llvm.trunc.f32", LR_RV_BLOB(llvm_trunc_f32) },
+    { "llvm.trunc.f64", LR_RV_BLOB(llvm_trunc_f64) },
+    { "llvm.round.f32", LR_RV_BLOB(llvm_round_f32) },
+    { "llvm.round.f64", LR_RV_BLOB(llvm_round_f64) },
+    { "llvm.rint.f32", LR_RV_BLOB(llvm_rint_f32) },
+    { "llvm.rint.f64", LR_RV_BLOB(llvm_rint_f64) },
+    { "llvm.nearbyint.f32", LR_RV_BLOB(llvm_nearbyint_f32) },
+    { "llvm.nearbyint.f64", LR_RV_BLOB(llvm_nearbyint_f64) },
+    { "llvm.fma.f32", LR_RV_BLOB(llvm_fma_f32) },
+    { "llvm.fma.f64", LR_RV_BLOB(llvm_fma_f64) },
+    { "llvm.fmuladd.f32", LR_RV_BLOB(llvm_fma_f32) },
+    { "llvm.fmuladd.f64", LR_RV_BLOB(llvm_fma_f64) },
+    { "llvm.fmuladd.v2f32", LR_RV_BLOB(llvm_fmuladd_v2f32) },
+    { "llvm.fmuladd.v4f32", LR_RV_BLOB(llvm_fmuladd_v4f32) },
+    { "llvm.fmuladd.v2f64", LR_RV_BLOB(llvm_fmuladd_v2f64) },
+    { "llvm.minnum.f32", LR_RV_BLOB(llvm_minnum_f32) },
+    { "llvm.minnum.f64", LR_RV_BLOB(llvm_minnum_f64) },
+    { "llvm.maxnum.f32", LR_RV_BLOB(llvm_maxnum_f32) },
+    { "llvm.maxnum.f64", LR_RV_BLOB(llvm_maxnum_f64) },
+    { "llvm.abs.i8", LR_RV_BLOB(llvm_abs_i8) },
+    { "llvm.abs.i16", LR_RV_BLOB(llvm_abs_i16) },
+    { "llvm.abs.i32", LR_RV_BLOB(llvm_abs_i32) },
+    { "llvm.abs.i64", LR_RV_BLOB(llvm_abs_i64) },
+    { "llvm.assume", LR_RV_BLOB(llvm_assume) },
+    { "llvm.trap", LR_RV_BLOB(llvm_trap) },
+    { "llvm.is.fpclass.f32", LR_RV_BLOB(llvm_is_fpclass_f32) },
+    { "llvm.is.fpclass.f64", LR_RV_BLOB(llvm_is_fpclass_f64) },
+    { "llvm.exp10.f32", LR_RV_BLOB(llvm_exp10_f32) },
+    { "llvm.exp10.f64", LR_RV_BLOB(llvm_exp10_f64) },
+};
+
+static const lr_platform_intrinsic_desc_t *
+lookup_intrinsic_in_table(const char *name,
+                          const lr_platform_intrinsic_desc_t *table,
+                          size_t count) {
+    size_t i;
+    if (!name || !name[0])
+        return NULL;
+    for (i = 0; i < count; i++) {
+        if (strcmp(table[i].name, name) == 0)
+            return &table[i];
+    }
+    return NULL;
+}
+
+static bool is_riscv64_target(const char *target_name) {
+    return target_name &&
+           strncmp(target_name, "riscv64", 7) == 0;
+}
+
+bool lr_platform_intrinsic_supported_for_target(const char *name,
+                                                 const char *target_name) {
+    const char *canonical = normalize_intrinsic_name(name);
+    const lr_platform_intrinsic_desc_t *d;
+    if (!canonical || !canonical[0])
+        return false;
+
+    if (is_riscv64_target(target_name)) {
+        d = lookup_intrinsic_in_table(
+            canonical, g_riscv64_intrinsics,
+            sizeof(g_riscv64_intrinsics) / sizeof(g_riscv64_intrinsics[0]));
+        return d && d->blob_begin && d->blob_end && d->blob_end > d->blob_begin;
+    }
+
+    /* Non-riscv64 targets: use host blob table */
+    return lr_platform_intrinsic_supported(canonical);
+}
+
+bool lr_platform_intrinsic_blob_lookup_for_target(const char *name,
+                                                   const char *target_name,
+                                                   const uint8_t **begin,
+                                                   const uint8_t **end) {
+    const char *canonical = normalize_intrinsic_name(name);
+    const lr_platform_intrinsic_desc_t *d;
+    if (!begin || !end)
+        return false;
+    if (!canonical || !canonical[0])
+        return false;
+
+    if (is_riscv64_target(target_name)) {
+        d = lookup_intrinsic_in_table(
+            canonical, g_riscv64_intrinsics,
+            sizeof(g_riscv64_intrinsics) / sizeof(g_riscv64_intrinsics[0]));
+        if (!d || !d->blob_begin || !d->blob_end || d->blob_end <= d->blob_begin)
+            return false;
+        *begin = d->blob_begin;
+        *end = d->blob_end;
+        return true;
+    }
+
+    return lr_platform_intrinsic_blob_lookup(canonical, begin, end);
 }
