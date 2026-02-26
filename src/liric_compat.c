@@ -578,6 +578,7 @@ struct lc_phi_node {
     lr_block_t *block;
     lr_func_t *func;
     lr_module_t *mod;
+    lc_module_compat_t *compat_mod;
     lc_value_t **incoming_vals;
     uint32_t *incoming_block_ids;
     uint32_t num_incoming;
@@ -3744,6 +3745,7 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
     phi->block = b;
     phi->func = f;
     phi->mod = mod->mod;
+    phi->compat_mod = mod;
     phi->session = mod->session;
     phi->cap_incoming = LC_INITIAL_PHI_CAP;
     phi->incoming_vals = (lc_value_t **)calloc(
@@ -3759,6 +3761,45 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
     return phi;
 }
 
+static bool type_is_int(lr_type_kind_t k) {
+    return k == LR_TYPE_I1 || k == LR_TYPE_I8 || k == LR_TYPE_I16 ||
+           k == LR_TYPE_I32 || k == LR_TYPE_I64;
+}
+
+static bool type_is_fp(lr_type_kind_t k) {
+    return k == LR_TYPE_FLOAT || k == LR_TYPE_DOUBLE;
+}
+
+/* Integer kind ordering: I1 < I8 < I16 < I32 < I64 (matches enum order). */
+static lc_value_t *phi_coerce_incoming(lc_phi_node_t *phi, lc_value_t *val,
+                                       lr_block_t *pred_block) {
+    lr_type_t *phi_ty = phi->type;
+    lr_type_t *val_ty = val ? val->type : NULL;
+    lc_module_compat_t *mod = phi->compat_mod;
+    lr_opcode_t cast_op;
+    uint32_t dest;
+    if (!phi_ty || !val_ty || !mod || phi_ty == val_ty)
+        return val;
+    if (phi_ty->kind == val_ty->kind)
+        return val;
+    if (type_is_int(phi_ty->kind) && type_is_int(val_ty->kind)) {
+        if (phi_ty->kind < val_ty->kind)
+            cast_op = LR_OP_TRUNC;
+        else
+            cast_op = LR_OP_SEXT;
+    } else if (type_is_fp(phi_ty->kind) && type_is_fp(val_ty->kind)) {
+        if (phi_ty->kind < val_ty->kind)
+            cast_op = LR_OP_FPTRUNC;
+        else
+            cast_op = LR_OP_FPEXT;
+    } else {
+        return val;
+    }
+    dest = build_cast(mod, pred_block, phi->func, cast_op, phi_ty,
+                      lc_value_to_desc(val));
+    return wrap_vreg(mod, dest, phi_ty, phi->func);
+}
+
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block) {
     lr_phi_copy_desc_t copy;
@@ -3766,6 +3807,7 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
     if (!phi || !block || phi->finalized) return;
     if (!phi->incoming_vals || !phi->incoming_block_ids ||
         phi->cap_incoming == 0) return;
+    val = phi_coerce_incoming(phi, val, block);
     if (phi->num_incoming == phi->cap_incoming) {
         uint32_t new_cap = phi->cap_incoming * 2;
         phi->incoming_vals = (lc_value_t **)realloc(
