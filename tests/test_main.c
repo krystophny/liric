@@ -283,6 +283,8 @@ int test_dynelf_ldd_check(void);
 #endif
 #else
 int test_objfile_macho_header(void);
+int test_macho_exe_runs(void);
+int test_macho_exe_codesign_verify(void);
 #endif
 
 #if defined(__linux__)
@@ -615,6 +617,8 @@ int main(void) {
 #endif
 #else
     RUN_TEST(test_objfile_macho_header);
+    RUN_TEST(test_macho_exe_runs);
+    RUN_TEST(test_macho_exe_codesign_verify);
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)

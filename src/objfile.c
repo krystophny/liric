@@ -11,10 +11,6 @@
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
-#ifdef __APPLE__
-#include <fcntl.h>
-#include <limits.h>
-#endif
 
 #define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
 #define OBJ_DATA_BUF_SIZE (1 * 1024 * 1024)
@@ -1068,118 +1064,6 @@ static int write_object_payload(FILE *out, const lr_target_t *target,
 #endif
 }
 
-#ifdef __APPLE__
-static int run_codesign_adhoc(const char *path) {
-    char *const argv[] = {
-        "/usr/bin/codesign", "--force", "--sign", "-", (char *)path, NULL
-    };
-    int status = -1;
-    if (!path || !path[0])
-        return -1;
-    if (lr_platform_run_process(argv, true, &status) != 0)
-        return -1;
-    return status;
-}
-
-static int copy_file_to_stream(const char *path, FILE *out) {
-    FILE *in = NULL;
-    uint8_t buf[4096];
-    size_t nread;
-    if (!path || !out)
-        return -1;
-    in = fopen(path, "rb");
-    if (!in)
-        return -1;
-    while ((nread = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, nread, out) != nread) {
-            fclose(in);
-            return -1;
-        }
-    }
-    if (ferror(in)) {
-        fclose(in);
-        return -1;
-    }
-    fclose(in);
-    return fflush(out) == 0 ? 0 : -1;
-}
-
-static int stream_get_path(FILE *out, char *path_buf, size_t path_cap) {
-    int fd;
-    if (!out || !path_buf || path_cap == 0)
-        return -1;
-    fd = fileno(out);
-    if (fd < 0)
-        return -1;
-    path_buf[0] = '\0';
-    if (fcntl(fd, F_GETPATH, path_buf) != 0)
-        return -1;
-    if (path_buf[0] == '\0')
-        return -1;
-    return 0;
-}
-
-static int write_signed_macho_exec_aarch64(FILE *out,
-                                           const uint8_t *code,
-                                           size_t code_size,
-                                           const uint8_t *data,
-                                           size_t data_size,
-                                           lr_objfile_ctx_t *ctx,
-                                           const char *entry_symbol) {
-    char out_path[PATH_MAX];
-    char exe_tpl[] = "/tmp/liric_exe_XXXXXX";
-    int exe_fd = -1;
-    FILE *exe_out = NULL;
-    int rc = -1;
-
-    if (!out || !ctx || !entry_symbol || !entry_symbol[0])
-        return -1;
-
-    if (stream_get_path(out, out_path, sizeof(out_path)) == 0) {
-        if (write_macho_executable_arm64(out, code, code_size, data, data_size,
-                                         ctx, entry_symbol) != 0)
-            return -1;
-        if (fflush(out) != 0)
-            return -1;
-        if (run_codesign_adhoc(out_path) != 0)
-            return -1;
-        return 0;
-    }
-
-    exe_fd = mkstemp(exe_tpl);
-    if (exe_fd < 0)
-        return -1;
-    exe_out = fdopen(exe_fd, "wb");
-    if (!exe_out) {
-        close(exe_fd);
-        unlink(exe_tpl);
-        return -1;
-    }
-    exe_fd = -1;
-
-    if (write_macho_executable_arm64(exe_out, code, code_size, data, data_size,
-                                     ctx, entry_symbol) != 0)
-        goto done;
-    if (fclose(exe_out) != 0)
-        goto done;
-    exe_out = NULL;
-
-    if (run_codesign_adhoc(exe_tpl) != 0)
-        goto done;
-    if (copy_file_to_stream(exe_tpl, out) != 0)
-        goto done;
-
-    rc = 0;
-
-done:
-    if (exe_out)
-        fclose(exe_out);
-    if (exe_fd >= 0)
-        close(exe_fd);
-    unlink(exe_tpl);
-    return rc;
-}
-#endif
 
 static int obj_build_module(lr_module_t *m, const lr_target_t *target,
                             bool preserve_symbol_names,
@@ -1712,7 +1596,7 @@ int lr_emit_executable_from_blobs(const lr_func_blob_t *blobs,
 #else
         goto done;
 #endif
-        result = write_signed_macho_exec_aarch64(
+        result = write_macho_executable_arm64(
             out, exec_code, exec_code_size,
             exec_data, exec_data_size,
             &build.ctx, entry_symbol);
@@ -1820,7 +1704,7 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
 #else
         goto done;
 #endif
-        result = write_signed_macho_exec_aarch64(
+        result = write_macho_executable_arm64(
             out, exec_code, exec_code_size,
             exec_data, exec_data_size,
             &build.ctx, entry_symbol);

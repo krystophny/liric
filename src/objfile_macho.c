@@ -1,4 +1,5 @@
 #include "objfile_macho.h"
+#include "sha256.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,12 +38,100 @@
 #define PLATFORM_MACOS 1u
 #define TOOL_LD 3u
 
+#define LC_CODE_SIGNATURE 0x1Du
+#define CS_MAGIC_EMBEDDED_SIGNATURE 0xFADE0CC0u
+#define CS_MAGIC_CODEDIRECTORY 0xFADE0C02u
+#define CS_ADHOC 0x2u
+#define CS_LINKER_SIGNED 0x20000u
+#define CS_HASHTYPE_SHA256 2u
+#define CS_SHA256_LEN 32u
+#define CS_PAGE_SHIFT 12u
+#define CS_SPECIAL_SLOTS 7u
+
+static size_t lr_codesig_size(size_t code_limit) {
+    size_t n_code_slots = (code_limit + (1u << CS_PAGE_SHIFT) - 1)
+                          >> CS_PAGE_SHIFT;
+    size_t cd_size = 44u + 1u
+                     + CS_SPECIAL_SLOTS * CS_SHA256_LEN
+                     + n_code_slots * CS_SHA256_LEN;
+    size_t blob_size = 12u + 8u + cd_size;
+    return obj_align_up(blob_size, 16u);
+}
+
+static void lr_codesig_write(uint8_t *buf, size_t code_limit,
+                              size_t sig_off, size_t sig_size) {
+    size_t n_code_slots = (code_limit + (1u << CS_PAGE_SHIFT) - 1)
+                          >> CS_PAGE_SHIFT;
+    size_t cd_size = 44u + 1u
+                     + CS_SPECIAL_SLOTS * CS_SHA256_LEN
+                     + n_code_slots * CS_SHA256_LEN;
+    uint32_t hash_off = (uint32_t)(44u + 1u);
+    uint32_t ident_off = 44u;
+    uint8_t *p = buf + sig_off;
+
+    /* SuperBlob header */
+    w32be(&p, CS_MAGIC_EMBEDDED_SIGNATURE);
+    w32be(&p, (uint32_t)(12u + 8u + cd_size));
+    w32be(&p, 1u); /* count */
+
+    /* BlobIndex */
+    w32be(&p, 0u); /* type = CodeDirectory */
+    w32be(&p, 20u); /* offset from SuperBlob start */
+
+    /* CodeDirectory */
+    w32be(&p, CS_MAGIC_CODEDIRECTORY);
+    w32be(&p, (uint32_t)cd_size);
+    w32be(&p, 0x20400u); /* version */
+    w32be(&p, CS_ADHOC | CS_LINKER_SIGNED); /* flags */
+    w32be(&p, hash_off + CS_SPECIAL_SLOTS * CS_SHA256_LEN); /* hashOffset */
+    w32be(&p, ident_off); /* identOffset */
+    w32be(&p, 0u); /* nSpecialSlots (filled below) */
+    w32be(&p, (uint32_t)n_code_slots); /* nCodeSlots */
+    w32be(&p, (uint32_t)code_limit); /* codeLimit */
+    *p++ = (uint8_t)CS_SHA256_LEN; /* hashSize */
+    *p++ = (uint8_t)CS_HASHTYPE_SHA256; /* hashType */
+    *p++ = 0u; /* platform */
+    *p++ = (uint8_t)CS_PAGE_SHIFT; /* pageSize */
+    w32be(&p, 0u); /* spare2 */
+
+    /* Back-patch nSpecialSlots */
+    {
+        uint8_t *ns_ptr = buf + sig_off + 20u + 24u;
+        ns_ptr[0] = (uint8_t)(CS_SPECIAL_SLOTS >> 24);
+        ns_ptr[1] = (uint8_t)(CS_SPECIAL_SLOTS >> 16);
+        ns_ptr[2] = (uint8_t)(CS_SPECIAL_SLOTS >> 8);
+        ns_ptr[3] = (uint8_t)(CS_SPECIAL_SLOTS);
+    }
+
+    /* Identity string (single NUL byte) */
+    *p++ = '\0';
+
+    /* Special slot hashes (zero-filled = empty) */
+    memset(p, 0, CS_SPECIAL_SLOTS * CS_SHA256_LEN);
+    p += CS_SPECIAL_SLOTS * CS_SHA256_LEN;
+
+    /* Code slot hashes: SHA-256 of each 4096-byte page */
+    for (size_t i = 0; i < n_code_slots; i++) {
+        size_t page_start = i << CS_PAGE_SHIFT;
+        size_t page_len = (1u << CS_PAGE_SHIFT);
+        if (page_start + page_len > code_limit)
+            page_len = code_limit - page_start;
+        lr_sha256_oneshot(buf + page_start, page_len, p);
+        p += CS_SHA256_LEN;
+    }
+
+    /* Zero-pad to aligned sig_size */
+    size_t written = (size_t)(p - (buf + sig_off));
+    if (written < sig_size)
+        memset(p, 0, sig_size - written);
+}
+
 size_t lr_macho_executable_text_offset_arm64(void) {
-    /* Keep in sync with write_macho_executable_arm64() command layout. */
+    /* Keep in sync with write_macho_executable_arm64() command layout.
+       16 cmds: 784 original + 16 for LC_CODE_SIGNATURE = 800. */
     const size_t header_size = 32u;
-    const size_t sizeofcmds = 784u;
-    const size_t code_sig_cmd_slack = 16u;
-    return obj_align_up(header_size + sizeofcmds + code_sig_cmd_slack, 8u);
+    const size_t sizeofcmds = 800u;
+    return obj_align_up(header_size + sizeofcmds, 8u);
 }
 
 static size_t append_uleb128(uint8_t *buf, size_t cap, uint64_t value) {
@@ -375,8 +464,8 @@ int write_macho_executable_arm64(FILE *out,
     static const char libsystem_path[] = "/usr/lib/libSystem.B.dylib";
     const uint64_t image_base = 0x100000000ULL;
     const size_t page = 0x4000u;
-    const uint32_t ncmds = 15;
-    const uint32_t sizeofcmds = 784;
+    const uint32_t ncmds = 16;
+    const uint32_t sizeofcmds = 800;
     const size_t text_off = lr_macho_executable_text_offset_arm64();
     const size_t text_file_size = obj_align_up(text_off + code_size, page);
     const size_t data_file_size = obj_align_up(data_size, page);
@@ -389,6 +478,8 @@ int write_macho_executable_arm64(FILE *out,
     size_t strtab_off = 0;
     size_t linkedit_size = 0;
     size_t total_size = 0;
+    size_t sig_off = 0;
+    size_t sig_size = 0;
     const lr_obj_symbol_t *entry = NULL;
     uint8_t exports_blob[64];
     size_t exports_size = 0;
@@ -497,8 +588,10 @@ int write_macho_executable_arm64(FILE *out,
     func_starts_off = exports_off + exports_size;
     symtab_off = func_starts_off + func_starts_size;
     strtab_off = symtab_off + sizeof(symtab_blob);
-    linkedit_size = strtab_off + sizeof(strtab_blob) - linkedit_off;
-    total_size = strtab_off + sizeof(strtab_blob);
+    sig_off = obj_align_up(strtab_off + sizeof(strtab_blob), 16u);
+    sig_size = lr_codesig_size(sig_off);
+    linkedit_size = sig_off + sig_size - linkedit_off;
+    total_size = sig_off + sig_size;
 
     buf = (uint8_t *)calloc(1, total_size);
     if (!buf)
@@ -688,6 +781,11 @@ int write_macho_executable_arm64(FILE *out,
     w32(&p, (uint32_t)symtab_off);
     w32(&p, 0u);
 
+    w32(&p, LC_CODE_SIGNATURE);
+    w32(&p, 16u);
+    w32(&p, (uint32_t)sig_off);
+    w32(&p, (uint32_t)sig_size);
+
     if ((size_t)(p - buf) > text_off) {
         free(buf);
         return -1;
@@ -700,6 +798,8 @@ int write_macho_executable_arm64(FILE *out,
     memcpy(buf + func_starts_off, func_starts_blob, func_starts_size);
     memcpy(buf + symtab_off, symtab_blob, sizeof(symtab_blob));
     memcpy(buf + strtab_off, strtab_blob, sizeof(strtab_blob));
+
+    lr_codesig_write(buf, sig_off, sig_off, sig_size);
 
     written = fwrite(buf, 1, total_size, out);
     free(buf);

@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#if defined(__linux__)
+#if !defined(_WIN32)
 #include <sys/stat.h>
 #include <sys/wait.h>
 #endif
@@ -944,6 +944,85 @@ int test_objfile_macho_header(void) {
     TEST_ASSERT_EQ(magic, 0xFEEDFACFu, "Mach-O magic");
 
     fclose(fp);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+static built_module_t build_main_ret42_module_macho(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    if (lr_session_func_begin(s, "main", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(42, i32));
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
+int test_macho_exe_runs(void) {
+    built_module_t bm = build_main_ret42_module_macho();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+
+    const char *path = "/tmp/liric_test_macho_exe";
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_executable(bm.module, target, fp, "main");
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit executable");
+
+    chmod(path, 0755);
+    int status = system(path);
+    TEST_ASSERT(WIFEXITED(status), "exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 42, "exit code 42");
+
+    remove(path);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+int test_macho_exe_codesign_verify(void) {
+    built_module_t bm = build_main_ret42_module_macho();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+
+    const char *path = "/tmp/liric_test_macho_codesign";
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_executable(bm.module, target, fp, "main");
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit executable");
+
+    chmod(path, 0755);
+
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd),
+             "codesign --verify --verbose %s 2>/dev/null", path);
+    rc = system(cmd);
+    TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0,
+                "codesign --verify passes");
+
+    remove(path);
     lr_session_destroy(bm.session);
     return 0;
 }

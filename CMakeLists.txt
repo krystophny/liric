@@ -252,6 +252,7 @@ add_library(liric STATIC
     src/objfile.c
     src/objfile_macho.c
     src/objfile_elf.c
+    src/sha256.c
     src/llvm_stubs.c
     src/platform/platform_intrinsics.c
     src/platform/platform_os.c

@@ -138,6 +138,14 @@ static inline void w32(uint8_t **p, uint32_t v) {
     *p += 4;
 }
 
+static inline void w32be(uint8_t **p, uint32_t v) {
+    (*p)[0] = (uint8_t)(v >> 24);
+    (*p)[1] = (uint8_t)(v >> 16);
+    (*p)[2] = (uint8_t)(v >> 8);
+    (*p)[3] = (uint8_t)(v);
+    *p += 4;
+}
+
 static inline void w64(uint8_t **p, uint64_t v) {
     for (int i = 0; i < 8; i++)
         (*p)[i] = (uint8_t)(v >> (i * 8));

@@ -531,6 +531,43 @@ if [[ -z "${LIRIC_POLICY:-}" ]]; then
     echo "lfortran_api_compat: applying WITH_LIRIC policy: LIRIC_POLICY=${LIRIC_POLICY}" >&2
 fi
 
+# Pre-build runtime BC once so individual lfortran invocations skip the
+# per-process clang fork (~330ms each).  Mirrors compat_select_runtime_clang()
+# and compat_build_runtime_bc() in src/liric_compat.c.
+if [[ -z "${LIRIC_RUNTIME_BC:-}" ]]; then
+    runtime_bc_clang=""
+    for _cand in \
+        "${LIRIC_CLANG:-}" \
+        /opt/homebrew/opt/llvm/bin/clang-21 \
+        /opt/homebrew/opt/llvm/bin/clang \
+        /usr/local/opt/llvm/bin/clang-21 \
+        /usr/local/opt/llvm/bin/clang \
+        clang-21 \
+        clang; do
+        [[ -n "$_cand" ]] || continue
+        if command -v "$_cand" >/dev/null 2>&1; then
+            runtime_bc_clang="$_cand"
+            break
+        fi
+    done
+    if [[ -n "$runtime_bc_clang" ]]; then
+        runtime_src="${lfortran_dir}/src/libasr/runtime/lfortran_intrinsics.c"
+        runtime_include="${lfortran_dir}/src"
+        runtime_bc_out="${output_root}/liric_runtime.bc"
+        if [[ -f "$runtime_src" ]]; then
+            echo "lfortran_api_compat: pre-building runtime BC with ${runtime_bc_clang}" >&2
+            "$runtime_bc_clang" -O2 -emit-llvm -c "$runtime_src" \
+                "-I${runtime_include}" -o "$runtime_bc_out"
+            export LIRIC_RUNTIME_BC="$runtime_bc_out"
+            echo "lfortran_api_compat: LIRIC_RUNTIME_BC=${LIRIC_RUNTIME_BC}" >&2
+        else
+            echo "lfortran_api_compat: runtime source not found, skipping BC pre-build" >&2
+        fi
+    else
+        echo "lfortran_api_compat: no clang found, skipping runtime BC pre-build" >&2
+    fi
+fi
+
 if [[ "$run_itests" == "yes" ]]; then
     # New stacktrace pipeline (no dwarfdump/python converters) writes
     # runtime debug maps in-process. Keep dwarfdump preflight only for
