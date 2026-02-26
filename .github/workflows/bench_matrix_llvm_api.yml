@@ -18,9 +18,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup micromamba
-        uses: mamba-org/setup-micromamba@v2.0.2
+        uses: mamba-org/setup-micromamba@v2.0.6
         with:
-          micromamba-version: "2.0.4-0"
+          micromamba-version: "2.5.0-2"
           environment-file: tools/llvm_backend_environment.yml
           create-args: >-
             llvmdev=20
