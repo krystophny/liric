@@ -46,6 +46,28 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  riscv64-qemu-linux:
+    runs-on: ubuntu-latest
+    name: riscv64-qemu-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install QEMU user-mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: RISC-V 64 QEMU tests
+        run: ctest --test-dir build -R riscv64 --output-on-failure
+
   platform-intrinsics-shape:
     runs-on: ubuntu-latest
 
