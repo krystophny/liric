@@ -265,9 +265,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "riscv6
     list(APPEND LIRIC_PLATFORM_ASM_SOURCES
         src/platform/platform_intrinsic_stubs_riscv64_linux.S)
 endif()
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
-    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_riscv64_linux.S)
-endif()
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     list(APPEND LIRIC_PLATFORM_ASM_SOURCES
         src/platform/platform_intrinsic_stubs_aarch64_darwin.S)
