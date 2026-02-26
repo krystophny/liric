@@ -656,12 +656,16 @@ static void convert_func_body(wasm_ctx_t *ctx, const lr_wasm_module_t *wmod,
         case OP_I32_SUB: case OP_I64_SUB: emit_binop(ctx, LR_OP_SUB); break;
         case OP_I32_MUL: case OP_I64_MUL: emit_binop(ctx, LR_OP_MUL); break;
         case OP_I32_DIV_S: case OP_I64_DIV_S:
-        case OP_I32_DIV_U: case OP_I64_DIV_U:
             emit_binop(ctx, LR_OP_SDIV);
             break;
+        case OP_I32_DIV_U: case OP_I64_DIV_U:
+            emit_binop(ctx, LR_OP_UDIV);
+            break;
         case OP_I32_REM_S: case OP_I64_REM_S:
-        case OP_I32_REM_U: case OP_I64_REM_U:
             emit_binop(ctx, LR_OP_SREM);
+            break;
+        case OP_I32_REM_U: case OP_I64_REM_U:
+            emit_binop(ctx, LR_OP_UREM);
             break;
         case OP_I32_AND: case OP_I64_AND: emit_binop(ctx, LR_OP_AND); break;
         case OP_I32_OR:  case OP_I64_OR:  emit_binop(ctx, LR_OP_OR); break;

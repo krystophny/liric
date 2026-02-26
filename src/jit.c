@@ -141,6 +141,20 @@ static uint32_t symbol_hash(const char *name) {
     return h;
 }
 
+static size_t jit_debug_strlen(const char *s) {
+    uintptr_t p = (uintptr_t)s;
+    void *ret = __builtin_return_address(0);
+    size_t n = 0;
+    fprintf(stderr, "jit_debug_strlen: p=%p ret=%p\n", (void *)p, ret);
+    if (p < 0x100000000ULL) {
+        fprintf(stderr, "jit_debug_strlen: low-pointer abort\n");
+        abort();
+    }
+    while (s && s[n] != '\0')
+        n++;
+    return n;
+}
+
 static uint64_t hash64_extend(uint64_t h, const void *data, size_t n) {
     const uint8_t *p = (const uint8_t *)data;
     for (size_t i = 0; i < n; i++) {
@@ -846,6 +860,10 @@ lr_jit_t *lr_jit_create_for_target(const char *target_name) {
     }
 
     register_builtin_symbols(j);
+    if (getenv("LIRIC_DBG_WRAP_STRLEN") != NULL) {
+        lr_jit_add_symbol(j, "strlen", (void *)(uintptr_t)jit_debug_strlen);
+        lr_jit_add_symbol(j, "_strlen", (void *)(uintptr_t)jit_debug_strlen);
+    }
 
     return j;
 }
@@ -1031,6 +1049,9 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     if (existing) {
         existing->addr = addr;
         update_last_symbol_lookup(j, existing, hash);
+        if (getenv("LIRIC_VERBOSE_JIT_SYMBOLS") != NULL) {
+            fprintf(stderr, "jit_symbol update %s -> %p\n", name, addr);
+        }
         return;
     }
 
@@ -1048,14 +1069,22 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
         e->bucket_next = NULL;
     }
     update_last_symbol_lookup(j, e, hash);
+    if (getenv("LIRIC_VERBOSE_JIT_SYMBOLS") != NULL) {
+        fprintf(stderr, "jit_symbol add %s -> %p\n", name, addr);
+    }
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
     size_t n = lr_platform_intrinsic_count();
     for (size_t i = 0; i < n; i++) {
         const char *name = lr_platform_intrinsic_name(i);
+        lr_platform_intrinsic_info_t info;
         const uint8_t *blob_begin, *blob_end;
-        if (lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end)) {
+        void *addr = NULL;
+        if (!name || lr_platform_intrinsic_lookup(name, &info) == 0)
+            continue;
+        if (info.has_blob &&
+            lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end)) {
             size_t blob_size = (size_t)(blob_end - blob_begin);
             size_t dest = align_up(j->code_size, 16);
             if (dest + blob_size > j->code_cap)
@@ -1068,13 +1097,9 @@ static void register_builtin_symbols(lr_jit_t *j) {
             lr_jit_add_symbol(j, name, (void *)(j->code_buf + dest));
             continue;
         }
-        /* No blob available (e.g. macOS): resolve via libc equivalent. */
-        const char *libc_name = lr_platform_intrinsic_libc_name(name);
-        if (libc_name != name) {
-            void *addr = lr_platform_dlsym_default(libc_name);
-            if (addr)
-                lr_jit_add_symbol(j, name, addr);
-        }
+        addr = lr_platform_intrinsic_resolve_addr(name, NULL);
+        if (addr)
+            lr_jit_add_symbol(j, name, addr);
     }
 }
 
@@ -1142,10 +1167,23 @@ int lr_jit_ensure_runtime_bc_loaded(lr_jit_t *j, lr_module_t *m,
 }
 
 static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name) {
+    const char *lookup = NULL;
+    const char *mapped = NULL;
     if (!j || !name || !name[0])
         return NULL;
+    lookup = name;
+    if ((unsigned char)lookup[0] == 1 && lookup[1] != '\0')
+        lookup = lookup + 1;
+    mapped = lr_platform_intrinsic_libc_name(lookup);
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
-        void *addr = lr_platform_dlsym(l->handle, name);
+        void *addr = lr_platform_dlsym(l->handle, lookup);
+        if (!addr && lookup[0] == '_')
+            addr = lr_platform_dlsym(l->handle, lookup + 1);
+        if (!addr && mapped && mapped[0] && strcmp(mapped, lookup) != 0) {
+            addr = lr_platform_dlsym(l->handle, mapped);
+            if (!addr && mapped[0] == '_')
+                addr = lr_platform_dlsym(l->handle, mapped + 1);
+        }
         if (addr)
             return addr;
     }
@@ -1153,10 +1191,27 @@ static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name)
 }
 
 static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
+    const char *lookup = NULL;
+    const char *mapped = NULL;
+    void *addr = NULL;
     (void)j;
     if (!name || !name[0])
         return NULL;
-    return lr_platform_dlsym_default(name);
+    lookup = name;
+    if ((unsigned char)lookup[0] == 1 && lookup[1] != '\0')
+        lookup = lookup + 1;
+    addr = lr_platform_dlsym_default(lookup);
+    if (!addr && lookup[0] == '_')
+        addr = lr_platform_dlsym_default(lookup + 1);
+    if (addr)
+        return addr;
+    mapped = lr_platform_intrinsic_libc_name(lookup);
+    if (mapped && mapped[0] && strcmp(mapped, lookup) != 0) {
+        addr = lr_platform_dlsym_default(mapped);
+        if (!addr && mapped[0] == '_')
+            addr = lr_platform_dlsym_default(mapped + 1);
+    }
+    return addr;
 }
 
 static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) {
@@ -1469,10 +1524,17 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
         }
     }
 
+    const int verbose_reloc =
+        (getenv("LIRIC_VERBOSE_JIT_RELOCS") != NULL);
     int rc = 0;
     for (uint32_t i = reloc_start; i < ctx->num_relocs; i++) {
         const lr_obj_reloc_t *rel = &ctx->relocs[i];
         if (rel->symbol_idx >= ctx->num_symbols) {
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: invalid symbol index reloc=%u sym_idx=%u num_symbols=%u\n",
+                        i, rel->symbol_idx, ctx->num_symbols);
+            }
             rc = -1;
             break;
         }
@@ -1489,6 +1551,11 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
                 target_addr = (void *)(j->code_buf + sym->offset);
             } else {
                 if (!sym_name || !sym_name[0]) {
+                    if (verbose_reloc) {
+                        fprintf(stderr,
+                                "jit_reloc: empty unresolved symbol reloc=%u type=%u\n",
+                                i, rel->type);
+                    }
                     rc = -1;
                     break;
                 }
@@ -1500,6 +1567,11 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
                 resolved_mask[rel->symbol_idx] = 1;
         }
         if (!target_addr) {
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: unresolved symbol reloc=%u type=%u name=%s\n",
+                        i, rel->type, sym_name ? sym_name : "<null>");
+            }
             if (missing_symbol)
                 *missing_symbol = sym_name;
             rc = -1;
@@ -1550,12 +1622,35 @@ static int apply_jit_relocs(lr_jit_t *j, const lr_objfile_ctx_t *ctx,
             rc = patch_aarch64_pageoff12(j->code_buf, j->code_size, rel->offset,
                                          patch_target, true);
             break;
+        case LR_RELOC_ARM64_ABS64:
+            rc = write_u64(j->code_buf, j->code_size, rel->offset,
+                           (uint64_t)patch_target);
+            break;
         default:
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: unsupported reloc type=%u off=%u sym=%s\n",
+                        rel->type, rel->offset,
+                        sym_name ? sym_name : "<null>");
+            }
             rc = -1;
             break;
         }
-        if (rc != 0)
+        if (rc != 0) {
+            if (missing_symbol && (!*missing_symbol) &&
+                sym_name && sym_name[0]) {
+                /* Treat patching failures like unresolved symbols so DIRECT
+                   mode can defer them for AOT blob/object emission paths. */
+                *missing_symbol = sym_name;
+            }
+            if (verbose_reloc) {
+                fprintf(stderr,
+                        "jit_reloc: patch failure type=%u off=%u sym=%s rc=%d\n",
+                        rel->type, rel->offset,
+                        sym_name ? sym_name : "<null>", rc);
+            }
             break;
+        }
         if (j->update_active) {
             j->update_dirty = true;
             if ((size_t)rel->offset < j->update_begin_code_size)

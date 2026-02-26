@@ -555,6 +555,30 @@ lr_stub_llvm_fma_f32_begin:
     ret
 lr_stub_llvm_fma_f32_end:
 
+.globl lr_stub_llvm_fmuladd_v2f32_begin
+.globl lr_stub_llvm_fmuladd_v2f32_end
+lr_stub_llvm_fmuladd_v2f32_begin:
+    fmul v0.2s, v0.2s, v1.2s
+    fadd v0.2s, v0.2s, v2.2s
+    ret
+lr_stub_llvm_fmuladd_v2f32_end:
+
+.globl lr_stub_llvm_fmuladd_v4f32_begin
+.globl lr_stub_llvm_fmuladd_v4f32_end
+lr_stub_llvm_fmuladd_v4f32_begin:
+    fmul v0.4s, v0.4s, v1.4s
+    fadd v0.4s, v0.4s, v2.4s
+    ret
+lr_stub_llvm_fmuladd_v4f32_end:
+
+.globl lr_stub_llvm_fmuladd_v2f64_begin
+.globl lr_stub_llvm_fmuladd_v2f64_end
+lr_stub_llvm_fmuladd_v2f64_begin:
+    fmul v0.2d, v0.2d, v1.2d
+    fadd v0.2d, v0.2d, v2.2d
+    ret
+lr_stub_llvm_fmuladd_v2f64_end:
+
 .globl lr_stub_llvm_minnum_f64_begin
 .globl lr_stub_llvm_minnum_f64_end
 lr_stub_llvm_minnum_f64_begin:
@@ -591,6 +615,24 @@ lr_stub_llvm_abs_i32_begin:
     ret
 lr_stub_llvm_abs_i32_end:
 
+.globl lr_stub_llvm_abs_i8_begin
+.globl lr_stub_llvm_abs_i8_end
+lr_stub_llvm_abs_i8_begin:
+    sxtb w0, w0
+    cmp w0, #0
+    cneg w0, w0, lt
+    ret
+lr_stub_llvm_abs_i8_end:
+
+.globl lr_stub_llvm_abs_i16_begin
+.globl lr_stub_llvm_abs_i16_end
+lr_stub_llvm_abs_i16_begin:
+    sxth w0, w0
+    cmp w0, #0
+    cneg w0, w0, lt
+    ret
+lr_stub_llvm_abs_i16_end:
+
 .globl lr_stub_llvm_abs_i64_begin
 .globl lr_stub_llvm_abs_i64_end
 lr_stub_llvm_abs_i64_begin:
@@ -598,6 +640,19 @@ lr_stub_llvm_abs_i64_begin:
     cneg x0, x0, lt
     ret
 lr_stub_llvm_abs_i64_end:
+
+.globl lr_stub_llvm_assume_begin
+.globl lr_stub_llvm_assume_end
+lr_stub_llvm_assume_begin:
+    ret
+lr_stub_llvm_assume_end:
+
+.globl lr_stub_llvm_trap_begin
+.globl lr_stub_llvm_trap_end
+lr_stub_llvm_trap_begin:
+    brk #0
+    ret
+lr_stub_llvm_trap_end:
 
 .globl lr_stub_llvm_exp2_f64_begin
 .globl lr_stub_llvm_exp2_f64_end
@@ -651,6 +706,59 @@ lr_stub_llvm_exp2_f32_begin:
 .Lexp2_f32_ln2:
     .double 0.69314718055994530942
 lr_stub_llvm_exp2_f32_end:
+
+.globl lr_stub_llvm_exp10_f64_begin
+.globl lr_stub_llvm_exp10_f64_end
+lr_stub_llvm_exp10_f64_begin:
+    adr x11, .Lexp10_f64_ln10
+    ldr d1, [x11]
+    fmul d0, d0, d1
+
+    fmov d2, #1.0
+    fmov d3, #1.0
+    mov x9, #1
+    mov x10, #24
+.Lexp10_f64_loop:
+    scvtf d4, x9
+    fmul d2, d2, d0
+    fdiv d2, d2, d4
+    fadd d3, d3, d2
+    add x9, x9, #1
+    cmp x9, x10
+    ble .Lexp10_f64_loop
+    fmov d0, d3
+    ret
+    .p2align 3
+.Lexp10_f64_ln10:
+    .double 2.30258509299404568402
+lr_stub_llvm_exp10_f64_end:
+
+.globl lr_stub_llvm_exp10_f32_begin
+.globl lr_stub_llvm_exp10_f32_end
+lr_stub_llvm_exp10_f32_begin:
+    fcvt d0, s0
+    adr x11, .Lexp10_f32_ln10
+    ldr d1, [x11]
+    fmul d0, d0, d1
+
+    fmov d2, #1.0
+    fmov d3, #1.0
+    mov x9, #1
+    mov x10, #20
+.Lexp10_f32_loop:
+    scvtf d4, x9
+    fmul d2, d2, d0
+    fdiv d2, d2, d4
+    fadd d3, d3, d2
+    add x9, x9, #1
+    cmp x9, x10
+    ble .Lexp10_f32_loop
+    fcvt s0, d3
+    ret
+    .p2align 3
+.Lexp10_f32_ln10:
+    .double 2.30258509299404568402
+lr_stub_llvm_exp10_f32_end:
 
 .globl lr_stub_llvm_log_f64_begin
 .globl lr_stub_llvm_log_f64_end

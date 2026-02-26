@@ -261,6 +261,33 @@ static inline uint32_t lr_emit_srem(lr_session_t *s, lr_type_t *ty,
     return lr_session_emit(s, &d, NULL);
 }
 
+static inline uint32_t lr_emit_udiv(lr_session_t *s, lr_type_t *ty,
+                                    lr_operand_desc_t lhs,
+                                    lr_operand_desc_t rhs) {
+    lr_inst_desc_t d = {0};
+    lr_operand_desc_t ops[2] = {lhs, rhs};
+    d.op = LR_OP_UDIV; d.type = ty; d.operands = ops; d.num_operands = 2;
+    return lr_session_emit(s, &d, NULL);
+}
+
+static inline uint32_t lr_emit_urem(lr_session_t *s, lr_type_t *ty,
+                                    lr_operand_desc_t lhs,
+                                    lr_operand_desc_t rhs) {
+    lr_inst_desc_t d = {0};
+    lr_operand_desc_t ops[2] = {lhs, rhs};
+    d.op = LR_OP_UREM; d.type = ty; d.operands = ops; d.num_operands = 2;
+    return lr_session_emit(s, &d, NULL);
+}
+
+static inline uint32_t lr_emit_frem(lr_session_t *s, lr_type_t *ty,
+                                    lr_operand_desc_t lhs,
+                                    lr_operand_desc_t rhs) {
+    lr_inst_desc_t d = {0};
+    lr_operand_desc_t ops[2] = {lhs, rhs};
+    d.op = LR_OP_FREM; d.type = ty; d.operands = ops; d.num_operands = 2;
+    return lr_session_emit(s, &d, NULL);
+}
+
 static inline uint32_t lr_emit_and(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {

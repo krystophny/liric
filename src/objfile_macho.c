@@ -37,6 +37,14 @@
 #define PLATFORM_MACOS 1u
 #define TOOL_LD 3u
 
+size_t lr_macho_executable_text_offset_arm64(void) {
+    /* Keep in sync with write_macho_executable_arm64() command layout. */
+    const size_t header_size = 32u;
+    const size_t sizeofcmds = 784u;
+    const size_t code_sig_cmd_slack = 16u;
+    return obj_align_up(header_size + sizeofcmds + code_sig_cmd_slack, 8u);
+}
+
 static size_t append_uleb128(uint8_t *buf, size_t cap, uint64_t value) {
     size_t n = 0;
     if (!buf || cap == 0)
@@ -363,25 +371,18 @@ int write_macho_executable_arm64(FILE *out,
                                  const uint8_t *data, size_t data_size,
                                  const lr_objfile_ctx_t *oc,
                                  const char *entry_symbol) {
-    static const uint8_t fixups_blob[56] = {
-        0x00,0x00,0x00,0x00, 0x20,0x00,0x00,0x00, 0x30,0x00,0x00,0x00,
-        0x30,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x01,0x00,0x00,0x00,
-        0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x03,0x00,0x00,0x00,
-        0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
-        0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00
-    };
     static const char dyld_path[] = "/usr/lib/dyld";
     static const char libsystem_path[] = "/usr/lib/libSystem.B.dylib";
     const uint64_t image_base = 0x100000000ULL;
     const size_t page = 0x4000u;
     const uint32_t ncmds = 15;
-    const uint32_t sizeofcmds = 648;
-    const size_t code_sig_cmd_slack = 16u;
-    const size_t header_and_cmds = 32u + (size_t)sizeofcmds + code_sig_cmd_slack;
-    const size_t text_off = obj_align_up(header_and_cmds, 8);
+    const uint32_t sizeofcmds = 784;
+    const size_t text_off = lr_macho_executable_text_offset_arm64();
     const size_t text_file_size = obj_align_up(text_off + code_size, page);
-    const size_t linkedit_off = text_file_size;
-    size_t fixups_off = linkedit_off;
+    const size_t data_file_size = obj_align_up(data_size, page);
+    const size_t data_file_off = text_file_size;
+    const size_t data_vmaddr = image_base + data_file_off;
+    const size_t linkedit_off = data_file_off + data_file_size;
     size_t exports_off = 0;
     size_t func_starts_off = 0;
     size_t symtab_off = 0;
@@ -403,7 +404,7 @@ int write_macho_executable_arm64(FILE *out,
 
     if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
         return -1;
-    if (data != NULL || data_size != 0)
+    if (data_size > 0 && !data)
         return -1;
 
     for (uint32_t i = 0; i < oc->num_symbols; i++) {
@@ -447,8 +448,9 @@ int write_macho_executable_arm64(FILE *out,
         exports_blob[ep++] = 0x00;
         exports_blob[ep++] = 0x00;
         exports_blob[ep++] = 0x02;
-        memcpy(exports_blob + ep, "_mh_execute_header", 18);
-        ep += 18;
+        memcpy(exports_blob + ep, "_mh_execute_header",
+               sizeof("_mh_execute_header"));
+        ep += sizeof("_mh_execute_header");
         exports_blob[ep++] = 0x09;
         memcpy(exports_blob + ep, "main", 5);
         ep += 5;
@@ -472,7 +474,8 @@ int write_macho_executable_arm64(FILE *out,
     memset(strtab_blob, 0, sizeof(strtab_blob));
     strtab_blob[0] = 0x20;
     strtab_blob[1] = 0x00;
-    memcpy(strtab_blob + 2, "__mh_execute_header", 18);
+    memcpy(strtab_blob + 2, "__mh_execute_header",
+           sizeof("__mh_execute_header"));
     memcpy(strtab_blob + 22, "_main", 6);
     {
         uint8_t *s = symtab_blob;
@@ -490,7 +493,7 @@ int write_macho_executable_arm64(FILE *out,
         w64(&s, entry_addr);
     }
 
-    exports_off = fixups_off + sizeof(fixups_blob);
+    exports_off = linkedit_off;
     func_starts_off = exports_off + exports_size;
     symtab_off = func_starts_off + func_starts_size;
     strtab_off = symtab_off + sizeof(symtab_blob);
@@ -563,6 +566,40 @@ int write_macho_executable_arm64(FILE *out,
         w32(&p, 0u);
     }
 
+    /* __DATA */
+    w32(&p, LC_SEGMENT_64);
+    w32(&p, 152u);
+    {
+        char segname[16] = {0};
+        char sectname[16] = {0};
+        memcpy(segname, "__DATA", 6);
+        wbytes(&p, segname, sizeof(segname));
+        w64(&p, data_vmaddr);
+        w64(&p, data_file_size);
+        w64(&p, data_file_off);
+        w64(&p, data_size);
+        w32(&p, 3u);
+        w32(&p, 3u);
+        w32(&p, 1u);
+        w32(&p, 0u);
+
+        memcpy(sectname, "__data", 6);
+        wbytes(&p, sectname, sizeof(sectname));
+        memset(segname, 0, sizeof(segname));
+        memcpy(segname, "__DATA", 6);
+        wbytes(&p, segname, sizeof(segname));
+        w64(&p, data_vmaddr);
+        w64(&p, data_size);
+        w32(&p, (uint32_t)data_file_off);
+        w32(&p, 3u);
+        w32(&p, 0u);
+        w32(&p, 0u);
+        w32(&p, S_REGULAR);
+        w32(&p, 0u);
+        w32(&p, 0u);
+        w32(&p, 0u);
+    }
+
     /* __LINKEDIT */
     w32(&p, LC_SEGMENT_64);
     w32(&p, 72u);
@@ -579,11 +616,6 @@ int write_macho_executable_arm64(FILE *out,
     w32(&p, 1u);
     w32(&p, 0u);
     w32(&p, 0u);
-
-    w32(&p, LC_DYLD_CHAINED_FIXUPS);
-    w32(&p, 16u);
-    w32(&p, (uint32_t)fixups_off);
-    w32(&p, (uint32_t)sizeof(fixups_blob));
 
     w32(&p, LC_DYLD_EXPORTS_TRIE);
     w32(&p, 16u);
@@ -662,7 +694,8 @@ int write_macho_executable_arm64(FILE *out,
     }
 
     memcpy(buf + text_off, code, code_size);
-    memcpy(buf + fixups_off, fixups_blob, sizeof(fixups_blob));
+    if (data_size > 0)
+        memcpy(buf + data_file_off, data, data_size);
     memcpy(buf + exports_off, exports_blob, exports_size);
     memcpy(buf + func_starts_off, func_starts_blob, func_starts_size);
     memcpy(buf + symtab_off, symtab_blob, sizeof(symtab_blob));

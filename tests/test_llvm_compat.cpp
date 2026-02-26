@@ -165,6 +165,25 @@ static int test_basic_types() {
     return 0;
 }
 
+static int test_opaque_pointer_equivalence() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("opaque_pointer_equivalence", ctx);
+
+    llvm::Type *voidTy = llvm::Type::getVoidTy(ctx);
+    llvm::Type *i8Ty = llvm::Type::getInt8Ty(ctx);
+    TEST_ASSERT(voidTy != nullptr, "void type exists");
+    TEST_ASSERT(i8Ty != nullptr, "i8 type exists");
+
+    llvm::Type *voidPtr = voidTy->getPointerTo();
+    llvm::Type *i8Ptr = i8Ty->getPointerTo();
+    TEST_ASSERT(voidPtr != nullptr, "void* type exists");
+    TEST_ASSERT(i8Ptr != nullptr, "i8* type exists");
+    TEST_ASSERT(voidPtr->isPointerTy(), "void* is pointer");
+    TEST_ASSERT(i8Ptr->isPointerTy(), "i8* is pointer");
+    TEST_ASSERT(voidPtr == i8Ptr, "opaque pointers unify void* and i8*");
+    return 0;
+}
+
 static int test_type_context_stability_across_nested_modules() {
     llvm::LLVMContext ctx_a;
     llvm::Module mod_a("ctx_a", ctx_a);
@@ -1002,6 +1021,41 @@ static int test_function_block_list_insert_and_iteration() {
     return 0;
 }
 
+static int test_function_create_detached_block_before_entry() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("function_create_detached_block_before_entry", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = llvm::Function::Create(
+        ft, llvm::GlobalValue::ExternalLinkage, "detached_then_entry", mod);
+    TEST_ASSERT(fn != nullptr, "Function::Create returns function");
+
+    llvm::BasicBlock *ret_bb = llvm::BasicBlock::Create(ctx, "return", nullptr);
+    TEST_ASSERT(ret_bb != nullptr, "detached return block wrapper");
+    TEST_ASSERT(ret_bb->impl_block() != nullptr, "detached return block IR");
+    TEST_ASSERT(ret_bb->getParent() == fn, "detached return block parent");
+
+    llvm::BasicBlock *entry_bb = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(entry_bb != nullptr, "entry block wrapper");
+    TEST_ASSERT(entry_bb->impl_block() != nullptr, "entry block IR");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetInsertPoint(entry_bb);
+    builder.CreateBr(ret_bb);
+    builder.SetInsertPoint(ret_bb);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 7));
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("detached_then_entry");
+    TEST_ASSERT(fp != nullptr, "lookup detached_then_entry");
+    TEST_ASSERT_EQ(fp(), 7, "detached block flow executes");
+    return 0;
+}
+
 static int test_irbuilder_arithmetic() {
     llvm::LLVMContext ctx;
     llvm::Module mod("arith", ctx);
@@ -1121,6 +1175,51 @@ static int test_irbuilder_memory() {
     TEST_ASSERT(ir.find("ret i64") != std::string::npos,
                 "printed IR keeps return");
 
+    return 0;
+}
+
+static int test_opaque_pointer_load_without_bitcast() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("opaque_pointer_load_without_bitcast", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *f32 = llvm::Type::getFloatTy(ctx);
+    llvm::Type *i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::FixedVectorType *v2f = llvm::FixedVectorType::get(f32, 2);
+    TEST_ASSERT(v2f != nullptr, "vector type created");
+
+    llvm::Type *fields[] = {f32, f32};
+    llvm::StructType *pair = llvm::StructType::get(
+        ctx, llvm::ArrayRef<llvm::Type *>(fields, 2));
+    TEST_ASSERT(pair != nullptr, "pair struct type created");
+
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = llvm::Function::Create(
+        ft, llvm::GlobalValue::ExternalLinkage, "opaque_load_no_bitcast", mod);
+    TEST_ASSERT(fn != nullptr, "function created");
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(entry != nullptr, "entry block");
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *slot = builder.CreateAlloca(pair, nullptr, "slot");
+    TEST_ASSERT(slot != nullptr, "alloca created");
+
+    llvm::Value *as_i64 = builder.CreateLoad(i64, slot, "as_i64");
+    TEST_ASSERT(as_i64 != nullptr, "load i64 from opaque ptr");
+    llvm::Value *as_v2f = builder.CreateLoad(v2f, slot, "as_v2f");
+    TEST_ASSERT(as_v2f != nullptr, "load <2 x float> from opaque ptr");
+    (void)as_i64;
+    (void)as_v2f;
+
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("opaque_load_no_bitcast");
+    TEST_ASSERT(fp != nullptr, "lookup opaque_load_no_bitcast");
+    TEST_ASSERT_EQ(fp(), 0, "opaque load function executes");
     return 0;
 }
 
@@ -2046,6 +2145,7 @@ int main() {
     fprintf(stderr, "\nModule and Type tests:\n");
     RUN_TEST(test_context_and_module);
     RUN_TEST(test_basic_types);
+    RUN_TEST(test_opaque_pointer_equivalence);
     RUN_TEST(test_type_context_stability_across_nested_modules);
     RUN_TEST(test_function_type);
     RUN_TEST(test_struct_type);
@@ -2073,11 +2173,13 @@ int main() {
     RUN_TEST(test_builder_syncs_module_from_insert_block);
     RUN_TEST(test_basicblock_mutation_ops);
     RUN_TEST(test_function_block_list_insert_and_iteration);
+    RUN_TEST(test_function_create_detached_block_before_entry);
 
     fprintf(stderr, "\nIRBuilder tests:\n");
     RUN_TEST(test_irbuilder_arithmetic);
     RUN_TEST(test_irbuilder_control_flow);
     RUN_TEST(test_irbuilder_memory);
+    RUN_TEST(test_opaque_pointer_load_without_bitcast);
     RUN_TEST(test_alloca_casting_precision);
     RUN_TEST(test_irbuilder_casts);
     RUN_TEST(test_irbuilder_fp_ops);

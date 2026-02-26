@@ -422,6 +422,16 @@ static bool fold_int_binop_immediates(const lr_inst_t *inst, lr_operand_t *out) 
         s_res = s_lhs % s_rhs;
         u_res = ((uint64_t)s_res) & mask;
         break;
+    case LR_OP_UDIV:
+        if (u_rhs == 0)
+            return false;
+        u_res = (u_lhs / u_rhs) & mask;
+        break;
+    case LR_OP_UREM:
+        if (u_rhs == 0)
+            return false;
+        u_res = (u_lhs % u_rhs) & mask;
+        break;
     default:
         return false;
     }
@@ -502,6 +512,7 @@ static bool fold_identity_int_binop(const lr_inst_t *inst, lr_operand_t *out) {
         if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 1) { *out = *lhs; return true; }
         return false;
     case LR_OP_SDIV:
+    case LR_OP_UDIV:
         if (rhs->kind == LR_VAL_IMM_I64 && rhs->imm_i64 == 1) { *out = *lhs; return true; }
         return false;
     case LR_OP_AND:
@@ -868,6 +879,11 @@ lr_operand_t lr_op_vreg(uint32_t vreg, lr_type_t *type) {
 }
 
 lr_operand_t lr_op_imm_i64(int64_t val, lr_type_t *type) {
+    /* Canonicalize i1 immediates to {0,1}. LLVM textual/bitcode may
+       represent true as -1, but liric integer ops execute in wider
+       registers and require canonical boolean lane values. */
+    if (type && type->kind == LR_TYPE_I1)
+        val = (val != 0) ? 1 : 0;
     return (lr_operand_t){
         .kind = LR_VAL_IMM_I64, .imm_i64 = val, .type = type, .global_offset = 0
     };
@@ -1447,6 +1463,8 @@ static const char *opcode_name(lr_opcode_t op) {
     case LR_OP_MUL:          return "mul";
     case LR_OP_SDIV:         return "sdiv";
     case LR_OP_SREM:         return "srem";
+    case LR_OP_UDIV:         return "udiv";
+    case LR_OP_UREM:         return "urem";
     case LR_OP_AND:          return "and";
     case LR_OP_OR:           return "or";
     case LR_OP_XOR:          return "xor";
@@ -1457,6 +1475,7 @@ static const char *opcode_name(lr_opcode_t op) {
     case LR_OP_FSUB:         return "fsub";
     case LR_OP_FMUL:         return "fmul";
     case LR_OP_FDIV:         return "fdiv";
+    case LR_OP_FREM:         return "frem";
     case LR_OP_FNEG:         return "fneg";
     case LR_OP_ICMP:         return "icmp";
     case LR_OP_FCMP:         return "fcmp";

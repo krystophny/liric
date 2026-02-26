@@ -1606,11 +1606,12 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
 
             switch (op_tok) {
             case LR_TOK_ADD: case LR_TOK_SUB: case LR_TOK_MUL:
-            case LR_TOK_SDIV: case LR_TOK_SREM: case LR_TOK_UREM:
+            case LR_TOK_SDIV: case LR_TOK_SREM:
+            case LR_TOK_UDIV: case LR_TOK_UREM:
             case LR_TOK_AND: case LR_TOK_OR: case LR_TOK_XOR:
             case LR_TOK_SHL: case LR_TOK_LSHR: case LR_TOK_ASHR:
             case LR_TOK_FADD: case LR_TOK_FSUB:
-            case LR_TOK_FMUL: case LR_TOK_FDIV: {
+            case LR_TOK_FMUL: case LR_TOK_FDIV: case LR_TOK_FREM: {
                 skip_attrs(p);
                 lr_type_t *ty = parse_type(p);
                 skip_attrs(p);
@@ -1625,7 +1626,8 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 case LR_TOK_MUL:  irop = LR_OP_MUL; break;
                 case LR_TOK_SDIV: irop = LR_OP_SDIV; break;
                 case LR_TOK_SREM: irop = LR_OP_SREM; break;
-                case LR_TOK_UREM: irop = LR_OP_SREM; break;
+                case LR_TOK_UDIV: irop = LR_OP_UDIV; break;
+                case LR_TOK_UREM: irop = LR_OP_UREM; break;
                 case LR_TOK_AND:  irop = LR_OP_AND; break;
                 case LR_TOK_OR:   irop = LR_OP_OR; break;
                 case LR_TOK_XOR:  irop = LR_OP_XOR; break;
@@ -1636,6 +1638,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                 case LR_TOK_FSUB: irop = LR_OP_FSUB; break;
                 case LR_TOK_FMUL: irop = LR_OP_FMUL; break;
                 case LR_TOK_FDIV: irop = LR_OP_FDIV; break;
+                case LR_TOK_FREM: irop = LR_OP_FREM; break;
                 default: irop = LR_OP_ADD; break;
                 }
 
@@ -2852,6 +2855,7 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
 static void parse_global(lr_parser_t *p) {
     char *name = tok_name(p, &p->cur);
     bool saw_initializer = false;
+    bool linkage_external = false;
     next(p);
     expect(p, LR_TOK_EQUALS);
 
@@ -2859,8 +2863,11 @@ static void parse_global(lr_parser_t *p) {
     while (check(p, LR_TOK_EXTERNAL) || check(p, LR_TOK_INTERNAL) ||
            check(p, LR_TOK_PRIVATE) || check(p, LR_TOK_COMMON) ||
            check(p, LR_TOK_LINKONCE_ODR) || check(p, LR_TOK_DSOLOCAL) ||
-           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR))
+           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) {
+        if (check(p, LR_TOK_EXTERNAL))
+            linkage_external = true;
         next(p);
+    }
 
     bool is_const = false;
     if (check(p, LR_TOK_GLOBAL)) {
@@ -3039,6 +3046,12 @@ static void parse_global(lr_parser_t *p) {
     }
 
     if (saw_initializer) {
+        skip_line(p);
+    } else {
+        if (linkage_external) {
+            /* `@g = external global ...` is a declaration, not a definition. */
+            g->is_external = true;
+        }
         skip_line(p);
     }
 }

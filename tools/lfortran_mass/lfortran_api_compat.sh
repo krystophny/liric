@@ -532,7 +532,15 @@ if [[ -z "${LIRIC_POLICY:-}" ]]; then
 fi
 
 if [[ "$run_itests" == "yes" ]]; then
-    require_tool_for_integration "llvm-dwarfdump"
+    # New stacktrace pipeline (no dwarfdump/python converters) writes
+    # runtime debug maps in-process. Keep dwarfdump preflight only for
+    # older LFortran trees that still carry converter scripts.
+    if [[ -f "$lfortran_dir/src/libasr/dwarf_convert.py" || \
+          -f "$lfortran_dir/src/libasr/dat_convert.py" ]]; then
+        require_tool_for_integration "llvm-dwarfdump"
+    else
+        echo "lfortran_api_compat: llvm-dwarfdump preflight skipped (in-process debug-map pipeline detected)" >&2
+    fi
 fi
 
 ctest --test-dir "$lfortran_build_liric" --output-on-failure \

@@ -17,6 +17,8 @@ typedef struct {
     char *stderr_text;
     double elapsed_ms;
     int timed_out;
+    int sys_errno;
+    char *spawn_error_text;
 } bench_cmd_result_t;
 
 typedef struct {

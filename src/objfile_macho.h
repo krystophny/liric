@@ -16,4 +16,6 @@ int write_macho_executable_arm64(FILE *out,
 
 lr_reloc_mapped_t macho_reloc_arm64(uint8_t liric_type);
 
+size_t lr_macho_executable_text_offset_arm64(void);
+
 #endif

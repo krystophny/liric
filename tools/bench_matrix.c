@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -1699,31 +1700,156 @@ static void run_micro_provider(const cfg_t *cfg,
 }
 
 
-static void run_best_effort_cmd(const char *cmd) {
-    int rc = system(cmd);
-    if (rc == -1) {
-        fprintf(stderr, "warn: cleanup command failed to execute: %s\n", cmd);
+static const char *k_bench_matrix_pidfile_name = "bench_matrix_run.pid";
+static const char *k_bench_matrix_pidfile_owner = "bench_matrix_v1";
+static char *g_bench_matrix_pidfile = NULL;
+
+static void bench_matrix_pidfile_cleanup(void) {
+    if (!g_bench_matrix_pidfile) return;
+    unlink(g_bench_matrix_pidfile);
+    free(g_bench_matrix_pidfile);
+    g_bench_matrix_pidfile = NULL;
+}
+
+static pid_t ensure_own_process_group(void) {
+    pid_t pid = getpid();
+    pid_t pgid = getpgrp();
+    if (pgid != pid) {
+        if (setpgid(0, 0) != 0 &&
+            errno != EACCES &&
+            errno != EPERM) {
+            fprintf(stderr, "warn: failed to isolate bench_matrix process group: %s\n",
+                    strerror(errno));
+        }
+        pgid = getpgrp();
+    }
+    return pgid;
+}
+
+static int read_bench_matrix_pidfile(const char *pidfile_path, pid_t *pid_out, pid_t *pgid_out) {
+    FILE *f;
+    char line[128];
+    int owner_ok = 0;
+    long parsed_pid = -1;
+    long parsed_pgid = -1;
+
+    if (!pidfile_path || !pid_out || !pgid_out) return 0;
+    f = fopen(pidfile_path, "r");
+    if (!f) return 0;
+
+    while (fgets(line, sizeof(line), f)) {
+        long value = 0;
+        if (strncmp(line, "owner=", 6) == 0) {
+            if (strncmp(line + 6, k_bench_matrix_pidfile_owner,
+                        strlen(k_bench_matrix_pidfile_owner)) == 0) {
+                owner_ok = 1;
+            }
+            continue;
+        }
+        if (sscanf(line, "pid=%ld", &value) == 1) {
+            parsed_pid = value;
+            continue;
+        }
+        if (sscanf(line, "pgid=%ld", &value) == 1) {
+            parsed_pgid = value;
+            continue;
+        }
+    }
+    fclose(f);
+
+    if (!owner_ok || parsed_pid <= 1 || parsed_pgid <= 1) return 0;
+    *pid_out = (pid_t)parsed_pid;
+    *pgid_out = (pid_t)parsed_pgid;
+    return 1;
+}
+
+static int pid_looks_like_bench_matrix(pid_t pid) {
+    char cmd[128];
+    FILE *fp;
+    char line[512];
+
+    if (pid <= 1) return 0;
+    snprintf(cmd, sizeof(cmd), "ps -o command= -p %ld 2>/dev/null", (long)pid);
+    fp = popen(cmd, "r");
+    if (!fp) return 0;
+    line[0] = '\0';
+    if (!fgets(line, sizeof(line), fp)) {
+        pclose(fp);
+        return 0;
+    }
+    pclose(fp);
+    return strstr(line, "bench_matrix") != NULL;
+}
+
+static void cleanup_stale_bench_matrix_run(const char *pidfile_path,
+                                           pid_t current_pid,
+                                           pid_t current_pgid) {
+    pid_t stale_pid = -1;
+    pid_t stale_pgid = -1;
+
+    if (!read_bench_matrix_pidfile(pidfile_path, &stale_pid, &stale_pgid)) return;
+
+    if (stale_pid == current_pid || stale_pgid == current_pgid) return;
+
+    if (kill(stale_pid, 0) != 0 && errno != EPERM) return;
+    if (!pid_looks_like_bench_matrix(stale_pid)) return;
+
+    if (kill(-stale_pgid, 0) == 0 || errno == EPERM) {
+        if (kill(-stale_pgid, SIGKILL) != 0 && errno != ESRCH) {
+            fprintf(stderr,
+                    "warn: failed to terminate stale bench_matrix process group %ld: %s\n",
+                    (long)stale_pgid, strerror(errno));
+        }
+        return;
+    }
+
+    if (kill(stale_pid, 0) == 0 || errno == EPERM) {
+        if (kill(stale_pid, SIGKILL) != 0 && errno != ESRCH) {
+            fprintf(stderr,
+                    "warn: failed to terminate stale bench_matrix pid %ld: %s\n",
+                    (long)stale_pid, strerror(errno));
+        }
     }
 }
 
-static void kill_stale_benchmark_processes(void) {
-    /* Kill leftover processes from interrupted benchmark runs.
-       Use -x (exact process name) for short names; use -f with anchored
-       pattern for names exceeding the 15-char comm limit.
-       Also kill orphaned lfortran test executables (.out binaries) that
-       escaped process-group cleanup. */
-    run_best_effort_cmd("pkill -9 -x bench_api 2>/dev/null");
-    run_best_effort_cmd("pkill -9 -f '^bench_corpus_compare' 2>/dev/null");
-    run_best_effort_cmd("pkill -9 -f '^liric_probe_runner' 2>/dev/null");
-    run_best_effort_cmd("pkill -9 -f 'lfortran.*--jit' 2>/dev/null");
-    run_best_effort_cmd("pkill -9 -f '/tmp/liric_bench/.*\\.out' 2>/dev/null");
+static void register_bench_matrix_run_guard(const char *bench_dir) {
+    FILE *f;
+    pid_t pid;
+    pid_t pgid;
+    char *pidfile_path;
+
+    if (!bench_dir || !bench_dir[0]) return;
+
+    pid = getpid();
+    pgid = ensure_own_process_group();
+    pidfile_path = bench_path_join2(bench_dir, k_bench_matrix_pidfile_name);
+    if (!pidfile_path) {
+        fprintf(stderr, "warn: failed to allocate bench_matrix pidfile path\n");
+        return;
+    }
+
+    cleanup_stale_bench_matrix_run(pidfile_path, pid, pgid);
+
+    f = fopen(pidfile_path, "w");
+    if (!f) {
+        fprintf(stderr, "warn: failed to write bench_matrix pidfile %s: %s\n",
+                pidfile_path, strerror(errno));
+        free(pidfile_path);
+        return;
+    }
+    fprintf(f, "owner=%s\n", k_bench_matrix_pidfile_owner);
+    fprintf(f, "pid=%ld\n", (long)pid);
+    fprintf(f, "pgid=%ld\n", (long)pgid);
+    fclose(f);
+
+    if (g_bench_matrix_pidfile) free(g_bench_matrix_pidfile);
+    g_bench_matrix_pidfile = pidfile_path;
+    atexit(bench_matrix_pidfile_cleanup);
 }
 
 int main(int argc, char **argv) {
     cfg_t cfg = parse_args(argc, argv);
     int bench_tcc_available = file_executable(cfg.bench_tcc);
-
-    kill_stale_benchmark_processes();
 
     FILE *rows = NULL;
     FILE *fails = NULL;
@@ -1756,6 +1882,7 @@ int main(int argc, char **argv) {
     if (cfg.manifest && !file_exists(cfg.manifest)) die("manifest missing: %s", cfg.manifest);
 
     if (mkdir_p(cfg.bench_dir) != 0) die("failed to create bench dir: %s", cfg.bench_dir);
+    register_bench_matrix_run_guard(cfg.bench_dir);
 
     rows_path = bench_path_join2(cfg.bench_dir, "matrix_rows.jsonl");
     fails_path = bench_path_join2(cfg.bench_dir, "matrix_failures.jsonl");

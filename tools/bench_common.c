@@ -13,11 +13,82 @@
 #include <unistd.h>
 
 static const char *k_bench_mode_names[BENCH_MODE_COUNT] = {"isel", "copy_patch", "llvm"};
+enum {
+    BENCH_TRANSIENT_RETRY_ATTEMPTS = 5,
+    BENCH_TRANSIENT_RETRY_BASE_NS = 10000000L
+};
 
 static double now_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+static int is_transient_spawn_errno(int err) {
+    return err == EAGAIN || err == EMFILE || err == ENFILE;
+}
+
+static void transient_retry_backoff(int attempt_idx) {
+    struct timespec ts;
+    long delay_ns = BENCH_TRANSIENT_RETRY_BASE_NS * (long)(attempt_idx + 1);
+    if (delay_ns > 50000000L) delay_ns = 50000000L;
+    ts.tv_sec = 0;
+    ts.tv_nsec = delay_ns;
+    nanosleep(&ts, NULL);
+}
+
+static int mkstemp_with_retry(char *tpl, int *err_out) {
+    int fd = -1;
+    int attempt;
+    int err = 0;
+    for (attempt = 0; attempt < BENCH_TRANSIENT_RETRY_ATTEMPTS; attempt++) {
+        fd = mkstemp(tpl);
+        if (fd >= 0) {
+            if (err_out) *err_out = 0;
+            return fd;
+        }
+        err = errno;
+        if (!is_transient_spawn_errno(err)) break;
+        if (attempt + 1 < BENCH_TRANSIENT_RETRY_ATTEMPTS)
+            transient_retry_backoff(attempt);
+    }
+    if (err_out) *err_out = err;
+    return -1;
+}
+
+static pid_t fork_with_retry(int *err_out) {
+    pid_t pid = -1;
+    int attempt;
+    int err = 0;
+    for (attempt = 0; attempt < BENCH_TRANSIENT_RETRY_ATTEMPTS; attempt++) {
+        pid = fork();
+        if (pid >= 0) {
+            if (err_out) *err_out = 0;
+            return pid;
+        }
+        err = errno;
+        if (!is_transient_spawn_errno(err)) break;
+        if (attempt + 1 < BENCH_TRANSIENT_RETRY_ATTEMPTS)
+            transient_retry_backoff(attempt);
+    }
+    if (err_out) *err_out = err;
+    return -1;
+}
+
+static void set_spawn_error(bench_cmd_result_t *out, const char *stage, int err) {
+    char msg[256];
+    if (!out) return;
+    out->sys_errno = err;
+    if (out->spawn_error_text) {
+        free(out->spawn_error_text);
+        out->spawn_error_text = NULL;
+    }
+    if (!stage) stage = "unknown";
+    if (err > 0)
+        snprintf(msg, sizeof(msg), "%s failed: %s", stage, strerror(err));
+    else
+        snprintf(msg, sizeof(msg), "%s failed", stage);
+    out->spawn_error_text = bench_xstrdup(msg);
 }
 
 char *bench_xstrdup(const char *s) {
@@ -172,9 +243,14 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
     const char *out_read_path = out_tpl;
     int out_fd = -1;
     int err_fd = -1;
+    int out_tpl_active = 0;
+    int err_tpl_active = 0;
     int status = 0;
     pid_t pid;
     double t0;
+    int io_errno = 0;
+    int spawn_errno = 0;
+    int wait_rc = 0;
 
     if (!opts || !opts->argv || !opts->argv[0] || !out) return -1;
 
@@ -183,32 +259,31 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
     out->stderr_text = bench_xstrdup("");
     out->elapsed_ms = 0.0;
     out->timed_out = 0;
-    if (!out->stdout_text || !out->stderr_text) return -1;
+    out->sys_errno = 0;
+    out->spawn_error_text = NULL;
+    if (!out->stdout_text || !out->stderr_text) goto fail;
 
     if (opts->stdout_path && opts->stdout_path[0] != '\0') {
         out_read_path = opts->stdout_path;
     } else {
-        out_fd = mkstemp(out_tpl);
-        if (out_fd < 0) return -1;
+        out_fd = mkstemp_with_retry(out_tpl, &io_errno);
+        if (out_fd < 0) {
+            set_spawn_error(out, "mkstemp(stdout)", io_errno);
+            goto fail;
+        }
+        out_tpl_active = 1;
     }
-    err_fd = mkstemp(err_tpl);
+    err_fd = mkstemp_with_retry(err_tpl, &io_errno);
     if (err_fd < 0) {
-        if (out_fd >= 0) {
-            close(out_fd);
-            unlink(out_tpl);
-        }
-        return -1;
+        set_spawn_error(out, "mkstemp(stderr)", io_errno);
+        goto fail;
     }
+    err_tpl_active = 1;
 
-    pid = fork();
+    pid = fork_with_retry(&spawn_errno);
     if (pid < 0) {
-        if (out_fd >= 0) {
-            close(out_fd);
-            unlink(out_tpl);
-        }
-        close(err_fd);
-        unlink(err_tpl);
-        return -1;
+        set_spawn_error(out, "fork", spawn_errno);
+        goto fail;
     }
 
     if (pid == 0) {
@@ -240,15 +315,25 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
     }
 
     t0 = now_ms();
-    if (out_fd >= 0) close(out_fd);
-    close(err_fd);
+    if (out_fd >= 0) {
+        close(out_fd);
+        out_fd = -1;
+    }
+    if (err_fd >= 0) {
+        close(err_fd);
+        err_fd = -1;
+    }
 
     {
         int timeout_grace_ms = opts->timeout_grace_ms;
         if (timeout_grace_ms < 0) timeout_grace_ms = 0;
-        if (wait_with_timeout(pid, opts->timeout_ms, timeout_grace_ms, &status) == 1) {
+        wait_rc = wait_with_timeout(pid, opts->timeout_ms, timeout_grace_ms, &status);
+        if (wait_rc == 1) {
             out->timed_out = 1;
             out->rc = -99;
+        } else if (wait_rc < 0) {
+            set_spawn_error(out, "waitpid", errno);
+            out->rc = -1;
         } else if (WIFEXITED(status)) {
             out->rc = WEXITSTATUS(status);
         } else if (WIFSIGNALED(status)) {
@@ -266,9 +351,20 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
     if (!out->stdout_text) out->stdout_text = bench_xstrdup("");
     if (!out->stderr_text) out->stderr_text = bench_xstrdup("");
 
-    if (!opts->stdout_path || opts->stdout_path[0] == '\0') unlink(out_tpl);
-    unlink(err_tpl);
+    if (!opts->stdout_path || opts->stdout_path[0] == '\0') {
+        if (out_tpl_active) unlink(out_tpl);
+    }
+    if (err_tpl_active) unlink(err_tpl);
     return 0;
+
+fail:
+    if (out_fd >= 0) close(out_fd);
+    if (err_fd >= 0) close(err_fd);
+    if (out_tpl_active) unlink(out_tpl);
+    if (err_tpl_active) unlink(err_tpl);
+    if (!out->stdout_text) out->stdout_text = bench_xstrdup("");
+    if (!out->stderr_text) out->stderr_text = bench_xstrdup("");
+    return -1;
 }
 
 int bench_run_cmd_with_mode(const char *mode, const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
@@ -302,8 +398,11 @@ void bench_free_cmd_result(bench_cmd_result_t *r) {
     if (!r) return;
     free(r->stdout_text);
     free(r->stderr_text);
+    free(r->spawn_error_text);
     r->stdout_text = NULL;
     r->stderr_text = NULL;
+    r->spawn_error_text = NULL;
+    r->sys_errno = 0;
 }
 
 int bench_is_supported_mode(const char *mode) {

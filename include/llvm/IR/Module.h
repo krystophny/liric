@@ -2,6 +2,7 @@
 #define LLVM_IR_MODULE_H
 
 #include <liric/liric_compat.h>
+#include <liric/llvm_compat_c.h>
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -19,7 +20,6 @@
 #include <memory>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <stdexcept>
 
 namespace llvm {
@@ -76,48 +76,24 @@ public:
     static void setCurrentModule(lc_module_compat_t *m) { current_ = m; }
 
     static bool isLocalGlobalLinkage(GlobalValue::LinkageTypes linkage) {
-        return linkage == GlobalValue::InternalLinkage ||
-               linkage == GlobalValue::PrivateLinkage;
+        return lr_llvm_compat_is_local_global_linkage(static_cast<int>(linkage)) != 0;
     }
 
     static std::string linkageScopedGlobalName(
         lc_module_compat_t *compat, StringRef name,
         GlobalValue::LinkageTypes linkage) {
         std::string base = name.str();
-        if (!compat || base.empty() || !isLocalGlobalLinkage(linkage))
-            return base;
-        /* Preserve stable names when reparsing carrier modules:
-           if a local name already carries the liric-local suffix,
-           do not append a second, process-local suffix. */
-        if (base.find(".__liric_local.") != std::string::npos)
-            return base;
-        char suffix[32];
-        std::snprintf(suffix, sizeof(suffix), "%llx",
-                      (unsigned long long)(uintptr_t)compat);
-        base += ".__liric_local.";
-        base += suffix;
-        return base;
+        char scoped[4096];
+        lr_llvm_compat_linkage_scoped_global_name(
+            compat, base.c_str(), static_cast<int>(linkage), scoped, sizeof(scoped));
+        return std::string(scoped);
     }
 
     static void applyCompatGlobalLinkage(
         lc_module_compat_t *compat, lc_value_t *global_value,
         GlobalValue::LinkageTypes linkage) {
-        if (!compat || !global_value || global_value->kind != LC_VAL_GLOBAL ||
-            !global_value->global.name)
-            return;
-        lr_module_t *m = lc_module_get_ir(compat);
-        if (!m)
-            return;
-        for (lr_global_t *g = m->first_global; g; g = g->next) {
-            if (!g->name || std::strcmp(g->name, global_value->global.name) != 0)
-                continue;
-            g->is_local = isLocalGlobalLinkage(linkage);
-            if (g->is_local)
-                g->is_external = false;
-            if (linkage == GlobalValue::AvailableExternallyLinkage)
-                g->is_external = true;
-            return;
-        }
+        lr_llvm_compat_apply_global_linkage(compat, global_value,
+                                            static_cast<int>(linkage));
     }
 
     lc_module_compat_t *getCompat() const { return compat_; }
@@ -343,18 +319,7 @@ inline IntegerType *Type::getInt64Ty(LLVMContext &C) {
 inline void Type::print(raw_ostream &OS, bool IsForDebug) const {
     (void)IsForDebug;
     lr_type_t *t = impl();
-    switch (t->kind) {
-    case LR_TYPE_VOID:   OS << "void"; break;
-    case LR_TYPE_I1:     OS << "i1"; break;
-    case LR_TYPE_I8:     OS << "i8"; break;
-    case LR_TYPE_I16:    OS << "i16"; break;
-    case LR_TYPE_I32:    OS << "i32"; break;
-    case LR_TYPE_I64:    OS << "i64"; break;
-    case LR_TYPE_FLOAT:  OS << "float"; break;
-    case LR_TYPE_DOUBLE: OS << "double"; break;
-    case LR_TYPE_PTR:    OS << "ptr"; break;
-    default:             OS << "type"; break;
-    }
+    OS << lr_llvm_compat_type_kind_name(t ? t->kind : LR_TYPE_VOID);
 }
 
 inline Type *Type::getPointerElementType() const {
@@ -561,7 +526,14 @@ inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Li
        lr_emit_object uses (!f->is_decl && f->first_block) to decide
        what to compile vs. leave as an undefined symbol. */
     (void)Linkage;
-    return M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
+    Function *fn = M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
+    if (fn && !detail::insertion_point_active_ref()) {
+        /* Keep a fallback implicit owner when there is no active insertion
+           context. While a builder has an insertion point, declarations
+           must not steal ownership from the function currently being built. */
+        detail::current_function_ref() = fn;
+    }
+    return fn;
 }
 
 inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
@@ -575,12 +547,9 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
                                        BasicBlock *InsertBefore) {
     (void)Context;
     Function *fn = Parent;
-    if (!fn && InsertBefore) {
+    if (!fn && InsertBefore)
         fn = InsertBefore->getParent();
-    }
-    if (!fn) {
-        fn = detail::current_function_ref();
-    }
+
     lc_module_compat_t *mod = nullptr;
     lr_func_t *f = nullptr;
     if (fn) {
@@ -588,27 +557,43 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         mod = fn->getCompatMod();
         f = fn->getIRFunc();
     }
-    if ((!mod || !f) && InsertBefore) {
+
+    if (!mod)
+        mod = Module::getCurrentModule();
+
+    if (InsertBefore && !f) {
         f = lc_value_get_block_func(InsertBefore->impl());
         if (!fn && f) {
             fn = detail::lookup_function_wrapper(f);
             if (fn) detail::current_function_ref() = fn;
         }
-        if (!mod) {
-            mod = Module::getCurrentModule();
-        }
     }
-    if (!mod || !f) return BasicBlock::wrap(nullptr);
+    if (!mod) return BasicBlock::wrap(nullptr);
+    if ((Parent || InsertBefore) && !f) return BasicBlock::wrap(nullptr);
+
     lc_value_t *bv = nullptr;
-    if (!Parent && !InsertBefore && !f->first_block) {
+    /* Match LLVM semantics:
+       - Parent == nullptr and InsertBefore == nullptr -> detached block with
+         no parent function until inserted.
+       - InsertBefore provided -> create detached, then insert before anchor.
+       - Parent provided and no InsertBefore -> append to parent immediately. */
+    if (!Parent && !InsertBefore) {
+        bv = lc_block_create_detached(mod, nullptr, Name.c_str());
+    } else if (InsertBefore) {
         bv = lc_block_create_detached(mod, f, Name.c_str());
     } else {
         bv = lc_block_create(mod, f, Name.c_str());
     }
-    if (fn) {
+    if (!bv) return BasicBlock::wrap(nullptr);
+
+    BasicBlock *bb = BasicBlock::wrap(bv);
+    if (fn && (Parent || InsertBefore)) {
         detail::register_block_parent(lc_value_get_block(bv), fn);
     }
-    return BasicBlock::wrap(bv);
+    if (InsertBefore && fn) {
+        fn->insert(InsertBefore, bb);
+    }
+    return bb;
 }
 
 inline bool legacy::PassManager::run(Module &M) {
