@@ -59,6 +59,8 @@ set(LIRIC_LFORTRAN_BUILD_LIRIC "${LIRIC_LFORTRAN_ROOT}/build-liric"
     CACHE PATH "Path to lfortran WITH_LIRIC build directory")
 set(LIRIC_LFORTRAN_API_OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out"
     CACHE PATH "Path to lfortran API compatibility output artifacts")
+set(LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out_safe"
+    CACHE PATH "Path to lfortran API compatibility safe-run output artifacts")
 set(LIRIC_LFORTRAN_REPO "https://github.com/krystophny/lfortran.git"
     CACHE STRING "LFortran repository URL for CMake-managed checkout")
 set(LIRIC_LFORTRAN_REF "origin/liric-aot-minimal"
@@ -600,6 +602,29 @@ add_custom_target(
         --run-itests yes
     DEPENDS lfortran_build_all
     COMMENT "Run LFortran API compatibility suite using CMake-managed builds"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    lfortran_api_compat_safe
+    COMMAND ${CMAKE_COMMAND} -E env
+        CMAKE_BUILD_PARALLEL_LEVEL=2
+        LIRIC_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+        --workspace ${CMAKE_CURRENT_BINARY_DIR}/deps
+        --output-root ${LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE}
+        --lfortran-dir ${LIRIC_LFORTRAN_ROOT}
+        --skip-checkout
+        --skip-lfortran-build
+        --run-ref-tests yes
+        --run-itests yes
+        --workers 2
+        --itest-workers 1
+        --itest-timeout-sec 600
+        --itest-memory-max 4G
+        --itest-tasks-max 256
+    DEPENDS lfortran_build_all
+    COMMENT "Run LFortran API compatibility suite (safe profile, logged)"
     USES_TERMINAL
 )
 

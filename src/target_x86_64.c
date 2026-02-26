@@ -64,6 +64,8 @@ typedef struct {
     bool func_is_vararg;
     int32_t vararg_rsa_off;
     uint32_t vararg_named_gp;
+    uint32_t vararg_named_fp;
+    uint32_t vararg_named_stack_gp;
     lr_jit_t *jit;
     bool func_uses_external_sysv_fp;
 } x86_compile_ctx_t;
@@ -920,6 +922,8 @@ static void emit_shift(x86_compile_ctx_t *ctx, uint8_t ext, uint8_t dst, uint8_t
     invalidate_cached_reg(ctx, dst);
 }
 
+static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size);
+
 static void emit_setcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
     if (cc >= LR_CC_FP_OEQ) {
         emit_fp_setcc(ctx->buf, &ctx->pos, ctx->buflen, cc, dst);
@@ -928,7 +932,8 @@ static void emit_setcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
         uint8_t x86cc = lr_cc_to_x86(cc);
         emit_setcc_byte(ctx->buf, &ctx->pos, ctx->buflen, x86cc, dst);
     }
-    invalidate_cached_reg(ctx, dst);
+    /* setcc writes only the low 8 bits; canonicalize i1 values to 0/1. */
+    emit_movzx_rr(ctx, dst, dst, 1);
 }
 
 static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size) {
@@ -1422,9 +1427,23 @@ static int direct_ensure_phi_copy_cap(x86_direct_ctx_t *ctx) {
     return 0;
 }
 
+static bool direct_phi_copy_matches_edge(const x86_stream_phi_copy_t *copy,
+                                         uint32_t pred,
+                                         uint32_t succ,
+                                         bool only_unemitted) {
+    if (!copy)
+        return false;
+    if (copy->pred_block_id != pred || copy->succ_block_id != succ)
+        return false;
+    if (only_unemitted && copy->emitted)
+        return false;
+    return true;
+}
+
 static void direct_emit_phi_copies_for_edge(x86_direct_ctx_t *ctx,
                                             uint32_t pred,
-                                            uint32_t succ) {
+                                            uint32_t succ,
+                                            bool only_unemitted) {
     x86_compile_ctx_t *cc = &ctx->cc;
     uint32_t stage_base = ctx->next_vreg;
     uint32_t staged = 0;
@@ -1436,8 +1455,8 @@ static void direct_emit_phi_copies_for_edge(x86_direct_ctx_t *ctx,
         uint32_t tmp_vreg;
         const lr_operand_t *src_op;
 
-        if (ctx->phi_copies[i].pred_block_id != pred ||
-            ctx->phi_copies[i].succ_block_id != succ)
+        if (!direct_phi_copy_matches_edge(&ctx->phi_copies[i], pred, succ,
+                                          only_unemitted))
             continue;
 
         src_op = &ctx->phi_copies[i].src_op;
@@ -1472,8 +1491,8 @@ static void direct_emit_phi_copies_for_edge(x86_direct_ctx_t *ctx,
     staged = 0;
     for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
         lr_operand_t staged_src;
-        if (ctx->phi_copies[i].pred_block_id != pred ||
-            ctx->phi_copies[i].succ_block_id != succ)
+        if (!direct_phi_copy_matches_edge(&ctx->phi_copies[i], pred, succ,
+                                          only_unemitted))
             continue;
         memset(&staged_src, 0, sizeof(staged_src));
         staged_src.kind = LR_VAL_VREG;
@@ -1587,7 +1606,7 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
         break;
     case LR_OP_BR: {
         direct_emit_phi_copies_for_edge(ctx, dt->block_id,
-                                        dt->ops[0].block_id);
+                                        dt->ops[0].block_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         uint32_t target_id = dt->ops[0].block_id;
         emit_jmp_sourced(cc, target_id, dt->block_id);
@@ -1615,7 +1634,7 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
         jcc_disp_pos = cc->pos;
         emit_u32(cc->buf, &cc->pos, cc->buflen, 0);
 
-        direct_emit_phi_copies_for_edge(ctx, dt->block_id, false_id);
+        direct_emit_phi_copies_for_edge(ctx, dt->block_id, false_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_sourced(cc, false_id, dt->block_id);
 
@@ -1629,7 +1648,7 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
             cc->buf[jcc_disp_pos + 3] = (uint8_t)(rel32 >> 24);
         }
 
-        direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id);
+        direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_sourced(cc, true_id, dt->block_id);
         break;
@@ -1769,6 +1788,8 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->func_is_vararg = false;
     cc->vararg_rsa_off = 0;
     cc->vararg_named_gp = 0;
+    cc->vararg_named_fp = 0;
+    cc->vararg_named_stack_gp = 0;
     cc->func_uses_external_sysv_fp = function_uses_external_sysv_fp_abi(func_meta);
 
     attach_obj_symbol_meta_cache(cc);
@@ -1787,6 +1808,8 @@ static int x86_64_compile_begin(void **compile_ctx,
         uint32_t gp_used = cc->func_uses_internal_sret ? 1u : 0u;
         uint32_t fp_used = 0u;
         uint32_t stack_used = 0u;
+        uint32_t named_gp_total = cc->func_uses_internal_sret ? 1u : 0u;
+        uint32_t named_fp_total = 0u;
 
         for (uint32_t i = 0; i < num_params; i++) {
             const lr_type_t *pty = NULL;
@@ -1799,6 +1822,17 @@ static int x86_64_compile_begin(void **compile_ctx,
                                           &agg_lane_count))
                 agg_stack_units = (uint32_t)(((uint32_t)agg_lane_size *
                                               (uint32_t)agg_lane_count + 7u) / 8u);
+
+            if (cc->func_uses_external_sysv_fp) {
+                if (is_fp_abi_type(pty))
+                    named_fp_total++;
+                else if (agg_stack_units != 0)
+                    named_fp_total += agg_lane_count;
+                else
+                    named_gp_total++;
+            } else {
+                named_gp_total++;
+            }
 
             if (cc->func_uses_external_sysv_fp) {
                 if (is_fp_abi_type(pty) && fp_used < 8) {
@@ -1884,17 +1918,33 @@ static int x86_64_compile_begin(void **compile_ctx,
                 gp_used++;
             }
         }
+
+        if (vararg) {
+            uint32_t named_gp_regs = named_gp_total;
+            uint32_t named_fp_regs = named_fp_total;
+            if (named_gp_regs > 6)
+                named_gp_regs = 6;
+            if (named_fp_regs > 8)
+                named_fp_regs = 8;
+            cc->vararg_named_gp = named_gp_regs;
+            cc->vararg_named_fp = named_fp_regs;
+            cc->vararg_named_stack_gp =
+                named_gp_total > 6 ? named_gp_total - 6 : 0;
+        }
     }
 
     cc->func_is_vararg = vararg;
     if (vararg) {
-        uint32_t named_gp = num_params;
-        if (named_gp > 6) named_gp = 6;
-        cc->vararg_named_gp = named_gp;
-        cc->vararg_rsa_off = alloc_temp_slot(cc, 48, 8);
+        /* SysV register save area: 6*8 GP + 8*16 FP = 176 bytes. */
+        cc->vararg_rsa_off = alloc_temp_slot(cc, 176, 16);
         for (uint32_t i = 0; i < 6; i++)
             emit_mem_store_sized(cc, param_regs[i], X86_RBP,
                                  cc->vararg_rsa_off + (int32_t)(i * 8), 8);
+        for (uint32_t i = 0; i < 8; i++) {
+            emit_store_fp_mem_base(cc, X86_RBP,
+                                   cc->vararg_rsa_off + 48 + (int32_t)(i * 16),
+                                   param_fp_regs[i], 8);
+        }
     }
 
     *compile_ctx = ctx;
@@ -2655,15 +2705,15 @@ static int x86_64_compile_emit(void *compile_ctx,
                 if (cc->func_is_vararg && nops >= 2) {
                     emit_load_operand(cc, &ops[1], X86_RAX);
                     uint32_t gp_off = cc->vararg_named_gp * 8;
+                    uint32_t fp_off = 48u + cc->vararg_named_fp * 16u;
                     emit_mov_imm(cc, X86_RCX, (int64_t)gp_off, false);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
                                X86_RCX, X86_RAX, 0, 4);
-                    emit_mov_imm(cc, X86_RCX, 48, false);
+                    emit_mov_imm(cc, X86_RCX, (int64_t)fp_off, false);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
                                X86_RCX, X86_RAX, 4, 4);
-                    int32_t overflow_off = 16 + (int32_t)(
-                        cc->vararg_named_gp > 6 ?
-                        cc->vararg_named_gp - 6 : 0) * 8;
+                    int32_t overflow_off =
+                        16 + (int32_t)(cc->vararg_named_stack_gp * 8u);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8D,
                                X86_RCX, X86_RBP, overflow_off, 8);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
@@ -2957,13 +3007,11 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
             if (!has_late)
                 continue;
             size_t stub_pos = cc->pos;
-            for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
-                if (ctx->phi_copies[pi].pred_block_id != source ||
-                    ctx->phi_copies[pi].succ_block_id != target)
-                    continue;
-                emit_phi_copy_value(cc, ctx->phi_copies[pi].dest_vreg,
-                                    &ctx->phi_copies[pi].src_op);
-            }
+            /* Late stubs are entered from runtime edges; reset cache state
+               and apply only pending copies with parallel PHI semantics. */
+            invalidate_cached_gprs(cc);
+            direct_emit_phi_copies_for_edge(ctx, source, target, true);
+            invalidate_cached_gprs(cc);
             if (direct_ensure_fixup_cap(ctx) != 0)
                 return -1;
             emit_jmp(cc, target);
