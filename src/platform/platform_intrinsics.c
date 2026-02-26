@@ -21,6 +21,14 @@ typedef struct {
 #define LR_PLATFORM_HAS_INTRINSIC_BLOBS 1
 extern const uint8_t lr_stub_llvm_fabs_f32_begin[];
 extern const uint8_t lr_stub_llvm_fabs_f32_end[];
+extern const uint8_t lr_stub_llvm_fabs_v2f32_begin[];
+extern const uint8_t lr_stub_llvm_fabs_v2f32_end[];
+extern const uint8_t lr_stub_llvm_fabs_v2f64_begin[];
+extern const uint8_t lr_stub_llvm_fabs_v2f64_end[];
+extern const uint8_t lr_stub_llvm_lifetime_start_begin[];
+extern const uint8_t lr_stub_llvm_lifetime_start_end[];
+extern const uint8_t lr_stub_llvm_lifetime_end_begin[];
+extern const uint8_t lr_stub_llvm_lifetime_end_end[];
 extern const uint8_t lr_stub_llvm_fabs_f64_begin[];
 extern const uint8_t lr_stub_llvm_fabs_f64_end[];
 extern const uint8_t lr_stub_llvm_sqrt_f32_begin[];
@@ -145,6 +153,22 @@ extern const uint8_t lr_stub_llvm_is_fpclass_f32_begin[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f32_end[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f64_begin[];
 extern const uint8_t lr_stub_llvm_is_fpclass_f64_end[];
+extern const uint8_t lr_stub_llvm_smax_i32_begin[];
+extern const uint8_t lr_stub_llvm_smax_i32_end[];
+extern const uint8_t lr_stub_llvm_smin_i32_begin[];
+extern const uint8_t lr_stub_llvm_smin_i32_end[];
+extern const uint8_t lr_stub_llvm_smax_i64_begin[];
+extern const uint8_t lr_stub_llvm_smax_i64_end[];
+extern const uint8_t lr_stub_llvm_smin_i64_begin[];
+extern const uint8_t lr_stub_llvm_smin_i64_end[];
+extern const uint8_t lr_stub_llvm_umax_i32_begin[];
+extern const uint8_t lr_stub_llvm_umax_i32_end[];
+extern const uint8_t lr_stub_llvm_umin_i32_begin[];
+extern const uint8_t lr_stub_llvm_umin_i32_end[];
+extern const uint8_t lr_stub_llvm_umax_i64_begin[];
+extern const uint8_t lr_stub_llvm_umax_i64_end[];
+extern const uint8_t lr_stub_llvm_umin_i64_begin[];
+extern const uint8_t lr_stub_llvm_umin_i64_end[];
 #else
 #define LR_PLATFORM_HAS_INTRINSIC_BLOBS 0
 #if !defined(LR_PLATFORM_SKIP_HOST_BLOB_CHECK)
@@ -161,6 +185,10 @@ extern const uint8_t lr_stub_llvm_is_fpclass_f64_end[];
 static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.fabs.f32", LR_STUB_BLOB(lr_stub_llvm_fabs_f32_begin, lr_stub_llvm_fabs_f32_end) },
     { "llvm.fabs.f64", LR_STUB_BLOB(lr_stub_llvm_fabs_f64_begin, lr_stub_llvm_fabs_f64_end) },
+    { "llvm.fabs.v2f32", LR_STUB_BLOB(lr_stub_llvm_fabs_v2f32_begin, lr_stub_llvm_fabs_v2f32_end) },
+    { "llvm.fabs.v2f64", LR_STUB_BLOB(lr_stub_llvm_fabs_v2f64_begin, lr_stub_llvm_fabs_v2f64_end) },
+    { "llvm.lifetime.start.p0", LR_STUB_BLOB(lr_stub_llvm_lifetime_start_begin, lr_stub_llvm_lifetime_start_end) },
+    { "llvm.lifetime.end.p0", LR_STUB_BLOB(lr_stub_llvm_lifetime_end_begin, lr_stub_llvm_lifetime_end_end) },
     { "llvm.sqrt.f32", LR_STUB_BLOB(lr_stub_llvm_sqrt_f32_begin, lr_stub_llvm_sqrt_f32_end) },
     { "llvm.sqrt.f64", LR_STUB_BLOB(lr_stub_llvm_sqrt_f64_begin, lr_stub_llvm_sqrt_f64_end) },
     { "llvm.exp.f32", LR_STUB_BLOB(lr_stub_llvm_exp_f32_begin, lr_stub_llvm_exp_f32_end) },
@@ -230,6 +258,14 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.trap", LR_STUB_BLOB(lr_stub_llvm_trap_begin, lr_stub_llvm_trap_end) },
     { "llvm.is.fpclass.f32", LR_STUB_BLOB(lr_stub_llvm_is_fpclass_f32_begin, lr_stub_llvm_is_fpclass_f32_end) },
     { "llvm.is.fpclass.f64", LR_STUB_BLOB(lr_stub_llvm_is_fpclass_f64_begin, lr_stub_llvm_is_fpclass_f64_end) },
+    { "llvm.smax.i32", LR_STUB_BLOB(lr_stub_llvm_smax_i32_begin, lr_stub_llvm_smax_i32_end) },
+    { "llvm.smin.i32", LR_STUB_BLOB(lr_stub_llvm_smin_i32_begin, lr_stub_llvm_smin_i32_end) },
+    { "llvm.smax.i64", LR_STUB_BLOB(lr_stub_llvm_smax_i64_begin, lr_stub_llvm_smax_i64_end) },
+    { "llvm.smin.i64", LR_STUB_BLOB(lr_stub_llvm_smin_i64_begin, lr_stub_llvm_smin_i64_end) },
+    { "llvm.umax.i32", LR_STUB_BLOB(lr_stub_llvm_umax_i32_begin, lr_stub_llvm_umax_i32_end) },
+    { "llvm.umin.i32", LR_STUB_BLOB(lr_stub_llvm_umin_i32_begin, lr_stub_llvm_umin_i32_end) },
+    { "llvm.umax.i64", LR_STUB_BLOB(lr_stub_llvm_umax_i64_begin, lr_stub_llvm_umax_i64_end) },
+    { "llvm.umin.i64", LR_STUB_BLOB(lr_stub_llvm_umin_i64_begin, lr_stub_llvm_umin_i64_end) },
 };
 
 static const char *normalize_intrinsic_name(const char *name) {

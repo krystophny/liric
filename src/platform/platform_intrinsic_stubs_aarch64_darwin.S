@@ -7,6 +7,32 @@ _lr_stub_llvm_fabs_f32_begin:
     ret
 _lr_stub_llvm_fabs_f32_end:
 
+.globl _lr_stub_llvm_fabs_v2f32_begin
+.globl _lr_stub_llvm_fabs_v2f32_end
+_lr_stub_llvm_fabs_v2f32_begin:
+    fabs v0.2s, v0.2s
+    ret
+_lr_stub_llvm_fabs_v2f32_end:
+
+.globl _lr_stub_llvm_fabs_v2f64_begin
+.globl _lr_stub_llvm_fabs_v2f64_end
+_lr_stub_llvm_fabs_v2f64_begin:
+    fabs v0.2d, v0.2d
+    ret
+_lr_stub_llvm_fabs_v2f64_end:
+
+.globl _lr_stub_llvm_lifetime_start_begin
+.globl _lr_stub_llvm_lifetime_start_end
+_lr_stub_llvm_lifetime_start_begin:
+    ret
+_lr_stub_llvm_lifetime_start_end:
+
+.globl _lr_stub_llvm_lifetime_end_begin
+.globl _lr_stub_llvm_lifetime_end_end
+_lr_stub_llvm_lifetime_end_begin:
+    ret
+_lr_stub_llvm_lifetime_end_end:
+
 .globl _lr_stub_llvm_fabs_f64_begin
 .globl _lr_stub_llvm_fabs_f64_end
 _lr_stub_llvm_fabs_f64_begin:
@@ -1299,5 +1325,69 @@ Lfpc32_check:
     cset w0, ne
     ret
 _lr_stub_llvm_is_fpclass_f32_end:
+
+.globl _lr_stub_llvm_smax_i32_begin
+.globl _lr_stub_llvm_smax_i32_end
+_lr_stub_llvm_smax_i32_begin:
+    cmp w0, w1
+    csel w0, w0, w1, ge
+    ret
+_lr_stub_llvm_smax_i32_end:
+
+.globl _lr_stub_llvm_smin_i32_begin
+.globl _lr_stub_llvm_smin_i32_end
+_lr_stub_llvm_smin_i32_begin:
+    cmp w0, w1
+    csel w0, w0, w1, le
+    ret
+_lr_stub_llvm_smin_i32_end:
+
+.globl _lr_stub_llvm_smax_i64_begin
+.globl _lr_stub_llvm_smax_i64_end
+_lr_stub_llvm_smax_i64_begin:
+    cmp x0, x1
+    csel x0, x0, x1, ge
+    ret
+_lr_stub_llvm_smax_i64_end:
+
+.globl _lr_stub_llvm_smin_i64_begin
+.globl _lr_stub_llvm_smin_i64_end
+_lr_stub_llvm_smin_i64_begin:
+    cmp x0, x1
+    csel x0, x0, x1, le
+    ret
+_lr_stub_llvm_smin_i64_end:
+
+.globl _lr_stub_llvm_umax_i32_begin
+.globl _lr_stub_llvm_umax_i32_end
+_lr_stub_llvm_umax_i32_begin:
+    cmp w0, w1
+    csel w0, w0, w1, hs
+    ret
+_lr_stub_llvm_umax_i32_end:
+
+.globl _lr_stub_llvm_umin_i32_begin
+.globl _lr_stub_llvm_umin_i32_end
+_lr_stub_llvm_umin_i32_begin:
+    cmp w0, w1
+    csel w0, w0, w1, ls
+    ret
+_lr_stub_llvm_umin_i32_end:
+
+.globl _lr_stub_llvm_umax_i64_begin
+.globl _lr_stub_llvm_umax_i64_end
+_lr_stub_llvm_umax_i64_begin:
+    cmp x0, x1
+    csel x0, x0, x1, hs
+    ret
+_lr_stub_llvm_umax_i64_end:
+
+.globl _lr_stub_llvm_umin_i64_begin
+.globl _lr_stub_llvm_umin_i64_end
+_lr_stub_llvm_umin_i64_begin:
+    cmp x0, x1
+    csel x0, x0, x1, ls
+    ret
+_lr_stub_llvm_umin_i64_end:
 
 .subsections_via_symbols
