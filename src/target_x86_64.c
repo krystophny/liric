@@ -1580,6 +1580,11 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
     case LR_OP_RET_VOID:
         emit_epilogue(cc);
         break;
+    case LR_OP_UNREACHABLE:
+        /* Some frontends leave an explicit `unreachable` at function tail.
+           Do not fall through into adjacent code; terminate the frame. */
+        emit_epilogue(cc);
+        break;
     case LR_OP_BR: {
         direct_emit_phi_copies_for_edge(ctx, dt->block_id,
                                         dt->ops[0].block_id);
@@ -2899,7 +2904,12 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_UNREACHABLE:
-        break;
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_UNREACHABLE;
+        ctx->deferred.num_ops = 0;
+        ctx->deferred.block_id = ctx->current_block_id;
+        cc->current_inst = NULL;
+        return 0;
     default:
         break;
     }

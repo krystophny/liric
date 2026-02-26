@@ -1354,6 +1354,11 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
     case LR_OP_RET_VOID:
         emit_epilogue_a64(cc);
         break;
+    case LR_OP_UNREACHABLE:
+        /* Frontend-produced tail `unreachable` must still terminate codegen
+           for this function instead of falling through into neighboring code. */
+        emit_epilogue_a64(cc);
+        break;
     case LR_OP_BR: {
         if (dbg_term) {
             fprintf(stderr,
@@ -2588,7 +2593,11 @@ static int aarch64_compile_emit(void *compile_ctx,
         }
         break;
     case LR_OP_UNREACHABLE:
-        break;
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_UNREACHABLE;
+        ctx->deferred.num_ops = 0;
+        ctx->deferred.block_id = ctx->current_block_id;
+        return 0;
     default:
         break;
     }

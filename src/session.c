@@ -1478,10 +1478,28 @@ static int validate_block_termination(struct lr_session *s,
             lr_inst_t *term = lr_inst_create(s->module->arena,
                                              LR_OP_UNREACHABLE,
                                              NULL, 0, NULL, 0);
+            lr_compile_inst_desc_t term_desc;
             if (!term) {
                 err_set(err, S_ERR_BACKEND,
                         "failed to synthesize terminator for block %u", id);
                 return -1;
+            }
+            if (s->compile_active && s->cur_block == b) {
+                if (!s->compile_ctx || !s->jit || !s->jit->target ||
+                    !s->jit->target->compile_emit) {
+                    err_set(err, S_ERR_STATE,
+                            "no active direct compile context for synthesized terminator");
+                    return -1;
+                }
+                memset(&term_desc, 0, sizeof(term_desc));
+                term_desc.op = LR_OP_UNREACHABLE;
+                term_desc.type = s->module->type_void;
+                if (s->jit->target->compile_emit(s->compile_ctx, &term_desc) != 0) {
+                    err_set(err, S_ERR_BACKEND,
+                            "backend emit failed for synthesized terminator in block %u",
+                            id);
+                    return -1;
+                }
             }
             lr_block_append(b, term);
             terminated = true;
