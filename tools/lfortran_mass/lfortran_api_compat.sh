@@ -484,14 +484,35 @@ fi
 lfortran_build_llvm="${lfortran_dir}/build-llvm"
 lfortran_build_liric="${lfortran_dir}/build-liric"
 if [[ "$skip_lfortran_build" != "yes" ]]; then
+    lf_build_cc=""
+    lf_build_cxx=""
+    for _cc_cand in clang clang-21; do
+        if command -v "$_cc_cand" >/dev/null 2>&1; then
+            lf_build_cc="$_cc_cand"; break
+        fi
+    done
+    for _cxx_cand in clang++ clang++-21; do
+        if command -v "$_cxx_cand" >/dev/null 2>&1; then
+            lf_build_cxx="$_cxx_cand"; break
+        fi
+    done
+    lf_compiler_flags=()
+    if [[ -n "$lf_build_cc" && -n "$lf_build_cxx" ]]; then
+        lf_compiler_flags+=(-DCMAKE_C_COMPILER="$lf_build_cc" -DCMAKE_CXX_COMPILER="$lf_build_cxx")
+        echo "lfortran_api_compat: using ${lf_build_cxx} for lfortran builds" >&2
+    fi
+
     cmake -S "$lfortran_dir" -B "$lfortran_build_llvm" -G Ninja \
         -DCMAKE_BUILD_TYPE="$build_type" \
+        "${lf_compiler_flags[@]}" \
         2>&1 | tee "${log_root}/build_lfortran_llvm_configure.log"
-    cmake --build "$lfortran_build_llvm" -j"$workers" \
+    cmake --build "$lfortran_build_llvm" \
+        --target lfortran lfortran_runtime build_runtime -j"$workers" \
         2>&1 | tee "${log_root}/build_lfortran_llvm_build.log"
 
     cmake -S "$lfortran_dir" -B "$lfortran_build_liric" -G Ninja \
         -DCMAKE_BUILD_TYPE="$build_type" \
+        "${lf_compiler_flags[@]}" \
         -DWITH_LIRIC=yes \
         -DLIRIC_DIR="$liric_root" \
         -DWITH_RUNTIME_STACKTRACE=yes \
