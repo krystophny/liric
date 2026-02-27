@@ -184,6 +184,13 @@ public:
         return f ? (f->first_block == nullptr) : true;
     }
 
+    static bool classof(const Value *V) {
+        if (!V) return false;
+        lc_value_t *v = V->impl();
+        if (!v || v->kind != LC_VAL_GLOBAL) return false;
+        return lc_value_get_func(v) != nullptr;
+    }
+
     static inline Function *Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,
                                      const Twine &Name, Module &M);
     static inline Function *Create(FunctionType *Ty, GlobalValue::LinkageTypes Linkage,

@@ -421,19 +421,8 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
     if (!session)
         return -1;
 
-    /* Prefer embedded BC set by lr_compat_set_embedded_runtime_bc() --
-       no file I/O, no wrapper extraction, no copy needed. */
-    if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
-        if (lr_session_set_runtime_bc_borrowed(session, g_embedded_runtime_bc,
-                                               g_embedded_runtime_bc_len,
-                                               &rt_err) != 0) {
-            if (rt_err.code == LR_ERR_STATE)
-                return 1;
-            return -1;
-        }
-        return 1;
-    }
-
+    /* Explicit env-var override takes priority over embedded BC so that
+       users (and test harnesses) can swap in a different runtime. */
     if (runtime_bc && runtime_bc[0]) {
         if (read_file_bytes(runtime_bc, &bc_data, &bc_len) != 0)
             return -1;
@@ -451,6 +440,18 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
             return -1;
         }
         free(raw_bc);
+        return 1;
+    }
+
+    /* Fall back to embedded BC (compiled into the binary). */
+    if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
+        if (lr_session_set_runtime_bc_borrowed(session, g_embedded_runtime_bc,
+                                               g_embedded_runtime_bc_len,
+                                               &rt_err) != 0) {
+            if (rt_err.code == LR_ERR_STATE)
+                return 1;
+            return -1;
+        }
         return 1;
     }
 
@@ -2593,7 +2594,12 @@ lr_block_t *lc_value_get_block(lc_value_t *val) {
 
 lr_func_t *lc_value_get_block_func(lc_value_t *val) {
     if (!val || val->kind != LC_VAL_BLOCK) return NULL;
-    return val->block.func;
+    /* Return the live func from the lr_block_t rather than the snapshot
+       stored at value creation time.  The block's func may be updated
+       after creation by lc_block_bind_func (called when CreateBr targets
+       a detached block). */
+    lr_block_t *b = val->block.block;
+    return b ? b->func : val->block.func;
 }
 
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val) {

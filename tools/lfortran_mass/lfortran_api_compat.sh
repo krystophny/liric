@@ -649,7 +649,7 @@ if [[ -z "${LIRIC_RUNTIME_BC:-}" ]]; then
         runtime_bc_out="${output_root}/liric_runtime.bc"
         if [[ -f "$runtime_src" ]]; then
             echo "lfortran_api_compat: pre-building runtime BC with ${runtime_bc_clang}" >&2
-            "$runtime_bc_clang" -O2 -emit-llvm -c "$runtime_src" \
+            "$runtime_bc_clang" -O0 -emit-llvm -c "$runtime_src" \
                 "-I${runtime_include}" -o "$runtime_bc_out"
             export LIRIC_RUNTIME_BC="$runtime_bc_out"
             echo "lfortran_api_compat: LIRIC_RUNTIME_BC=${LIRIC_RUNTIME_BC}" >&2

@@ -579,13 +579,15 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
        - InsertBefore provided -> create detached, then insert before anchor.
        - Parent provided and no InsertBefore -> append to parent immediately. */
     if (!Parent && !InsertBefore) {
-        Function *cur = detail::current_function_ref();
-        lr_func_t *cur_f = cur ? cur->getIRFunc() : nullptr;
-        bv = lc_block_create_detached(mod, cur_f, Name.c_str());
-        if (bv && cur) {
-            fn = cur;
-            detail::register_block_parent(lc_value_get_block(bv), cur);
-        }
+        /* Create truly detached block without eagerly binding a function.
+           In real LLVM, BasicBlock::Create(ctx, name) creates a block with
+           no parent.  We must NOT use current_function_ref() here because
+           it may point to a different function (e.g. the program's main
+           while we are defining an internal/contained function).
+           The correct function will be assigned lazily when the block is
+           actually used: CreateBr calls lc_block_bind_func, and
+           start_new_block calls fn->insert. */
+        bv = lc_block_create_detached(mod, nullptr, Name.c_str());
     } else if (InsertBefore) {
         bv = lc_block_create_detached(mod, f, Name.c_str());
     } else {
