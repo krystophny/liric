@@ -336,9 +336,14 @@ static bool inst_dead_def_eliminable(const lr_inst_t *inst) {
 
     switch (inst->op) {
     case LR_OP_ALLOCA:
-    case LR_OP_LOAD:
     case LR_OP_CALL:
         return false;
+    case LR_OP_LOAD:
+        /* Non-volatile loads are side-effect-free in LLVM's model and
+           can be eliminated when their result is unused.  This matches
+           LLVM's own -O0 behaviour and avoids crashes from dead loads
+           that dereference null-derived GEP addresses. */
+        return true;
     default:
         return true;
     }
@@ -591,7 +596,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
             uint32_t load_count = 0;
 
             if (!b)
-                return -1;
+                continue;
 
             for (lr_inst_t *inst = b->first; inst; ) {
                 lr_inst_t *next = inst->next;
@@ -681,7 +686,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
     for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
         lr_block_t *b = f->block_array[bi];
         if (!b)
-            return -1;
+            continue;
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
             for (uint32_t oi = 0; oi < inst->num_operands; oi++)
                 operand_resolve(repl, nrepl, &inst->operands[oi]);
@@ -695,7 +700,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
         for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
             lr_block_t *b = f->block_array[bi];
             if (!b)
-                return -1;
+                continue;
             for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
                 for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
                     if (inst->operands[oi].kind == LR_VAL_VREG &&
@@ -709,7 +714,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
             lr_block_t *b = f->block_array[bi];
             lr_inst_t *prev = NULL;
             if (!b)
-                return -1;
+                continue;
 
             for (lr_inst_t *inst = b->first; inst; ) {
                 lr_inst_t *next = inst->next;
@@ -753,7 +758,6 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         return 0;
 
     if (!f->block_array) {
-        uint32_t seen = 0;
         f->block_array = lr_arena_array(a, lr_block_t *, f->num_blocks);
         if (!f->block_array)
             return -1;
@@ -761,14 +765,8 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
             if (b->id >= f->num_blocks)
                 return -1;
             f->block_array[b->id] = b;
-            seen++;
         }
-        if (seen != f->num_blocks)
-            return -1;
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
-            if (!f->block_array[bi])
-                return -1;
-        }
+        /* NULL entries are permitted for detached/sparse blocks. */
     }
 
     if (run_func_peephole_passes(f, a) != 0)
@@ -778,7 +776,7 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         lr_block_t *b = f->block_array[bi];
         uint32_t n = 0, j = 0;
         if (!b)
-            return -1;
+            continue;
 
         for (lr_inst_t *inst = b->first; inst; inst = inst->next)
             n++;
@@ -804,8 +802,10 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         uint32_t at = 0;
         uint32_t total = 0;
 
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++)
-            total += f->block_array[bi]->num_insts;
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            if (f->block_array[bi])
+                total += f->block_array[bi]->num_insts;
+        }
 
         f->num_linear_insts = total;
         if (total > 0) {
@@ -817,6 +817,8 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
             lr_block_t *b = f->block_array[bi];
             f->block_inst_offsets[bi] = at;
+            if (!b)
+                continue;
             for (uint32_t ii = 0; ii < b->num_insts; ii++)
                 f->linear_inst_array[at++] = b->inst_array[ii];
         }

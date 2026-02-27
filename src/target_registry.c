@@ -107,7 +107,7 @@ static int replay_phi_copies(const lr_target_t *target, void *compile_ctx,
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
         if (!b)
-            return -1;
+            continue;
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
             if (!inst || inst->op != LR_OP_PHI)
@@ -142,8 +142,8 @@ static bool stream_inst_is_terminator(const lr_inst_t *inst) {
     }
 }
 
-static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
-                                  const lr_func_t *func) {
+int lr_replay_function_stream(const lr_target_t *target, void *compile_ctx,
+                              const lr_func_t *func) {
     uint32_t max_operands = 0;
     uint32_t max_indices = 0;
     lr_operand_desc_t *operands = NULL;
@@ -159,7 +159,7 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
         if (!b)
-            return -1;
+            continue;
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
             if (!inst)
@@ -187,6 +187,8 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
         bool has_terminator = false;
+        if (!b)
+            continue;
         if (target->compile_set_block(compile_ctx, b->id) != 0) {
             free(indices);
             free(operands);
@@ -291,7 +293,7 @@ int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
     if (rc != 0 || !compile_ctx)
         return rc != 0 ? rc : -1;
 
-    rc = replay_function_stream(target, compile_ctx, func);
+    rc = lr_replay_function_stream(target, compile_ctx, func);
     if (rc != 0)
         return rc;
 

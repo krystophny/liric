@@ -106,8 +106,11 @@ typedef struct suspended_compile {
     uint32_t direct_reloc_range_count;
     uint32_t direct_reloc_range_cap;
     bool compile_active;
+    bool compile_deferred;
     bool compile_opened_update;
     uint32_t emitted_count;
+    uint8_t *null_derived;
+    uint32_t null_derived_cap;
 } suspended_compile_t;
 
 struct lr_session {
@@ -129,6 +132,7 @@ struct lr_session {
     void *compile_ctx;
     size_t compile_start;
     bool compile_active;
+    bool compile_deferred;   /* defer backend emission to function end */
     bool direct_llvm_stream;
     bool compile_opened_update;
     uint32_t emitted_count;
@@ -168,6 +172,13 @@ struct lr_session {
     bool runtime_bc_borrowed;  /* true = process-lifetime pointer, skip free */
     bool runtime_bc_registered_with_jit;
     bool runtime_bc_merged_into_main_module;
+
+    /* Bitset tracking vregs known to hold null-derived values (e.g. GEP
+       from null).  Used in the streaming compile path to skip backend
+       emission of loads that would dereference null and crash, matching
+       LLVM's ISel behavior which silently drops dead null loads. */
+    uint8_t *null_derived;
+    uint32_t null_derived_cap;
 };
 
 /* Derive the direct per-function compile buffer capacity from remaining JIT
@@ -250,6 +261,36 @@ static bool opcode_has_dest(lr_opcode_t op, lr_type_t *type) {
     default:
         return true;
     }
+}
+
+static void null_derived_mark(struct lr_session *s, uint32_t vreg) {
+    if (vreg == 0 || vreg == UINT32_MAX)
+        return;
+    if (vreg >= s->null_derived_cap) {
+        uint32_t new_cap = (vreg + 64u) & ~63u;
+        uint8_t *p = (uint8_t *)realloc(s->null_derived, new_cap);
+        if (!p)
+            return;
+        memset(p + s->null_derived_cap, 0, new_cap - s->null_derived_cap);
+        s->null_derived = p;
+        s->null_derived_cap = new_cap;
+    }
+    s->null_derived[vreg] = 1;
+}
+
+static bool null_derived_check(const struct lr_session *s, uint32_t vreg) {
+    if (!s->null_derived || vreg >= s->null_derived_cap)
+        return false;
+    return s->null_derived[vreg] != 0;
+}
+
+static bool operand_is_null_derived(const struct lr_session *s,
+                                     const lr_operand_desc_t *op) {
+    if (op->kind == LR_OP_KIND_NULL)
+        return true;
+    if (op->kind == LR_OP_KIND_VREG)
+        return null_derived_check(s, op->vreg);
+    return false;
 }
 
 static lr_operand_t operand_desc_to_operand(const lr_operand_desc_t *d) {
@@ -732,9 +773,6 @@ static void try_patch_pending_direct_relocs(struct lr_session *s) {
 }
 
 static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
-    lr_compile_func_meta_t meta;
-    int rc;
-
     if (!s || !s->cur_func)
         return 0;
 
@@ -774,17 +812,6 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
     s->direct_reloc_active_start = s->direct_obj_ctx.num_relocs;
     s->direct_reloc_active = true;
 
-    memset(&meta, 0, sizeof(meta));
-    meta.func = s->cur_func;
-    meta.ret_type = s->cur_func->ret_type;
-    meta.param_types = s->cur_func->param_types;
-    meta.num_params = s->cur_func->num_params;
-    meta.vararg = s->cur_func->vararg;
-    meta.num_blocks = s->block_count;
-    meta.next_vreg = s->cur_func->next_vreg;
-    meta.mode = s->jit->mode;
-    meta.jit = s->jit;
-
     /* Allocate (or grow) the per-function temp buffer from available JIT
        code capacity so large functions do not hit fixed-size temp limits. */
     {
@@ -823,36 +850,12 @@ static int begin_direct_compile(struct lr_session *s, session_error_t *err) {
         }
     }
 
-    /* Transition JIT buffer to writable before compile_begin, which
-       emits the prologue immediately in the streaming backend. */
-    s->compile_opened_update = false;
-    if (!s->jit->update_active) {
-        lr_jit_begin_update(s->jit);
-        s->compile_opened_update = s->jit->update_active;
-    }
-    if (!s->jit->update_active) {
-        err_set(err, S_ERR_BACKEND, "jit update transition failed");
-        s->module->obj_ctx = NULL;
-        return -1;
-    }
-
-    rc = s->jit->target->compile_begin(
-        &s->compile_ctx, &meta, s->module,
-        s->func_compile_buf,
-        s->func_compile_buf_cap,
-        s->jit->arena
-    );
-    if (rc != 0 || !s->compile_ctx) {
-        err_set(err, S_ERR_BACKEND, "backend compile begin failed");
-        s->compile_ctx = NULL;
-        s->module->obj_ctx = NULL;
-        if (s->compile_opened_update && s->jit->update_active)
-            lr_jit_end_update(s->jit);
-        s->compile_opened_update = false;
-        return -1;
-    }
-
+    /* Defer backend emission to function end where lr_func_finalize (DCE)
+       runs first, matching LLVM's behavior of never generating machine code
+       for dead instructions (e.g. loads from null-derived pointers). */
     s->compile_active = true;
+    s->compile_deferred = true;
+    s->compile_opened_update = false;
     return 0;
 }
 
@@ -1203,7 +1206,11 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
     int rc;
     bool should_close_update;
 
-    if (!s || !s->cur_func || !s->jit || !s->compile_active || !s->compile_ctx) {
+    if (!s || !s->cur_func || !s->jit || !s->compile_active) {
+        err_set(err, S_ERR_STATE, "no active direct compile context");
+        return -1;
+    }
+    if (!s->compile_deferred && !s->compile_ctx) {
         err_set(err, S_ERR_STATE, "no active direct compile context");
         return -1;
     }
@@ -1229,6 +1236,58 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         if (should_close_update && s->jit->update_active)
             lr_jit_end_update(s->jit);
         return -1;
+    }
+
+    /* Deferred compilation: finalize IR (runs DCE to eliminate dead
+       instructions like loads from null-derived pointers), then replay
+       finalized IR through the backend. This matches LLVM's ISel behavior
+       of never generating machine code for unused instruction results. */
+    if (s->compile_deferred) {
+        lr_compile_func_meta_t meta;
+        lr_arena_t *arena = s->module->arena;
+
+        if (lr_func_finalize(s->cur_func, arena) != 0) {
+            err_set(err, S_ERR_BACKEND, "function finalization failed");
+            s->module->obj_ctx = NULL;
+            if (should_close_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
+            return -1;
+        }
+
+        memset(&meta, 0, sizeof(meta));
+        meta.func = s->cur_func;
+        meta.ret_type = s->cur_func->ret_type;
+        meta.param_types = s->cur_func->param_types;
+        meta.num_params = s->cur_func->num_params;
+        meta.vararg = s->cur_func->vararg;
+        meta.num_blocks = s->cur_func->num_blocks;
+        meta.next_vreg = s->cur_func->next_vreg;
+        meta.mode = s->jit->mode;
+        meta.jit = s->jit;
+
+        rc = s->jit->target->compile_begin(
+            &s->compile_ctx, &meta, s->module,
+            s->func_compile_buf, s->func_compile_buf_cap,
+            arena);
+        if (rc != 0 || !s->compile_ctx) {
+            err_set(err, S_ERR_BACKEND, "deferred compile_begin failed");
+            s->module->obj_ctx = NULL;
+            if (should_close_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
+            return -1;
+        }
+
+        rc = lr_replay_function_stream(s->jit->target, s->compile_ctx,
+                                        s->cur_func);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "deferred replay failed");
+            s->module->obj_ctx = NULL;
+            if (should_close_update && s->jit->update_active)
+                lr_jit_end_update(s->jit);
+            return -1;
+        }
+
+        s->compile_deferred = false;
     }
 
     rc = s->jit->target->compile_end(s->compile_ctx, &code_len);
@@ -1530,11 +1589,14 @@ static void finish_function_state(struct lr_session *s) {
     s->compile_ctx = NULL;
     s->compile_start = 0;
     s->compile_active = false;
+    s->compile_deferred = false;
     s->direct_llvm_stream = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
     s->direct_reloc_range_count = 0;
     s->direct_reloc_active = false;
+    if (s->null_derived)
+        memset(s->null_derived, 0, s->null_derived_cap);
 }
 
 /* ---- Suspend / resume for interleaved function generation -------------- */
@@ -1583,8 +1645,11 @@ int lr_session_suspend_func(struct lr_session *s) {
     slot->direct_reloc_range_count = s->direct_reloc_range_count;
     slot->direct_reloc_range_cap = s->direct_reloc_range_cap;
     slot->compile_active = s->compile_active;
+    slot->compile_deferred = s->compile_deferred;
     slot->compile_opened_update = s->compile_opened_update;
     slot->emitted_count = s->emitted_count;
+    slot->null_derived = s->null_derived;
+    slot->null_derived_cap = s->null_derived_cap;
 
     /* Move the per-function temp buffer ownership to the suspended slot.
        A new buffer will be allocated when the next function begins. */
@@ -1613,8 +1678,11 @@ int lr_session_suspend_func(struct lr_session *s) {
     s->compile_ctx = NULL;
     s->compile_start = 0;
     s->compile_active = false;
+    s->compile_deferred = false;
     s->compile_opened_update = false;
     s->emitted_count = 0;
+    s->null_derived = NULL;
+    s->null_derived_cap = 0;
     s->direct_reloc_ranges = NULL;
     s->direct_reloc_range_count = 0;
     s->direct_reloc_range_cap = 0;
@@ -1641,6 +1709,7 @@ int lr_session_resume_func(struct lr_session *s, uint32_t suspended_idx) {
     free(s->block_terminated);
     free(s->phi_copies);
     free(s->direct_reloc_ranges);
+    free(s->null_derived);
 
     /* Restore all compile state from the suspended slot */
     s->cur_func = slot->func;
@@ -1659,8 +1728,11 @@ int lr_session_resume_func(struct lr_session *s, uint32_t suspended_idx) {
     s->direct_reloc_range_count = slot->direct_reloc_range_count;
     s->direct_reloc_range_cap = slot->direct_reloc_range_cap;
     s->compile_active = slot->compile_active;
+    s->compile_deferred = slot->compile_deferred;
     s->compile_opened_update = slot->compile_opened_update;
     s->emitted_count = slot->emitted_count;
+    s->null_derived = slot->null_derived;
+    s->null_derived_cap = slot->null_derived_cap;
     s->direct_reloc_active_start = s->direct_obj_ctx_active ?
         s->direct_obj_ctx.num_relocs : s->direct_reloc_base;
     s->direct_reloc_active = true;
@@ -1670,9 +1742,10 @@ int lr_session_resume_func(struct lr_session *s, uint32_t suspended_idx) {
     s->func_compile_buf = slot->func_buf;
     s->func_compile_buf_cap = slot->func_buf_cap;
 
-    /* Re-open JIT update for the resumed compile context */
+    /* Re-open JIT update for the resumed compile context.
+       In deferred mode, JIT update is opened later at compile time. */
     if (s->compile_active && s->jit) {
-        if (!s->jit->update_active) {
+        if (!s->compile_deferred && !s->jit->update_active) {
             lr_jit_begin_update(s->jit);
             s->compile_opened_update = s->jit->update_active;
         }
@@ -1716,6 +1789,7 @@ static void free_suspended_list(struct lr_session *s) {
         free(s->suspended[i].phi_copies);
         free(s->suspended[i].direct_reloc_ranges);
         free(s->suspended[i].func_buf);
+        free(s->suspended[i].null_derived);
     }
     free(s->suspended);
     s->suspended = NULL;
@@ -1964,6 +2038,7 @@ void lr_session_destroy(struct lr_session *s) {
     free(s->block_terminated);
     free(s->block_seen);
     free(s->blocks);
+    free(s->null_derived);
     if (!s->runtime_bc_borrowed)
         free(s->runtime_bc_data);
     free(s);
@@ -2350,7 +2425,8 @@ int lr_session_add_phi_copy(struct lr_session *s, uint32_t pred_block_id,
         return -1;
     if (append_phi_copy(s, pred_block_id, copy, err) != 0)
         return -1;
-    if (s->compile_active && s->compile_ctx && s->jit &&
+    if (s->compile_active && !s->compile_deferred &&
+        s->compile_ctx && s->jit &&
         s->jit->target && s->jit->target->compile_add_phi_copy) {
         if (s->jit->target->compile_add_phi_copy(
                 s->compile_ctx, pred_block_id, succ_block_id,
@@ -2424,7 +2500,7 @@ int lr_session_set_block(struct lr_session *s, uint32_t block_id,
     if (ensure_block(s, block_id, err) != 0)
         return -1;
     s->cur_block = s->blocks[block_id];
-    if (s->compile_active) {
+    if (s->compile_active && !s->compile_deferred) {
         if (!s->compile_ctx || !s->jit->target ||
             !s->jit->target->compile_set_block ||
             s->jit->target->compile_set_block(s->compile_ctx, block_id) != 0) {
@@ -2450,7 +2526,7 @@ int lr_session_adopt_block(struct lr_session *s, uint32_t block_id,
         s->block_count = block_id + 1u;
     s->blocks[block_id] = block;
     s->cur_block = block;
-    if (s->compile_active) {
+    if (s->compile_active && !s->compile_deferred) {
         if (!s->compile_ctx || !s->jit->target ||
             !s->jit->target->compile_set_block ||
             s->jit->target->compile_set_block(s->compile_ctx, block_id) != 0) {
@@ -2587,30 +2663,53 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
         }
     }
 
-    if (s->compile_active) {
+    if (s->compile_active && !s->compile_deferred) {
+        bool skip_backend = false;
+
         if (!s->compile_ctx || !s->jit->target || !s->jit->target->compile_emit) {
             err_set(err, S_ERR_STATE, "no active direct compile context");
             free(resolved_call_ops);
             return 0;
         }
-        memset(&compile_desc, 0, sizeof(compile_desc));
-        compile_desc.op = normalized.op;
-        compile_desc.type = normalized.type;
-        compile_desc.dest = normalized.dest;
-        compile_desc.operands = normalized.operands;
-        compile_desc.num_operands = normalized.num_operands;
-        compile_desc.indices = normalized.indices;
-        compile_desc.num_indices = normalized.num_indices;
-        compile_desc.icmp_pred = normalized.icmp_pred;
-        compile_desc.fcmp_pred = normalized.fcmp_pred;
-        compile_desc.call_external_abi = normalized.call_external_abi;
-        compile_desc.call_vararg = normalized.call_vararg;
-        compile_desc.call_fixed_args = normalized.call_fixed_args;
-        if (s->jit->target->compile_emit(s->compile_ctx, &compile_desc) != 0) {
-            err_set(err, S_ERR_BACKEND, "backend emit failed for op %d",
-                    (int)normalized.op);
-            free(resolved_call_ops);
-            return 0;
+
+        /* Track null-derived vregs so we can skip loads that would
+           dereference null and crash.  LLVM's ISel silently drops such
+           dead loads; the streaming path must do the same. */
+        if (normalized.op == LR_OP_GEP &&
+            normalized.num_operands >= 1 &&
+            operand_is_null_derived(s, &normalized.operands[0]))
+            null_derived_mark(s, dest);
+        else if ((normalized.op == LR_OP_BITCAST ||
+                  normalized.op == LR_OP_INTTOPTR) &&
+                 normalized.num_operands >= 1 &&
+                 operand_is_null_derived(s, &normalized.operands[0]))
+            null_derived_mark(s, dest);
+        else if (normalized.op == LR_OP_LOAD &&
+                 normalized.num_operands >= 1 &&
+                 operand_is_null_derived(s, &normalized.operands[0]))
+            skip_backend = true;
+
+        if (!skip_backend) {
+            memset(&compile_desc, 0, sizeof(compile_desc));
+            compile_desc.op = normalized.op;
+            compile_desc.type = normalized.type;
+            compile_desc.dest = normalized.dest;
+            compile_desc.operands = normalized.operands;
+            compile_desc.num_operands = normalized.num_operands;
+            compile_desc.indices = normalized.indices;
+            compile_desc.num_indices = normalized.num_indices;
+            compile_desc.icmp_pred = normalized.icmp_pred;
+            compile_desc.fcmp_pred = normalized.fcmp_pred;
+            compile_desc.call_external_abi = normalized.call_external_abi;
+            compile_desc.call_vararg = normalized.call_vararg;
+            compile_desc.call_fixed_args = normalized.call_fixed_args;
+            if (s->jit->target->compile_emit(s->compile_ctx,
+                                              &compile_desc) != 0) {
+                err_set(err, S_ERR_BACKEND, "backend emit failed for op %d",
+                        (int)normalized.op);
+                free(resolved_call_ops);
+                return 0;
+            }
         }
         /* Extract phi copies from PHI operand pairs and forward to backend. */
         if (normalized.op == LR_OP_PHI &&
@@ -2639,6 +2738,9 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             return 0;
         }
     } else {
+        /* IR-only emit: covers both deferred DIRECT mode and IR mode.
+           In deferred DIRECT, lr_func_finalize (DCE) runs at function end
+           before backend compilation, matching LLVM's ISel behavior. */
         if (emit_ir_instruction(s, &normalized, err, NULL) != 0) {
             free(resolved_call_ops);
             return 0;

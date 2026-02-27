@@ -87,4 +87,10 @@ int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
                       uint8_t *buf, size_t buflen, size_t *out_len,
                       lr_arena_t *arena);
 
+/* Replay a finalized function's IR through compile_set_block / compile_emit.
+   Used by deferred compilation where IR is accumulated during streaming and
+   compiled after lr_func_finalize (DCE) at function end. */
+int lr_replay_function_stream(const lr_target_t *target, void *compile_ctx,
+                              const lr_func_t *func);
+
 #endif
