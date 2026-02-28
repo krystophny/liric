@@ -118,12 +118,11 @@ run_with_itest_guards() {
     fi
 
     if [[ -n "$itest_memory_max" ]]; then
-        if command -v systemd-run >/dev/null 2>&1; then
+        if command -v systemd-run >/dev/null 2>&1 \
+            && systemd-run --user --scope --quiet true >/dev/null 2>&1; then
             cmd+=(systemd-run --user --scope --quiet
                   -p "MemoryMax=${itest_memory_max}"
                   -p "TasksMax=${itest_tasks_max}")
-        else
-            echo "WARN: systemd-run unavailable; integration memory cap disabled" >&2
         fi
     fi
 
@@ -137,13 +136,14 @@ run_with_itest_guards() {
     if [[ "$itest_timeout_sec" -gt 0 ]]; then
         if [[ -n "$timeout_cmd" ]]; then
             cmd+=("$timeout_cmd" --signal=TERM --kill-after=15s "${itest_timeout_sec}s")
-        elif [[ "$timeout_warned" != "yes" ]]; then
-            echo "WARN: timeout command unavailable; integration suite timeout disabled" >&2
-            timeout_warned="yes"
         fi
     fi
 
-    run_in_selected_env "${cmd[@]}" "$@"
+    if (( ${#cmd[@]} > 0 )); then
+        run_in_selected_env "${cmd[@]}" "$@"
+    else
+        run_in_selected_env "$@"
+    fi
 }
 
 require_tool_for_integration() {
@@ -358,7 +358,6 @@ safe_itests="yes"
 itest_pgroup_isolation="none"
 setsid_wait_flag=""
 timeout_cmd=""
-timeout_warned="no"
 env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
 env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
@@ -507,17 +506,11 @@ need_cmd cmake
 need_cmd ctest
 if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" && "$itest_timeout_sec" -gt 0 ]]; then
     timeout_cmd="$(detect_timeout_cmd)"
-    if [[ -z "$timeout_cmd" ]]; then
-        echo "WARN: timeout command unavailable; integration suite timeout disabled" >&2
-        timeout_warned="yes"
-    fi
 fi
 if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" ]]; then
     if command -v setsid >/dev/null 2>&1; then
         itest_pgroup_isolation="setsid"
         setsid_wait_flag="$(detect_setsid_wait_flag)"
-    else
-        echo "WARN: setsid unavailable; integration process-group isolation disabled" >&2
     fi
 fi
 
