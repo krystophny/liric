@@ -46,13 +46,25 @@ jobs:
       - name: Run bench_matrix llvm API lanes
         shell: bash -e -l {0}
         run: |
+          rm -rf /tmp/liric_bench_llvm_api
           ./build/bench_matrix \
             --bench-dir /tmp/liric_bench_llvm_api \
             --modes llvm \
             --policies direct,ir \
             --lanes api_full_llvm,api_backend_llvm \
             --api-cases 10 \
-            --timeout 15
+            --timeout 15 || {
+              rc=$?
+              if [[ -f /tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
+                echo "matrix_failures.jsonl:"
+                cat /tmp/liric_bench_llvm_api/matrix_failures.jsonl
+              fi
+              if [[ -f /tmp/liric_bench_llvm_api/matrix_summary.json ]]; then
+                echo "matrix_summary.json:"
+                cat /tmp/liric_bench_llvm_api/matrix_summary.json
+              fi
+              exit "${rc}"
+            }
 
       - name: Assert summary
         shell: bash -e -l {0}
