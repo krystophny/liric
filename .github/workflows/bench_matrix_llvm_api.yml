@@ -53,7 +53,8 @@ jobs:
             --policies direct,ir \
             --lanes api_full_llvm,api_backend_llvm \
             --api-cases 10 \
-            --timeout 15 || {
+            --timeout 15 \
+            --timeout-ms 15000 || {
               rc=$?
               if [[ -f /tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
                 echo "matrix_failures.jsonl:"
