@@ -559,6 +559,18 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         f = fn->getIRFunc();
     }
 
+    if (!fn && !Parent && !InsertBefore) {
+        /* Keep LLVM-compat implicit owner behavior: a detached block created
+           without Parent/InsertBefore inherits the current function context
+           when one is active, but remains detached from the block list. */
+        Function *implicit_fn = detail::current_function_ref();
+        if (implicit_fn) {
+            fn = implicit_fn;
+            mod = fn->getCompatMod();
+            f = fn->getIRFunc();
+        }
+    }
+
     if (!mod)
         mod = Module::getCurrentModule();
 
@@ -579,15 +591,7 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
        - InsertBefore provided -> create detached, then insert before anchor.
        - Parent provided and no InsertBefore -> append to parent immediately. */
     if (!Parent && !InsertBefore) {
-        /* Create truly detached block without eagerly binding a function.
-           In real LLVM, BasicBlock::Create(ctx, name) creates a block with
-           no parent.  We must NOT use current_function_ref() here because
-           it may point to a different function (e.g. the program's main
-           while we are defining an internal/contained function).
-           The correct function will be assigned lazily when the block is
-           actually used: CreateBr calls lc_block_bind_func, and
-           start_new_block calls fn->insert. */
-        bv = lc_block_create_detached(mod, nullptr, Name.c_str());
+        bv = lc_block_create_detached(mod, f, Name.c_str());
     } else if (InsertBefore) {
         bv = lc_block_create_detached(mod, f, Name.c_str());
     } else {
@@ -596,7 +600,7 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     if (!bv) return BasicBlock::wrap(nullptr);
 
     BasicBlock *bb = BasicBlock::wrap(bv);
-    if (fn && (Parent || InsertBefore)) {
+    if (fn && f) {
         detail::register_block_parent(lc_value_get_block(bv), fn);
     }
     if (InsertBefore && fn) {

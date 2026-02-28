@@ -77,6 +77,16 @@ detect_setsid_wait_flag() {
     fi
 }
 
+detect_timeout_cmd() {
+    if command -v timeout >/dev/null 2>&1; then
+        printf '%s\n' "timeout"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        printf '%s\n' "gtimeout"
+    else
+        printf '%s\n' ""
+    fi
+}
+
 run_in_selected_env() {
     if [[ -n "$env_name" ]]; then
         local extra_args=()
@@ -125,7 +135,12 @@ run_with_itest_guards() {
     fi
 
     if [[ "$itest_timeout_sec" -gt 0 ]]; then
-        cmd+=(timeout --signal=TERM --kill-after=15s "${itest_timeout_sec}s")
+        if [[ -n "$timeout_cmd" ]]; then
+            cmd+=("$timeout_cmd" --signal=TERM --kill-after=15s "${itest_timeout_sec}s")
+        elif [[ "$timeout_warned" != "yes" ]]; then
+            echo "WARN: timeout command unavailable; integration suite timeout disabled" >&2
+            timeout_warned="yes"
+        fi
     fi
 
     run_in_selected_env "${cmd[@]}" "$@"
@@ -342,6 +357,8 @@ itest_tasks_max="${LIRIC_LFORTRAN_ITEST_TASKS_MAX:-512}"
 safe_itests="yes"
 itest_pgroup_isolation="none"
 setsid_wait_flag=""
+timeout_cmd=""
+timeout_warned="no"
 env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
 env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
@@ -489,7 +506,11 @@ need_cmd git
 need_cmd cmake
 need_cmd ctest
 if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" && "$itest_timeout_sec" -gt 0 ]]; then
-    need_cmd timeout
+    timeout_cmd="$(detect_timeout_cmd)"
+    if [[ -z "$timeout_cmd" ]]; then
+        echo "WARN: timeout command unavailable; integration suite timeout disabled" >&2
+        timeout_warned="yes"
+    fi
 fi
 if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" ]]; then
     if command -v setsid >/dev/null 2>&1; then

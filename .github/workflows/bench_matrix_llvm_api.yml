@@ -37,6 +37,7 @@ jobs:
           fi
           cmake -S . -B build -G Ninja \
             -DWITH_REAL_LLVM_BACKEND=ON \
+            -DLIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=ON \
             -DWITH_BENCH_TCC=OFF \
             -DWITH_BENCH_LLI_PHASES=OFF \
             -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
