@@ -366,6 +366,18 @@ static const char *session_blob_entry_symbol(const struct lr_session *s,
     return first ? first : (fallback ? fallback : "_start");
 }
 
+/* For no-link executable emission, prefer dynamic runtime imports when
+ * an explicit runtime shared library is configured. This avoids merging
+ * runtime IR/BC into the client module and keeps runtime behavior aligned
+ * with the shared runtime used by downstream integration tests. */
+static bool session_emit_prefers_runtime_lib(void) {
+    const char *force_merge = getenv("LIRIC_FORCE_RUNTIME_MERGE");
+    const char *runtime_lib = getenv("LIRIC_RUNTIME_LIB");
+    if (force_merge && force_merge[0] && strcmp(force_merge, "0") != 0)
+        return false;
+    return runtime_lib && runtime_lib[0];
+}
+
 static int merge_runtime_bc_into_module(struct lr_session *s, lr_module_t *m,
                                         bool *merged_flag,
                                         session_error_t *err) {
@@ -3057,13 +3069,14 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
     char backend_err[256] = {0};
     const char *entry = NULL;
+    bool prefer_runtime_lib = session_emit_prefers_runtime_lib();
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
-    if (s->runtime_bc_data && s->runtime_bc_len > 0) {
+    if (!prefer_runtime_lib && s->runtime_bc_data && s->runtime_bc_len > 0) {
         if (merge_runtime_bc_into_module(s, s->module,
                                          &s->runtime_bc_merged_into_main_module,
                                          err) != 0)
@@ -3111,11 +3124,15 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
     char backend_err[256] = {0};
     bool has_runtime_bc;
     const char *entry = NULL;
+    bool prefer_runtime_lib = session_emit_prefers_runtime_lib();
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
         return -1;
+    }
+    if (prefer_runtime_lib) {
+        return lr_session_emit_exe(s, path, err);
     }
     has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
     if (has_runtime_bc) {
