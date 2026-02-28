@@ -516,15 +516,21 @@ if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
         ${CMAKE_COMMAND} -E rm -rf ${LIRIC_LFORTRAN_BUILD_LIRIC})
 endif()
 
-# When LLVM backend is enabled but the compat build should not link LLVM,
-# pass the nollvm library so lfortran links stub versions of LLVM backend
-# functions instead of real LLVM C API calls.
+# Always pass an explicit liric archive into WITH_LIRIC builds so lfortran does
+# not resolve to an unintended default archive. When real LLVM linkage is
+# disabled for WITH_LIRIC, wire the nollvm archive instead.
 set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS "")
 set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS "")
-if(WITH_REAL_LLVM_BACKEND AND NOT LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
-    set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
-        -DLIRIC_LIB=$<TARGET_FILE:liric_nollvm>)
-    set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric_nollvm)
+if(WITH_REAL_LLVM_BACKEND)
+    if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+            -DLIRIC_LIB=$<TARGET_FILE:liric>)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
+    else()
+        set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+            -DLIRIC_LIB=$<TARGET_FILE:liric_nollvm>)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric_nollvm)
+    endif()
 endif()
 
 add_custom_target(
