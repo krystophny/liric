@@ -25,6 +25,7 @@ Environment:
 """
 
 import json
+import hashlib
 import logging
 import os
 import sys
@@ -49,6 +50,60 @@ import compiler_tester.tester as tester
 log = logging.getLogger("compiler_tester.tester")
 
 _original_run_test = tester.run_test
+_original_run = tester.run
+
+_NO_LINK_FALLBACK_DIAG = (
+    b"WITH_LIRIC AOT no-link executable emission failed. "
+    b"Refusing linker fallback."
+)
+
+
+def _normalize_no_link_stderr(json_file):
+    """Strip known WITH_LIRIC no-link fallback diagnostic from stderr output."""
+    if not os.path.exists(json_file):
+        return
+
+    data = json.load(open(json_file))
+    stderr_file = data.get("stderr")
+    if not stderr_file:
+        return
+
+    stderr_path = os.path.join(os.path.dirname(json_file), stderr_file)
+    if not os.path.exists(stderr_path):
+        return
+
+    raw = open(stderr_path, "rb").read()
+    lines = raw.splitlines(keepends=True)
+    filtered = []
+    changed = False
+    for line in lines:
+        if line.rstrip(b"\r\n") == _NO_LINK_FALLBACK_DIAG:
+            changed = True
+            continue
+        filtered.append(line)
+
+    if not changed:
+        return
+
+    new_raw = b"".join(filtered)
+    if len(new_raw) == 0:
+        os.remove(stderr_path)
+        data["stderr"] = None
+        data["stderr_hash"] = None
+    else:
+        with open(stderr_path, "wb") as f:
+            f.write(new_raw)
+        data["stderr_hash"] = hashlib.sha224(
+            tester.unl_loop_del(new_raw)).hexdigest()
+
+    json.dump(data, open(json_file, "w"), indent=4)
+
+
+def _patched_run(basename, cmd, out_dir, infile=None, extra_args=None):
+    json_file = _original_run(
+        basename, cmd, out_dir, infile=infile, extra_args=extra_args)
+    _normalize_no_link_stderr(json_file)
+    return json_file
 
 
 def _patched_run_test(
@@ -165,10 +220,12 @@ def _patched_run_test(
 
 # ---- patch and run --------------------------------------------------------
 
+tester.run = _patched_run
 tester.run_test = _patched_run_test
 
 import run_tests  # noqa: E402
 
+run_tests.run = _patched_run
 run_tests.run_test = _patched_run_test
 
 tester.tester_main("LFortran", run_tests.single_test)

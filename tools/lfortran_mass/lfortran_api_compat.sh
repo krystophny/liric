@@ -65,6 +65,18 @@ find_env_runner() {
     fi
 }
 
+detect_setsid_wait_flag() {
+    if ! command -v setsid >/dev/null 2>&1; then
+        printf '%s\n' ""
+        return 0
+    fi
+    if setsid --help 2>&1 | grep -q -- '--wait'; then
+        printf '%s\n' "--wait"
+    else
+        printf '%s\n' ""
+    fi
+}
+
 run_in_selected_env() {
     if [[ -n "$env_name" ]]; then
         local extra_args=()
@@ -74,6 +86,13 @@ run_in_selected_env() {
         "$env_runner" run "${extra_args[@]}" -n "$env_name" "$@"
     else
         "$@"
+    fi
+}
+
+clean_mod_artifacts() {
+    local dir="$1"
+    if [[ -d "$dir" ]]; then
+        find "$dir" -maxdepth 1 -type f \( -name '*.mod' -o -name '*.smod' \) -delete
     fi
 }
 
@@ -95,6 +114,13 @@ run_with_itest_guards() {
                   -p "TasksMax=${itest_tasks_max}")
         else
             echo "WARN: systemd-run unavailable; integration memory cap disabled" >&2
+        fi
+    fi
+
+    if [[ "$itest_pgroup_isolation" == "setsid" ]]; then
+        cmd+=(setsid)
+        if [[ -n "$setsid_wait_flag" ]]; then
+            cmd+=("$setsid_wait_flag")
         fi
     fi
 
@@ -314,6 +340,8 @@ itest_timeout_sec="${LIRIC_LFORTRAN_ITEST_TIMEOUT_SEC:-900}"
 itest_memory_max="${LIRIC_LFORTRAN_ITEST_MEMORY_MAX:-8G}"
 itest_tasks_max="${LIRIC_LFORTRAN_ITEST_TASKS_MAX:-512}"
 safe_itests="yes"
+itest_pgroup_isolation="none"
+setsid_wait_flag=""
 env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
 env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
@@ -321,6 +349,8 @@ itest_args=""
 skip_lfortran_build="no"
 skip_checkout="no"
 fresh_workspace="no"
+lfortran_with_runtime_stacktrace="${LIRIC_LFORTRAN_WITH_RUNTIME_STACKTRACE:-OFF}"
+lfortran_ctest_exclude="${LIRIC_LFORTRAN_CTEST_EXCLUDE:-^test_lfortran$}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -461,6 +491,14 @@ need_cmd ctest
 if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" && "$itest_timeout_sec" -gt 0 ]]; then
     need_cmd timeout
 fi
+if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" ]]; then
+    if command -v setsid >/dev/null 2>&1; then
+        itest_pgroup_isolation="setsid"
+        setsid_wait_flag="$(detect_setsid_wait_flag)"
+    else
+        echo "WARN: setsid unavailable; integration process-group isolation disabled" >&2
+    fi
+fi
 
 if [[ -n "$env_name" ]]; then
     if [[ -z "$env_runner" ]]; then
@@ -587,7 +625,7 @@ if [[ "$skip_lfortran_build" != "yes" ]]; then
         "${lf_compiler_flags[@]}" \
         -DWITH_LIRIC=yes \
         -DLIRIC_DIR="$liric_root" \
-        -DWITH_RUNTIME_STACKTRACE=yes \
+        -DWITH_RUNTIME_STACKTRACE="$lfortran_with_runtime_stacktrace" \
         -DWITH_LLVM=OFF \
         2>&1 | tee "${log_root}/build_lfortran_liric_configure.log"
     cmake --build "$lfortran_build_liric" -j"$workers" \
@@ -673,13 +711,26 @@ if [[ "$run_itests" == "yes" ]]; then
     fi
 fi
 
-ctest --test-dir "$lfortran_build_liric" --output-on-failure \
-    2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+# test_lfortran exercises JIT-only multi-module flows that are out of scope
+# for the current WITH_LIRIC AOT compatibility lane.
+if [[ -n "$lfortran_ctest_exclude" ]]; then
+    echo "lfortran_api_compat: excluding unit ctest pattern: ${lfortran_ctest_exclude}" >&2
+    ctest --test-dir "$lfortran_build_liric" --output-on-failure \
+        -E "$lfortran_ctest_exclude" \
+        2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+else
+    ctest --test-dir "$lfortran_build_liric" --output-on-failure \
+        2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+fi
 
 if [[ "$run_ref_tests" == "yes" ]]; then
     liric_ref_wrapper="${liric_root}/tools/lfortran_ref_test_liric.py"
     (
         cd "$lfortran_dir"
+        # Remove stale mixed-version module artifacts that can poison
+        # separate-compilation reference cases (for example submodule_04).
+        clean_mod_artifacts "$lfortran_dir"
+        clean_mod_artifacts "$lfortran_dir/integration_tests"
         if [[ -z "${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS:-}" ]]; then
             export LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS="1"
             echo "lfortran_api_compat: applying WITH_LIRIC reference policy: LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS=${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS}" >&2
@@ -700,6 +751,7 @@ fi
 if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
+        clean_mod_artifacts "$PWD"
         unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
@@ -710,7 +762,7 @@ if [[ "$run_itests" == "yes" ]]; then
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
-        echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max}" >&2
+        echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
         itest_extra=()
         if [[ -n "$itest_args" ]]; then
             # shellcheck disable=SC2206
@@ -725,6 +777,7 @@ if [[ "$run_itests" == "yes" ]]; then
 
     (
         cd "$lfortran_dir/integration_tests"
+        clean_mod_artifacts "$PWD"
         unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
