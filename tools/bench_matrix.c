@@ -1404,6 +1404,27 @@ static void run_api_provider(const cfg_t *cfg,
     cmd[n++] = NULL;
 
     if (run_cmd_with_mode(mode, cmd, &r) != 0 || r.rc != 0) {
+        fprintf(stderr,
+                "[matrix] bench_api failed (mode=%s policy=%s rc=%d)\n",
+                mode ? mode : "",
+                policy ? policy : "",
+                r.rc);
+        if (r.stderr_text && r.stderr_text[0]) {
+            fprintf(stderr, "[matrix] bench_api stderr:\n%s\n", r.stderr_text);
+        }
+        if (r.stdout_text && r.stdout_text[0]) {
+            fprintf(stderr, "[matrix] bench_api stdout:\n%s\n", r.stdout_text);
+        }
+        if (p->summary_path && file_exists(p->summary_path)) {
+            char *summary_json = bench_read_all_file(p->summary_path);
+            if (summary_json && summary_json[0]) {
+                fprintf(stderr,
+                        "[matrix] bench_api summary (%s):\n%s\n",
+                        p->summary_path,
+                        summary_json);
+            }
+            free(summary_json);
+        }
         strcpy(p->fail_reason, "bench_api_failed");
         p->rc = r.rc;
         free(api_dir);
