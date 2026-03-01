@@ -251,6 +251,7 @@ int test_builder_compat_direct_sparse_block_ids_finalize(void);
 int test_builder_compat_direct_multi_suspend_reloc_ranges(void);
 int test_builder_compat_add_to_jit_null_args(void);
 int test_builder_compat_memory_and_call_path(void);
+int test_builder_compat_scalar_gep_undef_tail_trimmed(void);
 int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void);
 int test_builder_compat_direct_llvm_phi_incoming_sync(void);
 int test_builder_compat_emit_object_to_file(void);
@@ -583,6 +584,7 @@ int main(void) {
     RUN_TEST(test_builder_compat_direct_multi_suspend_reloc_ranges);
     RUN_TEST(test_builder_compat_add_to_jit_null_args);
     RUN_TEST(test_builder_compat_memory_and_call_path);
+    RUN_TEST(test_builder_compat_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_builder_compat_phi_finalize_add_incoming_after_finalize_noop);
     RUN_TEST(test_builder_compat_direct_llvm_phi_incoming_sync);
     RUN_TEST(test_builder_compat_emit_object_to_file);

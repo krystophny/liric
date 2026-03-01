@@ -409,6 +409,145 @@ int test_builder_compat_memory_and_call_path(void) {
     return 0;
 }
 
+int test_builder_compat_scalar_gep_undef_tail_trimmed(void) {
+#if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
+    return 0;
+#else
+    int result = 1;
+    const char *obj_path = "/tmp/liric_test_compat_scalar_gep_trim.o";
+    const char *old_policy = getenv("LIRIC_POLICY");
+    const char *old_mode = getenv("LIRIC_COMPILE_MODE");
+    char *old_policy_copy = old_policy ? strdup(old_policy) : NULL;
+    char *old_mode_copy = old_mode ? strdup(old_mode) : NULL;
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    char *ir_text = NULL;
+    size_t ir_len = 0;
+
+    if (setenv("LIRIC_POLICY", "direct", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_POLICY=direct\n");
+        goto cleanup;
+    }
+    if (setenv("LIRIC_COMPILE_MODE", "llvm", 1) != 0) {
+        fprintf(stderr, "  FAIL: setenv LIRIC_COMPILE_MODE=llvm\n");
+        goto cleanup;
+    }
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        fprintf(stderr, "  FAIL: context create\n");
+        goto cleanup;
+    }
+    lc_context_set_backend(ctx, LC_BACKEND_LLVM);
+    mod = lc_module_create(ctx, "compat_scalar_gep_trim");
+    if (!mod) {
+        fprintf(stderr, "  FAIL: module create\n");
+        goto cleanup;
+    }
+
+    {
+        lr_module_t *ir = lc_module_get_ir(mod);
+        lr_type_t *i8 = lc_get_int_type(mod, 8);
+        lr_type_t *i32 = lc_get_int_type(mod, 32);
+        lr_type_t *i64 = lc_get_int_type(mod, 64);
+        lr_type_t *fn_ty = NULL;
+        lc_value_t *fn_val = NULL;
+        lr_func_t *fn = NULL;
+        lr_block_t *entry = NULL;
+        lc_alloca_inst_t *slot = NULL;
+        lc_value_t *idx0 = NULL;
+        lc_value_t *idx_undef = NULL;
+        lc_value_t *idxs[2];
+        lc_value_t *gep = NULL;
+        lc_value_t *byte1 = NULL;
+        lc_value_t *ret0 = NULL;
+
+        if (!ir || !i8 || !i32 || !i64) {
+            fprintf(stderr, "  FAIL: missing types\n");
+            goto cleanup;
+        }
+        fn_ty = lr_type_func_new(ir, i32, NULL, 0, false);
+        if (!fn_ty) {
+            fprintf(stderr, "  FAIL: function type\n");
+            goto cleanup;
+        }
+        fn_val = lc_func_create(mod, "main", fn_ty);
+        fn = lc_value_get_func(fn_val);
+        entry = lc_value_get_block(lc_block_create(mod, fn, "entry"));
+        if (!fn_val || !fn || !entry) {
+            fprintf(stderr, "  FAIL: function/block create\n");
+            goto cleanup;
+        }
+
+        slot = lc_create_alloca(mod, entry, fn, i8, NULL, "slot");
+        idx0 = lc_value_const_int(mod, i64, 0, 64);
+        idx_undef = lc_value_undef(mod, i64);
+        if (!slot || !slot->result || !idx0 || !idx_undef) {
+            fprintf(stderr, "  FAIL: alloca/index setup\n");
+            goto cleanup;
+        }
+        idxs[0] = idx0;
+        idxs[1] = idx_undef;
+        gep = lc_create_gep(mod, entry, fn, i8, slot->result, idxs, 2, "trimmed_gep");
+        if (!gep) {
+            fprintf(stderr, "  FAIL: create gep\n");
+            goto cleanup;
+        }
+
+        byte1 = lc_value_const_int(mod, i8, 1, 8);
+        ret0 = lc_value_const_int(mod, i32, 0, 32);
+        if (!byte1 || !ret0) {
+            fprintf(stderr, "  FAIL: constants\n");
+            goto cleanup;
+        }
+        lc_create_store(mod, entry, byte1, gep);
+        lc_create_ret(mod, entry, ret0);
+    }
+
+    ir_text = lc_module_sprint(mod, &ir_len);
+    if (!ir_text || ir_len == 0) {
+        fprintf(stderr, "  FAIL: module sprint\n");
+        goto cleanup;
+    }
+    if (!strstr(ir_text, "getelementptr i8, ptr")) {
+        fprintf(stderr, "  FAIL: expected scalar gep in IR\n");
+        goto cleanup;
+    }
+    if (strstr(ir_text, ", i64 undef")) {
+        fprintf(stderr, "  FAIL: scalar gep retained trailing undef index\n");
+        goto cleanup;
+    }
+
+    if (lc_module_emit_object(mod, obj_path) != 0) {
+        fprintf(stderr, "  FAIL: llvm object emission\n");
+        goto cleanup;
+    }
+
+    result = 0;
+
+cleanup:
+    free(ir_text);
+    remove(obj_path);
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    if (old_policy_copy) {
+        setenv("LIRIC_POLICY", old_policy_copy, 1);
+        free(old_policy_copy);
+    } else {
+        unsetenv("LIRIC_POLICY");
+    }
+    if (old_mode_copy) {
+        setenv("LIRIC_COMPILE_MODE", old_mode_copy, 1);
+        free(old_mode_copy);
+    } else {
+        unsetenv("LIRIC_COMPILE_MODE");
+    }
+    return result;
+#endif
+}
+
 int test_builder_compat_phi_finalize_add_incoming_after_finalize_noop(void) {
     lc_context_t *ctx = lc_context_create();
     TEST_ASSERT(ctx != NULL, "context create");

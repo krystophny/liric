@@ -3611,16 +3611,37 @@ lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
                            unsigned num_indices, const char *name) {
     lr_inst_desc_t inst;
     lr_operand_desc_t *ops;
-    uint32_t nops = 1 + num_indices;
+    unsigned trimmed_num_indices = num_indices;
+    uint32_t nops;
     uint32_t dest;
     (void)name;
+
+    if (base_type &&
+        base_type->kind != LR_TYPE_STRUCT &&
+        base_type->kind != LR_TYPE_ARRAY &&
+        base_type->kind != LR_TYPE_VECTOR) {
+        while (trimmed_num_indices > 1u) {
+            lc_value_t *idx = indices ? indices[trimmed_num_indices - 1u] : NULL;
+            if (!idx || idx->kind == LC_VAL_CONST_UNDEF) {
+                trimmed_num_indices--;
+                continue;
+            }
+            if (idx->kind == LC_VAL_CONST_INT && idx->const_int.val == 0) {
+                trimmed_num_indices--;
+                continue;
+            }
+            break;
+        }
+    }
+
+    nops = 1u + (uint32_t)trimmed_num_indices;
     if (!mod || !b || !f) return safe_undef(mod);
     ops = (lr_operand_desc_t *)calloc(nops, sizeof(*ops));
     if (!ops)
         return safe_undef(mod);
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(base_ptr);
-    for (unsigned i = 0; i < num_indices; i++) {
+    for (unsigned i = 0; i < trimmed_num_indices; i++) {
         ops[1 + i] = lc_value_to_desc(indices ? indices[i] : NULL);
     }
     inst.op = LR_OP_GEP;
