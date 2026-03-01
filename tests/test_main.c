@@ -300,6 +300,7 @@ int test_session_direct_exe_ret_42(void);
 int test_session_direct_exe_branch(void);
 int test_session_direct_exe_call(void);
 int test_session_direct_jit_and_exe(void);
+int test_session_blob_import_emit_exe_sets_executable_bit(void);
 #endif
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -575,6 +576,7 @@ int main(void) {
     RUN_TEST(test_session_direct_exe_branch);
     RUN_TEST(test_session_direct_exe_call);
     RUN_TEST(test_session_direct_jit_and_exe);
+    RUN_TEST(test_session_blob_import_emit_exe_sets_executable_bit);
 #endif
 
     fprintf(stderr, "\nModule merge tests:\n");

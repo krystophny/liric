@@ -1857,4 +1857,61 @@ int test_session_direct_jit_and_exe(void) {
     return 0;
 }
 
+int test_session_blob_import_emit_exe_sets_executable_bit(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *producer = NULL;
+    lr_session_t *consumer = NULL;
+    lr_type_t *i32 = NULL;
+    uint8_t *pkg = NULL;
+    size_t pkg_len = 0;
+    const char *path = "/tmp/liric_test_blob_import_emit_exe";
+    struct stat st;
+    int rc;
+
+    cfg.mode = LR_MODE_DIRECT;
+
+    producer = lr_session_create(&cfg, &err);
+    TEST_ASSERT(producer != NULL, "producer session create");
+    i32 = lr_type_i32_s(producer);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    rc = lr_session_func_begin(producer, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "producer func begin");
+    {
+        uint32_t b0 = lr_session_block(producer);
+        lr_session_set_block(producer, b0, &err);
+        lr_emit_ret(producer, LR_IMM(77, i32));
+    }
+    rc = lr_session_func_end(producer, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "producer func end");
+
+    rc = lr_session_export_blob_package(producer, &pkg, &pkg_len, &err);
+    TEST_ASSERT_EQ(rc, 0, "producer export blob package");
+    TEST_ASSERT(pkg != NULL && pkg_len > 0, "blob package non-empty");
+
+    consumer = lr_session_create(&cfg, &err);
+    TEST_ASSERT(consumer != NULL, "consumer session create");
+
+    rc = lr_session_import_blob_package(consumer, pkg, pkg_len, &err);
+    TEST_ASSERT_EQ(rc, 0, "consumer import blob package");
+
+    rc = lr_session_emit_exe(consumer, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "consumer emit exe from blob package");
+
+    rc = stat(path, &st);
+    TEST_ASSERT_EQ(rc, 0, "stat emitted executable");
+    TEST_ASSERT((st.st_mode & S_IXUSR) != 0,
+                "emitted executable has user execute bit");
+
+    rc = run_exe_expect(path, 77);
+    TEST_ASSERT_EQ(rc, 0, "blob-imported executable exit code 77");
+
+    remove(path);
+    free(pkg);
+    lr_session_destroy(consumer);
+    lr_session_destroy(producer);
+    return 0;
+}
+
 #endif

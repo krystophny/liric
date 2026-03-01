@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if defined(__unix__) || defined(__APPLE__)
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -212,6 +213,23 @@ static void err_set(session_error_t *err, int code, const char *fmt, ...) {
     va_start(args, fmt);
     (void)vsnprintf(err->msg, sizeof(err->msg), fmt, args);
     va_end(args);
+}
+
+static int session_mark_output_executable(const char *path, session_error_t *err) {
+#if defined(__unix__) || defined(__APPLE__)
+    if (!path || !path[0]) {
+        err_set(err, S_ERR_ARGUMENT, "invalid executable output path");
+        return -1;
+    }
+    if (chmod(path, 0755) != 0) {
+        err_set(err, S_ERR_BACKEND, "cannot chmod executable output: %s", path);
+        return -1;
+    }
+#else
+    (void)path;
+    (void)err;
+#endif
+    return 0;
 }
 
 static int register_owned_module(struct lr_session *s, lr_module_t *m,
@@ -3130,6 +3148,8 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "blob executable emission failed");
             return -1;
         }
+        if (session_mark_output_executable(path, err) != 0)
+            return -1;
         return 0;
     }
 
@@ -3143,6 +3163,8 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
                 backend_err[0] ? backend_err : "executable emission failed");
         return -1;
     }
+    if (session_mark_output_executable(path, err) != 0)
+        return -1;
     return 0;
 }
 
@@ -3207,6 +3229,8 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "blob executable emission failed");
             return -1;
         }
+        if (session_mark_output_executable(path, err) != 0)
+            return -1;
         return 0;
     }
 
@@ -3221,6 +3245,8 @@ int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
                 "executable emission with runtime failed");
         return -1;
     }
+    if (session_mark_output_executable(path, err) != 0)
+        return -1;
     return 0;
 }
 
