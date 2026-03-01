@@ -101,6 +101,18 @@ static size_t align_up(size_t value, size_t align) {
     return ((value + align - 1) / align) * align;
 }
 
+static bool x86_is_llvm_va_start_name(const char *name) {
+    return name && strncmp(name, "llvm.va_start", 13) == 0;
+}
+
+static bool x86_is_llvm_va_end_name(const char *name) {
+    return name && strncmp(name, "llvm.va_end", 11) == 0;
+}
+
+static bool x86_is_llvm_va_copy_name(const char *name) {
+    return name && strncmp(name, "llvm.va_copy", 12) == 0;
+}
+
 static int32_t alloc_temp_slot(x86_compile_ctx_t *ctx, size_t size, size_t align) {
     if (size < 8) size = 8;
     if (align < 8) align = 8;
@@ -2865,7 +2877,7 @@ static int x86_64_compile_emit(void *compile_ctx,
         if (ops[0].kind == LR_VAL_GLOBAL && cc->mod) {
             const char *cname = lr_module_symbol_name(
                 cc->mod, ops[0].global_id);
-            if (cname && strcmp(cname, "llvm.va_start.p0") == 0) {
+            if (x86_is_llvm_va_start_name(cname)) {
                 if (cc->func_is_vararg && nops >= 2) {
                     emit_load_operand(cc, &ops[1], X86_RAX);
                     uint32_t gp_off = cc->vararg_named_gp * 8;
@@ -2890,9 +2902,9 @@ static int x86_64_compile_emit(void *compile_ctx,
                 }
                 break;
             }
-            if (cname && strcmp(cname, "llvm.va_end.p0") == 0)
+            if (x86_is_llvm_va_end_name(cname))
                 break;
-            if (cname && strcmp(cname, "llvm.va_copy.p0") == 0) {
+            if (x86_is_llvm_va_copy_name(cname)) {
                 if (nops >= 3) {
                     emit_load_operand(cc, &ops[1], X86_RAX);
                     emit_load_operand(cc, &ops[2], X86_RCX);

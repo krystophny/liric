@@ -883,6 +883,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             -DEXPECT_RC=130
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
     )
+
+    add_test(
+        NAME liric_cli_exe_intrinsic_va_end_unsuffixed
+        COMMAND ${CMAKE_COMMAND}
+            -DCLI=$<TARGET_FILE:liric_bin>
+            -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/intrinsic_exec_va_end_unsuffixed.ll
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_intrinsic_va_end_unsuffixed
+            -DEXPECT_RC=77
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
+    )
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
