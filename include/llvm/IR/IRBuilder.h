@@ -78,6 +78,24 @@ class IRBuilder {
         return std::string(name);
     }
 
+    static void trimScalarGepTrailingIndices(
+        Type *Ty, std::vector<lc_value_t *> &indices) {
+        if (!Ty || Ty->isStructTy() || Ty->isArrayTy() || Ty->isVectorTy())
+            return;
+        while (indices.size() > 1) {
+            lc_value_t *idx = indices.back();
+            if (!idx || idx->kind == LC_VAL_CONST_UNDEF) {
+                indices.pop_back();
+                continue;
+            }
+            if (idx->kind == LC_VAL_CONST_INT && idx->const_int.val == 0) {
+                indices.pop_back();
+                continue;
+            }
+            break;
+        }
+    }
+
 public:
     explicit IRBuilder(LLVMContext &C)
         : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr), ctx_(C) {}
@@ -535,6 +553,7 @@ public:
         for (size_t i = 0; i < IdxList.size(); i++) {
             indices[i] = IdxList[i]->impl();
         }
+        trimScalarGepTrailingIndices(Ty, indices);
         return Value::wrap(lc_create_gep(
             M(), B(), F(), Ty->impl(), Ptr->impl(),
             indices.data(),
@@ -555,6 +574,7 @@ public:
         for (size_t i = 0; i < IdxList.size(); i++) {
             indices[i] = IdxList[i]->impl();
         }
+        trimScalarGepTrailingIndices(Ty, indices);
         return Value::wrap(lc_create_inbounds_gep(
             M(), B(), F(), Ty->impl(), Ptr->impl(),
             indices.data(),
