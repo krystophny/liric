@@ -1039,6 +1039,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     const size_t interp_size = sizeof(interp); /* includes NUL */
     static const char libc_name[] = "libc.so.6";
     static const char libm_name[] = "libm.so.6";
+    static const char libgcc_name[] = "libgcc_s.so.1";
     const char *runtime_lib_name = getenv("LIRIC_RUNTIME_LIB");
     bool has_runtime_lib = runtime_lib_name && runtime_lib_name[0];
 
@@ -1101,12 +1102,33 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         }
     }
 
-    /* Build .dynstr: "\0libc.so.6\0libm.so.6\0<runtime?>\0sym1\0sym2\0..." */
+    bool needs_libgcc = false;
+    for (uint32_t i = 0; i < num_dynimport; i++) {
+        const char *name = dyn_names[i];
+        if (!name)
+            continue;
+        if (strcmp(name, "__muldc3") == 0 ||
+            strcmp(name, "__mulsc3") == 0 ||
+            strcmp(name, "__mulxc3") == 0 ||
+            strcmp(name, "__divdc3") == 0 ||
+            strcmp(name, "__divsc3") == 0 ||
+            strcmp(name, "__divxc3") == 0) {
+            needs_libgcc = true;
+            break;
+        }
+    }
+
+    /* Build .dynstr: "\0libc.so.6\0libm.so.6\0libgcc_s.so.1?\0<runtime?>\0sym1\0sym2\0..." */
     size_t dynstr_size = 1; /* leading NUL */
     size_t libc_name_off = dynstr_size;
     dynstr_size += sizeof(libc_name); /* includes NUL */
     size_t libm_name_off = dynstr_size;
     dynstr_size += sizeof(libm_name); /* includes NUL */
+    size_t libgcc_name_off = 0;
+    if (needs_libgcc) {
+        libgcc_name_off = dynstr_size;
+        dynstr_size += sizeof(libgcc_name); /* includes NUL */
+    }
     size_t runtime_lib_name_off = 0;
     if (has_runtime_lib) {
         runtime_lib_name_off = dynstr_size;
@@ -1135,11 +1157,12 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     size_t got_size = (size_t)num_dynimport * 8;
 
     /* .dynamic: tag entries (each 16 bytes) */
-    /* DT_NEEDED(libc), DT_NEEDED(libm), DT_NEEDED(runtime?),
+    /* DT_NEEDED(libc), DT_NEEDED(libm), DT_NEEDED(libgcc_s?), DT_NEEDED(runtime?),
      * DT_HASH, DT_STRTAB, DT_SYMTAB,
      * DT_STRSZ, DT_SYMENT, DT_RELA, DT_RELASZ, DT_RELAENT, DT_BIND_NOW,
      * DT_TEXTREL?(optional), DT_FLAGS, DT_FLAGS_1, DT_NULL */
     uint32_t num_dynamic_entries = (num_textrel_abs64 > 0 ? 15u : 14u) +
+                                   (needs_libgcc ? 1u : 0u) +
                                    (has_runtime_lib ? 1u : 0u);
     size_t dynamic_size = (size_t)num_dynamic_entries * 16;
 
@@ -1610,6 +1633,10 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         dp += sizeof(libc_name);
         memcpy(dp, libm_name, sizeof(libm_name));
         dp += sizeof(libm_name);
+        if (needs_libgcc) {
+            memcpy(dp, libgcc_name, sizeof(libgcc_name));
+            dp += sizeof(libgcc_name);
+        }
         if (has_runtime_lib) {
             size_t slen = strlen(runtime_lib_name) + 1;
             memcpy(dp, runtime_lib_name, slen);
@@ -1676,6 +1703,10 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         w64(&dp, DT_NEEDED);  w64(&dp, libc_name_off);
         /* DT_NEEDED "libm.so.6" */
         w64(&dp, DT_NEEDED);  w64(&dp, libm_name_off);
+        if (needs_libgcc) {
+            /* DT_NEEDED "libgcc_s.so.1" for compiler-rt complex helpers */
+            w64(&dp, DT_NEEDED);  w64(&dp, libgcc_name_off);
+        }
         if (has_runtime_lib) {
             w64(&dp, DT_NEEDED);  w64(&dp, runtime_lib_name_off);
         }

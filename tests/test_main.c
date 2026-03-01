@@ -283,6 +283,7 @@ int test_objfile_link_and_run_direct(void);
 int test_dynelf_puts_hello(void);
 int test_dynelf_readelf_dynamic(void);
 int test_dynelf_ldd_check(void);
+int test_dynelf_complex_helper_adds_libgcc_needed(void);
 #endif
 #else
 int test_objfile_macho_header(void);
@@ -620,6 +621,7 @@ int main(void) {
     RUN_TEST(test_dynelf_puts_hello);
     RUN_TEST(test_dynelf_readelf_dynamic);
     RUN_TEST(test_dynelf_ldd_check);
+    RUN_TEST(test_dynelf_complex_helper_adds_libgcc_needed);
 #endif
 #else
     RUN_TEST(test_objfile_macho_header);
