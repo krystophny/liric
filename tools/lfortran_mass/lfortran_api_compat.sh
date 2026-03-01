@@ -9,6 +9,10 @@ usage: lfortran_api_compat.sh [options]
   --liric-build-dir PATH  liric build dir for artifacts and defaults (default: $LIRIC_BUILD_DIR or <liric-root>/build)
   --fresh-workspace       remove existing workspace checkout/build and output root before running
   --lfortran-dir PATH     use an existing lfortran checkout (skip clone if present)
+  --lfortran-build-llvm PATH
+                          baseline LFortran LLVM build directory (default: <lfortran-dir>/build-llvm)
+  --lfortran-build-liric PATH
+                          WITH_LIRIC LFortran build directory (default: <lfortran-dir>/build-liric)
   --lfortran-repo URL     lfortran git URL (default: https://github.com/krystophny/lfortran.git)
   --lfortran-ref REF      lfortran git ref to checkout (default: origin/liric-aot-minimal)
   --lfortran-remote NAME  remote name for --lfortran-ref (default: origin)
@@ -26,7 +30,7 @@ usage: lfortran_api_compat.sh [options]
   --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
   --itest-args "ARGS..."  extra args passed to each integration_tests/run_tests.py invocation
-  --skip-lfortran-build   do not rebuild lfortran/build-llvm and lfortran/build-liric
+  --skip-lfortran-build   do not rebuild selected lfortran build directories
   -h, --help              show this help
 
 This lane validates compile-time API compatibility:
@@ -103,6 +107,35 @@ clean_mod_artifacts() {
     local dir="$1"
     if [[ -d "$dir" ]]; then
         find "$dir" -maxdepth 1 -type f \( -name '*.mod' -o -name '*.smod' \) -delete
+    fi
+}
+
+clean_dir_retry() {
+    local dir="$1"
+    local attempts="${2:-5}"
+    local i
+    for (( i = 1; i <= attempts; i++ )); do
+        rm -rf "$dir" 2>/dev/null || true
+        if [[ ! -e "$dir" ]]; then
+            return 0
+        fi
+        find "$dir" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+        rmdir "$dir" 2>/dev/null || true
+        if [[ ! -e "$dir" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+clean_integration_build_tree() {
+    local root="$1"
+    local test_llvm_dir="${root}/test-llvm"
+    if [[ -d "$test_llvm_dir" ]]; then
+        if ! clean_dir_retry "$test_llvm_dir" 5; then
+            echo "lfortran_api_compat: WARN: failed to fully clean ${test_llvm_dir}" >&2
+        fi
     fi
 }
 
@@ -343,6 +376,8 @@ workspace=""
 output_root=""
 liric_build=""
 lfortran_dir=""
+lfortran_build_llvm_arg=""
+lfortran_build_liric_arg=""
 lfortran_repo="https://github.com/krystophny/lfortran.git"
 lfortran_ref="origin/liric-aot-minimal"
 lfortran_remote="origin"
@@ -392,6 +427,16 @@ while [[ $# -gt 0 ]]; do
         --lfortran-dir)
             [[ $# -ge 2 ]] || die "missing value for $1"
             lfortran_dir="$2"
+            shift 2
+            ;;
+        --lfortran-build-llvm)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            lfortran_build_llvm_arg="$2"
+            shift 2
+            ;;
+        --lfortran-build-liric)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            lfortran_build_liric_arg="$2"
             shift 2
             ;;
         --lfortran-repo)
@@ -565,6 +610,16 @@ if [[ -z "$lfortran_dir" ]]; then
     lfortran_dir="${workspace}/lfortran"
 fi
 lfortran_dir="$(normalize_path "$lfortran_dir")"
+if [[ -n "$lfortran_build_llvm_arg" ]]; then
+    lfortran_build_llvm="$(normalize_path "$lfortran_build_llvm_arg")"
+else
+    lfortran_build_llvm="${lfortran_dir}/build-llvm"
+fi
+if [[ -n "$lfortran_build_liric_arg" ]]; then
+    lfortran_build_liric="$(normalize_path "$lfortran_build_liric_arg")"
+else
+    lfortran_build_liric="${lfortran_dir}/build-liric"
+fi
 
 if [[ "$fresh_workspace" == "yes" ]]; then
     rm -rf "$lfortran_dir" "$output_root"
@@ -605,8 +660,6 @@ if [[ ! -x "${liric_build}/liric_probe_runner" || ! -f "${liric_build}/libliric.
         2>&1 | tee "${log_root}/build_liric_build.log"
 fi
 
-lfortran_build_llvm="${lfortran_dir}/build-llvm"
-lfortran_build_liric="${lfortran_dir}/build-liric"
 if [[ "$skip_lfortran_build" != "yes" ]]; then
     lf_build_cc=""
     lf_build_cxx=""
@@ -766,6 +819,7 @@ if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
         clean_mod_artifacts "$PWD"
+        clean_integration_build_tree "$PWD"
         unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
@@ -792,6 +846,7 @@ if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
         clean_mod_artifacts "$PWD"
+        clean_integration_build_tree "$PWD"
         unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"

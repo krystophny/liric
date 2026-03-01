@@ -57,6 +57,8 @@ set(LIRIC_LFORTRAN_BUILD_LLVM "${LIRIC_LFORTRAN_ROOT}/build-llvm"
     CACHE PATH "Path to lfortran baseline LLVM build directory")
 set(LIRIC_LFORTRAN_BUILD_LIRIC "${LIRIC_LFORTRAN_ROOT}/build-liric"
     CACHE PATH "Path to lfortran WITH_LIRIC build directory")
+set(LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM "${LIRIC_LFORTRAN_ROOT}/build-liric-nollvm"
+    CACHE PATH "Path to lfortran WITH_LIRIC no-LLVM build directory")
 set(LIRIC_LFORTRAN_API_OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out"
     CACHE PATH "Path to lfortran API compatibility output artifacts")
 set(LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out_safe"
@@ -563,6 +565,12 @@ if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
     set(LIRIC_LFORTRAN_LIRIC_PRECONFIGURE_COMMAND
         ${CMAKE_COMMAND} -E rm -rf ${LIRIC_LFORTRAN_BUILD_LIRIC})
 endif()
+set(LIRIC_LFORTRAN_LIRIC_CONFIGURE_LLVM_ARGS "")
+if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
+    list(APPEND LIRIC_LFORTRAN_LIRIC_CONFIGURE_LLVM_ARGS
+        ${LIRIC_LFORTRAN_LLVM_ARGS}
+        ${LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS})
+endif()
 
 # Always pass an explicit liric archive into WITH_LIRIC builds so lfortran does
 # not resolve to an unintended default archive. When real LLVM linkage is
@@ -588,6 +596,17 @@ else()
             -DLIRIC_LIB=$<TARGET_FILE:liric>)
         set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
     endif()
+endif()
+set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS_NOLLVM "")
+set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM "")
+if(TARGET liric_nollvm)
+    set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS_NOLLVM
+        -DLIRIC_LIB=$<TARGET_FILE:liric_nollvm>)
+    set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM liric_nollvm)
+else()
+    set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS_NOLLVM
+        -DLIRIC_LIB=$<TARGET_FILE:liric>)
+    set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM liric)
 endif()
 
 add_custom_target(
@@ -635,8 +654,7 @@ add_custom_target(
         -DLIRIC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -DLIRIC_REQUIRE_REAL_LLVM_LINK=${LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM}
         ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS}
-        ${LIRIC_LFORTRAN_LLVM_ARGS}
-        ${LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS}
+        ${LIRIC_LFORTRAN_LIRIC_CONFIGURE_LLVM_ARGS}
         -DWITH_RUNTIME_STACKTRACE=OFF
         -DWITH_LLVM=OFF
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
@@ -644,6 +662,30 @@ add_custom_target(
         test_cwrapper test_stacktrace test_lfortran --parallel
     DEPENDS lfortran_prepare liric_probe_runner ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS}
     COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    lfortran_build_liric_nollvm
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
+    COMMAND ${CMAKE_COMMAND}
+        -S ${LIRIC_LFORTRAN_ROOT}
+        -B ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
+        -G Ninja
+        -DCMAKE_BUILD_TYPE=${LIRIC_EXTERNAL_BUILD_TYPE}
+        ${LIRIC_LFORTRAN_LIRIC_COMPILER_ARGS}
+        -DBUILD_TESTING=ON
+        -DWITH_LIRIC=yes
+        -DLIRIC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DLIRIC_REQUIRE_REAL_LLVM_LINK=OFF
+        ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS_NOLLVM}
+        -DWITH_RUNTIME_STACKTRACE=OFF
+        -DWITH_LLVM=OFF
+    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
+        --target lfortran lfortran_runtime build_runtime
+        test_cwrapper test_stacktrace test_lfortran --parallel
+    DEPENDS lfortran_prepare liric_probe_runner ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM}
+    COMMENT "Configure/build LFortran WITH_LIRIC (no LLVM runtime link) in ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}"
     USES_TERMINAL
 )
 
@@ -660,11 +702,13 @@ add_custom_target(
         --workspace ${CMAKE_CURRENT_BINARY_DIR}/deps
         --output-root ${LIRIC_LFORTRAN_API_OUTPUT_ROOT}
         --lfortran-dir ${LIRIC_LFORTRAN_ROOT}
+        --lfortran-build-llvm ${LIRIC_LFORTRAN_BUILD_LLVM}
+        --lfortran-build-liric ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
         --skip-checkout
         --skip-lfortran-build
         --run-ref-tests yes
         --run-itests yes
-    DEPENDS lfortran_build_all
+    DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm
     COMMENT "Run LFortran API compatibility suite using CMake-managed builds"
     USES_TERMINAL
 )
@@ -678,6 +722,8 @@ add_custom_target(
         --workspace ${CMAKE_CURRENT_BINARY_DIR}/deps
         --output-root ${LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE}
         --lfortran-dir ${LIRIC_LFORTRAN_ROOT}
+        --lfortran-build-llvm ${LIRIC_LFORTRAN_BUILD_LLVM}
+        --lfortran-build-liric ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
         --skip-checkout
         --skip-lfortran-build
         --run-ref-tests yes
@@ -687,7 +733,7 @@ add_custom_target(
         --itest-timeout-sec 600
         --itest-memory-max 4G
         --itest-tasks-max 256
-    DEPENDS lfortran_build_all
+    DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm
     COMMENT "Run LFortran API compatibility suite (safe profile, logged)"
     USES_TERMINAL
 )
