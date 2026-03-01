@@ -1,4 +1,5 @@
 #include <liric/liric_session.h>
+#include "arena.h"
 #include "ir.h"
 #include "llvm_backend.h"
 #include <stdint.h>
@@ -1182,6 +1183,85 @@ int test_session_scalar_gep_undef_tail_trimmed(void) {
 
     free(buf);
     lr_session_destroy(s);
+    return 0;
+}
+
+int test_ir_dump_scalar_gep_undef_tail_trimmed(void) {
+    lr_arena_t *arena = NULL;
+    lr_module_t *m = NULL;
+    lr_func_t *f = NULL;
+    lr_block_t *b = NULL;
+    lr_inst_t *inst = NULL;
+    lr_operand_t ops[3];
+    FILE *tmp = NULL;
+    long len;
+    char *buf = NULL;
+    size_t nread;
+
+    arena = lr_arena_create(0);
+    TEST_ASSERT(arena != NULL, "arena create");
+    m = lr_module_create(arena);
+    TEST_ASSERT(m != NULL, "module create");
+    f = lr_func_create(m, "dump_scalar_gep_trim", m->type_i64, NULL, 0, false);
+    TEST_ASSERT(f != NULL, "func create");
+    b = lr_block_create(f, arena, "entry");
+    TEST_ASSERT(b != NULL, "block create");
+
+    inst = lr_inst_create(arena, LR_OP_ALLOCA, m->type_i8, 1, NULL, 0);
+    TEST_ASSERT(inst != NULL, "alloca create");
+    lr_block_append(b, inst);
+
+    memset(ops, 0, sizeof(ops));
+    ops[0].kind = LR_VAL_VREG;
+    ops[0].vreg = 1;
+    ops[0].type = m->type_ptr;
+    ops[1].kind = LR_VAL_IMM_I64;
+    ops[1].imm_i64 = 7;
+    ops[1].type = m->type_i64;
+    ops[2].kind = LR_VAL_UNDEF;
+    ops[2].type = m->type_i64;
+    inst = lr_inst_create(arena, LR_OP_GEP, m->type_i8, 2, ops, 3);
+    TEST_ASSERT(inst != NULL, "gep create");
+    lr_block_append(b, inst);
+
+    memset(ops, 0, sizeof(ops));
+    ops[0].kind = LR_VAL_VREG;
+    ops[0].vreg = 2;
+    ops[0].type = m->type_ptr;
+    inst = lr_inst_create(arena, LR_OP_PTRTOINT, m->type_i64, 3, ops, 1);
+    TEST_ASSERT(inst != NULL, "ptrtoint create");
+    lr_block_append(b, inst);
+
+    memset(ops, 0, sizeof(ops));
+    ops[0].kind = LR_VAL_VREG;
+    ops[0].vreg = 3;
+    ops[0].type = m->type_i64;
+    inst = lr_inst_create(arena, LR_OP_RET, m->type_i64, 0, ops, 1);
+    TEST_ASSERT(inst != NULL, "ret create");
+    lr_block_append(b, inst);
+
+    tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile");
+    lr_dump_func(f, m, tmp);
+
+    fseek(tmp, 0, SEEK_END);
+    len = ftell(tmp);
+    TEST_ASSERT(len > 0, "dump produced output");
+    fseek(tmp, 0, SEEK_SET);
+    buf = (char *)malloc((size_t)len + 1u);
+    TEST_ASSERT(buf != NULL, "alloc dump buf");
+    nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read dump");
+    buf[len] = '\0';
+    fclose(tmp);
+
+    TEST_ASSERT(strstr(buf, "getelementptr i8, ptr") != NULL,
+                "ir output contains scalar gep");
+    TEST_ASSERT(strstr(buf, ", i64 undef") == NULL,
+                "dump trims trailing scalar gep undef index");
+
+    free(buf);
+    lr_arena_destroy(arena);
     return 0;
 }
 

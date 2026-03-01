@@ -236,6 +236,7 @@ int test_session_operand_global_offset_propagates_to_ir(void);
 int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_scalar_gep_undef_tail_trimmed(void);
+int test_ir_dump_scalar_gep_undef_tail_trimmed(void);
 int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void);
 int test_session_ll_compile(void);
 int test_session_bc_compile(void);
@@ -552,6 +553,7 @@ int main(void) {
     RUN_TEST(test_session_select);
     RUN_TEST(test_session_ir_print);
     RUN_TEST(test_session_scalar_gep_undef_tail_trimmed);
+    RUN_TEST(test_ir_dump_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_session_ir_lookup_prefers_module_symbol_over_process_symbol);
     RUN_TEST(test_session_ll_compile);
     RUN_TEST(test_session_bc_compile);

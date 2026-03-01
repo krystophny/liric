@@ -1460,6 +1460,24 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
     }
 }
 
+static bool ir_gep_base_is_aggregate(const lr_type_t *type) {
+    if (!type)
+        return false;
+    return type->kind == LR_TYPE_STRUCT ||
+           type->kind == LR_TYPE_ARRAY ||
+           type->kind == LR_TYPE_VECTOR;
+}
+
+static bool ir_gep_trimmable_scalar_index(const lr_operand_t *op) {
+    if (!op)
+        return true;
+    if (op->kind == LR_VAL_UNDEF || op->kind == LR_VAL_NULL)
+        return true;
+    if (op->kind == LR_VAL_IMM_I64 && op->imm_i64 == 0)
+        return true;
+    return false;
+}
+
 static const char *opcode_name(lr_opcode_t op) {
     switch (op) {
     case LR_OP_RET:          return "ret";
@@ -1744,8 +1762,16 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
     case LR_OP_GEP:
         if (inst->type) print_type(inst->type, out);
         {
+            uint32_t gep_num_operands = inst->num_operands;
             const lr_type_t *cur_ty = inst->type;
-            for (uint32_t i = 0; i < inst->num_operands; i++) {
+            if (gep_num_operands > 2 && !ir_gep_base_is_aggregate(inst->type)) {
+                while (gep_num_operands > 2 &&
+                       ir_gep_trimmable_scalar_index(
+                           &inst->operands[gep_num_operands - 1])) {
+                    gep_num_operands--;
+                }
+            }
+            for (uint32_t i = 0; i < gep_num_operands; i++) {
                 const lr_type_t *idx_ty = inst->operands[i].type;
                 bool first_index = (i == 1);
                 if (i > 1 && cur_ty && cur_ty->kind == LR_TYPE_STRUCT &&
