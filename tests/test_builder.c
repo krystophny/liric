@@ -413,6 +413,9 @@ int test_builder_compat_scalar_gep_undef_tail_trimmed(void) {
 #if !defined(LIRIC_HAVE_REAL_LLVM_BACKEND) || !LIRIC_HAVE_REAL_LLVM_BACKEND
     return 0;
 #else
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && (LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15)
+    return 0;
+#else
     int result = 1;
     const char *obj_path = "/tmp/liric_test_compat_scalar_gep_trim.o";
     const char *old_policy = getenv("LIRIC_POLICY");
@@ -541,6 +544,7 @@ cleanup:
         unsetenv("LIRIC_COMPILE_MODE");
     }
     return result;
+#endif
 #endif
 }
 
