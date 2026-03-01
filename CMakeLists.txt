@@ -498,10 +498,58 @@ if(NOT LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE AND LLVM_CONFIG_EXE)
     endif()
 endif()
 
+set(LIRIC_LFORTRAN_LLVM_LIBDIR "" CACHE PATH
+    "Optional LLVM library directory override for WITH_LIRIC linkage")
+set(LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE "${LIRIC_LFORTRAN_LLVM_LIBDIR}")
+if(NOT LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE)
+    set(_liric_lfortran_llvm_libdir_config "")
+    if(LLVM_BACKEND_CONFIG_EXE)
+        set(_liric_lfortran_llvm_libdir_config "${LLVM_BACKEND_CONFIG_EXE}")
+    elseif(LLVM_CONFIG_EXE)
+        set(_liric_lfortran_llvm_libdir_config "${LLVM_CONFIG_EXE}")
+    endif()
+    if(_liric_lfortran_llvm_libdir_config)
+        execute_process(
+            COMMAND ${_liric_lfortran_llvm_libdir_config} --libdir
+            OUTPUT_VARIABLE _liric_lfortran_llvm_libdir
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _liric_lfortran_llvm_libdir_rc
+        )
+        if(_liric_lfortran_llvm_libdir_rc EQUAL 0 AND
+           EXISTS "${_liric_lfortran_llvm_libdir}")
+            set(LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE
+                "${_liric_lfortran_llvm_libdir}")
+        endif()
+    endif()
+endif()
+
 set(LIRIC_LFORTRAN_LLVM_ARGS "")
+set(LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS "")
 if(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE)
     list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
         -DLLVM_DIR=${LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE})
+endif()
+if(LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE)
+    list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
+        -DLLVM_LIBRARY_DIRS=${LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE})
+    set(_liric_lfortran_llvm_c_lib_override "")
+    foreach(_liric_lfortran_llvm_c_lib_name
+            libLLVM-C.so
+            libLLVM-C.dylib
+            libLLVM-C.tbd
+            libLLVM.so
+            libLLVM.dylib
+            libLLVM.tbd)
+        if(EXISTS "${LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE}/${_liric_lfortran_llvm_c_lib_name}")
+            set(_liric_lfortran_llvm_c_lib_override
+                "${LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE}/${_liric_lfortran_llvm_c_lib_name}")
+            break()
+        endif()
+    endforeach()
+    if(_liric_lfortran_llvm_c_lib_override)
+        list(APPEND LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS
+            -D_lfortran_liric_llvm_c_lib=${_liric_lfortran_llvm_c_lib_override})
+    endif()
 endif()
 
 set(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM OFF CACHE BOOL
@@ -588,6 +636,7 @@ add_custom_target(
         -DLIRIC_REQUIRE_REAL_LLVM_LINK=${LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM}
         ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS}
         ${LIRIC_LFORTRAN_LLVM_ARGS}
+        ${LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS}
         -DWITH_RUNTIME_STACKTRACE=OFF
         -DWITH_LLVM=OFF
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
