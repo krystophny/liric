@@ -11,6 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdarg.h>
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #define LR_HAS_PTHREADS 1
@@ -139,6 +140,119 @@ static uint32_t symbol_hash(const char *name) {
         h *= 16777619u;
     }
     return h;
+}
+
+static char *lr_builtin_lcompilers_snprintf(const char *format, ...) {
+    va_list args;
+    va_list args_copy;
+    int needed;
+    char *formatted;
+    if (!format)
+        return NULL;
+    va_start(args, format);
+    va_copy(args_copy, args);
+    needed = vsnprintf(NULL, 0, format, args_copy);
+    va_end(args_copy);
+    if (needed < 0) {
+        va_end(args);
+        return NULL;
+    }
+    formatted = (char *)malloc((size_t)needed + 1u);
+    if (!formatted) {
+        va_end(args);
+        return NULL;
+    }
+    (void)vsnprintf(formatted, (size_t)needed + 1u, format, args);
+    va_end(args);
+    return formatted;
+}
+
+static int32_t lr_builtin_lcompilers_optimization_mod_i32(int32_t a, int32_t b) {
+    if (b == 0)
+        return 0;
+    return a % b;
+}
+
+static int64_t lr_builtin_lcompilers_optimization_mod_i64(int64_t a, int64_t b) {
+    if (b == 0)
+        return 0;
+    return a % b;
+}
+
+static void lr_builtin_lcompilers_runtime_error(const char *format, ...) {
+    va_list args;
+    if (format && format[0]) {
+        va_start(args, format);
+        (void)vfprintf(stderr, format, args);
+        va_end(args);
+    }
+    fputc('\n', stderr);
+    fflush(stderr);
+    abort();
+}
+
+static char *lr_builtin_lcompilers_string_format_fortran(
+    const char *format, int64_t format_len, const char *serialization_string,
+    int64_t *result_size, int32_t array_sizes_cnt, int32_t string_lengths_cnt,
+    ...) {
+    size_t n = 0;
+    char *out = NULL;
+    (void)serialization_string;
+    (void)array_sizes_cnt;
+    (void)string_lengths_cnt;
+    if (!format) {
+        if (result_size)
+            *result_size = 0;
+        return NULL;
+    }
+    if (format_len > 0) {
+        n = (size_t)format_len;
+    } else {
+        n = strlen(format);
+    }
+    out = (char *)malloc(n + 1u);
+    if (!out) {
+        if (result_size)
+            *result_size = 0;
+        return NULL;
+    }
+    if (n > 0)
+        memcpy(out, format, n);
+    out[n] = '\0';
+    if (result_size)
+        *result_size = (int64_t)n;
+    return out;
+}
+
+static void lr_builtin_lcompilers_print_error(const char *format, ...) {
+    va_list args;
+    if (!format)
+        return;
+    va_start(args, format);
+    (void)vfprintf(stderr, format, args);
+    va_end(args);
+    fflush(stderr);
+}
+
+static void lr_builtin_lfortran_printf(const char *format, const char *str,
+                                       uint32_t str_len, const char *end,
+                                       uint32_t end_len) {
+    (void)format;
+    if (!str) {
+        str = " ";
+        str_len = 1u;
+    }
+    if (str_len > 0u && str[0] == '\b') {
+        fwrite(str + 1, sizeof(char), str_len - 1u, stderr);
+        fputc('\n', stderr);
+        fflush(stderr);
+        abort();
+    }
+    if (!end)
+        end = "";
+    fwrite(str, sizeof(char), str_len, stdout);
+    fwrite(end, sizeof(char), end_len, stdout);
+    fflush(stdout);
 }
 
 static size_t jit_debug_strlen(const char *s) {
@@ -1101,6 +1215,43 @@ static void register_builtin_symbols(lr_jit_t *j) {
         if (addr)
             lr_jit_add_symbol(j, name, addr);
     }
+
+    lr_jit_add_symbol(j, "_lcompilers_snprintf",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_snprintf);
+    lr_jit_add_symbol(j, "lcompilers_snprintf",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_snprintf);
+    lr_jit_add_symbol(j, "_lcompilers_optimization_mod_i32",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_optimization_mod_i32);
+    lr_jit_add_symbol(j, "lcompilers_optimization_mod_i32",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_optimization_mod_i32);
+    lr_jit_add_symbol(j, "_lcompilers_optimization_mod_i64",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_optimization_mod_i64);
+    lr_jit_add_symbol(j, "lcompilers_optimization_mod_i64",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_optimization_mod_i64);
+    lr_jit_add_symbol(j, "_lcompilers_runtime_error",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_runtime_error);
+    lr_jit_add_symbol(j, "lcompilers_runtime_error",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_runtime_error);
+    lr_jit_add_symbol(j, "_lcompilers_string_format_fortran",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_string_format_fortran);
+    lr_jit_add_symbol(j, "lcompilers_string_format_fortran",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_string_format_fortran);
+    lr_jit_add_symbol(j, "_lcompilers_print_error",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_print_error);
+    lr_jit_add_symbol(j, "lcompilers_print_error",
+                      (void *)(uintptr_t)lr_builtin_lcompilers_print_error);
+    lr_jit_add_symbol(j, "_lfortran_printf",
+                      (void *)(uintptr_t)lr_builtin_lfortran_printf);
+    lr_jit_add_symbol(j, "lfortran_printf",
+                      (void *)(uintptr_t)lr_builtin_lfortran_printf);
+    lr_jit_add_symbol(j, "_lfortran_free", (void *)(uintptr_t)free);
+    lr_jit_add_symbol(j, "lfortran_free", (void *)(uintptr_t)free);
+    lr_jit_add_symbol(j, "_lfortran_malloc", (void *)(uintptr_t)malloc);
+    lr_jit_add_symbol(j, "lfortran_malloc", (void *)(uintptr_t)malloc);
+    lr_jit_add_symbol(j, "_lfortran_calloc", (void *)(uintptr_t)calloc);
+    lr_jit_add_symbol(j, "lfortran_calloc", (void *)(uintptr_t)calloc);
+    lr_jit_add_symbol(j, "_lfortran_realloc", (void *)(uintptr_t)realloc);
+    lr_jit_add_symbol(j, "lfortran_realloc", (void *)(uintptr_t)realloc);
 }
 
 int lr_jit_load_library(lr_jit_t *j, const char *path) {
@@ -1228,7 +1379,8 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
     return addr;
 }
 
-static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) {
+static void *lookup_symbol_hashed_exact(lr_jit_t *j, const char *name,
+                                        uint32_t hash) {
     if (j->lazy_funcs) {
         lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
         if (lazy) {
@@ -1267,6 +1419,88 @@ static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) 
 
     if (!miss_known)
         miss_cache_add(j, name, hash);
+    return NULL;
+}
+
+static void *lookup_symbol_hashed_alias(lr_jit_t *j, const char *name,
+                                        const char *alias_name) {
+    void *addr;
+    if (!j || !name || !name[0] || !alias_name || !alias_name[0])
+        return NULL;
+    if (strcmp(name, alias_name) == 0)
+        return NULL;
+    addr = lookup_symbol_hashed_exact(j, alias_name, symbol_hash(alias_name));
+    if (addr)
+        lr_jit_add_symbol(j, name, addr);
+    return addr;
+}
+
+static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) {
+    const char *canonical = name;
+    const char *local_tag = ".__liric_local.";
+    void *addr;
+    if (!j || !name || !name[0])
+        return NULL;
+
+    addr = lookup_symbol_hashed_exact(j, name, hash);
+    if (addr)
+        return addr;
+
+    /* LLVM-compatible symbol references may carry '\01' to suppress mangling. */
+    if ((unsigned char)canonical[0] == 1 && canonical[1] != '\0') {
+        canonical = canonical + 1;
+        addr = lookup_symbol_hashed_alias(j, name, canonical);
+        if (addr)
+            return addr;
+    }
+
+    if (canonical[0] == '_' && canonical[1] != '\0') {
+        addr = lookup_symbol_hashed_alias(j, name, canonical + 1);
+        if (addr)
+            return addr;
+    } else {
+        size_t n = strlen(canonical);
+        char *prefixed = (char *)malloc(n + 2);
+        if (prefixed) {
+            prefixed[0] = '_';
+            memcpy(prefixed + 1, canonical, n + 1);
+            addr = lookup_symbol_hashed_alias(j, name, prefixed);
+            free(prefixed);
+            if (addr)
+                return addr;
+        }
+    }
+
+    {
+        const char *tag = strstr(canonical, local_tag);
+        if (tag && tag > canonical) {
+            size_t base_len = (size_t)(tag - canonical);
+            char *base_name = (char *)malloc(base_len + 1u);
+            if (base_name) {
+                memcpy(base_name, canonical, base_len);
+                base_name[base_len] = '\0';
+                addr = lookup_symbol_hashed_alias(j, name, base_name);
+                free(base_name);
+                if (addr)
+                    return addr;
+            }
+        }
+    }
+
+    if (strstr(canonical, local_tag) != NULL ||
+        strncmp(canonical, ".lc.constagg.", strlen(".lc.constagg.")) == 0) {
+        size_t off = align_up(j->data_size, sizeof(void *));
+        if (off + sizeof(void *) <= j->data_cap) {
+            void *placeholder = j->data_buf + off;
+            memset(placeholder, 0, sizeof(void *));
+            j->data_size = off + sizeof(void *);
+            lr_jit_add_symbol(j, name, placeholder);
+            if (strcmp(canonical, name) != 0)
+                lr_jit_add_symbol(j, canonical, placeholder);
+            return placeholder;
+        }
+    }
+
     return NULL;
 }
 
@@ -1316,11 +1550,24 @@ static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
 }
 
 int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m) {
+    int dbg_a = getenv("LIRIC_DEBUG_A") != NULL;
     /* First pass: allocate space and copy raw init_data for all globals */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (!g->name || !g->name[0])
             continue;
+        if (dbg_a && strcmp(g->name, "a") == 0) {
+            void *probe = lookup_symbol(j, g->name);
+            size_t nlen = strlen(g->name);
+            unsigned b0 = (unsigned)(unsigned char)g->name[0];
+            unsigned b1 = (unsigned)(unsigned char)(nlen > 1 ? g->name[1] : 0);
+            fprintf(stderr,
+                    "liric_matglob pre jit=%p name=a len=%zu b0=%u b1=%u ext=%d init_size=%zu probe=%p\n",
+                    (void *)j, nlen, b0, b1, (int)g->is_external, g->init_size, probe);
+        }
         if (g->is_external) {
+            uint32_t hash = symbol_hash(g->name);
+            if (find_symbol_entry(j, g->name, hash))
+                continue;
             if (lookup_symbol(j, g->name))
                 continue;
         } else {
@@ -1349,6 +1596,14 @@ int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m) {
 
         j->data_size = off + size;
         lr_jit_add_symbol(j, g->name, dst);
+        if (dbg_a && strcmp(g->name, "a") == 0) {
+            float fv = 0.0f;
+            if (size >= sizeof(float))
+                memcpy(&fv, dst, sizeof(float));
+            fprintf(stderr,
+                    "liric_matglob add jit=%p name=a dst=%p size=%zu first_f32=%g\n",
+                    (void *)j, (void *)dst, size, (double)fv);
+        }
     }
 
     /* Initial relocation pass may already resolve globals/external symbols. */
@@ -2468,8 +2723,7 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
     }
 
     bool own_wx_transition = !j->update_active;
-    bool lazy_mode = jit_lazy_materialization_enabled() ||
-                     (j->runtime_bc_data && j->runtime_bc_len > 0);
+    bool lazy_mode = jit_lazy_materialization_enabled();
     int rc = -1;
     size_t code_size_before = j->code_size;
     lr_objfile_ctx_t fixup_ctx;
@@ -2630,7 +2884,7 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
         return NULL;
     uint32_t hash = symbol_hash(name);
     void *addr = lookup_symbol_hashed(j, name, hash);
-    if (addr || !jit_lazy_materialization_enabled())
+    if (addr)
         return addr;
 
     /* Materialize only when the fast path misses a lazy pending entry. */

@@ -1268,6 +1268,67 @@ static void emit_cvtfp2si(x86_compile_ctx_t *ctx, uint8_t gpr, uint8_t fpreg, ui
     invalidate_cached_reg(ctx, gpr);
 }
 
+static void emit_x87_mem(x86_compile_ctx_t *ctx, uint8_t opcode,
+                         uint8_t ext, uint8_t base, int32_t disp) {
+    uint8_t mod;
+    if (base >= 8) {
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                  rex(false, false, false, true));
+    }
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, opcode);
+    if (disp == 0 && (base & 7) != 5) mod = 0;
+    else if (disp >= -128 && disp <= 127) mod = 1;
+    else mod = 2;
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(mod, ext, base));
+    if ((base & 7) == 4)
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x24);
+    if (mod == 1)
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(int8_t)disp);
+    else if (mod == 2)
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)disp);
+}
+
+static void emit_x87_fild_qword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDF, 5, base, disp);
+}
+
+static void emit_x87_fld_dword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xD9, 0, base, disp);
+}
+
+static void emit_x87_fld_qword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDD, 0, base, disp);
+}
+
+static void emit_x87_fld_tbyte(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDB, 5, base, disp);
+}
+
+static void emit_x87_fstp_dword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xD9, 3, base, disp);
+}
+
+static void emit_x87_fstp_qword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDD, 3, base, disp);
+}
+
+static void emit_x87_fstp_tbyte(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDB, 7, base, disp);
+}
+
+static void emit_x87_binop_pop(x86_compile_ctx_t *ctx, lr_opcode_t op) {
+    uint8_t modrm_byte = 0xC1;
+    switch (op) {
+    case LR_OP_FADD: modrm_byte = 0xC1; break; /* faddp st(1), st(0) */
+    case LR_OP_FMUL: modrm_byte = 0xC9; break; /* fmulp st(1), st(0) */
+    case LR_OP_FSUB: modrm_byte = 0xE9; break; /* fsubp st(1), st(0) */
+    case LR_OP_FDIV: modrm_byte = 0xF9; break; /* fdivp st(1), st(0) */
+    default: modrm_byte = 0xC1; break;
+    }
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xDE);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm_byte);
+}
+
 static void emit_movsxd(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, dst >= 8, false, src >= 8));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x63);
@@ -2117,6 +2178,24 @@ static int x86_64_compile_emit(void *compile_ctx,
             }
             break;
         }
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80 &&
+            ops[0].kind == LR_VAL_VREG && ops[1].kind == LR_VAL_VREG) {
+            size_t ty_sz = lr_type_size(desc->type);
+            size_t ty_al = lr_type_align(desc->type);
+            int32_t lhs_off;
+            int32_t rhs_off;
+            int32_t dst_off;
+            if (ty_sz < 10) ty_sz = 10;
+            if (ty_al < 8) ty_al = 8;
+            lhs_off = alloc_slot(cc, ops[0].vreg, ty_sz, ty_al);
+            rhs_off = alloc_slot(cc, ops[1].vreg, ty_sz, ty_al);
+            dst_off = alloc_slot(cc, desc->dest, ty_sz, ty_al);
+            emit_x87_fld_tbyte(cc, X86_RBP, lhs_off);
+            emit_x87_fld_tbyte(cc, X86_RBP, rhs_off);
+            emit_x87_binop_pop(cc, desc->op);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         uint8_t fsize = (desc->type &&
                          desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
         emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, fsize);
@@ -2507,6 +2586,29 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_SITOFP: {
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80) {
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t tmp_off;
+            int32_t dst_off;
+            emit_load_operand(cc, &ops[0], X86_RAX);
+            {
+                size_t src_sz = lr_type_size(ops[0].type);
+                if (src_sz == 1 || src_sz == 2)
+                    emit_movsx_rr(cc, X86_RAX, X86_RAX, (uint8_t)src_sz);
+                else if (src_sz == 4)
+                    emit_movsxd(cc, X86_RAX, X86_RAX);
+            }
+            tmp_off = alloc_temp_slot(cc, 8, 8);
+            encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                       X86_RAX, X86_RBP, tmp_off, 8);
+            if (dst_sz < 10) dst_sz = 10;
+            if (dst_al < 8) dst_al = 8;
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            emit_x87_fild_qword(cc, X86_RBP, tmp_off);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         uint8_t fsize = (desc->type &&
                          desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
         emit_load_operand(cc, &ops[0], X86_RAX);
@@ -2522,6 +2624,29 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_UITOFP: {
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80) {
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t tmp_off;
+            int32_t dst_off;
+            emit_load_operand(cc, &ops[0], X86_RAX);
+            {
+                size_t src_sz = lr_type_size(ops[0].type);
+                if (src_sz <= 4) {
+                    cc->buf[cc->pos++] = 0x89;
+                    cc->buf[cc->pos++] = 0xC0; /* mov eax, eax */
+                }
+            }
+            tmp_off = alloc_temp_slot(cc, 8, 8);
+            encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                       X86_RAX, X86_RBP, tmp_off, 8);
+            if (dst_sz < 10) dst_sz = 10;
+            if (dst_al < 8) dst_al = 8;
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            emit_x87_fild_qword(cc, X86_RBP, tmp_off);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         uint8_t fsize = (desc->type &&
                          desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
         emit_load_operand(cc, &ops[0], X86_RAX);
@@ -2553,6 +2678,24 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_FPEXT: {
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80 &&
+            ops[0].kind == LR_VAL_VREG) {
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t src_off;
+            int32_t dst_off;
+            size_t src_sz = ops[0].type ? lr_type_size(ops[0].type) : 8;
+            src_off = alloc_slot(cc, ops[0].vreg, src_sz, src_sz);
+            if (dst_sz < 10) dst_sz = 10;
+            if (dst_al < 8) dst_al = 8;
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            if (ops[0].type && ops[0].type->kind == LR_TYPE_FLOAT)
+                emit_x87_fld_dword(cc, X86_RBP, src_off);
+            else
+                emit_x87_fld_qword(cc, X86_RBP, src_off);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, 4);
         encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0xF3, 0x5A, 0,
                       FP_SCRATCH0, FP_SCRATCH0);
@@ -2560,6 +2703,27 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_FPTRUNC: {
+        if (ops[0].type && ops[0].type->kind == LR_TYPE_X86_FP80 &&
+            ops[0].kind == LR_VAL_VREG) {
+            size_t src_sz = lr_type_size(ops[0].type);
+            size_t src_al = lr_type_align(ops[0].type);
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t src_off;
+            int32_t dst_off;
+            if (src_sz < 10) src_sz = 10;
+            if (src_al < 8) src_al = 8;
+            if (dst_sz < 4) dst_sz = 4;
+            if (dst_al < 4) dst_al = 4;
+            src_off = alloc_slot(cc, ops[0].vreg, src_sz, src_al);
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            emit_x87_fld_tbyte(cc, X86_RBP, src_off);
+            if (desc->type && desc->type->kind == LR_TYPE_FLOAT)
+                emit_x87_fstp_dword(cc, X86_RBP, dst_off);
+            else
+                emit_x87_fstp_qword(cc, X86_RBP, dst_off);
+            break;
+        }
         emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, 8);
         encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0xF2, 0x5A, 0,
                       FP_SCRATCH0, FP_SCRATCH0);
@@ -3071,7 +3235,13 @@ static int x86_64_compile_add_phi_copy(void *compile_ctx,
     if (direct_ensure_phi_copy_cap(ctx) != 0)
         return -1;
 
-    (void)alloc_slot(&ctx->cc, dest_vreg, 8, 8);
+    {
+        size_t sz = src_op->type ? lr_type_size(src_op->type) : 8;
+        size_t al = src_op->type ? lr_type_align(src_op->type) : 8;
+        if (sz < 8) sz = 8;
+        if (al < 8) al = 8;
+        (void)alloc_slot(&ctx->cc, dest_vreg, sz, al);
+    }
 
     x86_stream_phi_copy_t *entry = &ctx->phi_copies[ctx->phi_copy_count++];
     entry->pred_block_id = pred_block_id;

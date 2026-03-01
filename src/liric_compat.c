@@ -528,6 +528,7 @@ typedef struct lc_context {
     lr_type_t *type_i64;
     lr_type_t *type_float;
     lr_type_t *type_double;
+    lr_type_t *type_x86_fp80;
     lr_type_t *type_ptr;
     lr_arena_t *type_arena;
     int backend;
@@ -1278,6 +1279,8 @@ lc_context_t *lc_context_create(void) {
     ctx->type_float->kind = LR_TYPE_FLOAT;
     ctx->type_double = lr_arena_new(ctx->type_arena, lr_type_t);
     ctx->type_double->kind = LR_TYPE_DOUBLE;
+    ctx->type_x86_fp80 = lr_arena_new(ctx->type_arena, lr_type_t);
+    ctx->type_x86_fp80->kind = LR_TYPE_X86_FP80;
     ctx->type_ptr    = lr_arena_new(ctx->type_arena, lr_type_t);
     ctx->type_ptr->kind = LR_TYPE_PTR;
     ctx->backend = LR_SESSION_BACKEND_ISEL;
@@ -1362,6 +1365,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod->type_i64    = ctx->type_i64;
     cm->mod->type_float  = ctx->type_float;
     cm->mod->type_double = ctx->type_double;
+    cm->mod->type_x86_fp80 = ctx->type_x86_fp80;
     cm->mod->type_ptr    = ctx->type_ptr;
 
     size_t nlen = strlen(name);
@@ -1595,6 +1599,10 @@ lr_type_t *lc_get_double_type(lc_module_compat_t *mod) {
     return mod->mod->type_double;
 }
 
+lr_type_t *lc_get_x86_fp80_type(lc_module_compat_t *mod) {
+    return mod->mod->type_x86_fp80;
+}
+
 lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod) {
     return mod->mod->type_ptr;
 }
@@ -1606,7 +1614,9 @@ bool lc_type_is_integer(lr_type_t *ty) {
 
 bool lc_type_is_floating(lr_type_t *ty) {
     if (!ty) return false;
-    return ty->kind == LR_TYPE_FLOAT || ty->kind == LR_TYPE_DOUBLE;
+    return ty->kind == LR_TYPE_FLOAT ||
+           ty->kind == LR_TYPE_DOUBLE ||
+           ty->kind == LR_TYPE_X86_FP80;
 }
 
 bool lc_type_is_pointer(lr_type_t *ty) {
@@ -1650,6 +1660,7 @@ unsigned lc_type_primitive_size_bits(lr_type_t *ty) {
     case LR_TYPE_I64:    return 64;
     case LR_TYPE_FLOAT:  return 32;
     case LR_TYPE_DOUBLE: return 64;
+    case LR_TYPE_X86_FP80: return 80;
     case LR_TYPE_PTR:    return 64;
     default:             return 0;
     }
@@ -1884,6 +1895,10 @@ static bool pack_constant_bytes_raw(const lc_value_t *value, const lr_type_t *ty
             float f = (float)value->const_fp.val;
             size_t n = need < sizeof(f) ? need : sizeof(f);
             memcpy(out, &f, n);
+        } else if (ty->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)value->const_fp.val;
+            size_t n = need < sizeof(ld) ? need : sizeof(ld);
+            memcpy(out, &ld, n);
         } else {
             double d = value->const_fp.val;
             size_t n = need < sizeof(d) ? need : sizeof(d);
@@ -2000,6 +2015,14 @@ static lc_value_t *const_extractvalue_fold(lc_module_compat_t *mod,
         if (src && n > 0)
             memcpy(&d, src, n);
         return lc_value_const_fp(mod, result_ty, d, true);
+    }
+
+    if (result_ty->kind == LR_TYPE_X86_FP80) {
+        long double ld = 0.0L;
+        size_t n = avail < sizeof(ld) ? avail : sizeof(ld);
+        if (src && n > 0)
+            memcpy(&ld, src, n);
+        return lc_value_const_fp(mod, result_ty, (double)ld, true);
     }
 
     if (result_ty->kind == LR_TYPE_PTR) {
@@ -2366,29 +2389,75 @@ static lc_value_t *create_func_value(lc_module_compat_t *mod,
     return v;
 }
 
+static bool func_signature_matches(const lr_func_t *f, lr_type_t *func_type,
+                                   lr_type_t *ret, lr_type_t **params,
+                                   uint32_t num_params, bool vararg) {
+    uint32_t i;
+    if (!f)
+        return false;
+    if (func_type && f->type != func_type)
+        return false;
+    if (f->ret_type != ret || f->num_params != num_params || f->vararg != vararg)
+        return false;
+    for (i = 0; i < num_params; i++) {
+        if (!f->param_types || f->param_types[i] != params[i])
+            return false;
+    }
+    return true;
+}
+
+static void func_reinit_for_create(lr_func_t *f, lr_type_t *func_type,
+                                   lr_type_t *ret, lr_type_t **params,
+                                   uint32_t num_params, bool vararg) {
+    if (!f)
+        return;
+    if (func_type && func_type->kind == LR_TYPE_FUNC)
+        f->type = func_type;
+    f->ret_type = ret;
+    f->param_types = params;
+    f->num_params = num_params;
+    f->vararg = vararg;
+    f->param_vregs = NULL;
+    f->is_decl = false;
+    f->uses_llvm_abi = true;
+    /* Treat recreate as a fresh definition to avoid stale bodies/signatures. */
+    f->first_block = NULL;
+    f->last_block = NULL;
+    f->block_array = NULL;
+    f->linear_inst_array = NULL;
+    f->block_inst_offsets = NULL;
+    f->num_linear_insts = 0;
+    f->num_blocks = 0;
+    f->next_vreg = num_params + 1u;
+}
+
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
                             lr_type_t *func_type) {
-    if (!mod) return safe_undef(NULL);
-    if (name && name[0]) {
-        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
-        if (existing) {
-            /* Promote an existing declaration to a definition placeholder.
-             * This keeps one canonical symbol and avoids declare/define
-             * duplication under different internal names. */
-            existing->is_decl = false;
-            existing->uses_llvm_abi = true;
-            return create_func_value(mod, existing);
-        }
-    }
-    lr_type_t *ret = mod->mod->type_void;
+    lr_type_t *ret;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
     bool vararg = false;
+    if (!mod) return safe_undef(NULL);
+    ret = mod->mod->type_void;
     if (func_type && func_type->kind == LR_TYPE_FUNC) {
         ret = func_type->func.ret ? func_type->func.ret : ret;
         params = func_type->func.params;
         num_params = func_type->func.num_params;
         vararg = func_type->func.vararg;
+    }
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing) {
+            if (!func_signature_matches(existing, func_type, ret, params,
+                                        num_params, vararg)) {
+                func_reinit_for_create(existing, func_type, ret, params,
+                                       num_params, vararg);
+            } else {
+                existing->is_decl = false;
+                existing->uses_llvm_abi = true;
+            }
+            return create_func_value(mod, existing);
+        }
     }
     lr_func_t *f = lr_func_create(mod->mod, name, ret,
                                    params, num_params, vararg);
@@ -2398,23 +2467,34 @@ lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
 
 lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
                              lr_type_t *func_type) {
-    if (!mod) return safe_undef(NULL);
-    if (name && name[0]) {
-        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
-        if (existing) {
-            existing->uses_llvm_abi = true;
-            return create_func_value(mod, existing);
-        }
-    }
-    lr_type_t *ret = mod->mod->type_void;
+    lr_type_t *ret;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
     bool vararg = false;
+    if (!mod) return safe_undef(NULL);
+    ret = mod->mod->type_void;
     if (func_type && func_type->kind == LR_TYPE_FUNC) {
         ret = func_type->func.ret ? func_type->func.ret : ret;
         params = func_type->func.params;
         num_params = func_type->func.num_params;
         vararg = func_type->func.vararg;
+    }
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing) {
+            if (existing->is_decl &&
+                !func_signature_matches(existing, func_type, ret, params,
+                                        num_params, vararg)) {
+                existing->type = func_type ? func_type : existing->type;
+                existing->ret_type = ret;
+                existing->param_types = params;
+                existing->num_params = num_params;
+                existing->vararg = vararg;
+                existing->next_vreg = num_params + 1u;
+            }
+            existing->uses_llvm_abi = true;
+            return create_func_value(mod, existing);
+        }
     }
     lr_func_t *f = lr_func_declare(mod->mod, name, ret,
                                     params, num_params, vararg);
@@ -2919,6 +2999,10 @@ int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
             float f = (float)init_val->const_fp.val;
             size_t n = gsize < sizeof(f) ? gsize : sizeof(f);
             memcpy(buf, &f, n);
+        } else if (g->type && g->type->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)init_val->const_fp.val;
+            size_t n = gsize < sizeof(ld) ? gsize : sizeof(ld);
+            memcpy(buf, &ld, n);
         } else {
             double d = init_val->const_fp.val;
             size_t n = gsize < sizeof(d) ? gsize : sizeof(d);
@@ -3727,6 +3811,60 @@ static void phi_refresh_operands(lc_phi_node_t *phi) {
     phi->inst->num_operands = n * 2u;
 }
 
+static bool phi_has_incoming_pred(const lc_phi_node_t *phi,
+                                  uint32_t pred_block_id) {
+    if (!phi || !phi->incoming_block_ids)
+        return false;
+    for (uint32_t i = 0; i < phi->num_incoming; i++) {
+        if (phi->incoming_block_ids[i] == pred_block_id)
+            return true;
+    }
+    return false;
+}
+
+static bool block_branches_to(const lr_block_t *pred, uint32_t succ_block_id) {
+    const lr_inst_t *term;
+    if (!pred || !pred->last)
+        return false;
+    term = pred->last;
+    if (term->op == LR_OP_BR &&
+        term->num_operands >= 1 &&
+        term->operands[0].kind == LR_VAL_BLOCK &&
+        term->operands[0].block_id == succ_block_id) {
+        return true;
+    }
+    if (term->op == LR_OP_CONDBR &&
+        term->num_operands >= 3) {
+        if (term->operands[1].kind == LR_VAL_BLOCK &&
+            term->operands[1].block_id == succ_block_id) {
+            return true;
+        }
+        if (term->operands[2].kind == LR_VAL_BLOCK &&
+            term->operands[2].block_id == succ_block_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+lr_block_t *lc_phi_infer_missing_pred(lc_phi_node_t *phi) {
+    lr_block_t *candidate = NULL;
+    if (!phi || !phi->func || !phi->block)
+        return NULL;
+    for (lr_block_t *it = phi->func->first_block; it; it = it->next) {
+        if (it == phi->block)
+            continue;
+        if (!block_branches_to(it, phi->block->id))
+            continue;
+        if (phi_has_incoming_pred(phi, it->id))
+            continue;
+        if (candidate && candidate != it)
+            return NULL;
+        candidate = it;
+    }
+    return candidate;
+}
+
 lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lr_type_t *ty,
                               const char *name) {
@@ -3773,7 +3911,9 @@ static bool type_is_int(lr_type_kind_t k) {
 }
 
 static bool type_is_fp(lr_type_kind_t k) {
-    return k == LR_TYPE_FLOAT || k == LR_TYPE_DOUBLE;
+    return k == LR_TYPE_FLOAT ||
+           k == LR_TYPE_DOUBLE ||
+           k == LR_TYPE_X86_FP80;
 }
 
 /* Integer kind ordering: I1 < I8 < I16 < I32 < I64 (matches enum order). */
@@ -4187,61 +4327,6 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     (void)compat_emit(mod, b, f, &inst);
 }
 
-static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
-    lr_jit_t *session_jit;
-    lr_func_t *f;
-    lr_global_t *g;
-
-    if (compat_finish_active_func(mod) != 0)
-        return -1;
-
-    session_jit = lr_session_jit(mod->session);
-    if (!session_jit)
-        return -1;
-
-    if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
-        return -1;
-
-    /* LLVM mode: compile mod->mod through the session JIT (which has LLVM
-       mode), then register symbols into the user-provided JIT below. */
-    if (session_jit->mode == LR_COMPILE_LLVM) {
-        if (!lr_llvm_jit_is_available())
-            return -1;
-        if (lr_jit_add_module(session_jit, mod->mod) != 0)
-            return -1;
-    }
-
-    for (f = mod->mod->first_func; f; f = f->next) {
-        void *addr = NULL;
-        if (!f->name || !f->name[0])
-            continue;
-        if (session_jit->mode == LR_COMPILE_LLVM)
-            addr = lr_jit_get_function(session_jit, f->name);
-        else
-            addr = lr_session_lookup(mod->session, f->name);
-        if (!f->is_decl && !addr)
-            return -1;
-        if (addr)
-            lr_jit_add_symbol(jit, f->name, addr);
-    }
-
-    for (g = mod->mod->first_global; g; g = g->next) {
-        void *addr = NULL;
-        if (!g->name || !g->name[0])
-            continue;
-        if (session_jit->mode == LR_COMPILE_LLVM)
-            addr = lr_jit_get_function(session_jit, g->name);
-        else
-            addr = lr_session_lookup(mod->session, g->name);
-        if (!g->is_external && !addr)
-            return -1;
-        if (addr)
-            lr_jit_add_symbol(jit, g->name, addr);
-    }
-
-    return 0;
-}
-
 static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
     const char *dump_path;
     FILE *f;
@@ -4268,14 +4353,20 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
 }
 
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
+    lr_jit_t *session_jit;
+    int rt_rc;
     if (!mod || !jit) return -1;
     if (!ensure_session(mod)) return -1;
-    compat_maybe_dump_final_ir(mod);
-    if (lr_session_is_direct(mod->session)) {
-        lr_module_t *session_mod = lr_session_module(mod->session);
-        if (session_mod == mod->mod)
-            return compat_add_to_jit_direct(mod, jit);
+    session_jit = lr_session_jit(mod->session);
+    if (session_jit && session_jit != jit) {
+        /* Keep session/runtime state aligned with the consumer JIT so module
+           materialization and symbol lookup stay in one execution context. */
+        lr_session_replace_jit(mod->session, jit, true);
+        rt_rc = compat_try_attach_runtime_bc(mod->session);
+        if (rt_rc < 0)
+            return -1;
     }
+    compat_maybe_dump_final_ir(mod);
     return lr_jit_add_module(jit, mod->mod);
 }
 

@@ -783,6 +783,7 @@ static lr_type_t *parse_type(lr_parser_t *p) {
     case LR_TOK_I64:    next(p); ty = p->module->type_i64; break;
     case LR_TOK_FLOAT:  next(p); ty = p->module->type_float; break;
     case LR_TOK_DOUBLE: next(p); ty = p->module->type_double; break;
+    case LR_TOK_X86_FP80: next(p); ty = p->module->type_x86_fp80; break;
     case LR_TOK_PTR:    next(p); ty = p->module->type_ptr; break;
     case LR_TOK_LOCAL_ID: {
         char *tname = tok_name(p, &p->cur);
@@ -1025,6 +1026,10 @@ static void pack_scalar_bits(uint8_t *buf, size_t offset, lr_type_t *ft,
         if (ft->kind == LR_TYPE_FLOAT) {
             float f = (float)op->imm_f64;
             memcpy(buf + offset, &f, 4);
+        } else if (ft->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)op->imm_f64;
+            size_t n = fsz < sizeof(ld) ? fsz : sizeof(ld);
+            memcpy(buf + offset, &ld, n);
         } else {
             double d = op->imm_f64;
             memcpy(buf + offset, &d, 8);
@@ -1351,6 +1356,7 @@ static const char *type_kind_name(const lr_type_t *ty) {
     case LR_TYPE_I64:    return "i64";
     case LR_TYPE_FLOAT:  return "float";
     case LR_TYPE_DOUBLE: return "double";
+    case LR_TYPE_X86_FP80: return "x86_fp80";
     case LR_TYPE_PTR:    return "ptr";
     case LR_TYPE_ARRAY:  return "array";
     case LR_TYPE_VECTOR: return "vector";
@@ -2743,6 +2749,13 @@ static void parse_init_field_value(lr_parser_t *p, lr_global_t *g,
             float fv = (float)val;
             if (field_off + 4 <= buf_size)
                 memcpy(buf + field_off, &fv, 4);
+        } else if (field_type->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)val;
+            size_t n = sizeof(ld);
+            if (n > field_sz)
+                n = field_sz;
+            if (field_off + n <= buf_size)
+                memcpy(buf + field_off, &ld, n);
         } else {
             if (field_off + 8 <= buf_size)
                 memcpy(buf + field_off, &val, 8);
@@ -2959,6 +2972,10 @@ static void parse_global(lr_parser_t *p) {
             if (ty->kind == LR_TYPE_FLOAT) {
                 float fv = (float)val;
                 memcpy(buf, &fv, 4);
+            } else if (ty->kind == LR_TYPE_X86_FP80) {
+                long double ld = (long double)val;
+                size_t n = sz < sizeof(ld) ? sz : sizeof(ld);
+                memcpy(buf, &ld, n);
             } else {
                 memcpy(buf, &val, sz < 8 ? sz : 8);
             }

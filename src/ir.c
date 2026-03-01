@@ -63,6 +63,9 @@ lr_module_t *lr_module_create(lr_arena_t *arena) {
     m->type_double = lr_arena_new(arena, lr_type_t);
     m->type_double->kind = LR_TYPE_DOUBLE;
 
+    m->type_x86_fp80 = lr_arena_new(arena, lr_type_t);
+    m->type_x86_fp80->kind = LR_TYPE_X86_FP80;
+
     m->type_ptr = lr_arena_new(arena, lr_type_t);
     m->type_ptr->kind = LR_TYPE_PTR;
 
@@ -982,6 +985,7 @@ size_t lr_type_size(const lr_type_t *t) {
     case LR_TYPE_I64:    return 8;
     case LR_TYPE_FLOAT:  return 4;
     case LR_TYPE_DOUBLE: return 8;
+    case LR_TYPE_X86_FP80: return 16;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_size(t->array.elem) * t->array.count;
     case LR_TYPE_VECTOR: return lr_type_size(t->array.elem) * t->array.count;
@@ -1017,6 +1021,7 @@ size_t lr_type_align(const lr_type_t *t) {
     case LR_TYPE_I64:    return 8;
     case LR_TYPE_FLOAT:  return 4;
     case LR_TYPE_DOUBLE: return 8;
+    case LR_TYPE_X86_FP80: return 16;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_align(t->array.elem);
     case LR_TYPE_VECTOR: {
@@ -1280,6 +1285,7 @@ static const char *type_name(const lr_type_t *t) {
     case LR_TYPE_I64:    return "i64";
     case LR_TYPE_FLOAT:  return "float";
     case LR_TYPE_DOUBLE: return "double";
+    case LR_TYPE_X86_FP80: return "x86_fp80";
     case LR_TYPE_PTR:    return "ptr";
     default: return "?";
     }
@@ -1383,7 +1389,8 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
             fprintf(out, "zeroinitializer");
         } else if (op->type &&
                    (op->type->kind == LR_TYPE_FLOAT ||
-                    op->type->kind == LR_TYPE_DOUBLE)) {
+                    op->type->kind == LR_TYPE_DOUBLE ||
+                    op->type->kind == LR_TYPE_X86_FP80)) {
             if (op->imm_i64 == 0) {
                 fprintf(out, "0.0");
             } else {
@@ -1584,6 +1591,7 @@ static const char *noop_cast_opcode(const lr_type_t *t) {
         return "add";
     case LR_TYPE_FLOAT:
     case LR_TYPE_DOUBLE:
+    case LR_TYPE_X86_FP80:
         return "fadd";
     case LR_TYPE_PTR:
         return "getelementptr";
@@ -1929,6 +1937,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                     break;
                 case LR_TYPE_FLOAT:
                 case LR_TYPE_DOUBLE:
+                case LR_TYPE_X86_FP80:
                     print_type(dst_ty, out);
                     fprintf(out, " ");
                     print_operand(&inst->operands[0], m, f, out);
@@ -2004,6 +2013,7 @@ static lr_type_t *merge_remap_type(lr_module_t *dest, const lr_type_t *t) {
     case LR_TYPE_I64:    return dest->type_i64;
     case LR_TYPE_FLOAT:  return dest->type_float;
     case LR_TYPE_DOUBLE: return dest->type_double;
+    case LR_TYPE_X86_FP80: return dest->type_x86_fp80;
     case LR_TYPE_PTR:    return dest->type_ptr;
     case LR_TYPE_ARRAY:
         return lr_type_array(dest->arena,

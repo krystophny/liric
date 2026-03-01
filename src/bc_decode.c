@@ -717,7 +717,16 @@ static bool bc_try_operand_from_const_bytes(lr_type_t *ty,
     if (!ty || !bytes || !out)
         return false;
     ty_sz = lr_type_size(ty);
-    if (ty_sz == 0 || ty_sz > 8 || nbytes < ty_sz)
+    if (ty_sz == 0 || nbytes < ty_sz)
+        return false;
+    if (ty->kind == LR_TYPE_X86_FP80 && ty_sz >= 10) {
+        long double ld = 0.0L;
+        size_t ncopy = ty_sz < sizeof(ld) ? ty_sz : sizeof(ld);
+        memcpy(&ld, bytes, ncopy);
+        *out = lr_op_imm_f64((double)ld, ty);
+        return true;
+    }
+    if (ty_sz > 8)
         return false;
     memcpy(&raw, bytes, ty_sz);
     if (ty->kind == LR_TYPE_FLOAT && ty_sz == 4) {
@@ -828,6 +837,16 @@ static bool bc_materialize_const_bytes(const bc_value_table_t *vt,
             uint64_t raw64 = 0;
             memcpy(&raw64, &cv->operand.imm_f64, sizeof(raw64));
             bc_store_le_bytes(buf, buf_size, base_off, raw64, 8);
+            return true;
+        }
+        if (dst_ty->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)cv->operand.imm_f64;
+            size_t n = sizeof(ld);
+            if (n > dst_sz)
+                n = dst_sz;
+            if (base_off + n > buf_size)
+                n = buf_size - base_off;
+            memcpy(buf + base_off, &ld, n);
             return true;
         }
         return false;
@@ -957,6 +976,14 @@ static void bc_apply_global_init_value(bc_decoder_t *d,
             uint64_t raw64 = 0;
             memcpy(&raw64, &cv->operand.imm_f64, sizeof(raw64));
             bc_store_le_bytes(buf, buf_size, base_off, raw64, 8);
+        } else if (dst_ty->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)cv->operand.imm_f64;
+            size_t n = sizeof(ld);
+            if (n > dst_sz)
+                n = dst_sz;
+            if (base_off + n > buf_size)
+                n = buf_size - base_off;
+            memcpy(buf + base_off, &ld, n);
         }
         break;
     default:
@@ -1637,8 +1664,10 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
                 break;
             case TYPE_CODE_FP128:
             case TYPE_CODE_PPC_FP128:
-            case TYPE_CODE_X86_FP80:
                 bc_type_table_push(&d->types, d->module->type_double);
+                break;
+            case TYPE_CODE_X86_FP80:
+                bc_type_table_push(&d->types, d->module->type_x86_fp80);
                 break;
             case TYPE_CODE_LABEL:
                 bc_type_table_push(&d->types, d->module->type_void);
@@ -1894,6 +1923,17 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                     float f32;
                     memcpy(&f32, &raw32, sizeof(f32));
                     fval = (double)f32;
+                } else if (cur_type->kind == LR_TYPE_X86_FP80) {
+                    long double ld = 0.0L;
+                    uint8_t raw80[16] = {0};
+                    if (r->record_len > 0)
+                        memcpy(raw80 + 0, &r->record[0], sizeof(uint64_t));
+                    if (r->record_len > 1) {
+                        uint16_t hi16 = (uint16_t)r->record[1];
+                        memcpy(raw80 + 8, &hi16, sizeof(hi16));
+                    }
+                    memcpy(&ld, raw80, sizeof(raw80) < sizeof(ld) ? sizeof(raw80) : sizeof(ld));
+                    fval = (double)ld;
                 } else {
                     memcpy(&fval, &raw, sizeof(fval));
                 }
@@ -1957,6 +1997,19 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                                                   (uint64_t)(uint32_t)raw, 4);
                             } else if (elem_ty->kind == LR_TYPE_DOUBLE && elem_sz == 8) {
                                 bc_store_le_bytes(bytes, packed_sz, off, raw, 8);
+                            } else if (elem_ty->kind == LR_TYPE_X86_FP80 && elem_sz >= 10) {
+                                long double ld = 0.0L;
+                                uint8_t raw80[16] = {0};
+                                memcpy(raw80 + 0, &raw, sizeof(uint64_t));
+                                memcpy(&ld, raw80, sizeof(raw80) < sizeof(ld) ? sizeof(raw80) : sizeof(ld));
+                                {
+                                    size_t n = sizeof(ld);
+                                    if (n > elem_sz)
+                                        n = elem_sz;
+                                    if (off + n > packed_sz)
+                                        n = packed_sz - off;
+                                    memcpy(bytes + off, &ld, n);
+                                }
                             } else {
                                 bc_store_le_bytes(bytes, packed_sz, off, raw, elem_sz);
                             }
@@ -2337,7 +2390,9 @@ static lr_opcode_t bc_map_cast(uint32_t opc) {
 static bool bc_type_is_fp(lr_type_t *t) {
     if (!t)
         return false;
-    if (t->kind == LR_TYPE_FLOAT || t->kind == LR_TYPE_DOUBLE)
+    if (t->kind == LR_TYPE_FLOAT ||
+        t->kind == LR_TYPE_DOUBLE ||
+        t->kind == LR_TYPE_X86_FP80)
         return true;
     if (t->kind == LR_TYPE_VECTOR && t->array.elem)
         return bc_type_is_fp(t->array.elem);
@@ -4772,6 +4827,7 @@ static lr_type_t *bc_map_type_to_session(lr_session_t *session,
     case LR_TYPE_I64:    return lr_type_i64_s(session);
     case LR_TYPE_FLOAT:  return lr_type_f32_s(session);
     case LR_TYPE_DOUBLE: return lr_type_f64_s(session);
+    case LR_TYPE_X86_FP80: return lr_type_f64_s(session);
     case LR_TYPE_PTR:    return lr_type_ptr_s(session);
     case LR_TYPE_ARRAY:
         return lr_type_array_s(session,

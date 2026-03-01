@@ -132,6 +132,7 @@ typedef enum lr_tok {
     LR_TOK_I64,
     LR_TOK_FLOAT,
     LR_TOK_DOUBLE,
+    LR_TOK_X86_FP80,
     LR_TOK_PTR,
 
     /* identifiers */

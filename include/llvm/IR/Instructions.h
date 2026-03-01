@@ -41,8 +41,13 @@ public:
 
     void addIncoming(Value *V, BasicBlock *BB) {
         lc_phi_node_t *phi = lc_value_get_phi_node(impl());
-        if (phi && BB && BB->impl_block()) {
-            lc_phi_add_incoming(phi, V->impl(), BB->impl_block());
+        lr_block_t *pred = BB ? BB->impl_block() : nullptr;
+        if (!pred)
+            pred = lc_phi_infer_missing_pred(phi);
+        if (!pred)
+            pred = detail::current_insert_block_ref();
+        if (phi && V && pred) {
+            lc_phi_add_incoming(phi, V->impl(), pred);
         }
     }
 

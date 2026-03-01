@@ -103,11 +103,13 @@ public:
             block_ = nullptr;
             func_ = nullptr;
             detail::insertion_point_active_ref() = false;
+            detail::current_insert_block_ref() = nullptr;
             detail::current_function_ref() = nullptr;
             return;
         }
         block_ = BB->impl_block();
         detail::insertion_point_active_ref() = true;
+        detail::current_insert_block_ref() = block_;
         if (block_ && M()) {
             lc_block_attach(M(), block_);
         }
@@ -154,6 +156,7 @@ public:
     void SetFunction(lr_func_t *f) {
         func_ = f;
         detail::insertion_point_active_ref() = (f != nullptr);
+        detail::current_insert_block_ref() = block_;
         Function *fn = detail::lookup_function_wrapper(func_);
         if (fn) {
             mod_ = fn->getCompatMod();
@@ -167,6 +170,7 @@ public:
         func_ = fn->getIRFunc();
         block_ = nullptr;
         detail::insertion_point_active_ref() = true;
+        detail::current_insert_block_ref() = nullptr;
         detail::current_function_ref() = fn;
     }
 
@@ -174,6 +178,7 @@ public:
         block_ = nullptr;
         func_ = nullptr;
         detail::insertion_point_active_ref() = false;
+        detail::current_insert_block_ref() = nullptr;
         detail::current_function_ref() = nullptr;
     }
 

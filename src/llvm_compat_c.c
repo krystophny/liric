@@ -640,6 +640,8 @@ const char *lr_llvm_compat_type_kind_name(unsigned type_kind) {
         return "float";
     case LR_TYPE_DOUBLE:
         return "double";
+    case LR_TYPE_X86_FP80:
+        return "x86_fp80";
     case LR_TYPE_PTR:
         return "ptr";
     default:
