@@ -52,6 +52,7 @@ vgcore.*
 
 # lfortran local run artifacts in repo root
 _lfortran_temporary_file
+input
 bnbz.dat
 cmp32
 print32
