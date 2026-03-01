@@ -19,6 +19,10 @@
 #include <mach-o/dyld.h>
 #endif
 
+static int compat_path_exists(const char *path);
+static const char *compat_select_runtime_clang(void);
+static int compat_parent_dir(char *path);
+
 static int compat_policy_from_env(lr_session_mode_t *out_mode) {
     const char *p;
     if (!out_mode)
@@ -72,6 +76,362 @@ static int read_file_bytes(const char *path, uint8_t **out_data, size_t *out_len
     *out_data = buf;
     *out_len = nread;
     return 0;
+}
+
+static int read_file_bytes_allow_empty(const char *path, uint8_t **out_data,
+                                       size_t *out_len) {
+    FILE *f = NULL;
+    long len = 0;
+    uint8_t *buf = NULL;
+    size_t nread = 0;
+    if (!path || !path[0] || !out_data || !out_len)
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
+    }
+    len = ftell(f);
+    if (len < 0) {
+        fclose(f);
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
+    if (len == 0) {
+        fclose(f);
+        *out_data = NULL;
+        *out_len = 0;
+        return 0;
+    }
+    buf = (uint8_t *)malloc((size_t)len);
+    if (!buf) {
+        fclose(f);
+        return -1;
+    }
+    nread = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    if (nread != (size_t)len) {
+        free(buf);
+        return -1;
+    }
+    *out_data = buf;
+    *out_len = nread;
+    return 0;
+}
+
+static int write_file_bytes(const char *path, const uint8_t *data, size_t len) {
+    FILE *f = NULL;
+    size_t nwritten = 0;
+    if (!path || !path[0])
+        return -1;
+    f = fopen(path, "wb");
+    if (!f)
+        return -1;
+    if (len > 0 && data) {
+        nwritten = fwrite(data, 1, len, f);
+        if (nwritten != len) {
+            fclose(f);
+            return -1;
+        }
+    }
+    if (fclose(f) != 0)
+        return -1;
+    return 0;
+}
+
+static void compat_set_err(char *err, size_t errlen, const char *fmt, ...) {
+    va_list ap;
+    if (!err || errlen == 0 || !fmt)
+        return;
+    va_start(ap, fmt);
+    vsnprintf(err, errlen, fmt, ap);
+    va_end(ap);
+}
+
+static int compat_ends_with(const char *s, const char *suffix) {
+    size_t ls, lt;
+    if (!s || !suffix)
+        return 0;
+    ls = strlen(s);
+    lt = strlen(suffix);
+    if (ls < lt)
+        return 0;
+    return memcmp(s + (ls - lt), suffix, lt) == 0;
+}
+
+static const char *compat_basename_ptr(const char *path) {
+    const char *slash = NULL;
+    if (!path)
+        return "";
+    slash = strrchr(path, '/');
+    if (!slash)
+        return path;
+    return slash + 1;
+}
+
+static char *compat_sidecar_path(const char *object_path, const char *suffix) {
+    size_t a = 0, b = 0;
+    char *out = NULL;
+    if (!object_path || !suffix)
+        return NULL;
+    a = strlen(object_path);
+    b = strlen(suffix);
+    out = (char *)malloc(a + b + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, object_path, a);
+    memcpy(out + a, suffix, b);
+    out[a + b] = '\0';
+    return out;
+}
+
+static int compat_object_has_sidecars(const char *obj_path) {
+    char *blob = NULL;
+    char *ll = NULL;
+    int ok = 0;
+    if (!obj_path || !obj_path[0])
+        return 0;
+    blob = compat_sidecar_path(obj_path, ".liric_blob");
+    ll = compat_sidecar_path(obj_path, ".liric_ll");
+    if (!blob || !ll)
+        goto done;
+    ok = compat_path_exists(blob) && compat_path_exists(ll);
+done:
+    if (blob)
+        free(blob);
+    if (ll)
+        free(ll);
+    return ok;
+}
+
+static char *compat_shell_quote(const char *s) {
+    size_t i = 0, extra = 0, len = 0;
+    char *out = NULL;
+    size_t j = 0;
+    if (!s)
+        return NULL;
+    len = strlen(s);
+#if defined(_WIN32)
+    out = (char *)malloc(len * 2 + 3);
+    if (!out)
+        return NULL;
+    out[j++] = '"';
+    for (i = 0; i < len; i++) {
+        if (s[i] == '"') {
+            out[j++] = '\\';
+            out[j++] = '"';
+        } else {
+            out[j++] = s[i];
+        }
+    }
+    out[j++] = '"';
+    out[j] = '\0';
+    return out;
+#else
+    for (i = 0; i < len; i++) {
+        if (s[i] == '\'')
+            extra += 3; /* '\'' contributes 4 chars instead of 1 */
+    }
+    out = (char *)malloc(len + extra + 3);
+    if (!out)
+        return NULL;
+    out[j++] = '\'';
+    for (i = 0; i < len; i++) {
+        if (s[i] == '\'') {
+            out[j++] = '\'';
+            out[j++] = '\\';
+            out[j++] = '\'';
+            out[j++] = '\'';
+        } else {
+            out[j++] = s[i];
+        }
+    }
+    out[j++] = '\'';
+    out[j] = '\0';
+    return out;
+#endif
+}
+
+static int compat_resolve_c_source_for_object(const char *obj_path, char *out_src,
+                                              size_t out_src_cap) {
+    char direct[PATH_MAX];
+    const char *src_name = NULL;
+    if (!obj_path || !out_src || out_src_cap == 0)
+        return -1;
+    if (!compat_ends_with(obj_path, ".c.o"))
+        return -1;
+    if (snprintf(direct, sizeof(direct), "%s", obj_path) >= (int)sizeof(direct))
+        return -1;
+    {
+        size_t n = strlen(direct);
+        if (n < 2)
+            return -1;
+        direct[n - 2] = '\0'; /* strip trailing ".o" */
+    }
+    if (compat_path_exists(direct)) {
+        if (snprintf(out_src, out_src_cap, "%s", direct) >= (int)out_src_cap)
+            return -1;
+        return 0;
+    }
+
+    src_name = compat_basename_ptr(direct);
+    if (!src_name || !src_name[0])
+        return -1;
+
+#if defined(_WIN32)
+    (void)src_name;
+    return -1;
+#else
+    {
+        char roots[5][PATH_MAX];
+        int root_n = 0;
+        int i = 0;
+        char candidate[PATH_MAX];
+        char obj_dir[PATH_MAX];
+        if (getcwd(roots[root_n], sizeof(roots[root_n])) != NULL)
+            root_n++;
+        if (root_n > 0) {
+            if (snprintf(roots[root_n], sizeof(roots[root_n]), "%s", roots[0]) <
+                (int)sizeof(roots[root_n]) &&
+                compat_parent_dir(roots[root_n]) == 0) {
+                root_n++;
+            }
+        }
+        if (root_n > 1) {
+            if (snprintf(roots[root_n], sizeof(roots[root_n]), "%s", roots[1]) <
+                (int)sizeof(roots[root_n]) &&
+                compat_parent_dir(roots[root_n]) == 0) {
+                root_n++;
+            }
+        }
+        if (snprintf(obj_dir, sizeof(obj_dir), "%s", obj_path) < (int)sizeof(obj_dir) &&
+            compat_parent_dir(obj_dir) == 0) {
+            if (root_n < 5 &&
+                snprintf(roots[root_n], sizeof(roots[root_n]), "%s", obj_dir) <
+                    (int)sizeof(roots[root_n])) {
+                root_n++;
+            }
+            if (root_n < 5 &&
+                snprintf(roots[root_n], sizeof(roots[root_n]), "%s", obj_dir) <
+                    (int)sizeof(roots[root_n]) &&
+                compat_parent_dir(roots[root_n]) == 0) {
+                root_n++;
+            }
+        }
+        for (i = 0; i < root_n; i++) {
+            if (!roots[i][0])
+                continue;
+            if (snprintf(candidate, sizeof(candidate), "%s/%s", roots[i], src_name) >=
+                (int)sizeof(candidate))
+                continue;
+            if (compat_path_exists(candidate)) {
+                if (snprintf(out_src, out_src_cap, "%s", candidate) >=
+                    (int)out_src_cap)
+                    return -1;
+                return 0;
+            }
+        }
+    }
+    return -1;
+#endif
+}
+
+static int compat_generate_sidecars_for_c_object(const char *obj_path,
+                                                 char *err, size_t errlen) {
+    char src_path[PATH_MAX];
+    const char *clang_bin = NULL;
+    char *ll_path = NULL;
+    char *blob_path = NULL;
+    char *q_src = NULL;
+    char *q_ll = NULL;
+    char *q_clang = NULL;
+    char *cmd = NULL;
+    size_t cmd_len = 0;
+    int rc = -1;
+
+    if (compat_resolve_c_source_for_object(obj_path, src_path, sizeof(src_path)) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC AOT no-link mode could not resolve C source for object: %s",
+                       obj_path ? obj_path : "(null)");
+        return -1;
+    }
+
+    ll_path = compat_sidecar_path(obj_path, ".liric_ll");
+    blob_path = compat_sidecar_path(obj_path, ".liric_blob");
+    if (!ll_path || !blob_path) {
+        compat_set_err(err, errlen, "sidecar path allocation failed");
+        goto done;
+    }
+
+    clang_bin = compat_select_runtime_clang();
+    q_clang = compat_shell_quote(clang_bin);
+    q_src = compat_shell_quote(src_path);
+    q_ll = compat_shell_quote(ll_path);
+    if (!q_clang || !q_src || !q_ll) {
+        compat_set_err(err, errlen, "shell quoting failed for sidecar generation");
+        goto done;
+    }
+
+    cmd_len = strlen(q_clang) + strlen(q_src) + strlen(q_ll) + 192;
+    cmd = (char *)malloc(cmd_len);
+    if (!cmd) {
+        compat_set_err(err, errlen, "command allocation failed");
+        goto done;
+    }
+    snprintf(cmd, cmd_len,
+             "%s -S -emit-llvm -O0 -fno-discard-value-names "
+             "-Xclang -opaque-pointers=0 -o %s %s",
+             q_clang, q_ll, q_src);
+    if (system(cmd) != 0 || !compat_path_exists(ll_path)) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC AOT no-link mode failed to generate LLVM sidecar from C source: %s",
+                       src_path);
+        goto done;
+    }
+
+    if (write_file_bytes(blob_path, NULL, 0) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC AOT no-link mode failed to write empty blob sidecar: %s",
+                       blob_path);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (ll_path)
+        free(ll_path);
+    if (blob_path)
+        free(blob_path);
+    if (q_src)
+        free(q_src);
+    if (q_ll)
+        free(q_ll);
+    if (q_clang)
+        free(q_clang);
+    if (cmd)
+        free(cmd);
+    return rc;
+}
+
+static int compat_ensure_object_sidecars(const char *obj_path,
+                                         char *err, size_t errlen) {
+    if (!obj_path || !obj_path[0]) {
+        compat_set_err(err, errlen, "empty object path");
+        return -1;
+    }
+    if (compat_object_has_sidecars(obj_path))
+        return 0;
+    if (compat_ends_with(obj_path, ".c.o"))
+        return compat_generate_sidecars_for_c_object(obj_path, err, errlen);
+    compat_set_err(err, errlen,
+                   "WITH_LIRIC AOT no-link mode requires sidecars for object input: %s",
+                   obj_path);
+    return -1;
 }
 
 typedef struct compat_runtime_bc_cache {
@@ -4622,4 +4982,238 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
         return -1;
     }
     return 0;
+}
+
+int lc_write_empty_sidecar_files(const char *object_outfile,
+                                 char *err, size_t errlen) {
+    char *blob_path = NULL;
+    char *ll_path = NULL;
+    int rc = -1;
+    if (!object_outfile || !object_outfile[0]) {
+        compat_set_err(err, errlen, "empty object output path");
+        return -1;
+    }
+    blob_path = compat_sidecar_path(object_outfile, ".liric_blob");
+    ll_path = compat_sidecar_path(object_outfile, ".liric_ll");
+    if (!blob_path || !ll_path) {
+        compat_set_err(err, errlen, "sidecar path allocation failed");
+        goto done;
+    }
+    if (write_file_bytes(blob_path, NULL, 0) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link sidecar write failed: %s", blob_path);
+        goto done;
+    }
+    if (write_file_bytes(ll_path, NULL, 0) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link sidecar write failed: %s", ll_path);
+        goto done;
+    }
+    rc = 0;
+done:
+    if (blob_path)
+        free(blob_path);
+    if (ll_path)
+        free(ll_path);
+    return rc;
+}
+
+int lc_module_export_sidecar_files(lc_module_compat_t *mod,
+                                   const char *object_outfile,
+                                   char *err, size_t errlen) {
+    lr_error_t sync_err = {0};
+    uint8_t *blob_data = NULL;
+    size_t blob_len = 0;
+    char *ll_text = NULL;
+    size_t ll_len = 0;
+    char *blob_path = NULL;
+    char *ll_path = NULL;
+    int rc = -1;
+
+    if (!mod || !object_outfile || !object_outfile[0]) {
+        compat_set_err(err, errlen, "invalid sidecar export arguments");
+        return -1;
+    }
+    blob_path = compat_sidecar_path(object_outfile, ".liric_blob");
+    ll_path = compat_sidecar_path(object_outfile, ".liric_ll");
+    if (!blob_path || !ll_path) {
+        compat_set_err(err, errlen, "sidecar path allocation failed");
+        goto done;
+    }
+
+    if (compat_finish_active_func(mod) != 0) {
+        compat_set_err(err, errlen, "failed to finalize active function before sidecar export");
+        goto done;
+    }
+    if (compat_sync_session_module(mod, &sync_err) != 0) {
+        if (sync_err.msg[0]) {
+            compat_set_err(err, errlen, "sidecar export sync failed: %s", sync_err.msg);
+        } else {
+            compat_set_err(err, errlen, "sidecar export sync failed");
+        }
+        goto done;
+    }
+
+    if (lr_session_export_blob_package(mod->session, &blob_data, &blob_len, &sync_err) != 0) {
+        if (sync_err.msg[0]) {
+            compat_set_err(err, errlen, "sidecar blob export failed: %s", sync_err.msg);
+        } else {
+            compat_set_err(err, errlen, "sidecar blob export failed");
+        }
+        goto done;
+    }
+    if (write_file_bytes(blob_path, blob_data, blob_len) != 0) {
+        compat_set_err(err, errlen, "WITH_LIRIC no-link sidecar write failed: %s",
+                       blob_path);
+        goto done;
+    }
+
+    ll_text = lc_module_sprint(mod, &ll_len);
+    if (!ll_text && ll_len > 0) {
+        compat_set_err(err, errlen, "sidecar LLVM IR export failed");
+        goto done;
+    }
+    if (write_file_bytes(ll_path, (const uint8_t *)ll_text, ll_len) != 0) {
+        compat_set_err(err, errlen, "WITH_LIRIC no-link sidecar write failed: %s",
+                       ll_path);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    if (blob_data)
+        free(blob_data);
+    if (ll_text)
+        free(ll_text);
+    if (blob_path)
+        free(blob_path);
+    if (ll_path)
+        free(ll_path);
+    return rc;
+}
+
+int lc_emit_executable_from_object_sidecars(const char *const *object_files,
+                                            size_t object_count,
+                                            const char *outfile,
+                                            char *err, size_t errlen) {
+    lc_context_t *ctx = NULL;
+    lc_module_compat_t *mod = NULL;
+    size_t i = 0;
+    int imported_blob_count = 0;
+    int merged_ll_count = 0;
+    int rc = -1;
+
+    if (!object_files || object_count == 0 || !outfile || !outfile[0]) {
+        compat_set_err(err, errlen, "invalid sidecar-link arguments");
+        return -1;
+    }
+
+    ctx = lc_context_create();
+    if (!ctx) {
+        compat_set_err(err, errlen, "WITH_LIRIC no-link blob-link failed: unable to create context");
+        return -1;
+    }
+    mod = lc_module_create(ctx, "lfortran.no_link.link");
+    if (!mod) {
+        compat_set_err(err, errlen, "WITH_LIRIC no-link blob-link failed: unable to create module");
+        goto done;
+    }
+
+    for (i = 0; i < object_count; i++) {
+        const char *obj_path = object_files[i];
+        char *blob_path = NULL;
+        char *ll_path = NULL;
+        uint8_t *blob_data = NULL;
+        size_t blob_len = 0;
+        uint8_t *ll_data = NULL;
+        size_t ll_len = 0;
+
+        if (!obj_path || !obj_path[0]) {
+            compat_set_err(err, errlen, "WITH_LIRIC AOT no-link mode requires non-empty object path");
+            goto fail_file;
+        }
+        if (compat_ensure_object_sidecars(obj_path, err, errlen) != 0)
+            goto fail_file;
+
+        blob_path = compat_sidecar_path(obj_path, ".liric_blob");
+        ll_path = compat_sidecar_path(obj_path, ".liric_ll");
+        if (!blob_path || !ll_path) {
+            compat_set_err(err, errlen, "sidecar path allocation failed");
+            goto fail_file;
+        }
+
+        if (read_file_bytes_allow_empty(ll_path, &ll_data, &ll_len) != 0) {
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC AOT no-link mode requires sidecar IR: %s",
+                           ll_path);
+            goto fail_file;
+        }
+        if (ll_len > 0) {
+            if (lc_module_merge_ll_text(mod, (const char *)ll_data, ll_len) != 0) {
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link sidecar IR merge failed: %s",
+                               ll_path);
+                goto fail_file;
+            }
+            merged_ll_count++;
+        }
+
+        if (read_file_bytes_allow_empty(blob_path, &blob_data, &blob_len) != 0) {
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC AOT no-link mode requires sidecar blob package: %s",
+                           blob_path);
+            goto fail_file;
+        }
+        if (blob_len > 0) {
+            if (lc_module_import_blob_package(mod, blob_data, blob_len) != 0) {
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link sidecar import failed: %s",
+                               blob_path);
+                goto fail_file;
+            }
+            imported_blob_count++;
+        }
+
+        if (blob_path)
+            free(blob_path);
+        if (ll_path)
+            free(ll_path);
+        if (blob_data)
+            free(blob_data);
+        if (ll_data)
+            free(ll_data);
+        continue;
+
+fail_file:
+        if (blob_path)
+            free(blob_path);
+        if (ll_path)
+            free(ll_path);
+        if (blob_data)
+            free(blob_data);
+        if (ll_data)
+            free(ll_data);
+        goto done;
+    }
+
+    if (imported_blob_count == 0 && merged_ll_count == 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC AOT no-link mode found only empty object sidecars; no executable code to emit.");
+        goto done;
+    }
+
+    if (lc_module_emit_executable(mod, outfile, NULL, 0) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link executable emission from sidecar blobs failed.");
+        goto done;
+    }
+
+    rc = 0;
+
+done:
+    if (mod)
+        lc_module_destroy(mod);
+    if (ctx)
+        lc_context_destroy(ctx);
+    return rc;
 }
