@@ -4352,11 +4352,71 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
     fclose(f);
 }
 
+static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
+    lr_jit_t *session_jit;
+    lr_func_t *f;
+    lr_global_t *g;
+
+    if (compat_finish_active_func(mod) != 0)
+        return -1;
+
+    session_jit = lr_session_jit(mod->session);
+    if (!session_jit)
+        return -1;
+
+    if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
+        return -1;
+
+    if (session_jit->mode == LR_COMPILE_LLVM) {
+        if (!lr_llvm_jit_is_available())
+            return -1;
+        if (lr_jit_add_module(session_jit, mod->mod) != 0)
+            return -1;
+    }
+
+    for (f = mod->mod->first_func; f; f = f->next) {
+        void *addr = NULL;
+        if (!f->name || !f->name[0])
+            continue;
+        if (session_jit->mode == LR_COMPILE_LLVM)
+            addr = lr_jit_get_function(session_jit, f->name);
+        else
+            addr = lr_session_lookup(mod->session, f->name);
+        if (!f->is_decl && !addr)
+            return -1;
+        if (addr)
+            lr_jit_add_symbol(jit, f->name, addr);
+    }
+
+    for (g = mod->mod->first_global; g; g = g->next) {
+        void *addr = NULL;
+        if (!g->name || !g->name[0])
+            continue;
+        if (session_jit->mode == LR_COMPILE_LLVM)
+            addr = lr_jit_get_function(session_jit, g->name);
+        else
+            addr = lr_session_lookup(mod->session, g->name);
+        if (!g->is_external && !addr)
+            return -1;
+        if (addr)
+            lr_jit_add_symbol(jit, g->name, addr);
+    }
+
+    return 0;
+}
+
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
     lr_jit_t *session_jit;
     int rt_rc;
     if (!mod || !jit) return -1;
     if (!ensure_session(mod)) return -1;
+    if (lr_session_is_direct(mod->session)) {
+        lr_module_t *session_mod = lr_session_module(mod->session);
+        if (session_mod == mod->mod) {
+            compat_maybe_dump_final_ir(mod);
+            return compat_add_to_jit_direct(mod, jit);
+        }
+    }
     session_jit = lr_session_jit(mod->session);
     if (session_jit && session_jit != jit) {
         /* Keep session/runtime state aligned with the consumer JIT so module
