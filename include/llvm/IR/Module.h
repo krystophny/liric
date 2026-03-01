@@ -259,6 +259,81 @@ public:
         owned_globals_.push_back(std::move(g));
         return ptr;
     }
+
+    void emitExecutable(StringRef outfile) const {
+        std::string out = outfile.str();
+        if (out.empty()) {
+            throw std::runtime_error(
+                "WITH_LIRIC no-link executable emission failed: empty output path");
+        }
+        if (lc_module_emit_executable(compat_, out.c_str(), nullptr, 0) != 0) {
+            throw std::runtime_error(
+                "WITH_LIRIC no-link executable emission failed.");
+        }
+    }
+
+    void emitObjectCompanionFiles(StringRef object_outfile) const {
+        std::string obj = object_outfile.str();
+        char err[512] = {0};
+        if (obj.empty()) {
+            throw std::runtime_error(
+                "WITH_LIRIC no-link companion emission failed: empty object path");
+        }
+        if (lc_module_export_sidecar_files(compat_, obj.c_str(), err, sizeof(err)) != 0) {
+            if (err[0]) {
+                throw std::runtime_error(std::string(err));
+            }
+            throw std::runtime_error(
+                "WITH_LIRIC no-link companion emission failed.");
+        }
+    }
+
+    static void writeEmptyObjectCompanionFiles(StringRef object_outfile) {
+        std::string obj = object_outfile.str();
+        char err[512] = {0};
+        if (obj.empty()) {
+            throw std::runtime_error(
+                "WITH_LIRIC no-link companion emission failed: empty object path");
+        }
+        if (lc_write_empty_sidecar_files(obj.c_str(), err, sizeof(err)) != 0) {
+            if (err[0]) {
+                throw std::runtime_error(std::string(err));
+            }
+            throw std::runtime_error(
+                "WITH_LIRIC no-link companion emission failed.");
+        }
+    }
+
+    static void emitExecutableFromObjects(const std::vector<std::string> &object_files,
+                                          StringRef outfile) {
+        std::string out = outfile.str();
+        std::vector<const char *> object_ptrs;
+        char err[512] = {0};
+
+        if (object_files.empty()) {
+            throw std::runtime_error(
+                "WITH_LIRIC AOT no-link mode requires at least one object input.");
+        }
+        if (out.empty()) {
+            throw std::runtime_error(
+                "WITH_LIRIC no-link executable emission failed: empty output path");
+        }
+
+        object_ptrs.reserve(object_files.size());
+        for (const auto &obj : object_files) {
+            object_ptrs.push_back(obj.c_str());
+        }
+
+        if (lc_emit_executable_from_object_sidecars(
+                object_ptrs.data(), object_ptrs.size(),
+                out.c_str(), err, sizeof(err)) != 0) {
+            if (err[0]) {
+                throw std::runtime_error(std::string(err));
+            }
+            throw std::runtime_error(
+                "WITH_LIRIC no-link executable emission from object inputs failed.");
+        }
+    }
 };
 
 #undef LIRIC_LLVM_COMPAT_HIDDEN
