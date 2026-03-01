@@ -75,6 +75,7 @@ public:
         case LR_TYPE_I64:    return IntegerTyID;
         case LR_TYPE_FLOAT:  return FloatTyID;
         case LR_TYPE_DOUBLE: return DoubleTyID;
+        case LR_TYPE_X86_FP80: return X86_FP80TyID;
         case LR_TYPE_PTR:    return PointerTyID;
         case LR_TYPE_ARRAY:  return ArrayTyID;
         case LR_TYPE_VECTOR: return FixedVectorTyID;
@@ -141,6 +142,7 @@ public:
         if (lc_type_is_integer(t)) return lc_type_int_width(t);
         if (isFloatTy()) return 32;
         if (isDoubleTy()) return 64;
+        if (getTypeID() == X86_FP80TyID) return 80;
         if (isPointerTy()) return 64;
         return 0;
     }

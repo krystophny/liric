@@ -717,7 +717,16 @@ static bool bc_try_operand_from_const_bytes(lr_type_t *ty,
     if (!ty || !bytes || !out)
         return false;
     ty_sz = lr_type_size(ty);
-    if (ty_sz == 0 || ty_sz > 8 || nbytes < ty_sz)
+    if (ty_sz == 0 || nbytes < ty_sz)
+        return false;
+    if (ty->kind == LR_TYPE_X86_FP80 && ty_sz >= 10) {
+        long double ld = 0.0L;
+        size_t ncopy = ty_sz < sizeof(ld) ? ty_sz : sizeof(ld);
+        memcpy(&ld, bytes, ncopy);
+        *out = lr_op_imm_f64((double)ld, ty);
+        return true;
+    }
+    if (ty_sz > 8)
         return false;
     memcpy(&raw, bytes, ty_sz);
     if (ty->kind == LR_TYPE_FLOAT && ty_sz == 4) {
@@ -828,6 +837,16 @@ static bool bc_materialize_const_bytes(const bc_value_table_t *vt,
             uint64_t raw64 = 0;
             memcpy(&raw64, &cv->operand.imm_f64, sizeof(raw64));
             bc_store_le_bytes(buf, buf_size, base_off, raw64, 8);
+            return true;
+        }
+        if (dst_ty->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)cv->operand.imm_f64;
+            size_t n = sizeof(ld);
+            if (n > dst_sz)
+                n = dst_sz;
+            if (base_off + n > buf_size)
+                n = buf_size - base_off;
+            memcpy(buf + base_off, &ld, n);
             return true;
         }
         return false;
@@ -957,6 +976,14 @@ static void bc_apply_global_init_value(bc_decoder_t *d,
             uint64_t raw64 = 0;
             memcpy(&raw64, &cv->operand.imm_f64, sizeof(raw64));
             bc_store_le_bytes(buf, buf_size, base_off, raw64, 8);
+        } else if (dst_ty->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)cv->operand.imm_f64;
+            size_t n = sizeof(ld);
+            if (n > dst_sz)
+                n = dst_sz;
+            if (base_off + n > buf_size)
+                n = buf_size - base_off;
+            memcpy(buf + base_off, &ld, n);
         }
         break;
     default:
@@ -1511,6 +1538,20 @@ static bool bc_switch_remap_phi_preds(bc_decoder_t *d, lr_block_t *succ,
                     rewritten[out_i++] = pred;
                 }
                 for (pi = 0; pi < new_pred_count; pi++) {
+                    /* Skip duplicate predecessors — a switch may
+                       route multiple cases to the same target block,
+                       but PHI must have exactly one entry per pred. */
+                    uint32_t qi;
+                    bool dup = false;
+                    for (qi = 0; qi < out_i; qi += 2) {
+                        if (rewritten[qi + 1].kind == LR_VAL_BLOCK &&
+                            rewritten[qi + 1].block_id == new_preds[pi]) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (dup)
+                        continue;
                     rewritten[out_i++] = val;
                     rewritten[out_i++] = lr_op_block(new_preds[pi]);
                 }
@@ -1519,12 +1560,8 @@ static bool bc_switch_remap_phi_preds(bc_decoder_t *d, lr_block_t *succ,
                 rewritten[out_i++] = pred;
             }
         }
-        if (out_i != new_pairs * 2u) {
-            bc_dec_error(d, "internal error while remapping switch phi operands");
-            return false;
-        }
         inst->operands = rewritten;
-        inst->num_operands = new_pairs * 2u;
+        inst->num_operands = out_i;
     }
     return true;
 }
@@ -1627,8 +1664,10 @@ static bool bc_decode_type_block(bc_decoder_t *d, bc_reader_t *r, size_t end_pos
                 break;
             case TYPE_CODE_FP128:
             case TYPE_CODE_PPC_FP128:
-            case TYPE_CODE_X86_FP80:
                 bc_type_table_push(&d->types, d->module->type_double);
+                break;
+            case TYPE_CODE_X86_FP80:
+                bc_type_table_push(&d->types, d->module->type_x86_fp80);
                 break;
             case TYPE_CODE_LABEL:
                 bc_type_table_push(&d->types, d->module->type_void);
@@ -1884,6 +1923,17 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                     float f32;
                     memcpy(&f32, &raw32, sizeof(f32));
                     fval = (double)f32;
+                } else if (cur_type->kind == LR_TYPE_X86_FP80) {
+                    long double ld = 0.0L;
+                    uint8_t raw80[16] = {0};
+                    if (r->record_len > 0)
+                        memcpy(raw80 + 0, &r->record[0], sizeof(uint64_t));
+                    if (r->record_len > 1) {
+                        uint16_t hi16 = (uint16_t)r->record[1];
+                        memcpy(raw80 + 8, &hi16, sizeof(hi16));
+                    }
+                    memcpy(&ld, raw80, sizeof(raw80) < sizeof(ld) ? sizeof(raw80) : sizeof(ld));
+                    fval = (double)ld;
                 } else {
                     memcpy(&fval, &raw, sizeof(fval));
                 }
@@ -1947,6 +1997,19 @@ static bool bc_decode_constants_block(bc_decoder_t *d, bc_reader_t *r,
                                                   (uint64_t)(uint32_t)raw, 4);
                             } else if (elem_ty->kind == LR_TYPE_DOUBLE && elem_sz == 8) {
                                 bc_store_le_bytes(bytes, packed_sz, off, raw, 8);
+                            } else if (elem_ty->kind == LR_TYPE_X86_FP80 && elem_sz >= 10) {
+                                long double ld = 0.0L;
+                                uint8_t raw80[16] = {0};
+                                memcpy(raw80 + 0, &raw, sizeof(uint64_t));
+                                memcpy(&ld, raw80, sizeof(raw80) < sizeof(ld) ? sizeof(raw80) : sizeof(ld));
+                                {
+                                    size_t n = sizeof(ld);
+                                    if (n > elem_sz)
+                                        n = elem_sz;
+                                    if (off + n > packed_sz)
+                                        n = packed_sz - off;
+                                    memcpy(bytes + off, &ld, n);
+                                }
                             } else {
                                 bc_store_le_bytes(bytes, packed_sz, off, raw, elem_sz);
                             }
@@ -2325,7 +2388,15 @@ static lr_opcode_t bc_map_cast(uint32_t opc) {
 }
 
 static bool bc_type_is_fp(lr_type_t *t) {
-    return t && (t->kind == LR_TYPE_FLOAT || t->kind == LR_TYPE_DOUBLE);
+    if (!t)
+        return false;
+    if (t->kind == LR_TYPE_FLOAT ||
+        t->kind == LR_TYPE_DOUBLE ||
+        t->kind == LR_TYPE_X86_FP80)
+        return true;
+    if (t->kind == LR_TYPE_VECTOR && t->array.elem)
+        return bc_type_is_fp(t->array.elem);
+    return false;
 }
 
 static bool bc_map_icmp_pred(uint32_t pred, lr_icmp_pred_t *out) {
@@ -4081,6 +4152,116 @@ cmp_emit_done:
         }
     }
 
+    /* Deduplicate PHI predecessor entries.  Switch lowering can
+       produce multiple entries for the same predecessor block when
+       several case values branch to the same target. */
+    if (ok && !r->has_error && num_blocks > 0) {
+        for (uint32_t bi = 0; bi < num_blocks; bi++) {
+            for (lr_inst_t *inst = blocks[bi]->first; inst;
+                 inst = inst->next) {
+                if (inst->op != LR_OP_PHI || inst->num_operands < 4)
+                    continue;
+                uint32_t out = 0;
+                for (uint32_t pi = 0; pi + 1 < inst->num_operands;
+                     pi += 2) {
+                    const lr_operand_t *pred = &inst->operands[pi + 1];
+                    bool dup = false;
+                    for (uint32_t qi = 0; qi < out; qi += 2) {
+                        if (inst->operands[qi + 1].kind == pred->kind &&
+                            inst->operands[qi + 1].block_id ==
+                                pred->block_id) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (dup)
+                        continue;
+                    inst->operands[out] = inst->operands[pi];
+                    inst->operands[out + 1] = inst->operands[pi + 1];
+                    out += 2;
+                }
+                inst->num_operands = out;
+            }
+        }
+    }
+
+    /* Fix forward-reference type mismatches.
+       When a BINOP/shift references a not-yet-defined vreg, the placeholder
+       type from the bitcode record may differ from the final type assigned
+       when the vreg is actually defined (e.g., a PHI).  Walk all
+       instructions and reconcile operand + instruction types, iterating
+       until no more changes (derived types cascade). */
+    if (ok && !r->has_error && func && local_vt.count > 0) {
+        lr_type_t **vreg_ty = NULL;
+        uint32_t nvreg = func->next_vreg;
+        if (nvreg > 0)
+            vreg_ty = (lr_type_t **)calloc(nvreg, sizeof(lr_type_t *));
+        if (vreg_ty) {
+            for (uint32_t vi = 0; vi < local_vt.count; vi++) {
+                bc_value_t *v = &local_vt.values[vi];
+                if (v->kind == BC_VAL_VREG && v->vreg < nvreg && v->type)
+                    vreg_ty[v->vreg] = v->type;
+            }
+            for (uint32_t pass = 0; pass < 4; pass++) {
+                bool any_change = false;
+                for (uint32_t bi = 0; bi < num_blocks; bi++) {
+                    for (lr_inst_t *inst = blocks[bi]->first; inst;
+                         inst = inst->next) {
+                        for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
+                            lr_operand_t *op = &inst->operands[oi];
+                            if (op->kind == LR_VAL_VREG && op->vreg < nvreg &&
+                                vreg_ty[op->vreg] &&
+                                op->type != vreg_ty[op->vreg]) {
+                                op->type = vreg_ty[op->vreg];
+                                any_change = true;
+                            }
+                        }
+                        /* Propagate corrected operand type to the
+                           instruction result for type-inheriting ops
+                           (binops/shifts whose result type == operand
+                           type). Use a whitelist to avoid corrupting
+                           vreg_ty via instructions that lack a dest
+                           (store) or whose result type is independent
+                           of their first operand (cmp, cast, gep). */
+                        lr_opcode_t op = inst->op;
+                        bool inherits = (op == LR_OP_ADD ||
+                                         op == LR_OP_SUB ||
+                                         op == LR_OP_MUL ||
+                                         op == LR_OP_SDIV ||
+                                         op == LR_OP_UDIV ||
+                                         op == LR_OP_SREM ||
+                                         op == LR_OP_UREM ||
+                                         op == LR_OP_AND ||
+                                         op == LR_OP_OR ||
+                                         op == LR_OP_XOR ||
+                                         op == LR_OP_SHL ||
+                                         op == LR_OP_LSHR ||
+                                         op == LR_OP_ASHR ||
+                                         op == LR_OP_FADD ||
+                                         op == LR_OP_FSUB ||
+                                         op == LR_OP_FMUL ||
+                                         op == LR_OP_FDIV ||
+                                         op == LR_OP_FREM ||
+                                         op == LR_OP_FNEG);
+                        if (inherits && inst->type &&
+                            inst->num_operands > 0 &&
+                            inst->operands[0].type &&
+                            inst->type != inst->operands[0].type) {
+                            inst->type = inst->operands[0].type;
+                            if (inst->dest < nvreg) {
+                                vreg_ty[inst->dest] = inst->type;
+                                any_change = true;
+                            }
+                        }
+                    }
+                }
+                if (!any_change)
+                    break;
+            }
+            free(vreg_ty);
+        }
+    }
+
     for (i = 0; i < switch_fixup_count; i++)
         free(switch_fixups[i].new_preds);
     free(switch_fixups);
@@ -4646,6 +4827,7 @@ static lr_type_t *bc_map_type_to_session(lr_session_t *session,
     case LR_TYPE_I64:    return lr_type_i64_s(session);
     case LR_TYPE_FLOAT:  return lr_type_f32_s(session);
     case LR_TYPE_DOUBLE: return lr_type_f64_s(session);
+    case LR_TYPE_X86_FP80: return lr_type_f64_s(session);
     case LR_TYPE_PTR:    return lr_type_ptr_s(session);
     case LR_TYPE_ARRAY:
         return lr_type_array_s(session,

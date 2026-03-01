@@ -78,6 +78,24 @@ class IRBuilder {
         return std::string(name);
     }
 
+    static void trimScalarGepTrailingIndices(
+        Type *Ty, std::vector<lc_value_t *> &indices) {
+        if (!Ty || Ty->isStructTy() || Ty->isArrayTy() || Ty->isVectorTy())
+            return;
+        while (indices.size() > 1) {
+            lc_value_t *idx = indices.back();
+            if (!idx || idx->kind == LC_VAL_CONST_UNDEF) {
+                indices.pop_back();
+                continue;
+            }
+            if (idx->kind == LC_VAL_CONST_INT && idx->const_int.val == 0) {
+                indices.pop_back();
+                continue;
+            }
+            break;
+        }
+    }
+
 public:
     explicit IRBuilder(LLVMContext &C)
         : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr), ctx_(C) {}
@@ -103,11 +121,13 @@ public:
             block_ = nullptr;
             func_ = nullptr;
             detail::insertion_point_active_ref() = false;
+            detail::current_insert_block_ref() = nullptr;
             detail::current_function_ref() = nullptr;
             return;
         }
         block_ = BB->impl_block();
         detail::insertion_point_active_ref() = true;
+        detail::current_insert_block_ref() = block_;
         if (block_ && M()) {
             lc_block_attach(M(), block_);
         }
@@ -154,6 +174,7 @@ public:
     void SetFunction(lr_func_t *f) {
         func_ = f;
         detail::insertion_point_active_ref() = (f != nullptr);
+        detail::current_insert_block_ref() = block_;
         Function *fn = detail::lookup_function_wrapper(func_);
         if (fn) {
             mod_ = fn->getCompatMod();
@@ -167,6 +188,7 @@ public:
         func_ = fn->getIRFunc();
         block_ = nullptr;
         detail::insertion_point_active_ref() = true;
+        detail::current_insert_block_ref() = nullptr;
         detail::current_function_ref() = fn;
     }
 
@@ -174,6 +196,7 @@ public:
         block_ = nullptr;
         func_ = nullptr;
         detail::insertion_point_active_ref() = false;
+        detail::current_insert_block_ref() = nullptr;
         detail::current_function_ref() = nullptr;
     }
 
@@ -530,6 +553,7 @@ public:
         for (size_t i = 0; i < IdxList.size(); i++) {
             indices[i] = IdxList[i]->impl();
         }
+        trimScalarGepTrailingIndices(Ty, indices);
         return Value::wrap(lc_create_gep(
             M(), B(), F(), Ty->impl(), Ptr->impl(),
             indices.data(),
@@ -550,6 +574,7 @@ public:
         for (size_t i = 0; i < IdxList.size(); i++) {
             indices[i] = IdxList[i]->impl();
         }
+        trimScalarGepTrailingIndices(Ty, indices);
         return Value::wrap(lc_create_inbounds_gep(
             M(), B(), F(), Ty->impl(), Ptr->impl(),
             indices.data(),

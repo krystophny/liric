@@ -41,6 +41,11 @@ namespace detail {
         return value;
     }
 
+    inline lr_block_t *&current_insert_block_ref() {
+        static thread_local lr_block_t *value = nullptr;
+        return value;
+    }
+
     inline void register_value_wrapper(const void *obj, lc_value_t *v) {
         lr_llvm_compat_register_value_wrapper(obj, v);
     }

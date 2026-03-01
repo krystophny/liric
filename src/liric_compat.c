@@ -421,19 +421,8 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
     if (!session)
         return -1;
 
-    /* Prefer embedded BC set by lr_compat_set_embedded_runtime_bc() --
-       no file I/O, no wrapper extraction, no copy needed. */
-    if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
-        if (lr_session_set_runtime_bc_borrowed(session, g_embedded_runtime_bc,
-                                               g_embedded_runtime_bc_len,
-                                               &rt_err) != 0) {
-            if (rt_err.code == LR_ERR_STATE)
-                return 1;
-            return -1;
-        }
-        return 1;
-    }
-
+    /* Explicit env-var override takes priority over embedded BC so that
+       users (and test harnesses) can swap in a different runtime. */
     if (runtime_bc && runtime_bc[0]) {
         if (read_file_bytes(runtime_bc, &bc_data, &bc_len) != 0)
             return -1;
@@ -451,6 +440,18 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
             return -1;
         }
         free(raw_bc);
+        return 1;
+    }
+
+    /* Fall back to embedded BC (compiled into the binary). */
+    if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
+        if (lr_session_set_runtime_bc_borrowed(session, g_embedded_runtime_bc,
+                                               g_embedded_runtime_bc_len,
+                                               &rt_err) != 0) {
+            if (rt_err.code == LR_ERR_STATE)
+                return 1;
+            return -1;
+        }
         return 1;
     }
 
@@ -527,6 +528,7 @@ typedef struct lc_context {
     lr_type_t *type_i64;
     lr_type_t *type_float;
     lr_type_t *type_double;
+    lr_type_t *type_x86_fp80;
     lr_type_t *type_ptr;
     lr_arena_t *type_arena;
     int backend;
@@ -578,6 +580,7 @@ struct lc_phi_node {
     lr_block_t *block;
     lr_func_t *func;
     lr_module_t *mod;
+    lc_module_compat_t *compat_mod;
     lc_value_t **incoming_vals;
     uint32_t *incoming_block_ids;
     uint32_t num_incoming;
@@ -1276,6 +1279,8 @@ lc_context_t *lc_context_create(void) {
     ctx->type_float->kind = LR_TYPE_FLOAT;
     ctx->type_double = lr_arena_new(ctx->type_arena, lr_type_t);
     ctx->type_double->kind = LR_TYPE_DOUBLE;
+    ctx->type_x86_fp80 = lr_arena_new(ctx->type_arena, lr_type_t);
+    ctx->type_x86_fp80->kind = LR_TYPE_X86_FP80;
     ctx->type_ptr    = lr_arena_new(ctx->type_arena, lr_type_t);
     ctx->type_ptr->kind = LR_TYPE_PTR;
     ctx->backend = LR_SESSION_BACKEND_ISEL;
@@ -1360,6 +1365,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
     cm->mod->type_i64    = ctx->type_i64;
     cm->mod->type_float  = ctx->type_float;
     cm->mod->type_double = ctx->type_double;
+    cm->mod->type_x86_fp80 = ctx->type_x86_fp80;
     cm->mod->type_ptr    = ctx->type_ptr;
 
     size_t nlen = strlen(name);
@@ -1593,6 +1599,10 @@ lr_type_t *lc_get_double_type(lc_module_compat_t *mod) {
     return mod->mod->type_double;
 }
 
+lr_type_t *lc_get_x86_fp80_type(lc_module_compat_t *mod) {
+    return mod->mod->type_x86_fp80;
+}
+
 lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod) {
     return mod->mod->type_ptr;
 }
@@ -1604,7 +1614,9 @@ bool lc_type_is_integer(lr_type_t *ty) {
 
 bool lc_type_is_floating(lr_type_t *ty) {
     if (!ty) return false;
-    return ty->kind == LR_TYPE_FLOAT || ty->kind == LR_TYPE_DOUBLE;
+    return ty->kind == LR_TYPE_FLOAT ||
+           ty->kind == LR_TYPE_DOUBLE ||
+           ty->kind == LR_TYPE_X86_FP80;
 }
 
 bool lc_type_is_pointer(lr_type_t *ty) {
@@ -1648,6 +1660,7 @@ unsigned lc_type_primitive_size_bits(lr_type_t *ty) {
     case LR_TYPE_I64:    return 64;
     case LR_TYPE_FLOAT:  return 32;
     case LR_TYPE_DOUBLE: return 64;
+    case LR_TYPE_X86_FP80: return 80;
     case LR_TYPE_PTR:    return 64;
     default:             return 0;
     }
@@ -1882,6 +1895,10 @@ static bool pack_constant_bytes_raw(const lc_value_t *value, const lr_type_t *ty
             float f = (float)value->const_fp.val;
             size_t n = need < sizeof(f) ? need : sizeof(f);
             memcpy(out, &f, n);
+        } else if (ty->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)value->const_fp.val;
+            size_t n = need < sizeof(ld) ? need : sizeof(ld);
+            memcpy(out, &ld, n);
         } else {
             double d = value->const_fp.val;
             size_t n = need < sizeof(d) ? need : sizeof(d);
@@ -1998,6 +2015,14 @@ static lc_value_t *const_extractvalue_fold(lc_module_compat_t *mod,
         if (src && n > 0)
             memcpy(&d, src, n);
         return lc_value_const_fp(mod, result_ty, d, true);
+    }
+
+    if (result_ty->kind == LR_TYPE_X86_FP80) {
+        long double ld = 0.0L;
+        size_t n = avail < sizeof(ld) ? avail : sizeof(ld);
+        if (src && n > 0)
+            memcpy(&ld, src, n);
+        return lc_value_const_fp(mod, result_ty, (double)ld, true);
     }
 
     if (result_ty->kind == LR_TYPE_PTR) {
@@ -2364,29 +2389,75 @@ static lc_value_t *create_func_value(lc_module_compat_t *mod,
     return v;
 }
 
+static bool func_signature_matches(const lr_func_t *f, lr_type_t *func_type,
+                                   lr_type_t *ret, lr_type_t **params,
+                                   uint32_t num_params, bool vararg) {
+    uint32_t i;
+    if (!f)
+        return false;
+    if (func_type && f->type != func_type)
+        return false;
+    if (f->ret_type != ret || f->num_params != num_params || f->vararg != vararg)
+        return false;
+    for (i = 0; i < num_params; i++) {
+        if (!f->param_types || f->param_types[i] != params[i])
+            return false;
+    }
+    return true;
+}
+
+static void func_reinit_for_create(lr_func_t *f, lr_type_t *func_type,
+                                   lr_type_t *ret, lr_type_t **params,
+                                   uint32_t num_params, bool vararg) {
+    if (!f)
+        return;
+    if (func_type && func_type->kind == LR_TYPE_FUNC)
+        f->type = func_type;
+    f->ret_type = ret;
+    f->param_types = params;
+    f->num_params = num_params;
+    f->vararg = vararg;
+    f->param_vregs = NULL;
+    f->is_decl = false;
+    f->uses_llvm_abi = true;
+    /* Treat recreate as a fresh definition to avoid stale bodies/signatures. */
+    f->first_block = NULL;
+    f->last_block = NULL;
+    f->block_array = NULL;
+    f->linear_inst_array = NULL;
+    f->block_inst_offsets = NULL;
+    f->num_linear_insts = 0;
+    f->num_blocks = 0;
+    f->next_vreg = num_params + 1u;
+}
+
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
                             lr_type_t *func_type) {
-    if (!mod) return safe_undef(NULL);
-    if (name && name[0]) {
-        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
-        if (existing) {
-            /* Promote an existing declaration to a definition placeholder.
-             * This keeps one canonical symbol and avoids declare/define
-             * duplication under different internal names. */
-            existing->is_decl = false;
-            existing->uses_llvm_abi = true;
-            return create_func_value(mod, existing);
-        }
-    }
-    lr_type_t *ret = mod->mod->type_void;
+    lr_type_t *ret;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
     bool vararg = false;
+    if (!mod) return safe_undef(NULL);
+    ret = mod->mod->type_void;
     if (func_type && func_type->kind == LR_TYPE_FUNC) {
         ret = func_type->func.ret ? func_type->func.ret : ret;
         params = func_type->func.params;
         num_params = func_type->func.num_params;
         vararg = func_type->func.vararg;
+    }
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing) {
+            if (!func_signature_matches(existing, func_type, ret, params,
+                                        num_params, vararg)) {
+                func_reinit_for_create(existing, func_type, ret, params,
+                                       num_params, vararg);
+            } else {
+                existing->is_decl = false;
+                existing->uses_llvm_abi = true;
+            }
+            return create_func_value(mod, existing);
+        }
     }
     lr_func_t *f = lr_func_create(mod->mod, name, ret,
                                    params, num_params, vararg);
@@ -2396,23 +2467,34 @@ lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
 
 lc_value_t *lc_func_declare(lc_module_compat_t *mod, const char *name,
                              lr_type_t *func_type) {
-    if (!mod) return safe_undef(NULL);
-    if (name && name[0]) {
-        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
-        if (existing) {
-            existing->uses_llvm_abi = true;
-            return create_func_value(mod, existing);
-        }
-    }
-    lr_type_t *ret = mod->mod->type_void;
+    lr_type_t *ret;
     lr_type_t **params = NULL;
     uint32_t num_params = 0;
     bool vararg = false;
+    if (!mod) return safe_undef(NULL);
+    ret = mod->mod->type_void;
     if (func_type && func_type->kind == LR_TYPE_FUNC) {
         ret = func_type->func.ret ? func_type->func.ret : ret;
         params = func_type->func.params;
         num_params = func_type->func.num_params;
         vararg = func_type->func.vararg;
+    }
+    if (name && name[0]) {
+        lr_func_t *existing = lookup_func_cached(mod, name, NULL);
+        if (existing) {
+            if (existing->is_decl &&
+                !func_signature_matches(existing, func_type, ret, params,
+                                        num_params, vararg)) {
+                existing->type = func_type ? func_type : existing->type;
+                existing->ret_type = ret;
+                existing->param_types = params;
+                existing->num_params = num_params;
+                existing->vararg = vararg;
+                existing->next_vreg = num_params + 1u;
+            }
+            existing->uses_llvm_abi = true;
+            return create_func_value(mod, existing);
+        }
     }
     lr_func_t *f = lr_func_declare(mod->mod, name, ret,
                                     params, num_params, vararg);
@@ -2592,7 +2674,12 @@ lr_block_t *lc_value_get_block(lc_value_t *val) {
 
 lr_func_t *lc_value_get_block_func(lc_value_t *val) {
     if (!val || val->kind != LC_VAL_BLOCK) return NULL;
-    return val->block.func;
+    /* Return the live func from the lr_block_t rather than the snapshot
+       stored at value creation time.  The block's func may be updated
+       after creation by lc_block_bind_func (called when CreateBr targets
+       a detached block). */
+    lr_block_t *b = val->block.block;
+    return b ? b->func : val->block.func;
 }
 
 lc_phi_node_t *lc_value_get_phi_node(lc_value_t *val) {
@@ -2912,6 +2999,10 @@ int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
             float f = (float)init_val->const_fp.val;
             size_t n = gsize < sizeof(f) ? gsize : sizeof(f);
             memcpy(buf, &f, n);
+        } else if (g->type && g->type->kind == LR_TYPE_X86_FP80) {
+            long double ld = (long double)init_val->const_fp.val;
+            size_t n = gsize < sizeof(ld) ? gsize : sizeof(ld);
+            memcpy(buf, &ld, n);
         } else {
             double d = init_val->const_fp.val;
             size_t n = gsize < sizeof(d) ? gsize : sizeof(d);
@@ -3520,16 +3611,37 @@ lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
                            unsigned num_indices, const char *name) {
     lr_inst_desc_t inst;
     lr_operand_desc_t *ops;
-    uint32_t nops = 1 + num_indices;
+    unsigned trimmed_num_indices = num_indices;
+    uint32_t nops;
     uint32_t dest;
     (void)name;
+
+    if (base_type &&
+        base_type->kind != LR_TYPE_STRUCT &&
+        base_type->kind != LR_TYPE_ARRAY &&
+        base_type->kind != LR_TYPE_VECTOR) {
+        while (trimmed_num_indices > 1u) {
+            lc_value_t *idx = indices ? indices[trimmed_num_indices - 1u] : NULL;
+            if (!idx || idx->kind == LC_VAL_CONST_UNDEF) {
+                trimmed_num_indices--;
+                continue;
+            }
+            if (idx->kind == LC_VAL_CONST_INT && idx->const_int.val == 0) {
+                trimmed_num_indices--;
+                continue;
+            }
+            break;
+        }
+    }
+
+    nops = 1u + (uint32_t)trimmed_num_indices;
     if (!mod || !b || !f) return safe_undef(mod);
     ops = (lr_operand_desc_t *)calloc(nops, sizeof(*ops));
     if (!ops)
         return safe_undef(mod);
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(base_ptr);
-    for (unsigned i = 0; i < num_indices; i++) {
+    for (unsigned i = 0; i < trimmed_num_indices; i++) {
         ops[1 + i] = lc_value_to_desc(indices ? indices[i] : NULL);
     }
     inst.op = LR_OP_GEP;
@@ -3720,6 +3832,60 @@ static void phi_refresh_operands(lc_phi_node_t *phi) {
     phi->inst->num_operands = n * 2u;
 }
 
+static bool phi_has_incoming_pred(const lc_phi_node_t *phi,
+                                  uint32_t pred_block_id) {
+    if (!phi || !phi->incoming_block_ids)
+        return false;
+    for (uint32_t i = 0; i < phi->num_incoming; i++) {
+        if (phi->incoming_block_ids[i] == pred_block_id)
+            return true;
+    }
+    return false;
+}
+
+static bool block_branches_to(const lr_block_t *pred, uint32_t succ_block_id) {
+    const lr_inst_t *term;
+    if (!pred || !pred->last)
+        return false;
+    term = pred->last;
+    if (term->op == LR_OP_BR &&
+        term->num_operands >= 1 &&
+        term->operands[0].kind == LR_VAL_BLOCK &&
+        term->operands[0].block_id == succ_block_id) {
+        return true;
+    }
+    if (term->op == LR_OP_CONDBR &&
+        term->num_operands >= 3) {
+        if (term->operands[1].kind == LR_VAL_BLOCK &&
+            term->operands[1].block_id == succ_block_id) {
+            return true;
+        }
+        if (term->operands[2].kind == LR_VAL_BLOCK &&
+            term->operands[2].block_id == succ_block_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+lr_block_t *lc_phi_infer_missing_pred(lc_phi_node_t *phi) {
+    lr_block_t *candidate = NULL;
+    if (!phi || !phi->func || !phi->block)
+        return NULL;
+    for (lr_block_t *it = phi->func->first_block; it; it = it->next) {
+        if (it == phi->block)
+            continue;
+        if (!block_branches_to(it, phi->block->id))
+            continue;
+        if (phi_has_incoming_pred(phi, it->id))
+            continue;
+        if (candidate && candidate != it)
+            return NULL;
+        candidate = it;
+    }
+    return candidate;
+}
+
 lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lr_type_t *ty,
                               const char *name) {
@@ -3744,6 +3910,7 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
     phi->block = b;
     phi->func = f;
     phi->mod = mod->mod;
+    phi->compat_mod = mod;
     phi->session = mod->session;
     phi->cap_incoming = LC_INITIAL_PHI_CAP;
     phi->incoming_vals = (lc_value_t **)calloc(
@@ -3759,6 +3926,47 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
     return phi;
 }
 
+static bool type_is_int(lr_type_kind_t k) {
+    return k == LR_TYPE_I1 || k == LR_TYPE_I8 || k == LR_TYPE_I16 ||
+           k == LR_TYPE_I32 || k == LR_TYPE_I64;
+}
+
+static bool type_is_fp(lr_type_kind_t k) {
+    return k == LR_TYPE_FLOAT ||
+           k == LR_TYPE_DOUBLE ||
+           k == LR_TYPE_X86_FP80;
+}
+
+/* Integer kind ordering: I1 < I8 < I16 < I32 < I64 (matches enum order). */
+static lc_value_t *phi_coerce_incoming(lc_phi_node_t *phi, lc_value_t *val,
+                                       lr_block_t *pred_block) {
+    lr_type_t *phi_ty = phi->type;
+    lr_type_t *val_ty = val ? val->type : NULL;
+    lc_module_compat_t *mod = phi->compat_mod;
+    lr_opcode_t cast_op;
+    uint32_t dest;
+    if (!phi_ty || !val_ty || !mod || phi_ty == val_ty)
+        return val;
+    if (phi_ty->kind == val_ty->kind)
+        return val;
+    if (type_is_int(phi_ty->kind) && type_is_int(val_ty->kind)) {
+        if (phi_ty->kind < val_ty->kind)
+            cast_op = LR_OP_TRUNC;
+        else
+            cast_op = LR_OP_SEXT;
+    } else if (type_is_fp(phi_ty->kind) && type_is_fp(val_ty->kind)) {
+        if (phi_ty->kind < val_ty->kind)
+            cast_op = LR_OP_FPTRUNC;
+        else
+            cast_op = LR_OP_FPEXT;
+    } else {
+        return val;
+    }
+    dest = build_cast(mod, pred_block, phi->func, cast_op, phi_ty,
+                      lc_value_to_desc(val));
+    return wrap_vreg(mod, dest, phi_ty, phi->func);
+}
+
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block) {
     lr_phi_copy_desc_t copy;
@@ -3766,6 +3974,7 @@ void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
     if (!phi || !block || phi->finalized) return;
     if (!phi->incoming_vals || !phi->incoming_block_ids ||
         phi->cap_incoming == 0) return;
+    val = phi_coerce_incoming(phi, val, block);
     if (phi->num_incoming == phi->cap_incoming) {
         uint32_t new_cap = phi->cap_incoming * 2;
         phi->incoming_vals = (lc_value_t **)realloc(
@@ -4139,6 +4348,31 @@ void lc_create_memmove(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     (void)compat_emit(mod, b, f, &inst);
 }
 
+static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
+    const char *dump_path;
+    FILE *f;
+    lr_module_t *session_mod = NULL;
+    if (!mod || !mod->mod)
+        return;
+    dump_path = getenv("LIRIC_COMPAT_DUMP_FINAL_IR");
+    if (!dump_path || !dump_path[0])
+        return;
+    f = fopen(dump_path, "a");
+    if (!f)
+        return;
+    fprintf(f, "; ---- module ----\n");
+    compat_dump_module(mod->mod, f);
+    if (mod->session) {
+        session_mod = lr_session_module(mod->session);
+        if (session_mod && session_mod != mod->mod) {
+            fprintf(f, "\n; ---- session module ----\n");
+            compat_dump_module(session_mod, f);
+        }
+    }
+    fprintf(f, "\n");
+    fclose(f);
+}
+
 static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     lr_jit_t *session_jit;
     lr_func_t *f;
@@ -4154,8 +4388,6 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
         return -1;
 
-    /* LLVM mode: compile mod->mod through the session JIT (which has LLVM
-       mode), then register symbols into the user-provided JIT below. */
     if (session_jit->mode == LR_COMPILE_LLVM) {
         if (!lr_llvm_jit_is_available())
             return -1;
@@ -4194,40 +4426,28 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     return 0;
 }
 
-static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
-    const char *dump_path;
-    FILE *f;
-    lr_module_t *session_mod = NULL;
-    if (!mod || !mod->mod)
-        return;
-    dump_path = getenv("LIRIC_COMPAT_DUMP_FINAL_IR");
-    if (!dump_path || !dump_path[0])
-        return;
-    f = fopen(dump_path, "a");
-    if (!f)
-        return;
-    fprintf(f, "; ---- module ----\n");
-    compat_dump_module(mod->mod, f);
-    if (mod->session) {
-        session_mod = lr_session_module(mod->session);
-        if (session_mod && session_mod != mod->mod) {
-            fprintf(f, "\n; ---- session module ----\n");
-            compat_dump_module(session_mod, f);
-        }
-    }
-    fprintf(f, "\n");
-    fclose(f);
-}
-
 int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
+    lr_jit_t *session_jit;
+    int rt_rc;
     if (!mod || !jit) return -1;
     if (!ensure_session(mod)) return -1;
-    compat_maybe_dump_final_ir(mod);
     if (lr_session_is_direct(mod->session)) {
         lr_module_t *session_mod = lr_session_module(mod->session);
-        if (session_mod == mod->mod)
+        if (session_mod == mod->mod) {
+            compat_maybe_dump_final_ir(mod);
             return compat_add_to_jit_direct(mod, jit);
+        }
     }
+    session_jit = lr_session_jit(mod->session);
+    if (session_jit && session_jit != jit) {
+        /* Keep session/runtime state aligned with the consumer JIT so module
+           materialization and symbol lookup stay in one execution context. */
+        lr_session_replace_jit(mod->session, jit, true);
+        rt_rc = compat_try_attach_runtime_bc(mod->session);
+        if (rt_rc < 0)
+            return -1;
+    }
+    compat_maybe_dump_final_ir(mod);
     return lr_jit_add_module(jit, mod->mod);
 }
 

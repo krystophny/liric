@@ -63,6 +63,9 @@ lr_module_t *lr_module_create(lr_arena_t *arena) {
     m->type_double = lr_arena_new(arena, lr_type_t);
     m->type_double->kind = LR_TYPE_DOUBLE;
 
+    m->type_x86_fp80 = lr_arena_new(arena, lr_type_t);
+    m->type_x86_fp80->kind = LR_TYPE_X86_FP80;
+
     m->type_ptr = lr_arena_new(arena, lr_type_t);
     m->type_ptr->kind = LR_TYPE_PTR;
 
@@ -336,9 +339,14 @@ static bool inst_dead_def_eliminable(const lr_inst_t *inst) {
 
     switch (inst->op) {
     case LR_OP_ALLOCA:
-    case LR_OP_LOAD:
     case LR_OP_CALL:
         return false;
+    case LR_OP_LOAD:
+        /* Non-volatile loads are side-effect-free in LLVM's model and
+           can be eliminated when their result is unused.  This matches
+           LLVM's own -O0 behaviour and avoids crashes from dead loads
+           that dereference null-derived GEP addresses. */
+        return true;
     default:
         return true;
     }
@@ -591,7 +599,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
             uint32_t load_count = 0;
 
             if (!b)
-                return -1;
+                continue;
 
             for (lr_inst_t *inst = b->first; inst; ) {
                 lr_inst_t *next = inst->next;
@@ -681,7 +689,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
     for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
         lr_block_t *b = f->block_array[bi];
         if (!b)
-            return -1;
+            continue;
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
             for (uint32_t oi = 0; oi < inst->num_operands; oi++)
                 operand_resolve(repl, nrepl, &inst->operands[oi]);
@@ -695,7 +703,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
         for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
             lr_block_t *b = f->block_array[bi];
             if (!b)
-                return -1;
+                continue;
             for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
                 for (uint32_t oi = 0; oi < inst->num_operands; oi++) {
                     if (inst->operands[oi].kind == LR_VAL_VREG &&
@@ -709,7 +717,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
             lr_block_t *b = f->block_array[bi];
             lr_inst_t *prev = NULL;
             if (!b)
-                return -1;
+                continue;
 
             for (lr_inst_t *inst = b->first; inst; ) {
                 lr_inst_t *next = inst->next;
@@ -753,7 +761,6 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         return 0;
 
     if (!f->block_array) {
-        uint32_t seen = 0;
         f->block_array = lr_arena_array(a, lr_block_t *, f->num_blocks);
         if (!f->block_array)
             return -1;
@@ -761,14 +768,8 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
             if (b->id >= f->num_blocks)
                 return -1;
             f->block_array[b->id] = b;
-            seen++;
         }
-        if (seen != f->num_blocks)
-            return -1;
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
-            if (!f->block_array[bi])
-                return -1;
-        }
+        /* NULL entries are permitted for detached/sparse blocks. */
     }
 
     if (run_func_peephole_passes(f, a) != 0)
@@ -778,7 +779,7 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         lr_block_t *b = f->block_array[bi];
         uint32_t n = 0, j = 0;
         if (!b)
-            return -1;
+            continue;
 
         for (lr_inst_t *inst = b->first; inst; inst = inst->next)
             n++;
@@ -804,8 +805,10 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         uint32_t at = 0;
         uint32_t total = 0;
 
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++)
-            total += f->block_array[bi]->num_insts;
+        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
+            if (f->block_array[bi])
+                total += f->block_array[bi]->num_insts;
+        }
 
         f->num_linear_insts = total;
         if (total > 0) {
@@ -817,6 +820,8 @@ int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
         for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
             lr_block_t *b = f->block_array[bi];
             f->block_inst_offsets[bi] = at;
+            if (!b)
+                continue;
             for (uint32_t ii = 0; ii < b->num_insts; ii++)
                 f->linear_inst_array[at++] = b->inst_array[ii];
         }
@@ -980,6 +985,7 @@ size_t lr_type_size(const lr_type_t *t) {
     case LR_TYPE_I64:    return 8;
     case LR_TYPE_FLOAT:  return 4;
     case LR_TYPE_DOUBLE: return 8;
+    case LR_TYPE_X86_FP80: return 16;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_size(t->array.elem) * t->array.count;
     case LR_TYPE_VECTOR: return lr_type_size(t->array.elem) * t->array.count;
@@ -1015,6 +1021,7 @@ size_t lr_type_align(const lr_type_t *t) {
     case LR_TYPE_I64:    return 8;
     case LR_TYPE_FLOAT:  return 4;
     case LR_TYPE_DOUBLE: return 8;
+    case LR_TYPE_X86_FP80: return 16;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_align(t->array.elem);
     case LR_TYPE_VECTOR: {
@@ -1278,6 +1285,7 @@ static const char *type_name(const lr_type_t *t) {
     case LR_TYPE_I64:    return "i64";
     case LR_TYPE_FLOAT:  return "float";
     case LR_TYPE_DOUBLE: return "double";
+    case LR_TYPE_X86_FP80: return "x86_fp80";
     case LR_TYPE_PTR:    return "ptr";
     default: return "?";
     }
@@ -1381,7 +1389,8 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
             fprintf(out, "zeroinitializer");
         } else if (op->type &&
                    (op->type->kind == LR_TYPE_FLOAT ||
-                    op->type->kind == LR_TYPE_DOUBLE)) {
+                    op->type->kind == LR_TYPE_DOUBLE ||
+                    op->type->kind == LR_TYPE_X86_FP80)) {
             if (op->imm_i64 == 0) {
                 fprintf(out, "0.0");
             } else {
@@ -1449,6 +1458,24 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         break;
     case LR_VAL_UNDEF:   fprintf(out, "undef"); break;
     }
+}
+
+static bool ir_gep_base_is_aggregate(const lr_type_t *type) {
+    if (!type)
+        return false;
+    return type->kind == LR_TYPE_STRUCT ||
+           type->kind == LR_TYPE_ARRAY ||
+           type->kind == LR_TYPE_VECTOR;
+}
+
+static bool ir_gep_trimmable_scalar_index(const lr_operand_t *op) {
+    if (!op)
+        return true;
+    if (op->kind == LR_VAL_UNDEF || op->kind == LR_VAL_NULL)
+        return true;
+    if (op->kind == LR_VAL_IMM_I64 && op->imm_i64 == 0)
+        return true;
+    return false;
 }
 
 static const char *opcode_name(lr_opcode_t op) {
@@ -1582,6 +1609,7 @@ static const char *noop_cast_opcode(const lr_type_t *t) {
         return "add";
     case LR_TYPE_FLOAT:
     case LR_TYPE_DOUBLE:
+    case LR_TYPE_X86_FP80:
         return "fadd";
     case LR_TYPE_PTR:
         return "getelementptr";
@@ -1734,8 +1762,16 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
     case LR_OP_GEP:
         if (inst->type) print_type(inst->type, out);
         {
+            uint32_t gep_num_operands = inst->num_operands;
             const lr_type_t *cur_ty = inst->type;
-            for (uint32_t i = 0; i < inst->num_operands; i++) {
+            if (gep_num_operands > 2 && !ir_gep_base_is_aggregate(inst->type)) {
+                while (gep_num_operands > 2 &&
+                       ir_gep_trimmable_scalar_index(
+                           &inst->operands[gep_num_operands - 1])) {
+                    gep_num_operands--;
+                }
+            }
+            for (uint32_t i = 0; i < gep_num_operands; i++) {
                 const lr_type_t *idx_ty = inst->operands[i].type;
                 bool first_index = (i == 1);
                 if (i > 1 && cur_ty && cur_ty->kind == LR_TYPE_STRUCT &&
@@ -1927,6 +1963,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                     break;
                 case LR_TYPE_FLOAT:
                 case LR_TYPE_DOUBLE:
+                case LR_TYPE_X86_FP80:
                     print_type(dst_ty, out);
                     fprintf(out, " ");
                     print_operand(&inst->operands[0], m, f, out);
@@ -2002,6 +2039,7 @@ static lr_type_t *merge_remap_type(lr_module_t *dest, const lr_type_t *t) {
     case LR_TYPE_I64:    return dest->type_i64;
     case LR_TYPE_FLOAT:  return dest->type_float;
     case LR_TYPE_DOUBLE: return dest->type_double;
+    case LR_TYPE_X86_FP80: return dest->type_x86_fp80;
     case LR_TYPE_PTR:    return dest->type_ptr;
     case LR_TYPE_ARRAY:
         return lr_type_array(dest->arena,

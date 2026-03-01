@@ -98,6 +98,8 @@ file(MAKE_DIRECTORY "${fake_lfortran}/.git")
 file(MAKE_DIRECTORY "${fake_lfortran}/build-llvm/src/bin")
 file(MAKE_DIRECTORY "${fake_lfortran}/build-liric/src/bin")
 file(MAKE_DIRECTORY "${fake_lfortran}/integration_tests")
+file(MAKE_DIRECTORY "${fake_lfortran}/src/libasr")
+file(WRITE "${fake_lfortran}/src/libasr/dwarf_convert.py" "# stub\n")
 file(WRITE "${fake_lfortran}/build-llvm/src/bin/lfortran" "#!/usr/bin/env bash
 exit 0
 ")

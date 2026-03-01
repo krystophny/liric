@@ -18,9 +18,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup micromamba
-        uses: mamba-org/setup-micromamba@v2.0.2
+        uses: mamba-org/setup-micromamba@v2.0.6
         with:
-          micromamba-version: "2.0.4-0"
+          micromamba-version: "2.5.0-2"
           environment-file: tools/llvm_backend_environment.yml
           create-args: >-
             llvmdev=20
@@ -37,6 +37,7 @@ jobs:
           fi
           cmake -S . -B build -G Ninja \
             -DWITH_REAL_LLVM_BACKEND=ON \
+            -DLIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=ON \
             -DWITH_BENCH_TCC=OFF \
             -DWITH_BENCH_LLI_PHASES=OFF \
             -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
@@ -45,13 +46,26 @@ jobs:
       - name: Run bench_matrix llvm API lanes
         shell: bash -e -l {0}
         run: |
+          rm -rf /tmp/liric_bench_llvm_api
           ./build/bench_matrix \
             --bench-dir /tmp/liric_bench_llvm_api \
             --modes llvm \
             --policies direct,ir \
             --lanes api_full_llvm,api_backend_llvm \
             --api-cases 10 \
-            --timeout 15
+            --timeout 15 \
+            --timeout-ms 15000 || {
+              rc=$?
+              if [[ -f /tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
+                echo "matrix_failures.jsonl:"
+                cat /tmp/liric_bench_llvm_api/matrix_failures.jsonl
+              fi
+              if [[ -f /tmp/liric_bench_llvm_api/matrix_summary.json ]]; then
+                echo "matrix_summary.json:"
+                cat /tmp/liric_bench_llvm_api/matrix_summary.json
+              fi
+              exit "${rc}"
+            }
 
       - name: Assert summary
         shell: bash -e -l {0}

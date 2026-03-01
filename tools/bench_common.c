@@ -209,12 +209,17 @@ static int wait_with_timeout(pid_t pid, int timeout_ms, int timeout_grace_ms, in
             if (r == 0) {
                 struct timespec ts;
                 if (now_ms() >= deadline_ms) {
+                    pid_t pgid;
                     r = waitpid(pid, &status, WNOHANG);
                     if (r == pid) {
                         *status_out = status;
                         return 0;
                     }
-                    (void)kill(-pid, SIGKILL);
+                    pgid = getpgid(pid);
+                    if (pgid == pid) {
+                        (void)kill(-pgid, SIGKILL);
+                    }
+                    (void)kill(pid, SIGKILL);
                     do {
                         r = waitpid(pid, &status, 0);
                     } while (r < 0 && errno == EINTR);
@@ -312,6 +317,10 @@ int bench_run_cmd(const bench_run_cmd_opts_t *opts, bench_cmd_result_t *out) {
         close(fderr);
         execvp(opts->argv[0], opts->argv);
         _exit(127);
+    }
+
+    if (setpgid(pid, pid) != 0 && errno != EACCES && errno != ESRCH) {
+        /* Child may have already exec'd; timeout path re-checks getpgid(). */
     }
 
     t0 = now_ms();

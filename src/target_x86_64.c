@@ -64,6 +64,8 @@ typedef struct {
     bool func_is_vararg;
     int32_t vararg_rsa_off;
     uint32_t vararg_named_gp;
+    uint32_t vararg_named_fp;
+    uint32_t vararg_named_stack_gp;
     lr_jit_t *jit;
     bool func_uses_external_sysv_fp;
 } x86_compile_ctx_t;
@@ -920,6 +922,8 @@ static void emit_shift(x86_compile_ctx_t *ctx, uint8_t ext, uint8_t dst, uint8_t
     invalidate_cached_reg(ctx, dst);
 }
 
+static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size);
+
 static void emit_setcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
     if (cc >= LR_CC_FP_OEQ) {
         emit_fp_setcc(ctx->buf, &ctx->pos, ctx->buflen, cc, dst);
@@ -928,7 +932,8 @@ static void emit_setcc(x86_compile_ctx_t *ctx, uint8_t cc, uint8_t dst) {
         uint8_t x86cc = lr_cc_to_x86(cc);
         emit_setcc_byte(ctx->buf, &ctx->pos, ctx->buflen, x86cc, dst);
     }
-    invalidate_cached_reg(ctx, dst);
+    /* setcc writes only the low 8 bits; canonicalize i1 values to 0/1. */
+    emit_movzx_rr(ctx, dst, dst, 1);
 }
 
 static void emit_movzx_rr(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src, uint8_t size) {
@@ -1263,6 +1268,67 @@ static void emit_cvtfp2si(x86_compile_ctx_t *ctx, uint8_t gpr, uint8_t fpreg, ui
     invalidate_cached_reg(ctx, gpr);
 }
 
+static void emit_x87_mem(x86_compile_ctx_t *ctx, uint8_t opcode,
+                         uint8_t ext, uint8_t base, int32_t disp) {
+    uint8_t mod;
+    if (base >= 8) {
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
+                  rex(false, false, false, true));
+    }
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, opcode);
+    if (disp == 0 && (base & 7) != 5) mod = 0;
+    else if (disp >= -128 && disp <= 127) mod = 1;
+    else mod = 2;
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(mod, ext, base));
+    if ((base & 7) == 4)
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x24);
+    if (mod == 1)
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, (uint8_t)(int8_t)disp);
+    else if (mod == 2)
+        emit_u32(ctx->buf, &ctx->pos, ctx->buflen, (uint32_t)disp);
+}
+
+static void emit_x87_fild_qword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDF, 5, base, disp);
+}
+
+static void emit_x87_fld_dword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xD9, 0, base, disp);
+}
+
+static void emit_x87_fld_qword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDD, 0, base, disp);
+}
+
+static void emit_x87_fld_tbyte(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDB, 5, base, disp);
+}
+
+static void emit_x87_fstp_dword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xD9, 3, base, disp);
+}
+
+static void emit_x87_fstp_qword(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDD, 3, base, disp);
+}
+
+static void emit_x87_fstp_tbyte(x86_compile_ctx_t *ctx, uint8_t base, int32_t disp) {
+    emit_x87_mem(ctx, 0xDB, 7, base, disp);
+}
+
+static void emit_x87_binop_pop(x86_compile_ctx_t *ctx, lr_opcode_t op) {
+    uint8_t modrm_byte = 0xC1;
+    switch (op) {
+    case LR_OP_FADD: modrm_byte = 0xC1; break; /* faddp st(1), st(0) */
+    case LR_OP_FMUL: modrm_byte = 0xC9; break; /* fmulp st(1), st(0) */
+    case LR_OP_FSUB: modrm_byte = 0xE9; break; /* fsubp st(1), st(0) */
+    case LR_OP_FDIV: modrm_byte = 0xF9; break; /* fdivp st(1), st(0) */
+    default: modrm_byte = 0xC1; break;
+    }
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xDE);
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm_byte);
+}
+
 static void emit_movsxd(x86_compile_ctx_t *ctx, uint8_t dst, uint8_t src) {
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, rex(true, dst >= 8, false, src >= 8));
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x63);
@@ -1422,9 +1488,23 @@ static int direct_ensure_phi_copy_cap(x86_direct_ctx_t *ctx) {
     return 0;
 }
 
+static bool direct_phi_copy_matches_edge(const x86_stream_phi_copy_t *copy,
+                                         uint32_t pred,
+                                         uint32_t succ,
+                                         bool only_unemitted) {
+    if (!copy)
+        return false;
+    if (copy->pred_block_id != pred || copy->succ_block_id != succ)
+        return false;
+    if (only_unemitted && copy->emitted)
+        return false;
+    return true;
+}
+
 static void direct_emit_phi_copies_for_edge(x86_direct_ctx_t *ctx,
                                             uint32_t pred,
-                                            uint32_t succ) {
+                                            uint32_t succ,
+                                            bool only_unemitted) {
     x86_compile_ctx_t *cc = &ctx->cc;
     uint32_t stage_base = ctx->next_vreg;
     uint32_t staged = 0;
@@ -1436,8 +1516,8 @@ static void direct_emit_phi_copies_for_edge(x86_direct_ctx_t *ctx,
         uint32_t tmp_vreg;
         const lr_operand_t *src_op;
 
-        if (ctx->phi_copies[i].pred_block_id != pred ||
-            ctx->phi_copies[i].succ_block_id != succ)
+        if (!direct_phi_copy_matches_edge(&ctx->phi_copies[i], pred, succ,
+                                          only_unemitted))
             continue;
 
         src_op = &ctx->phi_copies[i].src_op;
@@ -1472,8 +1552,8 @@ static void direct_emit_phi_copies_for_edge(x86_direct_ctx_t *ctx,
     staged = 0;
     for (uint32_t i = 0; i < ctx->phi_copy_count; i++) {
         lr_operand_t staged_src;
-        if (ctx->phi_copies[i].pred_block_id != pred ||
-            ctx->phi_copies[i].succ_block_id != succ)
+        if (!direct_phi_copy_matches_edge(&ctx->phi_copies[i], pred, succ,
+                                          only_unemitted))
             continue;
         memset(&staged_src, 0, sizeof(staged_src));
         staged_src.kind = LR_VAL_VREG;
@@ -1580,9 +1660,14 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
     case LR_OP_RET_VOID:
         emit_epilogue(cc);
         break;
+    case LR_OP_UNREACHABLE:
+        /* Some frontends leave an explicit `unreachable` at function tail.
+           Do not fall through into adjacent code; terminate the frame. */
+        emit_epilogue(cc);
+        break;
     case LR_OP_BR: {
         direct_emit_phi_copies_for_edge(ctx, dt->block_id,
-                                        dt->ops[0].block_id);
+                                        dt->ops[0].block_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         uint32_t target_id = dt->ops[0].block_id;
         emit_jmp_sourced(cc, target_id, dt->block_id);
@@ -1610,7 +1695,7 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
         jcc_disp_pos = cc->pos;
         emit_u32(cc->buf, &cc->pos, cc->buflen, 0);
 
-        direct_emit_phi_copies_for_edge(ctx, dt->block_id, false_id);
+        direct_emit_phi_copies_for_edge(ctx, dt->block_id, false_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_sourced(cc, false_id, dt->block_id);
 
@@ -1624,7 +1709,7 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
             cc->buf[jcc_disp_pos + 3] = (uint8_t)(rel32 >> 24);
         }
 
-        direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id);
+        direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_sourced(cc, true_id, dt->block_id);
         break;
@@ -1764,6 +1849,8 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->func_is_vararg = false;
     cc->vararg_rsa_off = 0;
     cc->vararg_named_gp = 0;
+    cc->vararg_named_fp = 0;
+    cc->vararg_named_stack_gp = 0;
     cc->func_uses_external_sysv_fp = function_uses_external_sysv_fp_abi(func_meta);
 
     attach_obj_symbol_meta_cache(cc);
@@ -1782,6 +1869,8 @@ static int x86_64_compile_begin(void **compile_ctx,
         uint32_t gp_used = cc->func_uses_internal_sret ? 1u : 0u;
         uint32_t fp_used = 0u;
         uint32_t stack_used = 0u;
+        uint32_t named_gp_total = cc->func_uses_internal_sret ? 1u : 0u;
+        uint32_t named_fp_total = 0u;
 
         for (uint32_t i = 0; i < num_params; i++) {
             const lr_type_t *pty = NULL;
@@ -1794,6 +1883,17 @@ static int x86_64_compile_begin(void **compile_ctx,
                                           &agg_lane_count))
                 agg_stack_units = (uint32_t)(((uint32_t)agg_lane_size *
                                               (uint32_t)agg_lane_count + 7u) / 8u);
+
+            if (cc->func_uses_external_sysv_fp) {
+                if (is_fp_abi_type(pty))
+                    named_fp_total++;
+                else if (agg_stack_units != 0)
+                    named_fp_total += agg_lane_count;
+                else
+                    named_gp_total++;
+            } else {
+                named_gp_total++;
+            }
 
             if (cc->func_uses_external_sysv_fp) {
                 if (is_fp_abi_type(pty) && fp_used < 8) {
@@ -1879,17 +1979,33 @@ static int x86_64_compile_begin(void **compile_ctx,
                 gp_used++;
             }
         }
+
+        if (vararg) {
+            uint32_t named_gp_regs = named_gp_total;
+            uint32_t named_fp_regs = named_fp_total;
+            if (named_gp_regs > 6)
+                named_gp_regs = 6;
+            if (named_fp_regs > 8)
+                named_fp_regs = 8;
+            cc->vararg_named_gp = named_gp_regs;
+            cc->vararg_named_fp = named_fp_regs;
+            cc->vararg_named_stack_gp =
+                named_gp_total > 6 ? named_gp_total - 6 : 0;
+        }
     }
 
     cc->func_is_vararg = vararg;
     if (vararg) {
-        uint32_t named_gp = num_params;
-        if (named_gp > 6) named_gp = 6;
-        cc->vararg_named_gp = named_gp;
-        cc->vararg_rsa_off = alloc_temp_slot(cc, 48, 8);
+        /* SysV register save area: 6*8 GP + 8*16 FP = 176 bytes. */
+        cc->vararg_rsa_off = alloc_temp_slot(cc, 176, 16);
         for (uint32_t i = 0; i < 6; i++)
             emit_mem_store_sized(cc, param_regs[i], X86_RBP,
                                  cc->vararg_rsa_off + (int32_t)(i * 8), 8);
+        for (uint32_t i = 0; i < 8; i++) {
+            emit_store_fp_mem_base(cc, X86_RBP,
+                                   cc->vararg_rsa_off + 48 + (int32_t)(i * 16),
+                                   param_fp_regs[i], 8);
+        }
     }
 
     *compile_ctx = ctx;
@@ -2060,6 +2176,24 @@ static int x86_64_compile_emit(void *compile_ctx,
                 emit_store_fp_mem_base(cc, X86_RBP, dst_off + off,
                                        FP_SCRATCH0, elem_sz);
             }
+            break;
+        }
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80 &&
+            ops[0].kind == LR_VAL_VREG && ops[1].kind == LR_VAL_VREG) {
+            size_t ty_sz = lr_type_size(desc->type);
+            size_t ty_al = lr_type_align(desc->type);
+            int32_t lhs_off;
+            int32_t rhs_off;
+            int32_t dst_off;
+            if (ty_sz < 10) ty_sz = 10;
+            if (ty_al < 8) ty_al = 8;
+            lhs_off = alloc_slot(cc, ops[0].vreg, ty_sz, ty_al);
+            rhs_off = alloc_slot(cc, ops[1].vreg, ty_sz, ty_al);
+            dst_off = alloc_slot(cc, desc->dest, ty_sz, ty_al);
+            emit_x87_fld_tbyte(cc, X86_RBP, lhs_off);
+            emit_x87_fld_tbyte(cc, X86_RBP, rhs_off);
+            emit_x87_binop_pop(cc, desc->op);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
             break;
         }
         uint8_t fsize = (desc->type &&
@@ -2452,6 +2586,29 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_SITOFP: {
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80) {
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t tmp_off;
+            int32_t dst_off;
+            emit_load_operand(cc, &ops[0], X86_RAX);
+            {
+                size_t src_sz = lr_type_size(ops[0].type);
+                if (src_sz == 1 || src_sz == 2)
+                    emit_movsx_rr(cc, X86_RAX, X86_RAX, (uint8_t)src_sz);
+                else if (src_sz == 4)
+                    emit_movsxd(cc, X86_RAX, X86_RAX);
+            }
+            tmp_off = alloc_temp_slot(cc, 8, 8);
+            encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                       X86_RAX, X86_RBP, tmp_off, 8);
+            if (dst_sz < 10) dst_sz = 10;
+            if (dst_al < 8) dst_al = 8;
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            emit_x87_fild_qword(cc, X86_RBP, tmp_off);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         uint8_t fsize = (desc->type &&
                          desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
         emit_load_operand(cc, &ops[0], X86_RAX);
@@ -2467,6 +2624,29 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_UITOFP: {
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80) {
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t tmp_off;
+            int32_t dst_off;
+            emit_load_operand(cc, &ops[0], X86_RAX);
+            {
+                size_t src_sz = lr_type_size(ops[0].type);
+                if (src_sz <= 4) {
+                    cc->buf[cc->pos++] = 0x89;
+                    cc->buf[cc->pos++] = 0xC0; /* mov eax, eax */
+                }
+            }
+            tmp_off = alloc_temp_slot(cc, 8, 8);
+            encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
+                       X86_RAX, X86_RBP, tmp_off, 8);
+            if (dst_sz < 10) dst_sz = 10;
+            if (dst_al < 8) dst_al = 8;
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            emit_x87_fild_qword(cc, X86_RBP, tmp_off);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         uint8_t fsize = (desc->type &&
                          desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
         emit_load_operand(cc, &ops[0], X86_RAX);
@@ -2498,6 +2678,24 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_FPEXT: {
+        if (desc->type && desc->type->kind == LR_TYPE_X86_FP80 &&
+            ops[0].kind == LR_VAL_VREG) {
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t src_off;
+            int32_t dst_off;
+            size_t src_sz = ops[0].type ? lr_type_size(ops[0].type) : 8;
+            src_off = alloc_slot(cc, ops[0].vreg, src_sz, src_sz);
+            if (dst_sz < 10) dst_sz = 10;
+            if (dst_al < 8) dst_al = 8;
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            if (ops[0].type && ops[0].type->kind == LR_TYPE_FLOAT)
+                emit_x87_fld_dword(cc, X86_RBP, src_off);
+            else
+                emit_x87_fld_qword(cc, X86_RBP, src_off);
+            emit_x87_fstp_tbyte(cc, X86_RBP, dst_off);
+            break;
+        }
         emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, 4);
         encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0xF3, 0x5A, 0,
                       FP_SCRATCH0, FP_SCRATCH0);
@@ -2505,6 +2703,27 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_FPTRUNC: {
+        if (ops[0].type && ops[0].type->kind == LR_TYPE_X86_FP80 &&
+            ops[0].kind == LR_VAL_VREG) {
+            size_t src_sz = lr_type_size(ops[0].type);
+            size_t src_al = lr_type_align(ops[0].type);
+            size_t dst_sz = lr_type_size(desc->type);
+            size_t dst_al = lr_type_align(desc->type);
+            int32_t src_off;
+            int32_t dst_off;
+            if (src_sz < 10) src_sz = 10;
+            if (src_al < 8) src_al = 8;
+            if (dst_sz < 4) dst_sz = 4;
+            if (dst_al < 4) dst_al = 4;
+            src_off = alloc_slot(cc, ops[0].vreg, src_sz, src_al);
+            dst_off = alloc_slot(cc, desc->dest, dst_sz, dst_al);
+            emit_x87_fld_tbyte(cc, X86_RBP, src_off);
+            if (desc->type && desc->type->kind == LR_TYPE_FLOAT)
+                emit_x87_fstp_dword(cc, X86_RBP, dst_off);
+            else
+                emit_x87_fstp_qword(cc, X86_RBP, dst_off);
+            break;
+        }
         emit_load_fp_operand(cc, &ops[0], FP_SCRATCH0, 8);
         encode_sse_rr(cc->buf, &cc->pos, cc->buflen, 0xF2, 0x5A, 0,
                       FP_SCRATCH0, FP_SCRATCH0);
@@ -2650,15 +2869,15 @@ static int x86_64_compile_emit(void *compile_ctx,
                 if (cc->func_is_vararg && nops >= 2) {
                     emit_load_operand(cc, &ops[1], X86_RAX);
                     uint32_t gp_off = cc->vararg_named_gp * 8;
+                    uint32_t fp_off = 48u + cc->vararg_named_fp * 16u;
                     emit_mov_imm(cc, X86_RCX, (int64_t)gp_off, false);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
                                X86_RCX, X86_RAX, 0, 4);
-                    emit_mov_imm(cc, X86_RCX, 48, false);
+                    emit_mov_imm(cc, X86_RCX, (int64_t)fp_off, false);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
                                X86_RCX, X86_RAX, 4, 4);
-                    int32_t overflow_off = 16 + (int32_t)(
-                        cc->vararg_named_gp > 6 ?
-                        cc->vararg_named_gp - 6 : 0) * 8;
+                    int32_t overflow_off =
+                        16 + (int32_t)(cc->vararg_named_stack_gp * 8u);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x8D,
                                X86_RCX, X86_RBP, overflow_off, 8);
                     encode_mem(cc->buf, &cc->pos, cc->buflen, 0x89,
@@ -2899,7 +3118,12 @@ static int x86_64_compile_emit(void *compile_ctx,
         break;
     }
     case LR_OP_UNREACHABLE:
-        break;
+        ctx->deferred.pending = true;
+        ctx->deferred.op = LR_OP_UNREACHABLE;
+        ctx->deferred.num_ops = 0;
+        ctx->deferred.block_id = ctx->current_block_id;
+        cc->current_inst = NULL;
+        return 0;
     default:
         break;
     }
@@ -2947,13 +3171,11 @@ static int x86_64_compile_end(void *compile_ctx, size_t *out_len) {
             if (!has_late)
                 continue;
             size_t stub_pos = cc->pos;
-            for (uint32_t pi = 0; pi < ctx->phi_copy_count; pi++) {
-                if (ctx->phi_copies[pi].pred_block_id != source ||
-                    ctx->phi_copies[pi].succ_block_id != target)
-                    continue;
-                emit_phi_copy_value(cc, ctx->phi_copies[pi].dest_vreg,
-                                    &ctx->phi_copies[pi].src_op);
-            }
+            /* Late stubs are entered from runtime edges; reset cache state
+               and apply only pending copies with parallel PHI semantics. */
+            invalidate_cached_gprs(cc);
+            direct_emit_phi_copies_for_edge(ctx, source, target, true);
+            invalidate_cached_gprs(cc);
             if (direct_ensure_fixup_cap(ctx) != 0)
                 return -1;
             emit_jmp(cc, target);
@@ -3013,7 +3235,13 @@ static int x86_64_compile_add_phi_copy(void *compile_ctx,
     if (direct_ensure_phi_copy_cap(ctx) != 0)
         return -1;
 
-    (void)alloc_slot(&ctx->cc, dest_vreg, 8, 8);
+    {
+        size_t sz = src_op->type ? lr_type_size(src_op->type) : 8;
+        size_t al = src_op->type ? lr_type_align(src_op->type) : 8;
+        if (sz < 8) sz = 8;
+        if (al < 8) al = 8;
+        (void)alloc_slot(&ctx->cc, dest_vreg, sz, al);
+    }
 
     x86_stream_phi_copy_t *entry = &ctx->phi_copies[ctx->phi_copy_count++];
     entry->pred_block_id = pred_block_id;

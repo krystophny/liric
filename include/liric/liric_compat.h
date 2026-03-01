@@ -48,6 +48,7 @@ typedef struct lc_context {
     lr_type_t *type_i64;
     lr_type_t *type_float;
     lr_type_t *type_double;
+    lr_type_t *type_x86_fp80;
     lr_type_t *type_ptr;
     lr_arena_t *type_arena;
     int backend;
@@ -149,6 +150,7 @@ lr_type_t *lc_get_int_type(lc_module_compat_t *mod, unsigned width);
 lr_type_t *lc_get_void_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_float_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_double_type(lc_module_compat_t *mod);
+lr_type_t *lc_get_x86_fp80_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod);
 bool lc_type_is_integer(lr_type_t *ty);
 bool lc_type_is_floating(lr_type_t *ty);
@@ -414,6 +416,7 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
 void lc_phi_add_incoming(lc_phi_node_t *phi, lc_value_t *val,
                          lr_block_t *block);
 void lc_phi_finalize(lc_phi_node_t *phi);
+lr_block_t *lc_phi_infer_missing_pred(lc_phi_node_t *phi);
 
 /* Select */
 lc_value_t *lc_create_select(lc_module_compat_t *mod, lr_block_t *b,

@@ -181,10 +181,10 @@ static int patch_riscv_jal_vaddr(uint8_t *buf, size_t buflen, uint32_t off,
     int64_t disp = (int64_t)target_vaddr - (int64_t)place_vaddr;
     if ((disp & 1LL) != 0)
         return -1;
-    if (disp < -(1LL << 20) * 2LL || disp > (((1LL << 20) - 1LL) * 2LL))
+    if (disp < -(1LL << 20) || disp >= (1LL << 20))
         return -1;
 
-    int32_t imm = (int32_t)(disp >> 1);
+    int32_t imm = (int32_t)disp;
     uint32_t uimm = (uint32_t)imm;
     uint32_t insn = read_u32_le(buf, off);
     uint32_t low = insn & 0x00000FFFu; /* rd + opcode */
@@ -273,6 +273,11 @@ lr_reloc_mapped_t elf_reloc_aarch64(uint8_t liric_type) {
 lr_reloc_mapped_t elf_reloc_riscv64(uint8_t liric_type) {
     lr_reloc_mapped_t m = {0};
     switch (liric_type) {
+    case LR_RELOC_RISCV64_JAL:
+        m.native_type = R_RISCV_JAL;
+        m.addend = 0;
+        m.is_pcrel = true;
+        break;
     default:
         m.native_type = R_RISCV_NONE;
         m.addend = 0;
@@ -2177,7 +2182,7 @@ int write_elf_executable_riscv64(FILE *out, const uint8_t *code, size_t code_siz
     if (!out || !code || !oc || !entry_symbol || !entry_symbol[0])
         return -1;
 
-    if (oc->num_relocs != 0 || oc->num_data_relocs != 0)
+    if (oc->num_data_relocs != 0)
         return -1;
 
     const uint64_t image_base = 0x400000ULL;
@@ -2226,6 +2231,32 @@ int write_elf_executable_riscv64(FILE *out, const uint8_t *code, size_t code_siz
         return -1;
     }
     memcpy(code_mut, code, code_size);
+
+    /* Patch text relocations within code_mut before copying to output */
+    for (uint32_t ri = 0; ri < oc->num_relocs; ri++) {
+        const lr_obj_reloc_t *rel = &oc->relocs[ri];
+        if (rel->type != LR_RELOC_RISCV64_JAL)
+            continue;
+        if (rel->symbol_idx >= oc->num_symbols) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+        const lr_obj_symbol_t *sym = &oc->symbols[rel->symbol_idx];
+        if (!sym->is_defined || sym->section != 1) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+        uint64_t place_vaddr = code_vaddr + rel->offset;
+        uint64_t target_vaddr = code_vaddr + sym->offset;
+        if (patch_riscv_jal_vaddr(code_mut, code_size, rel->offset,
+                                  place_vaddr, target_vaddr) != 0) {
+            free(buf);
+            free(code_mut);
+            return -1;
+        }
+    }
 
     uint8_t *p = buf;
     w8(&p, ELFMAG0); w8(&p, ELFMAG1); w8(&p, ELFMAG2); w8(&p, ELFMAG3);

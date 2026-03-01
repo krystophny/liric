@@ -128,7 +128,17 @@ void *lr_platform_dlsym(void *handle, const char *name) {
 void *lr_platform_dlsym_default(const char *name) {
     if (!name || !name[0])
         return NULL;
+#if defined(RTLD_DEFAULT)
     return dlsym(RTLD_DEFAULT, name);
+#else
+    void *handle = dlopen(NULL, RTLD_NOW | RTLD_GLOBAL);
+    void *sym = NULL;
+    if (!handle)
+        return NULL;
+    sym = dlsym(handle, name);
+    (void)dlclose(handle);
+    return sym;
+#endif
 }
 
 int lr_platform_run_process(char *const argv[], bool quiet, int *out_status) {

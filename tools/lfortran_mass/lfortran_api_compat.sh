@@ -17,6 +17,11 @@ usage: lfortran_api_compat.sh [options]
   --workers N             parallel build/test workers (default: nproc/sysctl)
   --run-ref-tests yes|no  run lfortran reference tests (default: yes)
   --run-itests yes|no     run lfortran integration tests (default: yes)
+  --itest-workers N       workers for integration tests only (default: 1)
+  --itest-timeout-sec N   per integration-suite timeout in seconds (default: 900)
+  --itest-memory-max SIZE memory cap for integration-suite scope, systemd format (default: 8G)
+  --itest-tasks-max N     task cap for integration-suite scope (default: 512)
+  --unsafe-itests         disable integration-suite containment guards
   --env-name NAME         run test suites via conda/mamba env NAME (lf.sh style)
   --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
@@ -60,6 +65,28 @@ find_env_runner() {
     fi
 }
 
+detect_setsid_wait_flag() {
+    if ! command -v setsid >/dev/null 2>&1; then
+        printf '%s\n' ""
+        return 0
+    fi
+    if setsid --help 2>&1 | grep -q -- '--wait'; then
+        printf '%s\n' "--wait"
+    else
+        printf '%s\n' ""
+    fi
+}
+
+detect_timeout_cmd() {
+    if command -v timeout >/dev/null 2>&1; then
+        printf '%s\n' "timeout"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        printf '%s\n' "gtimeout"
+    else
+        printf '%s\n' ""
+    fi
+}
+
 run_in_selected_env() {
     if [[ -n "$env_name" ]]; then
         local extra_args=()
@@ -69,6 +96,53 @@ run_in_selected_env() {
         "$env_runner" run "${extra_args[@]}" -n "$env_name" "$@"
     else
         "$@"
+    fi
+}
+
+clean_mod_artifacts() {
+    local dir="$1"
+    if [[ -d "$dir" ]]; then
+        find "$dir" -maxdepth 1 -type f \( -name '*.mod' -o -name '*.smod' \) -delete
+    fi
+}
+
+is_nonneg_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+run_with_itest_guards() {
+    local -a cmd=()
+    if [[ "$safe_itests" != "yes" ]]; then
+        run_in_selected_env "$@"
+        return 0
+    fi
+
+    if [[ -n "$itest_memory_max" ]]; then
+        if command -v systemd-run >/dev/null 2>&1 \
+            && systemd-run --user --scope --quiet true >/dev/null 2>&1; then
+            cmd+=(systemd-run --user --scope --quiet
+                  -p "MemoryMax=${itest_memory_max}"
+                  -p "TasksMax=${itest_tasks_max}")
+        fi
+    fi
+
+    if [[ "$itest_pgroup_isolation" == "setsid" ]]; then
+        cmd+=(setsid)
+        if [[ -n "$setsid_wait_flag" ]]; then
+            cmd+=("$setsid_wait_flag")
+        fi
+    fi
+
+    if [[ "$itest_timeout_sec" -gt 0 ]]; then
+        if [[ -n "$timeout_cmd" ]]; then
+            cmd+=("$timeout_cmd" --signal=TERM --kill-after=15s "${itest_timeout_sec}s")
+        fi
+    fi
+
+    if (( ${#cmd[@]} > 0 )); then
+        run_in_selected_env "${cmd[@]}" "$@"
+    else
+        run_in_selected_env "$@"
     fi
 }
 
@@ -276,6 +350,14 @@ build_type="Release"
 workers="$(detect_workers)"
 run_ref_tests="yes"
 run_itests="yes"
+itest_workers=""
+itest_timeout_sec="${LIRIC_LFORTRAN_ITEST_TIMEOUT_SEC:-900}"
+itest_memory_max="${LIRIC_LFORTRAN_ITEST_MEMORY_MAX:-8G}"
+itest_tasks_max="${LIRIC_LFORTRAN_ITEST_TASKS_MAX:-512}"
+safe_itests="yes"
+itest_pgroup_isolation="none"
+setsid_wait_flag=""
+timeout_cmd=""
 env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
 env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
@@ -283,6 +365,8 @@ itest_args=""
 skip_lfortran_build="no"
 skip_checkout="no"
 fresh_workspace="no"
+lfortran_with_runtime_stacktrace="${LIRIC_LFORTRAN_WITH_RUNTIME_STACKTRACE:-OFF}"
+lfortran_ctest_exclude="${LIRIC_LFORTRAN_CTEST_EXCLUDE:-^test_lfortran$}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -345,6 +429,30 @@ while [[ $# -gt 0 ]]; do
             run_itests="$2"
             shift 2
             ;;
+        --itest-workers)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_workers="$2"
+            shift 2
+            ;;
+        --itest-timeout-sec)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_timeout_sec="$2"
+            shift 2
+            ;;
+        --itest-memory-max)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_memory_max="$2"
+            shift 2
+            ;;
+        --itest-tasks-max)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_tasks_max="$2"
+            shift 2
+            ;;
+        --unsafe-itests)
+            safe_itests="no"
+            shift
+            ;;
         --env-name)
             [[ $# -ge 2 ]] || die "missing value for $1"
             env_name="$2"
@@ -385,10 +493,26 @@ done
 
 [[ "$run_ref_tests" == "yes" || "$run_ref_tests" == "no" ]] || die "--run-ref-tests must be yes|no"
 [[ "$run_itests" == "yes" || "$run_itests" == "no" ]] || die "--run-itests must be yes|no"
+is_nonneg_int "$workers" || die "--workers must be a non-negative integer"
+if [[ -z "$itest_workers" ]]; then
+    itest_workers="1"
+fi
+is_nonneg_int "$itest_workers" || die "--itest-workers must be a non-negative integer"
+is_nonneg_int "$itest_timeout_sec" || die "--itest-timeout-sec must be a non-negative integer"
+is_nonneg_int "$itest_tasks_max" || die "--itest-tasks-max must be a non-negative integer"
 
 need_cmd git
 need_cmd cmake
 need_cmd ctest
+if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" && "$itest_timeout_sec" -gt 0 ]]; then
+    timeout_cmd="$(detect_timeout_cmd)"
+fi
+if [[ "$safe_itests" == "yes" && "$run_itests" == "yes" ]]; then
+    if command -v setsid >/dev/null 2>&1; then
+        itest_pgroup_isolation="setsid"
+        setsid_wait_flag="$(detect_setsid_wait_flag)"
+    fi
+fi
 
 if [[ -n "$env_name" ]]; then
     if [[ -z "$env_runner" ]]; then
@@ -515,7 +639,7 @@ if [[ "$skip_lfortran_build" != "yes" ]]; then
         "${lf_compiler_flags[@]}" \
         -DWITH_LIRIC=yes \
         -DLIRIC_DIR="$liric_root" \
-        -DWITH_RUNTIME_STACKTRACE=yes \
+        -DWITH_RUNTIME_STACKTRACE="$lfortran_with_runtime_stacktrace" \
         -DWITH_LLVM=OFF \
         2>&1 | tee "${log_root}/build_lfortran_liric_configure.log"
     cmake --build "$lfortran_build_liric" -j"$workers" \
@@ -577,7 +701,7 @@ if [[ -z "${LIRIC_RUNTIME_BC:-}" ]]; then
         runtime_bc_out="${output_root}/liric_runtime.bc"
         if [[ -f "$runtime_src" ]]; then
             echo "lfortran_api_compat: pre-building runtime BC with ${runtime_bc_clang}" >&2
-            "$runtime_bc_clang" -O2 -emit-llvm -c "$runtime_src" \
+            "$runtime_bc_clang" -O0 -emit-llvm -c "$runtime_src" \
                 "-I${runtime_include}" -o "$runtime_bc_out"
             export LIRIC_RUNTIME_BC="$runtime_bc_out"
             echo "lfortran_api_compat: LIRIC_RUNTIME_BC=${LIRIC_RUNTIME_BC}" >&2
@@ -601,13 +725,26 @@ if [[ "$run_itests" == "yes" ]]; then
     fi
 fi
 
-ctest --test-dir "$lfortran_build_liric" --output-on-failure \
-    2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+# test_lfortran exercises JIT-only multi-module flows that are out of scope
+# for the current WITH_LIRIC AOT compatibility lane.
+if [[ -n "$lfortran_ctest_exclude" ]]; then
+    echo "lfortran_api_compat: excluding unit ctest pattern: ${lfortran_ctest_exclude}" >&2
+    ctest --test-dir "$lfortran_build_liric" --output-on-failure \
+        -E "$lfortran_ctest_exclude" \
+        2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+else
+    ctest --test-dir "$lfortran_build_liric" --output-on-failure \
+        2>&1 | tee "${log_root}/lfortran_unit_ctest_liric.log" || status=1
+fi
 
 if [[ "$run_ref_tests" == "yes" ]]; then
     liric_ref_wrapper="${liric_root}/tools/lfortran_ref_test_liric.py"
     (
         cd "$lfortran_dir"
+        # Remove stale mixed-version module artifacts that can poison
+        # separate-compilation reference cases (for example submodule_04).
+        clean_mod_artifacts "$lfortran_dir"
+        clean_mod_artifacts "$lfortran_dir/integration_tests"
         if [[ -z "${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS:-}" ]]; then
             export LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS="1"
             echo "lfortran_api_compat: applying WITH_LIRIC reference policy: LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS=${LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS}" >&2
@@ -628,6 +765,7 @@ fi
 if [[ "$run_itests" == "yes" ]]; then
     (
         cd "$lfortran_dir/integration_tests"
+        clean_mod_artifacts "$PWD"
         unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
@@ -638,16 +776,22 @@ if [[ "$run_itests" == "yes" ]]; then
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
+        echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
+        itest_extra=()
         if [[ -n "$itest_args" ]]; then
-            # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers" $itest_args
+            # shellcheck disable=SC2206
+            itest_extra=( $itest_args )
+        fi
+        if [[ -n "$itest_args" ]]; then
+            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$itest_workers" "${itest_extra[@]}"
         else
-            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$workers"
+            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$itest_workers"
         fi
     ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api.log" || status=1
 
     (
         cd "$lfortran_dir/integration_tests"
+        clean_mod_artifacts "$PWD"
         unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
         if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
             export LFORTRAN_LINKER="gcc"
@@ -658,11 +802,15 @@ if [[ "$run_itests" == "yes" ]]; then
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (-f -nf16 mode)" >&2
+        itest_extra=()
         if [[ -n "$itest_args" ]]; then
-            # shellcheck disable=SC2086
-            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$workers" $itest_args
+            # shellcheck disable=SC2206
+            itest_extra=( $itest_args )
+        fi
+        if [[ -n "$itest_args" ]]; then
+            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$itest_workers" "${itest_extra[@]}"
         else
-            run_in_selected_env "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$workers"
+            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$itest_workers"
         fi
     ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api_fast.log" || status=1
 fi

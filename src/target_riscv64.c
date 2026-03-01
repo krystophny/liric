@@ -1,6 +1,7 @@
 #include "target_riscv64.h"
 
 #include "ir.h"
+#include "objfile.h"
 
 #include <limits.h>
 #include <stdbool.h>
@@ -13,6 +14,7 @@
 #define RV_OPCODE_OP     0x33u
 #define RV_OPCODE_OPIMM  0x13u
 #define RV_OPCODE_LUI    0x37u
+#define RV_OPCODE_JAL    0x6Fu
 #define RV_OPCODE_JALR   0x67u
 #define RV_OPCODE_OPFP   0x53u
 
@@ -95,6 +97,12 @@ static uint32_t rv_enc_i(int32_t imm, uint8_t rs1, uint8_t funct3,
 static uint32_t rv_enc_u(int32_t imm20, uint8_t rd, uint8_t opcode) {
     return ((uint32_t)imm20 & 0xFFFFF000u)
          | ((uint32_t)(rd & 0x1Fu) << 7)
+         | (uint32_t)(opcode & 0x7Fu);
+}
+
+static uint32_t rv_enc_j(uint8_t rd, uint8_t opcode) {
+    /* J-type with zero immediate -- offset filled by relocation patching */
+    return ((uint32_t)(rd & 0x1Fu) << 7)
          | (uint32_t)(opcode & 0x7Fu);
 }
 
@@ -265,6 +273,7 @@ typedef struct rv_direct_ctx {
     const rv_features_t *feat;
     uint32_t current_block_id;
     bool has_current_block;
+    bool ra_saved;
     uint32_t next_vreg;
 } rv_direct_ctx_t;
 
@@ -433,7 +442,6 @@ static int rv_compile_emit(void *compile_ctx,
     switch (desc->op) {
     case LR_OP_ALLOCA:
     case LR_OP_BR:
-    case LR_OP_CALL:
     case LR_OP_CONDBR:
     case LR_OP_EXTRACTVALUE:
     case LR_OP_FCMP:
@@ -450,6 +458,86 @@ static int rv_compile_emit(void *compile_ctx,
     case LR_OP_UITOFP:
     case LR_OP_UNREACHABLE:
         return RV_ERR_UNSUPPORTED_OP;
+    case LR_OP_CALL: {
+        if (nops < 1 || ops[0].kind != LR_VAL_GLOBAL || !ctx->mod)
+            return -1;
+
+        const char *callee_name = lr_module_symbol_name(
+            ctx->mod, ops[0].global_id);
+        if (!callee_name)
+            return -1;
+
+        lr_objfile_ctx_t *oc = (lr_objfile_ctx_t *)ctx->mod->obj_ctx;
+        if (!oc)
+            return -1;
+
+        /* Save ra to s1 before the first call so ret can restore it */
+        if (!ctx->ra_saved) {
+            if (rv_emit_mv(ec, RV_S1, RV_RA) != 0)
+                return -1;
+            ctx->ra_saved = true;
+        }
+
+        /* Move arguments into ABI registers */
+        uint32_t nargs = nops - 1;
+        uint8_t next_iarg = RV_A0;
+        uint8_t next_farg = RV_FA0;
+        for (uint32_t i = 0; i < nargs; i++) {
+            const lr_type_t *at = ops[i + 1].type;
+            if (rv_type_is_fp(at)) {
+                if (next_farg > RV_FA7)
+                    return -1;
+                uint8_t src = 0;
+                if (rv_operand_fpr(ec, &ops[i + 1], ctx->vmap,
+                                   ctx->vmap_n, RV_T1, RV_T2,
+                                   RV_FT0, feat, &src) != 0)
+                    return -1;
+                bool is_double = at->kind == LR_TYPE_DOUBLE;
+                if (src != next_farg &&
+                    rv_emit_fp_move(ec, next_farg, src, is_double) != 0)
+                    return -1;
+                next_farg++;
+            } else {
+                if (next_iarg > RV_A7)
+                    return -1;
+                uint8_t src = 0;
+                if (rv_operand_gpr(ec, &ops[i + 1], ctx->vmap,
+                                   ctx->vmap_n, RV_T1, RV_T0,
+                                   &src) != 0)
+                    return -1;
+                if (src != next_iarg &&
+                    rv_emit_mv(ec, next_iarg, src) != 0)
+                    return -1;
+                next_iarg++;
+            }
+        }
+
+        /* Emit JAL ra, 0 (placeholder) and record relocation */
+        uint32_t sym_idx = lr_obj_ensure_symbol(oc, callee_name,
+                                                false, 0, 0);
+        if (sym_idx == UINT32_MAX)
+            return -1;
+        uint32_t jal_off = (uint32_t)ec->pos;
+        if (rv_emit32(ec, rv_enc_j(RV_RA, RV_OPCODE_JAL)) != 0)
+            return -1;
+        lr_obj_add_reloc(oc, jal_off, sym_idx, LR_RELOC_RISCV64_JAL);
+
+        /* Map return value */
+        if (desc->type && desc->type->kind != LR_TYPE_VOID) {
+            if (rv_direct_ensure_vmap(ctx, desc->dest) != 0)
+                return -1;
+            if (rv_type_is_fp(desc->type)) {
+                ctx->vmap[desc->dest].in_use = 1;
+                ctx->vmap[desc->dest].cls = RV_REGCLS_FPR;
+                ctx->vmap[desc->dest].reg = RV_FA0;
+            } else {
+                ctx->vmap[desc->dest].in_use = 1;
+                ctx->vmap[desc->dest].cls = RV_REGCLS_GPR;
+                ctx->vmap[desc->dest].reg = RV_A0;
+            }
+        }
+        break;
+    }
     case LR_OP_ADD: case LR_OP_SUB: case LR_OP_MUL:
     case LR_OP_SDIV: case LR_OP_SREM:
     case LR_OP_UDIV: case LR_OP_UREM:
@@ -655,11 +743,15 @@ static int rv_compile_emit(void *compile_ctx,
             if (src != RV_A0 && rv_emit_mv(ec, RV_A0, src) != 0)
                 return -1;
         }
+        if (ctx->ra_saved && rv_emit_mv(ec, RV_RA, RV_S1) != 0)
+            return -1;
         if (rv_emit32(ec, rv_enc_i(0, RV_RA, 0, RV_X0, RV_OPCODE_JALR)) != 0)
             return -1;
         break;
     }
     case LR_OP_RET_VOID:
+        if (ctx->ra_saved && rv_emit_mv(ec, RV_RA, RV_S1) != 0)
+            return -1;
         if (rv_emit32(ec, rv_enc_i(0, RV_RA, 0, RV_X0, RV_OPCODE_JALR)) != 0)
             return -1;
         break;

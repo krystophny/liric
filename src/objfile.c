@@ -987,12 +987,13 @@ static int obj_define_intrinsic_stubs(lr_obj_build_result_t *out,
         lr_obj_symbol_t *sym = &out->ctx.symbols[i];
         if (sym->is_defined || !sym->name || !sym->name[0])
             continue;
-        if (!lr_platform_intrinsic_supported(sym->name))
+        if (!lr_platform_intrinsic_supported_for_target(sym->name, target->name))
             continue;
 
         const uint8_t *blob_begin = NULL;
         const uint8_t *blob_end = NULL;
-        if (!lr_platform_intrinsic_blob_lookup(sym->name, &blob_begin, &blob_end))
+        if (!lr_platform_intrinsic_blob_lookup_for_target(
+                sym->name, target->name, &blob_begin, &blob_end))
             return -1;
         if (!blob_begin || !blob_end || blob_end <= blob_begin)
             return -1;

@@ -16,30 +16,33 @@ jobs:
       versions: ${{ steps.discover.outputs.versions }}
     steps:
       - name: Setup micromamba
-        uses: mamba-org/setup-micromamba@v2.0.2
+        uses: mamba-org/setup-micromamba@v2.0.6
         with:
-          micromamba-version: "2.0.4-0"
+          micromamba-version: "2.5.0-2"
 
       - name: Discover versions
         id: discover
         shell: bash -e -l {0}
         run: |
-          versions="$(
+          versions_json="$(
             micromamba search -c conda-forge llvmdev --json \
-              | sed -n 's/^[[:space:]]*"version":[[:space:]]*"\([^"]*\)".*/\1/p' \
-              | awk -F. '$1 ~ /^[0-9]+$/ && $1 >= 5 && $1 <= 22 {print $1}' \
-              | sort -n -u
+              | jq -c '
+                  # Bound majors to supported CI range: $1 >= 5 && $1 <= 22
+                  [.. | objects | .version? // empty
+                   | tostring
+                   | capture("^(?<major>[0-9]+)").major
+                   | tonumber
+                   | select(. >= 5 and . <= 22)]
+                  | unique
+                  | sort
+                '
           )"
-          if [[ -z "${versions}" ]]; then
+          if [[ -z "${versions_json}" || "${versions_json}" == "[]" ]]; then
             echo "No llvmdev majors found in supported CI range 5..22" >&2
             exit 1
           fi
-          versions_json="$(
-            printf '%s\n' "${versions}" \
-              | awk 'BEGIN { printf "[" } { if (NR > 1) printf ","; printf "\"%s\"", $1 } END { printf "]" }'
-          )"
           echo "versions=${versions_json}" >> "${GITHUB_OUTPUT}"
-          echo "Discovered llvmdev majors: ${versions}"
+          echo "Discovered llvmdev majors: $(echo "${versions_json}" | jq -r 'join(\" \")')"
 
   llvm-backend-matrix:
     name: LLVM backend (llvmdev=${{ matrix.llvm-version }})
@@ -55,9 +58,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup micromamba
-        uses: mamba-org/setup-micromamba@v2.0.2
+        uses: mamba-org/setup-micromamba@v2.0.6
         with:
-          micromamba-version: "2.0.4-0"
+          micromamba-version: "2.5.0-2"
           environment-file: tools/llvm_backend_environment.yml
           create-args: >-
             llvmdev=${{ matrix.llvm-version }}

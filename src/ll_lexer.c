@@ -167,6 +167,7 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"void", LR_TOK_VOID},
     {"float", LR_TOK_FLOAT},
     {"double", LR_TOK_DOUBLE},
+    {"x86_fp80", LR_TOK_X86_FP80},
     {"ptr", LR_TOK_PTR},
     {"eq", LR_TOK_EQ},
     {"ne", LR_TOK_NE},
@@ -189,7 +190,6 @@ static const keyword_t keywords[] __attribute__((unused)) = {
     {"une", LR_TOK_UNE},
     {"uno", LR_TOK_UNO},
     {"x", LR_TOK_X},
-    {"x86_fp80", LR_TOK_DOUBLE},
     {NULL, LR_TOK_EOF}
 };
 
@@ -560,7 +560,7 @@ static lr_tok_t lookup_keyword(const char *s, size_t len) {
         if (len == 1 && memcmp(s, "x", 1) == 0) return LR_TOK_X;
         break;
     case 0x87d98b64u:
-        if (len == 8 && memcmp(s, "x86_fp80", 8) == 0) return LR_TOK_DOUBLE;
+        if (len == 8 && memcmp(s, "x86_fp80", 8) == 0) return LR_TOK_X86_FP80;
         break;
     default:
         break;
@@ -815,6 +815,7 @@ const char *lr_tok_name(lr_tok_t kind) {
     case LR_TOK_I64:       return "i64";
     case LR_TOK_FLOAT:     return "float";
     case LR_TOK_DOUBLE:    return "double";
+    case LR_TOK_X86_FP80:  return "x86_fp80";
     case LR_TOK_PTR:       return "ptr";
     case LR_TOK_LOCAL_ID:  return "local_id";
     case LR_TOK_GLOBAL_ID: return "global_id";

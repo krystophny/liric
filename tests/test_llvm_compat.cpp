@@ -1647,6 +1647,45 @@ static int test_irbuilder_gep_and_struct_gep() {
     return 0;
 }
 
+static int test_irbuilder_scalar_gep_trims_trailing_undef_index() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("scalar_gep_trim", ctx);
+
+    llvm::Type *i8 = llvm::Type::getInt8Ty(ctx);
+    llvm::Type *i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::Type *ptrTy = llvm::PointerType::getUnqual(ctx);
+    llvm::Type *params[] = {ptrTy, i64};
+    llvm::FunctionType *ft = llvm::FunctionType::get(ptrTy, params, false);
+
+    llvm::Function *fn = mod.createFunction("test_scalar_gep_trim", ft, false);
+    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(fn);
+    builder.SetInsertPoint(bb);
+
+    llvm::Value *base = fn->getArg(0);
+    llvm::Value *idx0 = fn->getArg(1);
+    llvm::Value *idx1 = llvm::UndefValue::get(i64);
+    llvm::Value *idxs[] = {idx0, idx1};
+
+    llvm::Value *gep = builder.CreateGEP(i8, base,
+        llvm::ArrayRef<llvm::Value *>(idxs, 2), "trimmed_gep");
+    TEST_ASSERT(gep != nullptr, "scalar gep created");
+    builder.CreateRet(gep);
+
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    mod.print(os, nullptr);
+
+    TEST_ASSERT(ir.find("getelementptr i8, ptr") != std::string::npos,
+                "scalar gep emitted");
+    TEST_ASSERT(ir.find(", i64 undef") == std::string::npos,
+                "scalar gep omits trailing undef index");
+    return 0;
+}
+
 static int test_irbuilder_select() {
     llvm::LLVMContext ctx;
     llvm::Module mod("select", ctx);
@@ -2184,6 +2223,7 @@ int main() {
     RUN_TEST(test_irbuilder_casts);
     RUN_TEST(test_irbuilder_fp_ops);
     RUN_TEST(test_irbuilder_gep_and_struct_gep);
+    RUN_TEST(test_irbuilder_scalar_gep_trims_trailing_undef_index);
     RUN_TEST(test_irbuilder_select);
     RUN_TEST(test_irbuilder_call);
     RUN_TEST(test_irbuilder_extractvalue_insertvalue);

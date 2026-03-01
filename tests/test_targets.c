@@ -795,7 +795,6 @@ int test_target_riscv64_streaming_reports_unsupported_ops(void) {
     const lr_opcode_t unsupported_ops[] = {
         LR_OP_ALLOCA,
         LR_OP_BR,
-        LR_OP_CALL,
         LR_OP_CONDBR,
         LR_OP_EXTRACTVALUE,
         LR_OP_FCMP,

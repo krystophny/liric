@@ -107,7 +107,7 @@ static int replay_phi_copies(const lr_target_t *target, void *compile_ctx,
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
         if (!b)
-            return -1;
+            continue;
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
             if (!inst || inst->op != LR_OP_PHI)
@@ -127,8 +127,23 @@ static int replay_phi_copies(const lr_target_t *target, void *compile_ctx,
     return 0;
 }
 
-static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
-                                  const lr_func_t *func) {
+static bool stream_inst_is_terminator(const lr_inst_t *inst) {
+    if (!inst)
+        return false;
+    switch (inst->op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_UNREACHABLE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+int lr_replay_function_stream(const lr_target_t *target, void *compile_ctx,
+                              const lr_func_t *func) {
     uint32_t max_operands = 0;
     uint32_t max_indices = 0;
     lr_operand_desc_t *operands = NULL;
@@ -144,7 +159,7 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
         if (!b)
-            return -1;
+            continue;
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
             if (!inst)
@@ -171,6 +186,9 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
 
     for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
         lr_block_t *b = func->block_array[bi];
+        bool has_terminator = false;
+        if (!b)
+            continue;
         if (target->compile_set_block(compile_ctx, b->id) != 0) {
             free(indices);
             free(operands);
@@ -221,6 +239,22 @@ static int replay_function_stream(const lr_target_t *target, void *compile_ctx,
                 free(operands);
                 return -1;
             }
+            if (stream_inst_is_terminator(inst))
+                has_terminator = true;
+        }
+
+        if (!has_terminator) {
+            lr_compile_inst_desc_t fallthrough_desc;
+            memset(&fallthrough_desc, 0, sizeof(fallthrough_desc));
+            /* Block terminators are mandatory. If upstream handed us a
+               malformed block without one, terminate conservatively instead
+               of guessing a fallthrough edge from list order. */
+            fallthrough_desc.op = LR_OP_UNREACHABLE;
+            if (target->compile_emit(compile_ctx, &fallthrough_desc) != 0) {
+                free(indices);
+                free(operands);
+                return -1;
+            }
         }
     }
 
@@ -259,7 +293,7 @@ int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
     if (rc != 0 || !compile_ctx)
         return rc != 0 ? rc : -1;
 
-    rc = replay_function_stream(target, compile_ctx, func);
+    rc = lr_replay_function_stream(target, compile_ctx, func);
     if (rc != 0)
         return rc;
 

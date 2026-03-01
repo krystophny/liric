@@ -50,6 +50,13 @@ public:
     void setCompatMod(lc_module_compat_t *m) { compat_mod_ = m; }
     lc_module_compat_t *getCompatMod() const { return compat_mod_; }
 
+    static bool classof(const Value *V) {
+        if (!V) return false;
+        lc_value_t *v = V->impl();
+        if (!v || v->kind != LC_VAL_GLOBAL) return false;
+        return lc_value_get_func(v) == nullptr;
+    }
+
     template <typename AlignTy>
     void setAlignment(AlignTy A) { (void)A; }
 };

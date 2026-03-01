@@ -10,6 +10,36 @@ lr_stub_llvm_fabs_f32_begin:
     ret
 lr_stub_llvm_fabs_f32_end:
 
+.globl lr_stub_llvm_fabs_v2f32_begin
+.globl lr_stub_llvm_fabs_v2f32_end
+lr_stub_llvm_fabs_v2f32_begin:
+    pcmpeqd xmm1, xmm1
+    psrld xmm1, 1
+    andps xmm0, xmm1
+    ret
+lr_stub_llvm_fabs_v2f32_end:
+
+.globl lr_stub_llvm_fabs_v2f64_begin
+.globl lr_stub_llvm_fabs_v2f64_end
+lr_stub_llvm_fabs_v2f64_begin:
+    pcmpeqd xmm1, xmm1
+    psrlq xmm1, 1
+    andpd xmm0, xmm1
+    ret
+lr_stub_llvm_fabs_v2f64_end:
+
+.globl lr_stub_llvm_lifetime_start_begin
+.globl lr_stub_llvm_lifetime_start_end
+lr_stub_llvm_lifetime_start_begin:
+    ret
+lr_stub_llvm_lifetime_start_end:
+
+.globl lr_stub_llvm_lifetime_end_begin
+.globl lr_stub_llvm_lifetime_end_end
+lr_stub_llvm_lifetime_end_begin:
+    ret
+lr_stub_llvm_lifetime_end_end:
+
 .globl lr_stub_llvm_fabs_f64_begin
 .globl lr_stub_llvm_fabs_f64_end
 lr_stub_llvm_fabs_f64_begin:
@@ -953,3 +983,75 @@ lr_stub_llvm_is_fpclass_f32_begin:
     movzx eax, al
     ret
 lr_stub_llvm_is_fpclass_f32_end:
+
+.globl lr_stub_llvm_smax_i32_begin
+.globl lr_stub_llvm_smax_i32_end
+lr_stub_llvm_smax_i32_begin:
+    mov eax, edi
+    cmp edi, esi
+    cmovl eax, esi
+    ret
+lr_stub_llvm_smax_i32_end:
+
+.globl lr_stub_llvm_smin_i32_begin
+.globl lr_stub_llvm_smin_i32_end
+lr_stub_llvm_smin_i32_begin:
+    mov eax, edi
+    cmp edi, esi
+    cmovg eax, esi
+    ret
+lr_stub_llvm_smin_i32_end:
+
+.globl lr_stub_llvm_smax_i64_begin
+.globl lr_stub_llvm_smax_i64_end
+lr_stub_llvm_smax_i64_begin:
+    mov rax, rdi
+    cmp rdi, rsi
+    cmovl rax, rsi
+    ret
+lr_stub_llvm_smax_i64_end:
+
+.globl lr_stub_llvm_smin_i64_begin
+.globl lr_stub_llvm_smin_i64_end
+lr_stub_llvm_smin_i64_begin:
+    mov rax, rdi
+    cmp rdi, rsi
+    cmovg rax, rsi
+    ret
+lr_stub_llvm_smin_i64_end:
+
+.globl lr_stub_llvm_umax_i32_begin
+.globl lr_stub_llvm_umax_i32_end
+lr_stub_llvm_umax_i32_begin:
+    mov eax, edi
+    cmp edi, esi
+    cmovb eax, esi
+    ret
+lr_stub_llvm_umax_i32_end:
+
+.globl lr_stub_llvm_umin_i32_begin
+.globl lr_stub_llvm_umin_i32_end
+lr_stub_llvm_umin_i32_begin:
+    mov eax, edi
+    cmp edi, esi
+    cmova eax, esi
+    ret
+lr_stub_llvm_umin_i32_end:
+
+.globl lr_stub_llvm_umax_i64_begin
+.globl lr_stub_llvm_umax_i64_end
+lr_stub_llvm_umax_i64_begin:
+    mov rax, rdi
+    cmp rdi, rsi
+    cmovb rax, rsi
+    ret
+lr_stub_llvm_umax_i64_end:
+
+.globl lr_stub_llvm_umin_i64_begin
+.globl lr_stub_llvm_umin_i64_end
+lr_stub_llvm_umin_i64_begin:
+    mov rax, rdi
+    cmp rdi, rsi
+    cmova rax, rsi
+    ret
+lr_stub_llvm_umin_i64_end:

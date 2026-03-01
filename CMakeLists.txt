@@ -59,6 +59,8 @@ set(LIRIC_LFORTRAN_BUILD_LIRIC "${LIRIC_LFORTRAN_ROOT}/build-liric"
     CACHE PATH "Path to lfortran WITH_LIRIC build directory")
 set(LIRIC_LFORTRAN_API_OUTPUT_ROOT "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out"
     CACHE PATH "Path to lfortran API compatibility output artifacts")
+set(LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortran_api_compat_out_safe"
+    CACHE PATH "Path to lfortran API compatibility safe-run output artifacts")
 set(LIRIC_LFORTRAN_REPO "https://github.com/krystophny/lfortran.git"
     CACHE STRING "LFortran repository URL for CMake-managed checkout")
 set(LIRIC_LFORTRAN_REF "origin/liric-aot-minimal"
@@ -193,13 +195,6 @@ if(WITH_REAL_LLVM_BACKEND)
         unset(LIRIC_LLJIT_C_HEADER)
     endif()
 
-    add_compile_definitions(
-        LIRIC_HAVE_REAL_LLVM_BACKEND=1
-        LIRIC_HAVE_LLVM_C_LLJIT=${LIRIC_HAVE_LLVM_C_LLJIT}
-        LIRIC_BACKEND_LLVM_VERSION_MAJOR=${LIRIC_BACKEND_LLVM_VERSION_MAJOR}
-        LIRIC_BACKEND_LLVM_VERSION_NUM=${LIRIC_BACKEND_LLVM_VERSION_NUM}
-        LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR=${LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR}
-    )
     message(STATUS "Real LLVM backend enabled (llvm-config=${LLVM_BACKEND_CONFIG_EXE}, version=${LIRIC_BACKEND_LLVM_VERSION})")
 endif()
 
@@ -221,7 +216,7 @@ if(UNIX AND NOT APPLE)
     add_link_options("$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-rdynamic>")
 endif()
 
-add_library(liric STATIC
+set(LIRIC_LIB_SOURCES
     src/arena.c
     src/ir.c
     src/ll_lexer.c
@@ -257,17 +252,25 @@ add_library(liric STATIC
     src/platform/platform_intrinsics.c
     src/platform/platform_os.c
 )
+set(LIRIC_PLATFORM_ASM_SOURCES "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-    target_sources(liric PRIVATE
-        src/platform/platform_intrinsic_stubs_x86_64_linux.S
-    )
+    list(APPEND LIRIC_PLATFORM_ASM_SOURCES
+        src/platform/platform_intrinsic_stubs_x86_64_linux.S)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_aarch64_linux.S)
+    list(APPEND LIRIC_PLATFORM_ASM_SOURCES
+        src/platform/platform_intrinsic_stubs_aarch64_linux.S)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    list(APPEND LIRIC_PLATFORM_ASM_SOURCES
+        src/platform/platform_intrinsic_stubs_riscv64_linux.S)
 endif()
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    target_sources(liric PRIVATE src/platform/platform_intrinsic_stubs_aarch64_darwin.S)
+    list(APPEND LIRIC_PLATFORM_ASM_SOURCES
+        src/platform/platform_intrinsic_stubs_aarch64_darwin.S)
 endif()
+
+add_library(liric STATIC ${LIRIC_LIB_SOURCES} ${LIRIC_PLATFORM_ASM_SOURCES})
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
@@ -302,7 +305,10 @@ if(WITH_REAL_LLVM_BACKEND)
     target_compile_options(liric PRIVATE ${LIRIC_REAL_LLVM_CFLAGS_LIST})
     target_compile_definitions(liric PRIVATE
         LIRIC_HAVE_REAL_LLVM_BACKEND=1
+        LIRIC_HAVE_LLVM_C_LLJIT=${LIRIC_HAVE_LLVM_C_LLJIT}
         LIRIC_BACKEND_LLVM_VERSION_MAJOR=${LIRIC_BACKEND_LLVM_VERSION_MAJOR}
+        LIRIC_BACKEND_LLVM_VERSION_NUM=${LIRIC_BACKEND_LLVM_VERSION_NUM}
+        LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR=${LIRIC_HAVE_LLVM_ORC_LLJIT_GET_DATALAYOUT_STR}
     )
     target_link_options(liric PUBLIC ${LIRIC_REAL_LLVM_LDFLAGS_LIST})
     target_link_libraries(liric PRIVATE
@@ -310,6 +316,25 @@ if(WITH_REAL_LLVM_BACKEND)
         ${LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST}
         stdc++
     )
+endif()
+
+# Build a second library without the real LLVM backend for downstream consumers
+# (e.g. lfortran WITH_LIRIC) that must not link libLLVM.
+if(WITH_REAL_LLVM_BACKEND)
+    add_library(liric_nollvm STATIC ${LIRIC_LIB_SOURCES} ${LIRIC_PLATFORM_ASM_SOURCES})
+    target_include_directories(liric_nollvm PUBLIC include)
+    target_include_directories(liric_nollvm PRIVATE src)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+        add_dependencies(liric_nollvm liric_stencil_data)
+        target_include_directories(liric_nollvm PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+        target_compile_definitions(liric_nollvm PRIVATE LIRIC_HAVE_GENERATED_STENCILS=1)
+    endif()
+    if(LIRIC_LFORTRAN_NO_LTO)
+        set_property(TARGET liric_nollvm PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+        set_property(TARGET liric_nollvm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+        set_property(TARGET liric_nollvm PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+        target_compile_options(liric_nollvm PRIVATE -fno-lto)
+    endif()
 endif()
 
 add_executable(liric_bin tools/liric_main.c)
@@ -473,13 +498,61 @@ if(NOT LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE AND LLVM_CONFIG_EXE)
     endif()
 endif()
 
+set(LIRIC_LFORTRAN_LLVM_LIBDIR "" CACHE PATH
+    "Optional LLVM library directory override for WITH_LIRIC linkage")
+set(LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE "${LIRIC_LFORTRAN_LLVM_LIBDIR}")
+if(NOT LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE)
+    set(_liric_lfortran_llvm_libdir_config "")
+    if(LLVM_BACKEND_CONFIG_EXE)
+        set(_liric_lfortran_llvm_libdir_config "${LLVM_BACKEND_CONFIG_EXE}")
+    elseif(LLVM_CONFIG_EXE)
+        set(_liric_lfortran_llvm_libdir_config "${LLVM_CONFIG_EXE}")
+    endif()
+    if(_liric_lfortran_llvm_libdir_config)
+        execute_process(
+            COMMAND ${_liric_lfortran_llvm_libdir_config} --libdir
+            OUTPUT_VARIABLE _liric_lfortran_llvm_libdir
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE _liric_lfortran_llvm_libdir_rc
+        )
+        if(_liric_lfortran_llvm_libdir_rc EQUAL 0 AND
+           EXISTS "${_liric_lfortran_llvm_libdir}")
+            set(LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE
+                "${_liric_lfortran_llvm_libdir}")
+        endif()
+    endif()
+endif()
+
 set(LIRIC_LFORTRAN_LLVM_ARGS "")
+set(LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS "")
 if(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE)
     list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
         -DLLVM_DIR=${LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE})
 endif()
+if(LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE)
+    list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
+        -DLLVM_LIBRARY_DIRS=${LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE})
+    set(_liric_lfortran_llvm_c_lib_override "")
+    foreach(_liric_lfortran_llvm_c_lib_name
+            libLLVM-C.so
+            libLLVM-C.dylib
+            libLLVM-C.tbd
+            libLLVM.so
+            libLLVM.dylib
+            libLLVM.tbd)
+        if(EXISTS "${LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE}/${_liric_lfortran_llvm_c_lib_name}")
+            set(_liric_lfortran_llvm_c_lib_override
+                "${LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE}/${_liric_lfortran_llvm_c_lib_name}")
+            break()
+        endif()
+    endforeach()
+    if(_liric_lfortran_llvm_c_lib_override)
+        list(APPEND LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS
+            -D_lfortran_liric_llvm_c_lib=${_liric_lfortran_llvm_c_lib_override})
+    endif()
+endif()
 
-set(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM "${WITH_REAL_LLVM_BACKEND}" CACHE BOOL
+set(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM OFF CACHE BOOL
     "Allow WITH_LIRIC LFortran build to link real LLVM libraries")
 
 set(LIRIC_LFORTRAN_LIRIC_COMPILER_ARGS ${LIRIC_LFORTRAN_LLVM_COMPILER_ARGS})
@@ -489,6 +562,32 @@ set(LIRIC_LFORTRAN_LIRIC_PRECONFIGURE_COMMAND
 if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
     set(LIRIC_LFORTRAN_LIRIC_PRECONFIGURE_COMMAND
         ${CMAKE_COMMAND} -E rm -rf ${LIRIC_LFORTRAN_BUILD_LIRIC})
+endif()
+
+# Always pass an explicit liric archive into WITH_LIRIC builds so lfortran does
+# not resolve to an unintended default archive. When real LLVM linkage is
+# disabled for WITH_LIRIC, wire the nollvm archive instead.
+set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS "")
+set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS "")
+if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
+    if(NOT WITH_REAL_LLVM_BACKEND)
+        message(FATAL_ERROR
+            "LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=ON requires WITH_REAL_LLVM_BACKEND=ON")
+    endif()
+    set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+        -DLIRIC_LIB=$<TARGET_FILE:liric>)
+    set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
+else()
+    if(TARGET liric_nollvm)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+            -DLIRIC_LIB=$<TARGET_FILE:liric_nollvm>)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric_nollvm)
+    else()
+        # WITH_REAL_LLVM_BACKEND=OFF: main liric target is already no-LLVM.
+        set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+            -DLIRIC_LIB=$<TARGET_FILE:liric>)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
+    endif()
 endif()
 
 add_custom_target(
@@ -535,13 +634,15 @@ add_custom_target(
         -DWITH_LIRIC=yes
         -DLIRIC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
         -DLIRIC_REQUIRE_REAL_LLVM_LINK=${LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM}
+        ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS}
         ${LIRIC_LFORTRAN_LLVM_ARGS}
-        -DWITH_RUNTIME_STACKTRACE=yes
+        ${LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS}
+        -DWITH_RUNTIME_STACKTRACE=OFF
         -DWITH_LLVM=OFF
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
         --target lfortran lfortran_runtime build_runtime
         test_cwrapper test_stacktrace test_lfortran --parallel
-    DEPENDS lfortran_prepare liric_probe_runner
+    DEPENDS lfortran_prepare liric_probe_runner ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS}
     COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
     USES_TERMINAL
 )
@@ -565,6 +666,29 @@ add_custom_target(
         --run-itests yes
     DEPENDS lfortran_build_all
     COMMENT "Run LFortran API compatibility suite using CMake-managed builds"
+    USES_TERMINAL
+)
+
+add_custom_target(
+    lfortran_api_compat_safe
+    COMMAND ${CMAKE_COMMAND} -E env
+        CMAKE_BUILD_PARALLEL_LEVEL=2
+        LIRIC_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+        --workspace ${CMAKE_CURRENT_BINARY_DIR}/deps
+        --output-root ${LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE}
+        --lfortran-dir ${LIRIC_LFORTRAN_ROOT}
+        --skip-checkout
+        --skip-lfortran-build
+        --run-ref-tests yes
+        --run-itests yes
+        --workers 2
+        --itest-workers 1
+        --itest-timeout-sec 600
+        --itest-memory-max 4G
+        --itest-tasks-max 256
+    DEPENDS lfortran_build_all
+    COMMENT "Run LFortran API compatibility suite (safe profile, logged)"
     USES_TERMINAL
 )
 
@@ -605,6 +729,13 @@ add_executable(test_liric
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
+if(WITH_REAL_LLVM_BACKEND)
+    target_compile_definitions(test_liric PRIVATE
+        LIRIC_HAVE_REAL_LLVM_BACKEND=1
+        LIRIC_HAVE_LLVM_C_LLJIT=${LIRIC_HAVE_LLVM_C_LLJIT}
+        LIRIC_BACKEND_LLVM_VERSION_MAJOR=${LIRIC_BACKEND_LLVM_VERSION_MAJOR}
+    )
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     target_compile_definitions(test_liric PRIVATE
         LIRIC_STENCIL_GEN_EXE="$<TARGET_FILE:stencil_gen>"
@@ -744,6 +875,30 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                 -DTARGET=riscv64gc
                 -DQEMU=${QEMU_RISCV64_EXE}
                 -DEXPECT_RC=9
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_exe_riscv64gc_qemu_intrinsic_math
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_intrinsic_math.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64gc_qemu_intrinsic_math
+                -DTARGET=riscv64gc
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_exe_riscv64gc_qemu_intrinsic_trig
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/riscv_intrinsic_trig.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_riscv64gc_qemu_intrinsic_trig
+                -DTARGET=riscv64gc
+                -DQEMU=${QEMU_RISCV64_EXE}
+                -DEXPECT_RC=42
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_riscv_qemu_run.cmake
         )
     endif()

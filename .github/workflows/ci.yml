@@ -46,6 +46,28 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  riscv64-qemu-linux:
+    runs-on: ubuntu-latest
+    name: riscv64-qemu-linux
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install QEMU user-mode
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+
+      - name: RISC-V 64 QEMU tests
+        run: ctest --test-dir build -R riscv64 --output-on-failure
+
   platform-intrinsics-shape:
     runs-on: ubuntu-latest
 
@@ -62,10 +84,13 @@ jobs:
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
             -D__linux__ -D__riscv -D__riscv_xlen=64 src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -DLR_PLATFORM_SKIP_HOST_BLOB_CHECK \
             -D__APPLE__ -D__MACH__ -D__x86_64__ src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
             -D__APPLE__ -D__MACH__ -D__aarch64__ src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -DLR_PLATFORM_SKIP_HOST_BLOB_CHECK \
             -D_WIN32 -D_M_X64 src/platform/platform_intrinsics.c
           cc -std=c11 -Wall -Wextra -Wpedantic -Werror -Isrc -fsyntax-only \
+            -DLR_PLATFORM_SKIP_HOST_BLOB_CHECK \
             -D_WIN32 -D_M_ARM64 src/platform/platform_intrinsics.c

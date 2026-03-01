@@ -527,10 +527,11 @@ inline Function *Function::Create(FunctionType *Ty, GlobalValue::LinkageTypes Li
        what to compile vs. leave as an undefined symbol. */
     (void)Linkage;
     Function *fn = M.createFunction(Name.c_str(), Ty, /*is_decl=*/true);
-    if (fn && !detail::insertion_point_active_ref()) {
+    if (fn && (!detail::insertion_point_active_ref() ||
+               !detail::current_function_ref())) {
         /* Keep a fallback implicit owner when there is no active insertion
-           context. While a builder has an insertion point, declarations
-           must not steal ownership from the function currently being built. */
+           context, or when the previous context was torn down but the
+           insertion-active flag was not cleared. */
         detail::current_function_ref() = fn;
     }
     return fn;
@@ -558,6 +559,18 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
         f = fn->getIRFunc();
     }
 
+    if (!fn && !Parent && !InsertBefore) {
+        /* Keep LLVM-compat implicit owner behavior: a detached block created
+           without Parent/InsertBefore inherits the current function context
+           when one is active, but remains detached from the block list. */
+        Function *implicit_fn = detail::current_function_ref();
+        if (implicit_fn) {
+            fn = implicit_fn;
+            mod = fn->getCompatMod();
+            f = fn->getIRFunc();
+        }
+    }
+
     if (!mod)
         mod = Module::getCurrentModule();
 
@@ -574,11 +587,11 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     lc_value_t *bv = nullptr;
     /* Match LLVM semantics:
        - Parent == nullptr and InsertBefore == nullptr -> detached block with
-         no parent function until inserted.
+         implicit parent from current function context.
        - InsertBefore provided -> create detached, then insert before anchor.
        - Parent provided and no InsertBefore -> append to parent immediately. */
     if (!Parent && !InsertBefore) {
-        bv = lc_block_create_detached(mod, nullptr, Name.c_str());
+        bv = lc_block_create_detached(mod, f, Name.c_str());
     } else if (InsertBefore) {
         bv = lc_block_create_detached(mod, f, Name.c_str());
     } else {
@@ -587,7 +600,7 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     if (!bv) return BasicBlock::wrap(nullptr);
 
     BasicBlock *bb = BasicBlock::wrap(bv);
-    if (fn && (Parent || InsertBefore)) {
+    if (fn && f) {
         detail::register_block_parent(lc_value_get_block(bv), fn);
     }
     if (InsertBefore && fn) {

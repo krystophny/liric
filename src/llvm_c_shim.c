@@ -172,9 +172,21 @@ static void upsert_lookup_sig_entry(LLVMLiricSessionStateRef state,
 static void record_module_lookup_signatures(LLVMLiricSessionStateRef state,
                                             const lr_module_t *module) {
     const lr_func_t *f;
+    int dbg_lookup = getenv("LIRIC_DEBUG_LOOKUP") != NULL;
     if (!state || !module)
         return;
     for (f = module->first_func; f; f = f->next) {
+        if (dbg_lookup) {
+            fprintf(stderr,
+                    "liric_sig func=%s is_decl=%d blocks=%u first_block=%p uses_llvm_abi=%d ret_kind=%d params=%u\n",
+                    f->name ? f->name : "<null>",
+                    (int)f->is_decl,
+                    f->num_blocks,
+                    (void *)f->first_block,
+                    (int)f->uses_llvm_abi,
+                    (int)classify_lookup_ret_kind(f->ret_type),
+                    f->num_params);
+        }
         if (!f->name || !f->name[0] || f->is_decl)
             continue;
         upsert_lookup_sig_entry(state, f->name, f->num_params,
@@ -230,6 +242,18 @@ static int validate_module_data_global_refs(const lr_module_t *module) {
         }
     }
     return 0;
+}
+
+static void restore_defined_functions(lr_module_t *module) {
+    lr_func_t *f;
+    if (!module)
+        return;
+    for (f = module->first_func; f; f = f->next) {
+        if (!f->is_decl)
+            continue;
+        if (f->first_block || f->num_blocks > 0)
+            f->is_decl = false;
+    }
 }
 
 static liric_lookup_wrapper_entry_t *find_lookup_wrapper(
@@ -621,6 +645,7 @@ void LLVMLiricSessionDispose(LLVMLiricSessionStateRef state) {
 int LLVMLiricSessionAddCompatModule(LLVMLiricSessionStateRef state,
                                     lc_module_compat_t *mod) {
     lr_module_t *ir = NULL;
+    int dbg_lookup = getenv("LIRIC_DEBUG_LOOKUP") != NULL;
     if (!state || !mod)
         return -1;
     if (!state->jit)
@@ -628,11 +653,25 @@ int LLVMLiricSessionAddCompatModule(LLVMLiricSessionStateRef state,
     ir = lc_module_get_ir(mod);
     if (!ir)
         return -1;
+    if (dbg_lookup) {
+        const lr_global_t *g;
+        for (g = ir->first_global; g; g = g->next) {
+            if (g->name && strcmp(g->name, "a") == 0) {
+                float fv = 0.0f;
+                if (g->init_data && g->init_size >= sizeof(float))
+                    memcpy(&fv, g->init_data, sizeof(float));
+                fprintf(stderr,
+                        "liric_addmod jit=%p global a ext=%d init_size=%zu init_f32=%g\n",
+                        (void *)state->jit, (int)g->is_external, g->init_size, (double)fv);
+            }
+        }
+    }
     record_module_lookup_signatures(state, ir);
     if (validate_module_data_global_refs(ir) != 0)
         return -1;
     if (lc_module_finalize_for_execution(mod) != 0)
         return -1;
+    restore_defined_functions(ir);
     return lc_module_add_to_jit(mod, state->jit);
 }
 
@@ -653,28 +692,87 @@ int LLVMLiricSessionLoadLibrary(LLVMLiricSessionStateRef state,
 void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
     liric_lookup_sig_entry_t *sig;
     liric_lookup_wrapper_entry_t *wrapper;
+    int dbg_lookup = getenv("LIRIC_DEBUG_LOOKUP") != NULL;
+    bool force_eval_wrapper = false;
+    const char *resolved_name = name;
+    char *prefixed_name = NULL;
     void *addr;
     if (!state || !state->jit || !name || !name[0])
         return NULL;
     addr = lr_jit_get_function(state->jit, name);
-    if (!addr)
+    if (!addr) {
+        if (name[0] == '_') {
+            resolved_name = name + 1;
+            addr = lr_jit_get_function(state->jit, resolved_name);
+        } else {
+            size_t name_len = strlen(name);
+            prefixed_name = (char *)malloc(name_len + 2);
+            if (prefixed_name) {
+                prefixed_name[0] = '_';
+                memcpy(prefixed_name + 1, name, name_len + 1);
+                resolved_name = prefixed_name;
+                addr = lr_jit_get_function(state->jit, resolved_name);
+            }
+        }
+    }
+    if (!addr) {
+        free(prefixed_name);
+        if (dbg_lookup) {
+            fprintf(stderr, "liric_lookup miss name=%s\n", name);
+        }
         return NULL;
+    }
 
-    sig = find_lookup_sig_entry(state, name);
+    sig = find_lookup_sig_entry(state, resolved_name);
+    if (!sig && resolved_name[0] == '_')
+        sig = find_lookup_sig_entry(state, resolved_name + 1);
+    if (dbg_lookup) {
+        fprintf(stderr,
+                "liric_lookup jit=%p name=%s resolved=%s addr=%p sig=%p num_params=%u ret_kind=%d uses_llvm_abi=%d\n",
+                (void *)state->jit, name, resolved_name, addr, (void *)sig,
+                sig ? sig->num_params : 0u,
+                sig ? (int)sig->ret_kind : -1,
+                sig ? (int)sig->uses_llvm_abi : -1);
+        if (strcmp(resolved_name, "__lfortran_evaluate_2") == 0) {
+            float *a_ptr = (float *)lr_jit_get_function(state->jit, "a");
+            if (a_ptr) {
+                fprintf(stderr, "liric_lookup probe symbol a=%p value=%g\n",
+                        (void *)a_ptr, (double)(*a_ptr));
+            } else {
+                fprintf(stderr, "liric_lookup probe symbol a=<missing>\n");
+            }
+        }
+    }
+    if (sig && sig->uses_llvm_abi &&
+        sig->ret_kind != LIRIC_LOOKUP_RET_C64 &&
+        strncmp(resolved_name, "__lfortran_evaluate_", 20) == 0) {
+        force_eval_wrapper = true;
+    }
     if (!sig || sig->num_params != 0 ||
         sig->ret_kind == LIRIC_LOOKUP_RET_OTHER ||
-        sig->uses_llvm_abi)
+        (sig->uses_llvm_abi && !force_eval_wrapper)) {
+        free(prefixed_name);
         return addr;
+    }
 
-    wrapper = find_lookup_wrapper(state, name, addr, sig->ret_kind);
-    if (wrapper)
+    wrapper = find_lookup_wrapper(state, resolved_name, addr, sig->ret_kind);
+    if (wrapper) {
+        free(prefixed_name);
+        if (dbg_lookup) {
+            fprintf(stderr, "liric_lookup wrapper hit name=%s code=%p\n",
+                    resolved_name, wrapper->code);
+        }
         return wrapper->code;
+    }
 
     wrapper = (liric_lookup_wrapper_entry_t *)calloc(1, sizeof(*wrapper));
-    if (!wrapper)
+    if (!wrapper) {
+        free(prefixed_name);
         return addr;
-    wrapper->name = strdup(name);
+    }
+    wrapper->name = strdup(resolved_name);
     if (!wrapper->name) {
+        free(prefixed_name);
         free(wrapper);
         return addr;
     }
@@ -682,12 +780,18 @@ void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
     wrapper->ret_kind = sig->ret_kind;
     if (build_lookup_wrapper_code(sig->ret_kind, addr,
                                   &wrapper->code, &wrapper->code_len) != 0) {
+        free(prefixed_name);
         free(wrapper->name);
         free(wrapper);
         return addr;
     }
+    free(prefixed_name);
     wrapper->next = state->lookup_wrappers;
     state->lookup_wrappers = wrapper;
+    if (dbg_lookup) {
+        fprintf(stderr, "liric_lookup wrapper new name=%s code=%p target=%p kind=%d\n",
+                resolved_name, wrapper->code, addr, (int)sig->ret_kind);
+    }
     return wrapper->code;
 }
 

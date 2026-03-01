@@ -17,6 +17,7 @@ enum lr_type_kind_public {
     LR_TYPE_I64,
     LR_TYPE_FLOAT,
     LR_TYPE_DOUBLE,
+    LR_TYPE_X86_FP80,
     LR_TYPE_PTR,
     LR_TYPE_ARRAY,
     LR_TYPE_VECTOR,
@@ -149,6 +150,7 @@ struct lr_module {
     lr_type_t *type_i64;
     lr_type_t *type_float;
     lr_type_t *type_double;
+    lr_type_t *type_x86_fp80;
     lr_type_t *type_ptr;
     void *obj_ctx;
 };
