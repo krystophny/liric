@@ -1116,6 +1116,75 @@ int test_session_ir_print(void) {
     return 0;
 }
 
+int test_session_scalar_gep_undef_tail_trimmed(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    lr_type_t *i8;
+    lr_type_t *i64;
+    lr_type_t *ptr;
+    lr_operand_desc_t gep_indices[2];
+    uint32_t slot;
+    uint32_t gep;
+    uint32_t p2i;
+    int rc;
+    FILE *tmp;
+    long len;
+    char *buf;
+    size_t nread;
+
+    cfg.mode = LR_MODE_IR;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i8 = lr_type_i8_s(s);
+    i64 = lr_type_i64_s(s);
+    ptr = lr_type_ptr_s(s);
+    TEST_ASSERT(i8 != NULL, "i8 type");
+    TEST_ASSERT(i64 != NULL, "i64 type");
+    TEST_ASSERT(ptr != NULL, "ptr type");
+
+    rc = lr_session_func_begin(s, "session_scalar_gep_trim", i64, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    slot = lr_emit_alloca(s, i8);
+    gep_indices[0] = LR_IMM(7, i64);
+    gep_indices[1] = LR_UNDEF(i64);
+    gep = lr_emit_gep(s, i8, LR_VREG(slot, ptr), gep_indices, 2);
+    p2i = lr_emit_ptrtoint(s, i64, LR_VREG(gep, ptr));
+    lr_emit_ret(s, LR_VREG(p2i, i64));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile");
+    rc = lr_session_dump_ir(s, tmp, &err);
+    TEST_ASSERT_EQ(rc, 0, "ir dump");
+
+    fseek(tmp, 0, SEEK_END);
+    len = ftell(tmp);
+    TEST_ASSERT(len > 0, "ir dump produced output");
+    fseek(tmp, 0, SEEK_SET);
+    buf = (char *)malloc((size_t)len + 1u);
+    TEST_ASSERT(buf != NULL, "alloc dump buf");
+    nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read dump");
+    buf[len] = '\0';
+    fclose(tmp);
+
+    TEST_ASSERT(strstr(buf, "getelementptr i8, ptr") != NULL,
+                "ir output contains scalar gep");
+    TEST_ASSERT(strstr(buf, ", i64 undef") == NULL,
+                "scalar gep omits trailing undef index");
+
+    free(buf);
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;

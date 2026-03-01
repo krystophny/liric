@@ -1516,6 +1516,24 @@ static int emit_ir_instruction(struct lr_session *s, const session_inst_desc_t *
     return 0;
 }
 
+static bool is_aggregate_gep_base_type(const lr_type_t *type) {
+    if (!type)
+        return false;
+    return type->kind == LR_TYPE_STRUCT ||
+           type->kind == LR_TYPE_ARRAY ||
+           type->kind == LR_TYPE_VECTOR;
+}
+
+static bool is_trimmable_scalar_gep_index(const lr_operand_desc_t *op) {
+    if (!op)
+        return true;
+    if (op->kind == LR_OP_KIND_UNDEF || op->kind == LR_OP_KIND_NULL)
+        return true;
+    if (op->kind == LR_OP_KIND_IMM_I64 && op->imm_i64 == 0)
+        return true;
+    return false;
+}
+
 static int validate_block_termination(struct lr_session *s,
                                       session_error_t *err) {
     lr_block_t *b;
@@ -2634,6 +2652,16 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
     normalized = *inst;
     normalized.type = itype;
     normalized.dest = dest;
+    if (normalized.op == LR_OP_GEP &&
+        normalized.num_operands > 2 &&
+        normalized.operands &&
+        !is_aggregate_gep_base_type(normalized.type)) {
+        while (normalized.num_operands > 2 &&
+               is_trimmable_scalar_gep_index(
+                   &normalized.operands[normalized.num_operands - 1])) {
+            normalized.num_operands--;
+        }
+    }
 
     if (s->compile_active &&
         normalized.op == LR_OP_CALL &&
