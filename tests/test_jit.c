@@ -1853,7 +1853,9 @@ int test_jit_patch_relocs_from_skips_prior_entries(void) {
     int rc;
     uint32_t missing_idx;
     uint32_t live_idx;
-    void *live_addr = (void *)(uintptr_t)&cache_override_symbol_one;
+    /* Use a fixed non-zero page offset so ARM64 PAGEOFF12 relocation
+       assertions are deterministic across hosts/toolchains. */
+    void *live_addr = (void *)(uintptr_t)0x12345678u;
     TEST_ASSERT(jit != NULL, "jit create");
 
     memset(&ctx, 0, sizeof(ctx));
@@ -1887,8 +1889,13 @@ int test_jit_patch_relocs_from_skips_prior_entries(void) {
                    "second reloc patched expected address");
 #else
     uint32_t patched_insn = 0;
+    uint32_t patched_imm12 = 0;
+    uint32_t expected_imm12 = 0;
     memcpy(&patched_insn, jit->code_buf + 4, sizeof(patched_insn));
-    TEST_ASSERT(patched_insn != 0, "second reloc patched instruction");
+    patched_imm12 = (patched_insn >> 10) & 0xFFFu;
+    expected_imm12 = ((uint32_t)(uintptr_t)live_addr) & 0xFFFu;
+    TEST_ASSERT_EQ(patched_imm12, expected_imm12,
+                   "second reloc patched PAGEOFF12 immediate");
 #endif
 
     rc = lr_jit_patch_relocs_from(jit, &ctx, 0);

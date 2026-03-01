@@ -508,6 +508,15 @@ int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out);
 int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                               const char *runtime_ll, size_t runtime_len);
+int lc_write_empty_sidecar_files(const char *object_outfile,
+                                 char *err, size_t errlen);
+int lc_module_export_sidecar_files(lc_module_compat_t *mod,
+                                   const char *object_outfile,
+                                   char *err, size_t errlen);
+int lc_emit_executable_from_object_sidecars(const char *const *object_files,
+                                            size_t object_count,
+                                            const char *outfile,
+                                            char *err, size_t errlen);
 int lc_module_export_blob_package(lc_module_compat_t *mod,
                                   uint8_t **out_data, size_t *out_len);
 int lc_module_import_blob_package(lc_module_compat_t *mod,
