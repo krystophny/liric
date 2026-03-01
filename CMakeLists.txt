@@ -521,15 +521,24 @@ endif()
 # disabled for WITH_LIRIC, wire the nollvm archive instead.
 set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS "")
 set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS "")
-if(WITH_REAL_LLVM_BACKEND)
-    if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
-        set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
-            -DLIRIC_LIB=$<TARGET_FILE:liric>)
-        set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
-    else()
+if(LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
+    if(NOT WITH_REAL_LLVM_BACKEND)
+        message(FATAL_ERROR
+            "LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=ON requires WITH_REAL_LLVM_BACKEND=ON")
+    endif()
+    set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+        -DLIRIC_LIB=$<TARGET_FILE:liric>)
+    set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
+else()
+    if(TARGET liric_nollvm)
         set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
             -DLIRIC_LIB=$<TARGET_FILE:liric_nollvm>)
         set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric_nollvm)
+    else()
+        # WITH_REAL_LLVM_BACKEND=OFF: main liric target is already no-LLVM.
+        set(LIRIC_LFORTRAN_LIRIC_LIB_ARGS
+            -DLIRIC_LIB=$<TARGET_FILE:liric>)
+        set(LIRIC_LFORTRAN_LIRIC_LIB_DEPS liric)
     endif()
 endif()
 
