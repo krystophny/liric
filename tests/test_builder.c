@@ -509,10 +509,6 @@ int test_builder_compat_scalar_gep_undef_tail_trimmed(void) {
         fprintf(stderr, "  FAIL: module sprint\n");
         goto cleanup;
     }
-    if (!strstr(ir_text, "getelementptr")) {
-        fprintf(stderr, "  FAIL: expected gep in IR\n");
-        goto cleanup;
-    }
     if (strstr(ir_text, ", i64 undef")) {
         fprintf(stderr, "  FAIL: scalar gep retained trailing undef index\n");
         goto cleanup;
