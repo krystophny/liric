@@ -649,14 +649,12 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     }
 
     if (!fn && !Parent && !InsertBefore) {
-        /* Keep LLVM-compat implicit owner behavior: a detached block created
-           without Parent/InsertBefore inherits the current function context
-           when one is active, but remains detached from the block list. */
+        /* Detached blocks only inherit the module for arena allocation.
+           fn and f stay nullptr: the block binds lazily when first
+           targeted by CreateBr/CreateCondBr/Function::insert. */
         Function *implicit_fn = detail::current_function_ref();
         if (implicit_fn) {
-            fn = implicit_fn;
-            mod = fn->getCompatMod();
-            f = fn->getIRFunc();
+            mod = implicit_fn->getCompatMod();
         }
     }
 
