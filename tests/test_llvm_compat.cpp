@@ -785,8 +785,11 @@ static int test_block_parent_tracking_across_decls() {
     TEST_ASSERT(ext_decl != nullptr, "decl created");
 
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", nullptr);
-    TEST_ASSERT(entry->impl_block() != nullptr, "implicit parent block created");
-    TEST_ASSERT(entry->getParent() == main_fn, "decl must not clobber current function");
+    TEST_ASSERT(entry->impl_block() != nullptr, "detached block created");
+    TEST_ASSERT(entry->getParent() == nullptr, "detached block has no parent initially");
+
+    main_fn->getBasicBlockList().push_back(entry);
+    TEST_ASSERT(entry->getParent() == main_fn, "push_back binds detached block");
 
     llvm::IRBuilder<> builder(ctx);
     builder.SetModule(mod.getCompat());
@@ -1035,7 +1038,7 @@ static int test_function_create_detached_block_before_entry() {
     llvm::BasicBlock *ret_bb = llvm::BasicBlock::Create(ctx, "return", nullptr);
     TEST_ASSERT(ret_bb != nullptr, "detached return block wrapper");
     TEST_ASSERT(ret_bb->impl_block() != nullptr, "detached return block IR");
-    TEST_ASSERT(ret_bb->getParent() == fn, "detached return block parent");
+    TEST_ASSERT(ret_bb->getParent() == nullptr, "detached block parentless before bind");
 
     llvm::BasicBlock *entry_bb = llvm::BasicBlock::Create(ctx, "entry", fn);
     TEST_ASSERT(entry_bb != nullptr, "entry block wrapper");
