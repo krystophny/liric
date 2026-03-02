@@ -222,11 +222,11 @@ run_with_itest_shards() {
                 echo "lfortran_api_compat: integration shard ${shard_idx}/${shard_count} (${mode_label}): <all-tests>" >&2
             fi
         fi
-        cmd=("$PYTHON_BIN" run_tests.py -b llvm "${mode_flags[@]}" --ninja -j"$itest_workers")
+        cmd=("$PYTHON_BIN" run_tests.py -b llvm ${mode_flags[@]+"${mode_flags[@]}"} --ninja -j"$itest_workers")
         if [[ -n "$pattern" ]]; then
             cmd+=(-t "$pattern")
         fi
-        run_with_itest_guards "${cmd[@]}" "${itest_extra[@]}"
+        run_with_itest_guards "${cmd[@]}" ${itest_extra[@]+"${itest_extra[@]}"}
     done
 }
 
