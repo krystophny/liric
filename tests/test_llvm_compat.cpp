@@ -43,6 +43,7 @@
 #include <llvm/Transforms/Utils/Mem2Reg.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
+#include <llvm/ExecutionEngine/Orc/KaleidoscopeJIT.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -1039,12 +1040,26 @@ static int test_function_create_detached_block_before_entry() {
     llvm::BasicBlock *entry_bb = llvm::BasicBlock::Create(ctx, "entry", fn);
     TEST_ASSERT(entry_bb != nullptr, "entry block wrapper");
     TEST_ASSERT(entry_bb->impl_block() != nullptr, "entry block IR");
+    TEST_ASSERT(fn->getIRFunc()->first_block == entry_bb->impl_block(),
+                "entry block is function head");
+    TEST_ASSERT(entry_bb->impl_block()->id != ret_bb->impl_block()->id,
+                "entry block id differs from detached block id");
 
     llvm::IRBuilder<> builder(ctx);
     builder.SetInsertPoint(entry_bb);
+    llvm::Value *slot0 = builder.CreateAlloca(i32, nullptr, "slot0");
+    llvm::Value *slot1 = builder.CreateAlloca(i32, nullptr, "slot1");
+    llvm::Value *mark0 = llvm::ConstantInt::get(i32, 0x4A17u);
+    llvm::Value *mark1 = llvm::ConstantInt::get(i32, 0x9C35u);
+    builder.CreateStore(mark0, slot0);
+    builder.CreateStore(mark1, slot1);
     builder.CreateBr(ret_bb);
     builder.SetInsertPoint(ret_bb);
-    builder.CreateRet(llvm::ConstantInt::get(i32, 7));
+    llvm::Value *v0 = builder.CreateLoad(i32, slot0, "v0");
+    llvm::Value *v1 = builder.CreateLoad(i32, slot1, "v1");
+    llvm::Value *x0 = builder.CreateXor(v0, mark0, "x0");
+    llvm::Value *x1 = builder.CreateXor(v1, mark1, "x1");
+    builder.CreateRet(builder.CreateOr(x0, x1, "xsum"));
 
     llvm::orc::LLJIT jit;
     int rc = jit.addModule(mod);
@@ -1052,7 +1067,7 @@ static int test_function_create_detached_block_before_entry() {
     typedef int (*fn_t)(void);
     fn_t fp = (fn_t)jit.lookup("detached_then_entry");
     TEST_ASSERT(fp != nullptr, "lookup detached_then_entry");
-    TEST_ASSERT_EQ(fp(), 7, "detached block flow executes");
+    TEST_ASSERT_EQ(fp(), 0, "entry block executes before detached block");
     return 0;
 }
 
@@ -1934,6 +1949,167 @@ static int test_jit_smoke_ret_42() {
     return 0;
 }
 
+static int test_kaleidoscope_jit_smoke_ret_42() {
+    std::unique_ptr<llvm::LLVMContext> ctx = std::make_unique<llvm::LLVMContext>();
+    std::unique_ptr<llvm::Module> mod = std::make_unique<llvm::Module>("kaleidoscope_jit_smoke", *ctx);
+    auto *i32 = llvm::Type::getInt32Ty(*ctx);
+    auto *fty = llvm::FunctionType::get(i32, false);
+    auto *fn = llvm::Function::Create(fty, llvm::GlobalValue::ExternalLinkage,
+                                      "ret42_kaleidoscope", *mod);
+    auto *entry = llvm::BasicBlock::Create(*ctx, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateRet(llvm::ConstantInt::get(i32, 42));
+
+    auto jit = llvm::orc::KaleidoscopeJIT::Create();
+    TEST_ASSERT((bool)jit, "KaleidoscopeJIT::Create");
+    llvm::Error err = (*jit)->addModule(std::move(mod), ctx);
+    TEST_ASSERT(!err, "KaleidoscopeJIT::addModule");
+
+#if LLVM_VERSION_MAJOR < 17
+    auto sym = (*jit)->lookup("ret42_kaleidoscope");
+    TEST_ASSERT((bool)sym, "KaleidoscopeJIT::lookup");
+    uint64_t addr = sym->getAddress();
+#else
+    auto sym = (*jit)->lookup("ret42_kaleidoscope");
+    TEST_ASSERT((bool)sym, "KaleidoscopeJIT::lookup");
+    uint64_t addr = sym->getAddress().getValue();
+#endif
+
+    typedef int (*fn_t)(void);
+    fn_t fp = nullptr;
+    void *raw = (void *)(uintptr_t)addr;
+    memcpy(&fp, &raw, sizeof(fp));
+    TEST_ASSERT(fp != nullptr, "resolved symbol cast");
+    TEST_ASSERT_EQ(fp(), 42, "ret42_kaleidoscope() == 42");
+    return 0;
+}
+
+static int test_jit_smoke_alloca_store_load_i32() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_alloca_store_load_i32", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    auto *fty = llvm::FunctionType::get(i32, false);
+    auto *fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage, "alloca_store_load_i32", mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::AllocaInst *slot = builder.CreateAlloca(i32);
+    TEST_ASSERT(slot != nullptr, "alloca i32");
+    builder.CreateStore(llvm::ConstantInt::get(i32, 5), slot);
+    llvm::Value *loaded = builder.CreateLoad(i32, slot);
+    TEST_ASSERT(loaded != nullptr, "load i32");
+    builder.CreateRet(loaded);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("alloca_store_load_i32");
+    TEST_ASSERT(fp != nullptr, "lookup alloca_store_load_i32");
+    TEST_ASSERT_EQ(fp(), 5, "alloca/store/load returns 5");
+    return 0;
+}
+
+static int test_kaleidoscope_jit_alloca_store_load_i32() {
+    std::unique_ptr<llvm::LLVMContext> ctx = std::make_unique<llvm::LLVMContext>();
+    std::unique_ptr<llvm::Module> mod = std::make_unique<llvm::Module>("kaleidoscope_alloca_store_load_i32", *ctx);
+    auto *i32 = llvm::Type::getInt32Ty(*ctx);
+    auto *fty = llvm::FunctionType::get(i32, false);
+    auto *fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage, "kaleidoscope_alloca_store_load_i32", *mod);
+    auto *entry = llvm::BasicBlock::Create(*ctx, "entry", fn);
+    llvm::IRBuilder<> builder(entry);
+    llvm::AllocaInst *slot = builder.CreateAlloca(i32);
+    TEST_ASSERT(slot != nullptr, "alloca i32");
+    builder.CreateStore(llvm::ConstantInt::get(i32, 5), slot);
+    llvm::Value *loaded = builder.CreateLoad(i32, slot);
+    TEST_ASSERT(loaded != nullptr, "load i32");
+    builder.CreateRet(loaded);
+
+    auto jit = llvm::orc::KaleidoscopeJIT::Create();
+    TEST_ASSERT((bool)jit, "KaleidoscopeJIT::Create");
+    llvm::Error err = (*jit)->addModule(std::move(mod), ctx);
+    TEST_ASSERT(!err, "KaleidoscopeJIT::addModule");
+
+    auto sym = (*jit)->lookup("kaleidoscope_alloca_store_load_i32");
+    TEST_ASSERT((bool)sym, "KaleidoscopeJIT::lookup");
+    uint64_t addr = sym->getAddress().getValue();
+    typedef int (*fn_t)(void);
+    fn_t fp = nullptr;
+    void *raw = (void *)(uintptr_t)addr;
+    memcpy(&fp, &raw, sizeof(fp));
+    TEST_ASSERT(fp != nullptr, "resolved symbol cast");
+    TEST_ASSERT_EQ(fp(), 5, "kaleidoscope alloca/store/load returns 5");
+    return 0;
+}
+
+static int test_jit_smoke_chained_branches_alloca_load_i32() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("jit_chained_branches_alloca_load_i32", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    auto *fty = llvm::FunctionType::get(i32, false);
+    auto *fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage,
+        "chained_branches_alloca_load_i32", mod);
+    auto *bb1 = llvm::BasicBlock::Create(ctx, "bb1", fn);
+    auto *bb0 = llvm::BasicBlock::Create(ctx, "bb0", fn);
+    auto *bb2 = llvm::BasicBlock::Create(ctx, "bb2", fn);
+
+    llvm::IRBuilder<> b1(bb1);
+    llvm::AllocaInst *slot = b1.CreateAlloca(i32);
+    TEST_ASSERT(slot != nullptr, "alloca i32");
+    b1.CreateStore(llvm::ConstantInt::get(i32, 5), slot);
+    b1.CreateBr(bb0);
+
+    llvm::IRBuilder<> b0(bb0);
+    b0.CreateBr(bb2);
+
+    llvm::IRBuilder<> b2(bb2);
+    llvm::Value *loaded = b2.CreateLoad(i32, slot);
+    TEST_ASSERT(loaded != nullptr, "load i32");
+    b2.CreateRet(loaded);
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("chained_branches_alloca_load_i32");
+    TEST_ASSERT(fp != nullptr, "lookup chained_branches_alloca_load_i32");
+    TEST_ASSERT_EQ(fp(), 5, "chained branches alloca/load returns 5");
+    return 0;
+}
+
+static int test_jit_parse_module_chained_branches_alloca_load_i32() {
+    const char *src =
+        "define i32 @parsed_chained_branches_alloca_load_i32() {\n"
+        "bb1:\n"
+        "  %v0 = alloca i32\n"
+        "  store i32 5, ptr %v0\n"
+        "  br label %bb0\n"
+        "bb0:\n"
+        "  br label %bb2\n"
+        "bb2:\n"
+        "  %v1 = load i32, ptr %v0\n"
+        "  ret i32 %v1\n"
+        "}\n";
+
+    llvm::LLVMContext ctx;
+    llvm::SMDiagnostic err;
+    std::unique_ptr<llvm::Module> parsed = llvm::parseAssemblyString(src, err, ctx);
+    TEST_ASSERT(parsed != nullptr, "parse module");
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(*parsed);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+
+    typedef int (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("parsed_chained_branches_alloca_load_i32");
+    TEST_ASSERT(fp != nullptr, "lookup parsed_chained_branches_alloca_load_i32");
+    TEST_ASSERT_EQ(fp(), 5, "parsed chained branches alloca/load returns 5");
+    return 0;
+}
+
 static int test_jit_smoke_add_args() {
     llvm::LLVMContext ctx;
     llvm::Module mod("jit_add", ctx);
@@ -2238,6 +2414,11 @@ int main() {
     RUN_TEST(test_replace_all_uses_with_rewrites_existing_operands);
     RUN_TEST(test_switch_add_case_builds_dispatch_chain);
     RUN_TEST(test_jit_smoke_ret_42);
+    RUN_TEST(test_kaleidoscope_jit_smoke_ret_42);
+    RUN_TEST(test_jit_smoke_alloca_store_load_i32);
+    RUN_TEST(test_kaleidoscope_jit_alloca_store_load_i32);
+    RUN_TEST(test_jit_smoke_chained_branches_alloca_load_i32);
+    RUN_TEST(test_jit_parse_module_chained_branches_alloca_load_i32);
     RUN_TEST(test_jit_smoke_add_args);
     RUN_TEST(test_jit_smoke_vector_return_call);
     RUN_TEST(test_jit_smoke_branch);

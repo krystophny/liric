@@ -645,7 +645,6 @@ void LLVMLiricSessionDispose(LLVMLiricSessionStateRef state) {
 int LLVMLiricSessionAddCompatModule(LLVMLiricSessionStateRef state,
                                     lc_module_compat_t *mod) {
     lr_module_t *ir = NULL;
-    int dbg_lookup = getenv("LIRIC_DEBUG_LOOKUP") != NULL;
     if (!state || !mod)
         return -1;
     if (!state->jit)
@@ -653,19 +652,6 @@ int LLVMLiricSessionAddCompatModule(LLVMLiricSessionStateRef state,
     ir = lc_module_get_ir(mod);
     if (!ir)
         return -1;
-    if (dbg_lookup) {
-        const lr_global_t *g;
-        for (g = ir->first_global; g; g = g->next) {
-            if (g->name && strcmp(g->name, "a") == 0) {
-                float fv = 0.0f;
-                if (g->init_data && g->init_size >= sizeof(float))
-                    memcpy(&fv, g->init_data, sizeof(float));
-                fprintf(stderr,
-                        "liric_addmod jit=%p global a ext=%d init_size=%zu init_f32=%g\n",
-                        (void *)state->jit, (int)g->is_external, g->init_size, (double)fv);
-            }
-        }
-    }
     record_module_lookup_signatures(state, ir);
     if (validate_module_data_global_refs(ir) != 0)
         return -1;
@@ -725,6 +711,22 @@ void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
     sig = find_lookup_sig_entry(state, resolved_name);
     if (!sig && resolved_name[0] == '_')
         sig = find_lookup_sig_entry(state, resolved_name + 1);
+    if (sig) {
+        void *defined_addr = lr_jit_get_defined_function(state->jit, resolved_name);
+        if (!defined_addr && strcmp(resolved_name, name) != 0)
+            defined_addr = lr_jit_get_defined_function(state->jit, name);
+        if (defined_addr) {
+            addr = defined_addr;
+        } else {
+            free(prefixed_name);
+            if (dbg_lookup) {
+                fprintf(stderr,
+                        "liric_lookup miss-defined name=%s resolved=%s (signature present)\n",
+                        name, resolved_name);
+            }
+            return NULL;
+        }
+    }
     if (dbg_lookup) {
         fprintf(stderr,
                 "liric_lookup jit=%p name=%s resolved=%s addr=%p sig=%p num_params=%u ret_kind=%d uses_llvm_abi=%d\n",
@@ -732,15 +734,6 @@ void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
                 sig ? sig->num_params : 0u,
                 sig ? (int)sig->ret_kind : -1,
                 sig ? (int)sig->uses_llvm_abi : -1);
-        if (strcmp(resolved_name, "__lfortran_evaluate_2") == 0) {
-            float *a_ptr = (float *)lr_jit_get_function(state->jit, "a");
-            if (a_ptr) {
-                fprintf(stderr, "liric_lookup probe symbol a=%p value=%g\n",
-                        (void *)a_ptr, (double)(*a_ptr));
-            } else {
-                fprintf(stderr, "liric_lookup probe symbol a=<missing>\n");
-            }
-        }
     }
     if (!sig || sig->num_params != 0 ||
         sig->ret_kind == LIRIC_LOOKUP_RET_OTHER ||

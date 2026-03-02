@@ -156,10 +156,7 @@ int lr_replay_function_stream(const lr_target_t *target, void *compile_ctx,
     if (replay_phi_copies(target, compile_ctx, func) != 0)
         return -1;
 
-    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-        lr_block_t *b = func->block_array[bi];
-        if (!b)
-            continue;
+    for (const lr_block_t *b = func->first_block; b; b = b->next) {
         for (uint32_t ii = 0; ii < b->num_insts; ii++) {
             lr_inst_t *inst = b->inst_array[ii];
             if (!inst)
@@ -184,11 +181,8 @@ int lr_replay_function_stream(const lr_target_t *target, void *compile_ctx,
         }
     }
 
-    for (uint32_t bi = 0; bi < func->num_blocks; bi++) {
-        lr_block_t *b = func->block_array[bi];
+    for (const lr_block_t *b = func->first_block; b; b = b->next) {
         bool has_terminator = false;
-        if (!b)
-            continue;
         if (target->compile_set_block(compile_ctx, b->id) != 0) {
             free(indices);
             free(operands);
