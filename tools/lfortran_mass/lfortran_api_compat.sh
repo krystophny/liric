@@ -26,6 +26,7 @@ usage: lfortran_api_compat.sh [options]
   --itest-memory-max SIZE memory cap for integration-suite scope, systemd format (default: 8G)
   --itest-tasks-max N     task cap for integration-suite scope (default: 512)
   --unsafe-itests         disable integration-suite containment guards
+  --itest-shards LIST     semicolon-separated ctest regex shards for integration suites
   --env-name NAME         run test suites via conda/mamba env NAME (lf.sh style)
   --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
@@ -143,6 +144,22 @@ is_nonneg_int() {
     [[ "${1:-}" =~ ^[0-9]+$ ]]
 }
 
+trim_ascii_ws() {
+    local s="${1:-}"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s\n' "$s"
+}
+
+itest_args_has_filter() {
+    local args="${1:-}"
+    [[ "$args" == *" -t "* ]] && return 0
+    [[ "$args" == -t* ]] && return 0
+    [[ "$args" == *" --test "* ]] && return 0
+    [[ "$args" == --test* ]] && return 0
+    return 1
+}
+
 run_with_itest_guards() {
     local -a cmd=()
     if [[ "$safe_itests" != "yes" ]]; then
@@ -177,6 +194,40 @@ run_with_itest_guards() {
     else
         run_in_selected_env "$@"
     fi
+}
+
+run_with_itest_shards() {
+    local mode_label="$1"
+    shift
+    local -a mode_flags=("$@")
+    local -a shard_patterns=("")
+    local raw_pattern=""
+    local pattern=""
+    local -a cmd=()
+    local shard_idx=0
+    local shard_count=1
+
+    if [[ -n "$itest_shards" ]]; then
+        IFS=';' read -r -a shard_patterns <<< "$itest_shards"
+        shard_count="${#shard_patterns[@]}"
+    fi
+
+    for raw_pattern in "${shard_patterns[@]}"; do
+        pattern="$(trim_ascii_ws "$raw_pattern")"
+        shard_idx=$((shard_idx + 1))
+        if [[ -n "$itest_shards" ]]; then
+            if [[ -n "$pattern" ]]; then
+                echo "lfortran_api_compat: integration shard ${shard_idx}/${shard_count} (${mode_label}): ${pattern}" >&2
+            else
+                echo "lfortran_api_compat: integration shard ${shard_idx}/${shard_count} (${mode_label}): <all-tests>" >&2
+            fi
+        fi
+        cmd=("$PYTHON_BIN" run_tests.py -b llvm "${mode_flags[@]}" --ninja -j"$itest_workers")
+        if [[ -n "$pattern" ]]; then
+            cmd+=(-t "$pattern")
+        fi
+        run_with_itest_guards "${cmd[@]}" "${itest_extra[@]}"
+    done
 }
 
 require_tool_for_integration() {
@@ -393,6 +444,7 @@ safe_itests="yes"
 itest_pgroup_isolation="none"
 setsid_wait_flag=""
 timeout_cmd=""
+itest_shards="${LIRIC_LFORTRAN_ITEST_SHARDS:-}"
 env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
 env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
@@ -498,6 +550,11 @@ while [[ $# -gt 0 ]]; do
             safe_itests="no"
             shift
             ;;
+        --itest-shards)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_shards="$2"
+            shift 2
+            ;;
         --env-name)
             [[ $# -ge 2 ]] || die "missing value for $1"
             env_name="$2"
@@ -545,6 +602,9 @@ fi
 is_nonneg_int "$itest_workers" || die "--itest-workers must be a non-negative integer"
 is_nonneg_int "$itest_timeout_sec" || die "--itest-timeout-sec must be a non-negative integer"
 is_nonneg_int "$itest_tasks_max" || die "--itest-tasks-max must be a non-negative integer"
+if [[ -n "$itest_shards" ]] && itest_args_has_filter "$itest_args"; then
+    die "--itest-shards cannot be combined with --itest-args containing -t/--test"
+fi
 
 need_cmd git
 need_cmd cmake
@@ -816,6 +876,12 @@ if [[ "$run_ref_tests" == "yes" ]]; then
 fi
 
 if [[ "$run_itests" == "yes" ]]; then
+    itest_extra=()
+    if [[ -n "$itest_args" ]]; then
+        # shellcheck disable=SC2206
+        itest_extra=( $itest_args )
+    fi
+
     (
         cd "$lfortran_dir/integration_tests"
         clean_mod_artifacts "$PWD"
@@ -831,16 +897,7 @@ if [[ "$run_itests" == "yes" ]]; then
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
         echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
-        itest_extra=()
-        if [[ -n "$itest_args" ]]; then
-            # shellcheck disable=SC2206
-            itest_extra=( $itest_args )
-        fi
-        if [[ -n "$itest_args" ]]; then
-            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$itest_workers" "${itest_extra[@]}"
-        else
-            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm --ninja -j"$itest_workers"
-        fi
+        run_with_itest_shards "default" 
     ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api.log" || status=1
 
     (
@@ -857,16 +914,7 @@ if [[ "$run_itests" == "yes" ]]; then
             echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
         fi
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (-f -nf16 mode)" >&2
-        itest_extra=()
-        if [[ -n "$itest_args" ]]; then
-            # shellcheck disable=SC2206
-            itest_extra=( $itest_args )
-        fi
-        if [[ -n "$itest_args" ]]; then
-            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$itest_workers" "${itest_extra[@]}"
-        else
-            run_with_itest_guards "$PYTHON_BIN" run_tests.py -b llvm -f -nf16 --ninja -j"$itest_workers"
-        fi
+        run_with_itest_shards "fast" -f -nf16
     ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api_fast.log" || status=1
 fi
 
