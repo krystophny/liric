@@ -14,7 +14,12 @@
 #include "llvm/Support/Error.h"
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
+
+#ifndef RM_OPTIONAL_TYPE
+#define RM_OPTIONAL_TYPE std::optional
+#endif
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC visibility push(hidden)
