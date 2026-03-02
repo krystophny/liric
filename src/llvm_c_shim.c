@@ -693,7 +693,6 @@ void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
     liric_lookup_sig_entry_t *sig;
     liric_lookup_wrapper_entry_t *wrapper;
     int dbg_lookup = getenv("LIRIC_DEBUG_LOOKUP") != NULL;
-    bool force_eval_wrapper = false;
     const char *resolved_name = name;
     char *prefixed_name = NULL;
     void *addr;
@@ -743,14 +742,9 @@ void *LLVMLiricSessionLookup(LLVMLiricSessionStateRef state, const char *name) {
             }
         }
     }
-    if (sig && sig->uses_llvm_abi &&
-        sig->ret_kind != LIRIC_LOOKUP_RET_C64 &&
-        strncmp(resolved_name, "__lfortran_evaluate_", 20) == 0) {
-        force_eval_wrapper = true;
-    }
     if (!sig || sig->num_params != 0 ||
         sig->ret_kind == LIRIC_LOOKUP_RET_OTHER ||
-        (sig->uses_llvm_abi && !force_eval_wrapper)) {
+        sig->uses_llvm_abi) {
         free(prefixed_name);
         return addr;
     }

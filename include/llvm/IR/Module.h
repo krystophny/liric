@@ -232,6 +232,15 @@ public:
         std::string requested_name = name ? name : "";
         std::string actual_name =
             linkageScopedGlobalName(compat_, requested_name, linkage);
+        if (actual_name == requested_name &&
+            !requested_name.empty() &&
+            requested_name[0] == '.') {
+            /* Some frontends set local linkage after construction; ensure
+               dot-prefixed compiler-temporary globals are still module-scoped
+               to avoid cross-module symbol collisions in shared JIT mode. */
+            actual_name = linkageScopedGlobalName(
+                compat_, requested_name, GlobalValue::PrivateLinkage);
+        }
         const char *symbol_name = actual_name.empty() ? name : actual_name.c_str();
         if (!symbol_name)
             symbol_name = "";

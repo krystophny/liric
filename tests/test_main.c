@@ -265,6 +265,8 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void);
 int test_builder_compat_direct_large_object_emission(void);
 int test_llvm_c_shim_add_and_lookup(void);
 int test_llvm_c_shim_lookup_float_return_uses_host_abi(void);
+int test_llvm_c_shim_lookup_complex4_return_uses_host_abi(void);
+int test_llvm_c_shim_cross_module_i1_call(void);
 int test_llvm_c_shim_rejects_undeclared_data_global(void);
 int test_llvm_c_shim_load_library_rejects_null(void);
 #if !defined(__APPLE__)
@@ -603,6 +605,8 @@ int main(void) {
     RUN_TEST(test_builder_compat_direct_large_object_emission);
     RUN_TEST(test_llvm_c_shim_add_and_lookup);
     RUN_TEST(test_llvm_c_shim_lookup_float_return_uses_host_abi);
+    RUN_TEST(test_llvm_c_shim_lookup_complex4_return_uses_host_abi);
+    RUN_TEST(test_llvm_c_shim_cross_module_i1_call);
     RUN_TEST(test_llvm_c_shim_rejects_undeclared_data_global);
     RUN_TEST(test_llvm_c_shim_load_library_rejects_null);
 

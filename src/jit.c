@@ -1487,8 +1487,7 @@ static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) 
         }
     }
 
-    if (strstr(canonical, local_tag) != NULL ||
-        strncmp(canonical, ".lc.constagg.", strlen(".lc.constagg.")) == 0) {
+    if (strstr(canonical, local_tag) != NULL) {
         size_t off = align_up(j->data_size, sizeof(void *));
         if (off + sizeof(void *) <= j->data_cap) {
             void *placeholder = j->data_buf + off;
@@ -1570,6 +1569,10 @@ int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m) {
                 continue;
             if (lookup_symbol(j, g->name))
                 continue;
+            /* External declarations must not allocate private zero storage.
+               Leave unresolved and let relocation patching bind to a real
+               definition when the symbol becomes available. */
+            continue;
         } else {
             uint32_t hash = symbol_hash(g->name);
             if (find_symbol_entry(j, g->name, hash))
