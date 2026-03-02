@@ -1591,7 +1591,8 @@ static int validate_block_termination(struct lr_session *s,
                         "failed to synthesize terminator for block %u", id);
                 return -1;
             }
-            if (s->compile_active && s->cur_block == b) {
+            if (s->compile_active && !s->compile_deferred &&
+                s->cur_block == b) {
                 if (!s->compile_ctx || !s->jit || !s->jit->target ||
                     !s->jit->target->compile_emit) {
                     err_set(err, S_ERR_STATE,

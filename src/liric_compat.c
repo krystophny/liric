@@ -2447,7 +2447,8 @@ static lc_value_t *const_extractvalue_fold(lc_module_compat_t *mod,
 static lc_value_t *materialize_const_aggregate_global(lc_module_compat_t *mod,
                                                       lc_value_t *agg) {
     static uint32_t constagg_seq = 0;
-    char name[64];
+    static uint64_t constagg_nonce = 0;
+    char name[128];
     size_t size;
     lr_global_t *g;
     uint32_t sym_id;
@@ -2458,10 +2459,22 @@ static lc_value_t *materialize_const_aggregate_global(lc_module_compat_t *mod,
     if (size == 0)
         return safe_undef(mod);
 
-    (void)snprintf(name, sizeof(name), ".lc.constagg.%u", constagg_seq++);
+    if (constagg_nonce == 0) {
+        uint64_t seed = lr_platform_time_ns() ^ (uint64_t)(uintptr_t)mod;
+#if !defined(_WIN32)
+        seed ^= ((uint64_t)getpid() << 17);
+#endif
+        constagg_nonce = seed ? seed : 1u;
+    }
+    (void)snprintf(name, sizeof(name), ".lc.constagg.%llx.%u.%llx",
+                   (unsigned long long)constagg_nonce,
+                   constagg_seq++,
+                   (unsigned long long)(uintptr_t)mod->mod);
     g = lr_global_create(mod->mod, name, agg->type, true);
     if (!g)
         return safe_undef(mod);
+    g->is_local = true;
+    g->is_external = false;
 
     g->init_data = (uint8_t *)lr_arena_alloc(mod->mod->arena, size, 1);
     if (!g->init_data)
@@ -4036,10 +4049,22 @@ lc_value_t *lc_create_struct_gep(lc_module_compat_t *mod, lr_block_t *b,
 /* ---- Control flow ---- */
 
 void lc_create_ret(lc_module_compat_t *mod, lr_block_t *b,
-                   lc_value_t *val) {
+                    lc_value_t *val) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[1];
     if (!mod || !b || !val) return;
+    if (val->kind == LC_VAL_CONST_AGGREGATE && val->type &&
+        (val->type->kind == LR_TYPE_STRUCT ||
+         val->type->kind == LR_TYPE_ARRAY ||
+         val->type->kind == LR_TYPE_VECTOR)) {
+        lc_value_t *src = materialize_const_aggregate_global(mod, val);
+        if (src) {
+            lc_value_t *loaded = lc_create_load(mod, b, b->func, val->type, src,
+                                                ".lc.constagg.ret");
+            if (loaded)
+                val = loaded;
+        }
+    }
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(val);
     inst.op = LR_OP_RET;
@@ -4733,10 +4758,50 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
     fclose(f);
 }
 
+static void compat_seed_session_externs_from_consumer(lc_module_compat_t *mod,
+                                                       lr_jit_t *session_jit,
+                                                       lr_jit_t *consumer_jit) {
+    lr_func_t *f;
+    lr_global_t *g;
+
+    if (!mod || !mod->mod || !session_jit || !consumer_jit ||
+        session_jit == consumer_jit)
+        return;
+
+    /* Ensure direct-mode relocations for extern declarations resolve to the
+       consumer JIT namespace (already-populated symbols from earlier modules). */
+    for (f = mod->mod->first_func; f; f = f->next) {
+        void *addr;
+        if (!f->name || !f->name[0] || !f->is_decl)
+            continue;
+        addr = lr_jit_get_function(consumer_jit, f->name);
+        if (addr)
+            lr_session_add_symbol(mod->session, f->name, addr);
+    }
+
+    for (g = mod->mod->first_global; g; g = g->next) {
+        void *addr;
+        if (!g->name || !g->name[0] || !g->is_external)
+            continue;
+        addr = lr_jit_get_function(consumer_jit, g->name);
+        if (addr)
+            lr_session_add_symbol(mod->session, g->name, addr);
+    }
+}
+
 static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     lr_jit_t *session_jit;
     lr_func_t *f;
     lr_global_t *g;
+
+    session_jit = lr_session_jit(mod->session);
+    if (!session_jit)
+        return -1;
+
+    compat_seed_session_externs_from_consumer(mod, session_jit, jit);
+
+    if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
+        return -1;
 
     if (compat_finish_active_func(mod) != 0)
         return -1;
@@ -4745,24 +4810,28 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
     if (!session_jit)
         return -1;
 
+    compat_seed_session_externs_from_consumer(mod, session_jit, jit);
+
+    /* Finalization can synthesize late globals (for example const aggregate
+       side globals such as ".lc.constagg.*"). Materialize again so codegen
+       never falls back to zero placeholders for those symbols. */
     if (lr_jit_materialize_globals(session_jit, mod->mod) != 0)
         return -1;
 
-    if (session_jit->mode == LR_COMPILE_LLVM) {
-        if (!lr_llvm_jit_is_available())
-            return -1;
-        if (lr_jit_add_module(session_jit, mod->mod) != 0)
-            return -1;
-    }
+    if (session_jit->mode == LR_COMPILE_LLVM && !lr_llvm_jit_is_available())
+        return -1;
+    if (lr_jit_add_module(session_jit, mod->mod) != 0)
+        return -1;
 
     for (f = mod->mod->first_func; f; f = f->next) {
         void *addr = NULL;
         if (!f->name || !f->name[0])
             continue;
-        if (session_jit->mode == LR_COMPILE_LLVM)
+        if (f->is_decl) {
             addr = lr_jit_get_function(session_jit, f->name);
-        else
-            addr = lr_session_lookup(mod->session, f->name);
+        } else {
+            addr = lr_jit_get_defined_function(session_jit, f->name);
+        }
         if (!f->is_decl && !addr)
             return -1;
         if (addr)
@@ -4773,10 +4842,11 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         void *addr = NULL;
         if (!g->name || !g->name[0])
             continue;
-        if (session_jit->mode == LR_COMPILE_LLVM)
+        if (g->is_external) {
             addr = lr_jit_get_function(session_jit, g->name);
-        else
-            addr = lr_session_lookup(mod->session, g->name);
+        } else {
+            addr = lr_jit_get_defined_function(session_jit, g->name);
+        }
         if (!g->is_external && !addr)
             return -1;
         if (addr)

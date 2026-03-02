@@ -91,6 +91,7 @@ void lr_jit_begin_update(lr_jit_t *j);
 int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m);
 int lr_jit_add_module(lr_jit_t *j, lr_module_t *m);
 void lr_jit_end_update(lr_jit_t *j);
+void *lr_jit_get_defined_function(lr_jit_t *j, const char *name);
 void *lr_jit_get_function(lr_jit_t *j, const char *name);
 void lr_jit_destroy(lr_jit_t *j);
 struct lr_objfile_ctx;

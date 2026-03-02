@@ -98,16 +98,16 @@ class IRBuilder {
 
 public:
     explicit IRBuilder(LLVMContext &C)
-        : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr), ctx_(C) {}
+        : mod_(nullptr), block_(nullptr), func_(nullptr), ctx_(C) {}
 
     explicit IRBuilder(BasicBlock *BB)
-        : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr),
+        : mod_(nullptr), block_(nullptr), func_(nullptr),
           ctx_(LLVMContext::getGlobal()) {
         SetInsertPoint(BB);
     }
 
     IRBuilder(BasicBlock *BB, LLVMContext &C)
-        : mod_(Module::getCurrentModule()), block_(nullptr), func_(nullptr), ctx_(C) {
+        : mod_(nullptr), block_(nullptr), func_(nullptr), ctx_(C) {
         SetInsertPoint(BB);
     }
 
@@ -128,9 +128,6 @@ public:
         block_ = BB->impl_block();
         detail::insertion_point_active_ref() = true;
         detail::current_insert_block_ref() = block_;
-        if (block_ && M()) {
-            lc_block_attach(M(), block_);
-        }
         lr_func_t *f = lc_value_get_block_func(BB->impl());
         if (!f) {
             Function *parent = detail::lookup_block_parent(block_);
@@ -147,6 +144,12 @@ public:
                 mod_ = fn->getCompatMod();
                 detail::current_function_ref() = fn;
                 detail::register_block_parent(block_, fn);
+            }
+        }
+        if (block_) {
+            lc_module_compat_t *attach_mod = mod_ ? mod_ : Module::getCurrentModule();
+            if (attach_mod) {
+                lc_block_attach(attach_mod, block_);
             }
         }
     }

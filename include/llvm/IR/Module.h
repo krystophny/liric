@@ -232,6 +232,15 @@ public:
         std::string requested_name = name ? name : "";
         std::string actual_name =
             linkageScopedGlobalName(compat_, requested_name, linkage);
+        if (actual_name == requested_name &&
+            !requested_name.empty() &&
+            requested_name[0] == '.') {
+            /* Some frontends set local linkage after construction; ensure
+               dot-prefixed compiler-temporary globals are still module-scoped
+               to avoid cross-module symbol collisions in shared JIT mode. */
+            actual_name = linkageScopedGlobalName(
+                compat_, requested_name, GlobalValue::PrivateLinkage);
+        }
         const char *symbol_name = actual_name.empty() ? name : actual_name.c_str();
         if (!symbol_name)
             symbol_name = "";
@@ -434,7 +443,9 @@ inline IntegerType *IntegerType::get(LLVMContext &C, unsigned NumBits) {
 
 inline FunctionType *FunctionType::get(Type *Result, ArrayRef<Type *> Params,
                                        bool isVarArg) {
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    if (!Result) return nullptr;
+    LLVMContext &ctx = Result->getContext();
+    lc_module_compat_t *mod = ctx.getDefaultModule();
     if (!mod) return nullptr;
     std::vector<lr_type_t *> param_types(Params.size());
     for (size_t i = 0; i < Params.size(); i++) {
@@ -444,7 +455,7 @@ inline FunctionType *FunctionType::get(Type *Result, ArrayRef<Type *> Params,
         lc_module_get_ir(mod), Result->impl(),
         Params.empty() ? nullptr : param_types.data(),
         static_cast<uint32_t>(Params.size()), isVarArg);
-    detail::register_type_context(ft, &Result->getContext());
+    detail::register_type_context(ft, &ctx);
     return FunctionType::wrap(ft);
 }
 
@@ -454,7 +465,8 @@ inline FunctionType *FunctionType::get(Type *Result, bool isVarArg) {
 
 inline void StructType::setBody(ArrayRef<Type *> Elements, bool isPkd) {
     lr_type_t *self = impl();
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    LLVMContext &ctx = getContext();
+    lc_module_compat_t *mod = ctx.getDefaultModule();
     if (!mod) return;
     lr_module_t *m = lc_module_get_ir(mod);
     uint32_t n = static_cast<uint32_t>(Elements.size());
@@ -469,7 +481,7 @@ inline void StructType::setBody(ArrayRef<Type *> Elements, bool isPkd) {
 }
 
 inline StructType *StructType::create(LLVMContext &C, StringRef Name) {
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    lc_module_compat_t *mod = C.getDefaultModule();
     if (!mod) return nullptr;
     lr_module_t *m = lc_module_get_ir(mod);
     char *name_dup = lr_arena_strdup(m->arena, Name.data(), Name.size());
@@ -490,7 +502,7 @@ inline StructType *StructType::create(LLVMContext &C, ArrayRef<Type *> Elements,
 
 inline StructType *StructType::get(LLVMContext &C, ArrayRef<Type *> Elements,
                                     bool isPkd) {
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    lc_module_compat_t *mod = C.getDefaultModule();
     if (!mod) return nullptr;
     lr_module_t *m = lc_module_get_ir(mod);
     uint32_t n = static_cast<uint32_t>(Elements.size());
@@ -506,11 +518,13 @@ inline StructType *StructType::get(LLVMContext &C, ArrayRef<Type *> Elements,
 }
 
 inline ArrayType *ArrayType::get(Type *ElementType, uint64_t NumElements) {
-    lc_module_compat_t *mod = Module::getCurrentModule();
+    if (!ElementType) return nullptr;
+    LLVMContext &ctx = ElementType->getContext();
+    lc_module_compat_t *mod = ctx.getDefaultModule();
     if (!mod) return nullptr;
     lr_type_t *at = lr_type_array_new(lc_module_get_ir(mod),
                                        ElementType->impl(), NumElements);
-    detail::register_type_context(at, &ElementType->getContext());
+    detail::register_type_context(at, &ctx);
     return ArrayType::wrap(at);
 }
 
@@ -635,14 +649,12 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
     }
 
     if (!fn && !Parent && !InsertBefore) {
-        /* Keep LLVM-compat implicit owner behavior: a detached block created
-           without Parent/InsertBefore inherits the current function context
-           when one is active, but remains detached from the block list. */
+        /* Detached blocks only inherit the module for arena allocation.
+           fn and f stay nullptr: the block binds lazily when first
+           targeted by CreateBr/CreateCondBr/Function::insert. */
         Function *implicit_fn = detail::current_function_ref();
         if (implicit_fn) {
-            fn = implicit_fn;
-            mod = fn->getCompatMod();
-            f = fn->getIRFunc();
+            mod = implicit_fn->getCompatMod();
         }
     }
 

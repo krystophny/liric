@@ -1096,14 +1096,39 @@ static lr_operand_t parse_aggregate_constant_operand(lr_parser_t *p, lr_type_t *
         return parse_struct_constant_fields(p, type, fields, AGG_FIELDS_MAX, &nf);
     }
     if (check(p, LR_TOK_LANGLE)) {
+        bool can_pack = false;
+        uint64_t elem_count = 0;
+        size_t elem_size = 0;
+        size_t total_size = 0;
+        uint8_t packed[8] = {0};
+        uint64_t parsed = 0;
         next(p);
-        if (type && type->kind == LR_TYPE_VECTOR) {
+        if (type && type->kind == LR_TYPE_VECTOR &&
+            type->array.elem && type->array.count > 0) {
+            elem_count = type->array.count;
+            elem_size = lr_type_size(type->array.elem);
+            total_size = lr_type_size(type);
+            can_pack = (elem_size > 0 && total_size > 0 && total_size <= sizeof(packed));
             while (!check(p, LR_TOK_RANGLE) && !check(p, LR_TOK_EOF)) {
-                (void)parse_typed_operand(p);
+                lr_operand_t elem = parse_typed_operand(p);
+                if (can_pack && parsed < elem_count) {
+                    size_t off = (size_t)parsed * elem_size;
+                    if (off + elem_size <= total_size) {
+                        pack_scalar_bits(packed, off, type->array.elem, &elem);
+                    } else {
+                        can_pack = false;
+                    }
+                }
+                parsed++;
                 if (!match(p, LR_TOK_COMMA))
                     break;
             }
             expect(p, LR_TOK_RANGLE);
+            if (can_pack && parsed == elem_count) {
+                int64_t packed_val = 0;
+                memcpy(&packed_val, packed, total_size);
+                return lr_op_imm_i64(packed_val, type);
+            }
         } else {
             skip_balanced_braces(p);
             if (check(p, LR_TOK_RANGLE))
@@ -2865,10 +2890,28 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
         expect(p, LR_TOK_RANGLE);
 }
 
+static const char *scoped_local_global_name(lr_parser_t *p, const char *name) {
+    const char *local_tag = ".__liric_local.";
+    char suffix[32];
+    size_t n;
+    char *scoped;
+    if (!p || !p->module || !name || !name[0] || strstr(name, local_tag) != NULL)
+        return name;
+    snprintf(suffix, sizeof(suffix), "%p", (void *)p->module);
+    n = strlen(name) + strlen(local_tag) + strlen(suffix) + 1u;
+    scoped = lr_arena_array(p->arena, char, n);
+    if (!scoped)
+        return name;
+    (void)snprintf(scoped, n, "%s%s%s", name, local_tag, suffix);
+    return scoped;
+}
+
 static void parse_global(lr_parser_t *p) {
     char *name = tok_name(p, &p->cur);
+    const char *global_name = name;
     bool saw_initializer = false;
     bool linkage_external = false;
+    bool linkage_local = false;
     next(p);
     expect(p, LR_TOK_EQUALS);
 
@@ -2879,6 +2922,8 @@ static void parse_global(lr_parser_t *p) {
            check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) {
         if (check(p, LR_TOK_EXTERNAL))
             linkage_external = true;
+        if (check(p, LR_TOK_INTERNAL) || check(p, LR_TOK_PRIVATE))
+            linkage_local = true;
         next(p);
     }
 
@@ -2904,10 +2949,19 @@ static void parse_global(lr_parser_t *p) {
     }
 
     lr_type_t *ty = parse_type(p);
-    lr_global_t *g = lr_global_create(p->module, name, ty, is_const);
+    if (linkage_local && name && name[0] == '.' &&
+        strncmp(name, ".lc.constagg.", 12) != 0)
+        global_name = scoped_local_global_name(p, name);
+    lr_global_t *g = lr_global_create(p->module, global_name, ty, is_const);
     uint32_t sym_id = lr_frontend_intern_symbol(p->module, g->name);
+    if (resolve_global(p, name) == UINT32_MAX)
+        register_global(p, name, sym_id);
     if (resolve_global(p, g->name) == UINT32_MAX)
         register_global(p, g->name, sym_id);
+    if (linkage_local) {
+        g->is_local = true;
+        g->is_external = false;
+    }
     bool at_toplevel_col = (p->cur.start == p->lex.src ||
                             p->cur.start[-1] == '\n');
 

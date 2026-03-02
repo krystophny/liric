@@ -490,6 +490,7 @@ static int sig_serialize_block(lr_sig_buf_t *sb, const lr_block_t *b,
 
 static int sig_serialize_function(lr_sig_buf_t *sb, const lr_module_t *m,
                                   const lr_func_t *f) {
+    uint32_t attached_blocks = 0;
     if (!f)
         return -1;
     if (sig_buf_str(sb, f->name) != 0)
@@ -516,26 +517,19 @@ static int sig_serialize_function(lr_sig_buf_t *sb, const lr_module_t *m,
             return -1;
     }
 
-    if (sig_buf_u32(sb, f->num_blocks) != 0)
+    for (const lr_block_t *b = f->first_block; b; b = b->next)
+        attached_blocks++;
+
+    if (sig_buf_u32(sb, attached_blocks) != 0)
         return -1;
-    if (f->num_blocks == 0)
+    if (attached_blocks == 0)
         return 0;
 
-    if (f->block_array) {
-        for (uint32_t bi = 0; bi < f->num_blocks; bi++) {
-            if (sig_serialize_block(sb, f->block_array[bi], m) != 0)
-                return -1;
-        }
-        return 0;
-    }
-
-    uint32_t seen = 0;
     for (const lr_block_t *b = f->first_block; b; b = b->next) {
         if (sig_serialize_block(sb, b, m) != 0)
             return -1;
-        seen++;
     }
-    return seen == f->num_blocks ? 0 : -1;
+    return 0;
 }
 
 static int sig_serialize_global(lr_sig_buf_t *sb, const lr_global_t *g) {
@@ -1487,8 +1481,7 @@ static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) 
         }
     }
 
-    if (strstr(canonical, local_tag) != NULL ||
-        strncmp(canonical, ".lc.constagg.", strlen(".lc.constagg.")) == 0) {
+    if (strstr(canonical, local_tag) != NULL) {
         size_t off = align_up(j->data_size, sizeof(void *));
         if (off + sizeof(void *) <= j->data_cap) {
             void *placeholder = j->data_buf + off;
@@ -1502,6 +1495,77 @@ static void *lookup_symbol_hashed(lr_jit_t *j, const char *name, uint32_t hash) 
     }
 
     return NULL;
+}
+
+static void *lookup_defined_symbol_hashed_exact(lr_jit_t *j, const char *name,
+                                                uint32_t hash) {
+    const char *local_tag = ".__liric_local.";
+    size_t name_len;
+    if (!j || !name || !name[0])
+        return NULL;
+    name_len = strlen(name);
+
+    if (j->lazy_funcs) {
+        lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
+        if (lazy) {
+            if (lazy->state == LR_LAZY_FUNC_COMPILING)
+                return lazy->pending_addr;
+            if (lazy->state != LR_LAZY_FUNC_READY) {
+                if (materialize_lazy_function(j, lazy) != 0)
+                    return NULL;
+            }
+        }
+    }
+
+    lr_sym_entry_t *cached_entry = lookup_last_entry(j, name, hash);
+    if (cached_entry)
+        return cached_entry->addr;
+
+    lr_sym_entry_t *entry = find_symbol_entry(j, name, hash);
+    if (entry) {
+        update_last_symbol_lookup(j, entry, hash);
+        return entry->addr;
+    }
+
+    for (entry = j->symbols; entry; entry = entry->next) {
+        if (!entry->name)
+            continue;
+        if (strncmp(entry->name, name, name_len) != 0)
+            continue;
+        if (strncmp(entry->name + name_len, local_tag, strlen(local_tag)) != 0)
+            continue;
+        lr_jit_add_symbol(j, name, entry->addr);
+        return entry->addr;
+    }
+
+    if (name[0] == '_') {
+        const char *base = name + 1;
+        size_t base_len = strlen(base);
+        for (entry = j->symbols; entry; entry = entry->next) {
+            if (!entry->name)
+                continue;
+            if (strncmp(entry->name, base, base_len) != 0)
+                continue;
+            if (strncmp(entry->name + base_len, local_tag, strlen(local_tag)) != 0)
+                continue;
+            lr_jit_add_symbol(j, name, entry->addr);
+            return entry->addr;
+        }
+    }
+    return NULL;
+}
+
+static void *lookup_defined_symbol_hashed_alias(lr_jit_t *j, const char *name,
+                                                const char *alias_name) {
+    void *addr;
+    if (!j || !name || !name[0] || !alias_name || !alias_name[0])
+        return NULL;
+    if (strcmp(name, alias_name) == 0)
+        return NULL;
+    addr = lookup_defined_symbol_hashed_exact(j, alias_name, symbol_hash(alias_name));
+    if (addr)
+        lr_jit_add_symbol(j, name, addr);
+    return addr;
 }
 
 static void *lookup_symbol(lr_jit_t *j, const char *name) {
@@ -1570,6 +1634,10 @@ int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m) {
                 continue;
             if (lookup_symbol(j, g->name))
                 continue;
+            /* External declarations must not allocate private zero storage.
+               Leave unresolved and let relocation patching bind to a real
+               definition when the symbol becomes available. */
+            continue;
         } else {
             uint32_t hash = symbol_hash(g->name);
             if (find_symbol_entry(j, g->name, hash))
@@ -2894,6 +2962,63 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
             return NULL;
     }
     return lookup_symbol_hashed(j, name, hash);
+}
+
+void *lr_jit_get_defined_function(lr_jit_t *j, const char *name) {
+    const char *canonical = name;
+    const char *local_tag = ".__liric_local.";
+    uint32_t hash;
+    void *addr;
+
+    if (!j || !name || !name[0])
+        return NULL;
+
+    hash = symbol_hash(name);
+    addr = lookup_defined_symbol_hashed_exact(j, name, hash);
+    if (addr)
+        return addr;
+
+    if ((unsigned char)canonical[0] == 1 && canonical[1] != '\0') {
+        canonical = canonical + 1;
+        addr = lookup_defined_symbol_hashed_alias(j, name, canonical);
+        if (addr)
+            return addr;
+    }
+
+    if (canonical[0] == '_' && canonical[1] != '\0') {
+        addr = lookup_defined_symbol_hashed_alias(j, name, canonical + 1);
+        if (addr)
+            return addr;
+    } else {
+        size_t n = strlen(canonical);
+        char *prefixed = (char *)malloc(n + 2);
+        if (prefixed) {
+            prefixed[0] = '_';
+            memcpy(prefixed + 1, canonical, n + 1);
+            addr = lookup_defined_symbol_hashed_alias(j, name, prefixed);
+            free(prefixed);
+            if (addr)
+                return addr;
+        }
+    }
+
+    {
+        const char *tag = strstr(canonical, local_tag);
+        if (tag && tag > canonical) {
+            size_t base_len = (size_t)(tag - canonical);
+            char *base_name = (char *)malloc(base_len + 1u);
+            if (base_name) {
+                memcpy(base_name, canonical, base_len);
+                base_name[base_len] = '\0';
+                addr = lookup_defined_symbol_hashed_alias(j, name, base_name);
+                free(base_name);
+                if (addr)
+                    return addr;
+            }
+        }
+    }
+
+    return NULL;
 }
 
 int lr_jit_patch_relocs(lr_jit_t *j, const struct lr_objfile_ctx *ctx) {
