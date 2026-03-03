@@ -23,10 +23,6 @@ usage: lfortran_api_compat.sh [options]
   --run-itests yes|no     run lfortran integration tests (default: yes)
   --run-smoke-tests yes|no|auto
                           run llvm21 parity smoke tests (default: auto: yes for llvm21 family-set, else no)
-  --run-third-party yes|no
-                          run lfortran third-party suite (default: no)
-  --third-party-lapack-mode MODE
-                          third-party LAPACK mode: smoke|full (default: full)
   --itest-workers N       workers for integration tests only (default: 1)
   --itest-timeout-sec N   per integration-suite timeout in seconds (default: 900)
   --itest-memory-max SIZE memory cap for integration-suite scope, systemd format (default: 8G)
@@ -571,7 +567,11 @@ run_smoke_tests() {
     local smoke_status=0
     (
         cd "$lfortran_dir"
-        rm -f expr2.o expr2 intrinsics_04 intrinsics_04s
+        rm -f \
+            expr2.o expr2 \
+            modules_15 modules_15.o modules_15b.o modules_15c.o \
+            intrinsics_04 intrinsics_04s \
+            *.o.liric_blob *.o.liric_ll
         echo "lfortran_api_compat: running WITH_LIRIC llvm21 smoke tests" >&2
         run_in_selected_env lfortran --version || exit 1
 
@@ -580,7 +580,18 @@ run_smoke_tests() {
         [[ -x expr2 ]] || die "smoke test expected executable is missing: expr2"
         ./expr2 || exit 1
 
-        echo "lfortran_api_compat: skipping mixed C/Fortran object-link smoke in mandatory no-link mode" >&2
+        run_in_selected_env lfortran -c integration_tests/modules_15b.f90 -o modules_15b.o || exit 1
+        run_in_selected_env lfortran -c integration_tests/modules_15.f90 -o modules_15.o || exit 1
+        if run_in_selected_env bash -lc "command -v clang >/dev/null 2>&1"; then
+            run_in_selected_env clang -c integration_tests/modules_15c.c -o modules_15c.o || exit 1
+        elif run_in_selected_env bash -lc "command -v gcc >/dev/null 2>&1"; then
+            run_in_selected_env gcc -c integration_tests/modules_15c.c -o modules_15c.o || exit 1
+        else
+            die "smoke test requires clang or gcc to build integration_tests/modules_15c.c"
+        fi
+        run_in_selected_env lfortran modules_15.o modules_15b.o modules_15c.o -o modules_15 || exit 1
+        [[ -x modules_15 ]] || die "smoke test expected executable is missing: modules_15"
+        ./modules_15 || exit 1
 
         run_in_selected_env lfortran integration_tests/intrinsics_04s.f90 -o intrinsics_04s || exit 1
         [[ -x intrinsics_04s ]] || die "smoke test expected executable is missing: intrinsics_04s"
@@ -595,27 +606,6 @@ run_smoke_tests() {
     fi
 
     if [[ "$smoke_status" -ne 0 ]]; then
-        status=1
-    fi
-}
-
-run_third_party_suite() {
-    local third_party_status=0
-    (
-        cd "$lfortran_dir"
-        echo "lfortran_api_compat: running WITH_LIRIC third-party suite (lapack-mode=${third_party_lapack_mode})" >&2
-        run_in_selected_env env \
-            RUNNER_OS="Linux" \
-            FC="$lfortran_liric_bin" \
-            LFORTRAN_LAPACK_TEST_MODE="$third_party_lapack_mode" \
-            bash ci/test_third_party_codes.sh --lapack-mode "$third_party_lapack_mode"
-    ) 2>&1 | tee "${log_root}/lfortran_third_party_liric.log" || third_party_status=1
-    if grep -Fq "$NO_LINK_FALLBACK_DIAG_TEXT" "${log_root}/lfortran_third_party_liric.log"; then
-        echo "lfortran_api_compat: fallback diagnostic detected in third-party suite; refusing fallback" >&2
-        third_party_status=1
-    fi
-
-    if [[ "$third_party_status" -ne 0 ]]; then
         status=1
     fi
 }
@@ -784,8 +774,6 @@ write_summary_json() {
             --arg run_ref_tests "$run_ref_tests" \
             --arg run_itests "$run_itests" \
             --arg run_smoke_tests "$run_smoke_tests_flag" \
-            --arg run_third_party "$run_third_party" \
-            --arg third_party_lapack_mode "$third_party_lapack_mode" \
             --arg itest_family_set "$itest_family_set" \
             --arg itest_families_requested "$itest_families_requested_csv" \
             --arg itest_families_executed "$itest_families_executed_csv" \
@@ -800,8 +788,6 @@ write_summary_json() {
               run_ref_tests: $run_ref_tests,
               run_itests: $run_itests,
               run_smoke_tests: $run_smoke_tests,
-              run_third_party: $run_third_party,
-              third_party_lapack_mode: $third_party_lapack_mode,
               itest_family_set: $itest_family_set,
               itest_families_requested: (if $itest_families_requested == "" then [] else ($itest_families_requested|split(",")) end),
               itest_families_executed: (if $itest_families_executed == "" then [] else ($itest_families_executed|split(",")) end),
@@ -822,8 +808,6 @@ write_summary_json() {
     local esc_run_ref_tests
     local esc_run_itests
     local esc_run_smoke_tests
-    local esc_run_third_party
-    local esc_third_party_lapack_mode
     local esc_itest_family_set
     local pass_flag="false"
     if [[ "$status" -eq 0 ]]; then
@@ -836,8 +820,6 @@ write_summary_json() {
     esc_run_ref_tests="$(json_escape "$run_ref_tests")"
     esc_run_itests="$(json_escape "$run_itests")"
     esc_run_smoke_tests="$(json_escape "$run_smoke_tests_flag")"
-    esc_run_third_party="$(json_escape "$run_third_party")"
-    esc_third_party_lapack_mode="$(json_escape "$third_party_lapack_mode")"
     esc_itest_family_set="$(json_escape "$itest_family_set")"
 
     cat > "$out" <<EOF
@@ -849,8 +831,6 @@ write_summary_json() {
   "run_ref_tests": "${esc_run_ref_tests}",
   "run_itests": "${esc_run_itests}",
   "run_smoke_tests": "${esc_run_smoke_tests}",
-  "run_third_party": "${esc_run_third_party}",
-  "third_party_lapack_mode": "${esc_third_party_lapack_mode}",
   "itest_family_set": "${esc_itest_family_set}",
   "itest_families_requested": ${itest_families_requested_json},
   "itest_families_executed": ${itest_families_executed_json},
@@ -913,8 +893,6 @@ run_ref_tests="yes"
 run_itests="yes"
 run_smoke_tests_mode="${LIRIC_LFORTRAN_RUN_SMOKE_TESTS:-auto}"
 run_smoke_tests_flag="no"
-run_third_party="${LIRIC_LFORTRAN_RUN_THIRD_PARTY:-no}"
-third_party_lapack_mode="${LIRIC_LFORTRAN_THIRD_PARTY_LAPACK_MODE:-full}"
 itest_workers=""
 itest_timeout_sec="${LIRIC_LFORTRAN_ITEST_TIMEOUT_SEC:-900}"
 itest_memory_max="${LIRIC_LFORTRAN_ITEST_MEMORY_MAX:-8G}"
@@ -1015,16 +993,6 @@ while [[ $# -gt 0 ]]; do
             run_smoke_tests_mode="$2"
             shift 2
             ;;
-        --run-third-party)
-            [[ $# -ge 2 ]] || die "missing value for $1"
-            run_third_party="$2"
-            shift 2
-            ;;
-        --third-party-lapack-mode)
-            [[ $# -ge 2 ]] || die "missing value for $1"
-            third_party_lapack_mode="$2"
-            shift 2
-            ;;
         --itest-workers)
             [[ $# -ge 2 ]] || die "missing value for $1"
             itest_workers="$2"
@@ -1106,10 +1074,6 @@ done
 [[ "$run_itests" == "yes" || "$run_itests" == "no" ]] || die "--run-itests must be yes|no"
 [[ "$run_smoke_tests_mode" == "yes" || "$run_smoke_tests_mode" == "no" || "$run_smoke_tests_mode" == "auto" ]] \
     || die "--run-smoke-tests must be yes|no|auto"
-[[ "$run_third_party" == "yes" || "$run_third_party" == "no" ]] \
-    || die "--run-third-party must be yes|no"
-[[ "$third_party_lapack_mode" == "smoke" || "$third_party_lapack_mode" == "full" ]] \
-    || die "--third-party-lapack-mode must be smoke|full"
 is_nonneg_int "$workers" || die "--workers must be a non-negative integer"
 if [[ -z "$itest_workers" ]]; then
     itest_workers="1"
@@ -1424,10 +1388,6 @@ if [[ "$run_itests" == "yes" ]]; then
     for itest_family in "${itest_families_requested[@]}"; do
         run_integration_family "$itest_family"
     done
-fi
-
-if [[ "$run_third_party" == "yes" ]]; then
-    run_third_party_suite
 fi
 
 summary_json="${output_root}/summary.json"

@@ -260,18 +260,26 @@ static char *compat_shell_quote(const char *s) {
 static int compat_resolve_c_source_for_object(const char *obj_path, char *out_src,
                                               size_t out_src_cap) {
     char direct[PATH_MAX];
+    char stem[PATH_MAX];
     const char *src_name = NULL;
     if (!obj_path || !out_src || out_src_cap == 0)
         return -1;
-    if (!compat_ends_with(obj_path, ".c.o"))
+    if (!compat_ends_with(obj_path, ".o"))
         return -1;
-    if (snprintf(direct, sizeof(direct), "%s", obj_path) >= (int)sizeof(direct))
+    if (snprintf(stem, sizeof(stem), "%s", obj_path) >= (int)sizeof(stem))
         return -1;
     {
-        size_t n = strlen(direct);
+        size_t n = strlen(stem);
         if (n < 2)
             return -1;
-        direct[n - 2] = '\0'; /* strip trailing ".o" */
+        stem[n - 2] = '\0'; /* strip trailing ".o" */
+    }
+    if (compat_ends_with(obj_path, ".c.o")) {
+        if (snprintf(direct, sizeof(direct), "%s", stem) >= (int)sizeof(direct))
+            return -1;
+    } else {
+        if (snprintf(direct, sizeof(direct), "%s.c", stem) >= (int)sizeof(direct))
+            return -1;
     }
     if (compat_path_exists(direct)) {
         if (snprintf(out_src, out_src_cap, "%s", direct) >= (int)out_src_cap)
@@ -328,6 +336,15 @@ static int compat_resolve_c_source_for_object(const char *obj_path, char *out_sr
                 continue;
             if (snprintf(candidate, sizeof(candidate), "%s/%s", roots[i], src_name) >=
                 (int)sizeof(candidate))
+                continue;
+            if (compat_path_exists(candidate)) {
+                if (snprintf(out_src, out_src_cap, "%s", candidate) >=
+                    (int)out_src_cap)
+                    return -1;
+                return 0;
+            }
+            if (snprintf(candidate, sizeof(candidate), "%s/integration_tests/%s",
+                         roots[i], src_name) >= (int)sizeof(candidate))
                 continue;
             if (compat_path_exists(candidate)) {
                 if (snprintf(out_src, out_src_cap, "%s", candidate) >=
@@ -426,7 +443,7 @@ static int compat_ensure_object_sidecars(const char *obj_path,
     }
     if (compat_object_has_sidecars(obj_path))
         return 0;
-    if (compat_ends_with(obj_path, ".c.o"))
+    if (compat_ends_with(obj_path, ".o"))
         return compat_generate_sidecars_for_c_object(obj_path, err, errlen);
     compat_set_err(err, errlen,
                    "WITH_LIRIC AOT no-link mode requires sidecars for object input: %s",
