@@ -319,7 +319,7 @@ run_with_itest_shards() {
         shard_tmp_log="$(mktemp)"
         if ! run_with_itest_guards "${cmd[@]}" ${itest_extra[@]+"${itest_extra[@]}"} \
             2>&1 | tee "$shard_tmp_log"; then
-            if [[ -n "$pattern" ]] && rg -q "No tests match pattern:|No tests were found!!!" "$shard_tmp_log"; then
+            if [[ -n "$pattern" ]] && grep -Eq "No tests match pattern:|No tests were found!!!" "$shard_tmp_log"; then
                 echo "lfortran_api_compat: integration shard ${shard_idx}/${shard_count} (${mode_label}) had no matching tests; skipping" >&2
                 rm -f "$shard_tmp_log"
                 continue
