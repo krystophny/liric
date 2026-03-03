@@ -21,15 +21,21 @@ usage: lfortran_api_compat.sh [options]
   --workers N             parallel build/test workers (default: nproc/sysctl)
   --run-ref-tests yes|no  run lfortran reference tests (default: yes)
   --run-itests yes|no     run lfortran integration tests (default: yes)
+  --run-smoke-tests yes|no|auto
+                          run llvm21 parity smoke tests (default: auto: yes for llvm21 family-set, else no)
+  --run-third-party yes|no
+                          run lfortran third-party suite (default: no)
+  --third-party-lapack-mode MODE
+                          third-party LAPACK mode: smoke|full (default: full)
   --itest-workers N       workers for integration tests only (default: 1)
   --itest-timeout-sec N   per integration-suite timeout in seconds (default: 900)
   --itest-memory-max SIZE memory cap for integration-suite scope, systemd format (default: 8G)
   --itest-tasks-max N     task cap for integration-suite scope (default: 512)
   --unsafe-itests         disable integration-suite containment guards
   --itest-shards LIST     semicolon-separated ctest regex shards for integration suites
-  --itest-family-set SET  integration family set: legacy|quick|extended (default: legacy)
+  --itest-family-set SET  integration family set: legacy|quick|extended|llvm21 (default: legacy)
   --itest-families LIST   comma-separated integration families override
-                          (llvm_base,llvm_fast,llvm_sc,llvm_submodule,llvm_single_invocation,llvm_std_f23)
+                          (llvm_base,llvm_fast,llvm_sc,llvm_submodule,llvm_single_invocation,llvm_std_f23,llvm2_base,llvm_rtlib_base,llvm_nopragma_base,llvm_integer8_base,llvm_implicit_base,llvm2_fast,llvm_rtlib_fast,llvm_nopragma_fast,llvm_integer8_fast,llvm_implicit_fast,llvm_submodule_sc)
   --env-name NAME         run test suites via conda/mamba env NAME (lf.sh style)
   --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
@@ -52,6 +58,19 @@ This lane validates compile-time API compatibility:
       run_tests.py -b llvm_submodule --ninja -jN
       run_tests.py -b llvm_single_invocation --ninja -jN
       run_tests.py -b llvm --std=f23 --ninja -jN
+    llvm21:
+      extended +
+      run_tests.py -b llvm2 --ninja -jN
+      run_tests.py -b llvm_rtlib --ninja -jN
+      run_tests.py -b llvm_nopragma --ninja -jN
+      run_tests.py -b llvm_integer_8 --ninja -jN
+      run_tests.py -b llvmImplicit --ninja -jN
+      run_tests.py -b llvm2 -f --ninja -jN
+      run_tests.py -b llvm_rtlib -f --ninja -jN
+      run_tests.py -b llvm_nopragma -f --ninja -jN
+      run_tests.py -b llvm_integer_8 -f --ninja -jN
+      run_tests.py -b llvmImplicit -f --ninja -jN
+      run_tests.py -b llvm_submodule -sc --ninja -jN
   (explicit --itest-families overrides --itest-family-set)
   Reference tests run ALL backends via lfortran_ref_test_liric.py.
   The llvm backend (--show-llvm) skips IR output comparison (stderr and
@@ -65,6 +84,8 @@ die() {
     echo "lfortran_api_compat: $*" >&2
     exit 1
 }
+
+NO_LINK_FALLBACK_DIAG_TEXT="WITH_LIRIC AOT no-link executable emission failed"
 
 need_cmd() {
     command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
@@ -194,6 +215,39 @@ canonicalize_itest_family() {
         llvm_std_f23|std_f23|f23)
             printf '%s\n' "llvm_std_f23"
             ;;
+        llvm2_base|llvm2)
+            printf '%s\n' "llvm2_base"
+            ;;
+        llvm_rtlib_base|rtlib|llvm_rtlib)
+            printf '%s\n' "llvm_rtlib_base"
+            ;;
+        llvm_nopragma_base|nopragma|llvm_nopragma)
+            printf '%s\n' "llvm_nopragma_base"
+            ;;
+        llvm_integer8_base|integer8|llvm_integer8|llvm_integer_8)
+            printf '%s\n' "llvm_integer8_base"
+            ;;
+        llvm_implicit_base|implicit|llvm_implicit|llvmimplicit)
+            printf '%s\n' "llvm_implicit_base"
+            ;;
+        llvm2_fast)
+            printf '%s\n' "llvm2_fast"
+            ;;
+        llvm_rtlib_fast)
+            printf '%s\n' "llvm_rtlib_fast"
+            ;;
+        llvm_nopragma_fast)
+            printf '%s\n' "llvm_nopragma_fast"
+            ;;
+        llvm_integer8_fast)
+            printf '%s\n' "llvm_integer8_fast"
+            ;;
+        llvm_implicit_fast)
+            printf '%s\n' "llvm_implicit_fast"
+            ;;
+        llvm_submodule_sc|submodule_sc)
+            printf '%s\n' "llvm_submodule_sc"
+            ;;
         *)
             return 1
             ;;
@@ -213,8 +267,29 @@ populate_itest_families_from_set() {
         extended)
             itest_families_requested=(llvm_base llvm_fast llvm_sc llvm_submodule llvm_single_invocation llvm_std_f23)
             ;;
+        llvm21)
+            itest_families_requested=(
+                llvm_base
+                llvm_fast
+                llvm_sc
+                llvm_submodule
+                llvm_single_invocation
+                llvm_std_f23
+                llvm2_base
+                llvm_rtlib_base
+                llvm_nopragma_base
+                llvm_integer8_base
+                llvm_implicit_base
+                llvm2_fast
+                llvm_rtlib_fast
+                llvm_nopragma_fast
+                llvm_integer8_fast
+                llvm_implicit_fast
+                llvm_submodule_sc
+            )
+            ;;
         *)
-            die "--itest-family-set must be one of: legacy|quick|extended"
+            die "--itest-family-set must be one of: legacy|quick|extended|llvm21"
             ;;
     esac
 }
@@ -404,6 +479,67 @@ run_integration_family() {
             mode_flags=(--std=f23)
             log_name="lfortran_integration_tests_liric_api_std_f23.log"
             ;;
+        llvm2_base)
+            mode_label="llvm2-default"
+            backend="llvm2"
+            log_name="lfortran_integration_tests_liric_api_llvm2.log"
+            ;;
+        llvm_rtlib_base)
+            mode_label="llvm-rtlib-default"
+            backend="llvm_rtlib"
+            log_name="lfortran_integration_tests_liric_api_llvm_rtlib.log"
+            ;;
+        llvm_nopragma_base)
+            mode_label="llvm-nopragma-default"
+            backend="llvm_nopragma"
+            log_name="lfortran_integration_tests_liric_api_llvm_nopragma.log"
+            ;;
+        llvm_integer8_base)
+            mode_label="llvm-integer8-default"
+            backend="llvm_integer_8"
+            log_name="lfortran_integration_tests_liric_api_llvm_integer8.log"
+            ;;
+        llvm_implicit_base)
+            mode_label="llvm-implicit-default"
+            backend="llvmImplicit"
+            log_name="lfortran_integration_tests_liric_api_llvm_implicit.log"
+            ;;
+        llvm2_fast)
+            mode_label="llvm2-fast"
+            backend="llvm2"
+            mode_flags=(-f)
+            log_name="lfortran_integration_tests_liric_api_llvm2_fast.log"
+            ;;
+        llvm_rtlib_fast)
+            mode_label="llvm-rtlib-fast"
+            backend="llvm_rtlib"
+            mode_flags=(-f)
+            log_name="lfortran_integration_tests_liric_api_llvm_rtlib_fast.log"
+            ;;
+        llvm_nopragma_fast)
+            mode_label="llvm-nopragma-fast"
+            backend="llvm_nopragma"
+            mode_flags=(-f)
+            log_name="lfortran_integration_tests_liric_api_llvm_nopragma_fast.log"
+            ;;
+        llvm_integer8_fast)
+            mode_label="llvm-integer8-fast"
+            backend="llvm_integer_8"
+            mode_flags=(-f)
+            log_name="lfortran_integration_tests_liric_api_llvm_integer8_fast.log"
+            ;;
+        llvm_implicit_fast)
+            mode_label="llvm-implicit-fast"
+            backend="llvmImplicit"
+            mode_flags=(-f)
+            log_name="lfortran_integration_tests_liric_api_llvm_implicit_fast.log"
+            ;;
+        llvm_submodule_sc)
+            mode_label="submodule-separate-compilation"
+            backend="llvm_submodule"
+            mode_flags=(-sc)
+            log_name="lfortran_integration_tests_liric_api_submodule_sc.log"
+            ;;
         *)
             die "unsupported integration family: ${family}"
             ;;
@@ -417,12 +553,69 @@ run_integration_family() {
         echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
         run_with_itest_shards "$mode_label" "$backend" "${mode_flags[@]}"
     ) 2>&1 | tee "${log_root}/${log_name}" || family_status=1
+    if grep -Fq "$NO_LINK_FALLBACK_DIAG_TEXT" "${log_root}/${log_name}"; then
+        echo "lfortran_api_compat: fallback diagnostic detected in integration family ${family}; refusing fallback" >&2
+        family_status=1
+    fi
     end_ts="$(date +%s)"
     duration_ms=$(( (end_ts - start_ts) * 1000 ))
 
     itest_families_executed+=("$family")
     record_itest_family_result "$family" "$family_status" "$duration_ms" "${log_root}/${log_name}"
     if [[ "$family_status" -ne 0 ]]; then
+        status=1
+    fi
+}
+
+run_smoke_tests() {
+    local smoke_status=0
+    (
+        cd "$lfortran_dir"
+        rm -f expr2.o expr2 intrinsics_04 intrinsics_04s
+        echo "lfortran_api_compat: running WITH_LIRIC llvm21 smoke tests" >&2
+        run_in_selected_env lfortran --version || exit 1
+
+        run_in_selected_env lfortran -c examples/expr2.f90 -o expr2.o || exit 1
+        run_in_selected_env lfortran -o expr2 expr2.o || exit 1
+        [[ -x expr2 ]] || die "smoke test expected executable is missing: expr2"
+        ./expr2 || exit 1
+
+        echo "lfortran_api_compat: skipping mixed C/Fortran object-link smoke in mandatory no-link mode" >&2
+
+        run_in_selected_env lfortran integration_tests/intrinsics_04s.f90 -o intrinsics_04s || exit 1
+        [[ -x intrinsics_04s ]] || die "smoke test expected executable is missing: intrinsics_04s"
+        ./intrinsics_04s || exit 1
+        run_in_selected_env lfortran integration_tests/intrinsics_04.f90 -o intrinsics_04 || exit 1
+        [[ -x intrinsics_04 ]] || die "smoke test expected executable is missing: intrinsics_04"
+        ./intrinsics_04 || exit 1
+    ) 2>&1 | tee "${log_root}/lfortran_smoke_tests_liric.log" || smoke_status=1
+    if grep -Fq "$NO_LINK_FALLBACK_DIAG_TEXT" "${log_root}/lfortran_smoke_tests_liric.log"; then
+        echo "lfortran_api_compat: fallback diagnostic detected in smoke tests; refusing fallback" >&2
+        smoke_status=1
+    fi
+
+    if [[ "$smoke_status" -ne 0 ]]; then
+        status=1
+    fi
+}
+
+run_third_party_suite() {
+    local third_party_status=0
+    (
+        cd "$lfortran_dir"
+        echo "lfortran_api_compat: running WITH_LIRIC third-party suite (lapack-mode=${third_party_lapack_mode})" >&2
+        run_in_selected_env env \
+            RUNNER_OS="Linux" \
+            FC="$lfortran_liric_bin" \
+            LFORTRAN_LAPACK_TEST_MODE="$third_party_lapack_mode" \
+            bash ci/test_third_party_codes.sh --lapack-mode "$third_party_lapack_mode"
+    ) 2>&1 | tee "${log_root}/lfortran_third_party_liric.log" || third_party_status=1
+    if grep -Fq "$NO_LINK_FALLBACK_DIAG_TEXT" "${log_root}/lfortran_third_party_liric.log"; then
+        echo "lfortran_api_compat: fallback diagnostic detected in third-party suite; refusing fallback" >&2
+        third_party_status=1
+    fi
+
+    if [[ "$third_party_status" -ne 0 ]]; then
         status=1
     fi
 }
@@ -590,6 +783,9 @@ write_summary_json() {
             --arg lfortran_bin "$lfortran_liric_bin" \
             --arg run_ref_tests "$run_ref_tests" \
             --arg run_itests "$run_itests" \
+            --arg run_smoke_tests "$run_smoke_tests_flag" \
+            --arg run_third_party "$run_third_party" \
+            --arg third_party_lapack_mode "$third_party_lapack_mode" \
             --arg itest_family_set "$itest_family_set" \
             --arg itest_families_requested "$itest_families_requested_csv" \
             --arg itest_families_executed "$itest_families_executed_csv" \
@@ -603,6 +799,9 @@ write_summary_json() {
               lfortran_liric_bin: $lfortran_bin,
               run_ref_tests: $run_ref_tests,
               run_itests: $run_itests,
+              run_smoke_tests: $run_smoke_tests,
+              run_third_party: $run_third_party,
+              third_party_lapack_mode: $third_party_lapack_mode,
               itest_family_set: $itest_family_set,
               itest_families_requested: (if $itest_families_requested == "" then [] else ($itest_families_requested|split(",")) end),
               itest_families_executed: (if $itest_families_executed == "" then [] else ($itest_families_executed|split(",")) end),
@@ -622,6 +821,9 @@ write_summary_json() {
     local esc_lfortran_bin
     local esc_run_ref_tests
     local esc_run_itests
+    local esc_run_smoke_tests
+    local esc_run_third_party
+    local esc_third_party_lapack_mode
     local esc_itest_family_set
     local pass_flag="false"
     if [[ "$status" -eq 0 ]]; then
@@ -633,6 +835,9 @@ write_summary_json() {
     esc_lfortran_bin="$(json_escape "$lfortran_liric_bin")"
     esc_run_ref_tests="$(json_escape "$run_ref_tests")"
     esc_run_itests="$(json_escape "$run_itests")"
+    esc_run_smoke_tests="$(json_escape "$run_smoke_tests_flag")"
+    esc_run_third_party="$(json_escape "$run_third_party")"
+    esc_third_party_lapack_mode="$(json_escape "$third_party_lapack_mode")"
     esc_itest_family_set="$(json_escape "$itest_family_set")"
 
     cat > "$out" <<EOF
@@ -643,6 +848,9 @@ write_summary_json() {
   "lfortran_liric_bin": "${esc_lfortran_bin}",
   "run_ref_tests": "${esc_run_ref_tests}",
   "run_itests": "${esc_run_itests}",
+  "run_smoke_tests": "${esc_run_smoke_tests}",
+  "run_third_party": "${esc_run_third_party}",
+  "third_party_lapack_mode": "${esc_third_party_lapack_mode}",
   "itest_family_set": "${esc_itest_family_set}",
   "itest_families_requested": ${itest_families_requested_json},
   "itest_families_executed": ${itest_families_executed_json},
@@ -703,6 +911,10 @@ build_type="Release"
 workers="$(detect_workers)"
 run_ref_tests="yes"
 run_itests="yes"
+run_smoke_tests_mode="${LIRIC_LFORTRAN_RUN_SMOKE_TESTS:-auto}"
+run_smoke_tests_flag="no"
+run_third_party="${LIRIC_LFORTRAN_RUN_THIRD_PARTY:-no}"
+third_party_lapack_mode="${LIRIC_LFORTRAN_THIRD_PARTY_LAPACK_MODE:-full}"
 itest_workers=""
 itest_timeout_sec="${LIRIC_LFORTRAN_ITEST_TIMEOUT_SEC:-900}"
 itest_memory_max="${LIRIC_LFORTRAN_ITEST_MEMORY_MAX:-8G}"
@@ -798,6 +1010,21 @@ while [[ $# -gt 0 ]]; do
             run_itests="$2"
             shift 2
             ;;
+        --run-smoke-tests)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            run_smoke_tests_mode="$2"
+            shift 2
+            ;;
+        --run-third-party)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            run_third_party="$2"
+            shift 2
+            ;;
+        --third-party-lapack-mode)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            third_party_lapack_mode="$2"
+            shift 2
+            ;;
         --itest-workers)
             [[ $# -ge 2 ]] || die "missing value for $1"
             itest_workers="$2"
@@ -877,6 +1104,12 @@ done
 
 [[ "$run_ref_tests" == "yes" || "$run_ref_tests" == "no" ]] || die "--run-ref-tests must be yes|no"
 [[ "$run_itests" == "yes" || "$run_itests" == "no" ]] || die "--run-itests must be yes|no"
+[[ "$run_smoke_tests_mode" == "yes" || "$run_smoke_tests_mode" == "no" || "$run_smoke_tests_mode" == "auto" ]] \
+    || die "--run-smoke-tests must be yes|no|auto"
+[[ "$run_third_party" == "yes" || "$run_third_party" == "no" ]] \
+    || die "--run-third-party must be yes|no"
+[[ "$third_party_lapack_mode" == "smoke" || "$third_party_lapack_mode" == "full" ]] \
+    || die "--third-party-lapack-mode must be smoke|full"
 is_nonneg_int "$workers" || die "--workers must be a non-negative integer"
 if [[ -z "$itest_workers" ]]; then
     itest_workers="1"
@@ -889,6 +1122,15 @@ if [[ -n "$itest_shards" ]] && itest_args_has_filter "$itest_args"; then
 fi
 if [[ "$run_itests" == "yes" ]]; then
     resolve_itest_families
+fi
+if [[ "$run_smoke_tests_mode" == "auto" ]]; then
+    if [[ "$itest_family_set" == "llvm21" ]]; then
+        run_smoke_tests_flag="yes"
+    else
+        run_smoke_tests_flag="no"
+    fi
+else
+    run_smoke_tests_flag="$run_smoke_tests_mode"
 fi
 
 need_cmd git
@@ -1165,6 +1407,10 @@ if [[ "$run_ref_tests" == "yes" ]]; then
     ) 2>&1 | tee "${log_root}/lfortran_reference_tests.log" || status=1
 fi
 
+if [[ "$run_smoke_tests_flag" == "yes" ]]; then
+    run_smoke_tests
+fi
+
 if [[ "$run_itests" == "yes" ]]; then
     itest_extra=()
     if [[ -n "$itest_args" ]]; then
@@ -1178,6 +1424,10 @@ if [[ "$run_itests" == "yes" ]]; then
     for itest_family in "${itest_families_requested[@]}"; do
         run_integration_family "$itest_family"
     done
+fi
+
+if [[ "$run_third_party" == "yes" ]]; then
+    run_third_party_suite
 fi
 
 summary_json="${output_root}/summary.json"

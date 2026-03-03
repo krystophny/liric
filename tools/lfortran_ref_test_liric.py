@@ -25,7 +25,6 @@ Environment:
 """
 
 import json
-import hashlib
 import logging
 import os
 import sys
@@ -68,8 +67,8 @@ _NO_LINK_FALLBACK_DIAG = (
 )
 
 
-def _normalize_no_link_stderr(json_file):
-    """Strip known WITH_LIRIC no-link fallback diagnostic from stderr output."""
+def _fail_on_no_link_fallback_diag(json_file):
+    """Fail hard if a no-link fallback diagnostic appears in stderr."""
     if not os.path.exists(json_file):
         return
 
@@ -83,36 +82,15 @@ def _normalize_no_link_stderr(json_file):
         return
 
     raw = open(stderr_path, "rb").read()
-    lines = raw.splitlines(keepends=True)
-    filtered = []
-    changed = False
-    for line in lines:
-        if line.rstrip(b"\r\n") == _NO_LINK_FALLBACK_DIAG:
-            changed = True
-            continue
-        filtered.append(line)
-
-    if not changed:
-        return
-
-    new_raw = b"".join(filtered)
-    if len(new_raw) == 0:
-        os.remove(stderr_path)
-        data["stderr"] = None
-        data["stderr_hash"] = None
-    else:
-        with open(stderr_path, "wb") as f:
-            f.write(new_raw)
-        data["stderr_hash"] = hashlib.sha224(
-            tester.unl_loop_del(new_raw)).hexdigest()
-
-    json.dump(data, open(json_file, "w"), indent=4)
+    if _NO_LINK_FALLBACK_DIAG in raw:
+        raise tester.RunException(
+            "WITH_LIRIC no-link fallback diagnostic detected; failing hard")
 
 
 def _patched_run(basename, cmd, out_dir, infile=None, extra_args=None):
     json_file = _original_run(
         basename, cmd, out_dir, infile=infile, extra_args=extra_args)
-    _normalize_no_link_stderr(json_file)
+    _fail_on_no_link_fallback_diag(json_file)
     return json_file
 
 
