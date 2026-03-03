@@ -27,6 +27,9 @@ usage: lfortran_api_compat.sh [options]
   --itest-tasks-max N     task cap for integration-suite scope (default: 512)
   --unsafe-itests         disable integration-suite containment guards
   --itest-shards LIST     semicolon-separated ctest regex shards for integration suites
+  --itest-family-set SET  integration family set: legacy|quick|extended (default: legacy)
+  --itest-families LIST   comma-separated integration families override
+                          (llvm_base,llvm_fast,llvm_sc,llvm_submodule,llvm_single_invocation,llvm_std_f23)
   --env-name NAME         run test suites via conda/mamba env NAME (lf.sh style)
   --env-runner CMD        env runner for --env-name (auto: conda|micromamba|mamba)
   --ref-args "ARGS..."    extra args passed to ./run_tests.py
@@ -38,9 +41,18 @@ This lane validates compile-time API compatibility:
   LFortran built with -DWITH_LIRIC=yes uses Liric's LLVM C++ compatibility
   API internally, then runs LFortran's own test runners.
   Unit tests run via: ctest --test-dir <build-liric> --output-on-failure
-  Integration tests run in both modes:
-    run_tests.py -b llvm --ninja -jN
-    run_tests.py -b llvm -f -nf16 --ninja -jN
+  Integration tests run by family:
+    legacy:
+      run_tests.py -b llvm --ninja -jN
+      run_tests.py -b llvm -f -nf16 --ninja -jN
+    quick:
+      legacy + run_tests.py -b llvm -sc --ninja -jN
+    extended:
+      quick +
+      run_tests.py -b llvm_submodule --ninja -jN
+      run_tests.py -b llvm_single_invocation --ninja -jN
+      run_tests.py -b llvm --std=f23 --ninja -jN
+  (explicit --itest-families overrides --itest-family-set)
   Reference tests run ALL backends via lfortran_ref_test_liric.py.
   The llvm backend (--show-llvm) skips IR output comparison (stderr and
   returncode still checked).  The run_dbg backend skips all comparison
@@ -160,6 +172,81 @@ itest_args_has_filter() {
     return 1
 }
 
+canonicalize_itest_family() {
+    local token="${1,,}"
+    token="${token//-/_}"
+    case "$token" in
+        llvm_base|base|default)
+            printf '%s\n' "llvm_base"
+            ;;
+        llvm_fast|fast)
+            printf '%s\n' "llvm_fast"
+            ;;
+        llvm_sc|llvm_separate_compilation|separate_compilation|sc)
+            printf '%s\n' "llvm_sc"
+            ;;
+        llvm_submodule|submodule)
+            printf '%s\n' "llvm_submodule"
+            ;;
+        llvm_single_invocation|single_invocation|single)
+            printf '%s\n' "llvm_single_invocation"
+            ;;
+        llvm_std_f23|std_f23|f23)
+            printf '%s\n' "llvm_std_f23"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+populate_itest_families_from_set() {
+    local set_name="${1,,}"
+    set_name="${set_name//-/_}"
+    case "$set_name" in
+        legacy)
+            itest_families_requested=(llvm_base llvm_fast)
+            ;;
+        quick)
+            itest_families_requested=(llvm_base llvm_fast llvm_sc)
+            ;;
+        extended)
+            itest_families_requested=(llvm_base llvm_fast llvm_sc llvm_submodule llvm_single_invocation llvm_std_f23)
+            ;;
+        *)
+            die "--itest-family-set must be one of: legacy|quick|extended"
+            ;;
+    esac
+}
+
+resolve_itest_families() {
+    local seen=","
+    local raw_item=""
+    local canonical=""
+    local -a parsed=()
+
+    if [[ -n "$itest_families" ]]; then
+        IFS=',' read -r -a parsed <<< "$itest_families"
+        itest_families_requested=()
+        for raw_item in "${parsed[@]}"; do
+            raw_item="$(trim_ascii_ws "$raw_item")"
+            [[ -n "$raw_item" ]] || continue
+            canonical="$(canonicalize_itest_family "$raw_item")" \
+                || die "unsupported integration family in --itest-families: ${raw_item}"
+            if [[ "$seen" == *",${canonical},"* ]]; then
+                continue
+            fi
+            seen="${seen}${canonical},"
+            itest_families_requested+=("$canonical")
+        done
+    else
+        populate_itest_families_from_set "$itest_family_set"
+    fi
+
+    ((${#itest_families_requested[@]} > 0)) \
+        || die "no integration families resolved (check --itest-family-set/--itest-families)"
+}
+
 run_with_itest_guards() {
     local -a cmd=()
     if [[ "$safe_itests" != "yes" ]]; then
@@ -199,6 +286,8 @@ run_with_itest_guards() {
 run_with_itest_shards() {
     local mode_label="$1"
     shift
+    local backend="$1"
+    shift
     local -a mode_flags=("$@")
     local -a shard_patterns=("")
     local raw_pattern=""
@@ -222,12 +311,108 @@ run_with_itest_shards() {
                 echo "lfortran_api_compat: integration shard ${shard_idx}/${shard_count} (${mode_label}): <all-tests>" >&2
             fi
         fi
-        cmd=("$PYTHON_BIN" run_tests.py -b llvm ${mode_flags[@]+"${mode_flags[@]}"} --ninja -j"$itest_workers")
+        cmd=("$PYTHON_BIN" run_tests.py -b "$backend" ${mode_flags[@]+"${mode_flags[@]}"} --ninja -j"$itest_workers")
         if [[ -n "$pattern" ]]; then
             cmd+=(-t "$pattern")
         fi
         run_with_itest_guards "${cmd[@]}" ${itest_extra[@]+"${itest_extra[@]}"}
     done
+}
+
+prepare_itest_env() {
+    clean_mod_artifacts "$PWD"
+    clean_integration_build_tree "$PWD"
+    unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
+    if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
+        export LFORTRAN_LINKER="gcc"
+        echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
+    fi
+    if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
+        export LFORTRAN_NO_LINK_MODE="1"
+        echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
+    fi
+    [[ "${LFORTRAN_NO_LINK_MODE}" == "1" ]] \
+        || die "LFORTRAN_NO_LINK_MODE must remain 1 in WITH_LIRIC integration lane"
+}
+
+record_itest_family_result() {
+    local family="$1"
+    local family_status="$2"
+    local duration_ms="$3"
+    local log_file="$4"
+    local pass_flag="false"
+    if [[ "$family_status" -eq 0 ]]; then
+        pass_flag="true"
+    fi
+    itest_family_result_entries+=("${family}|${family_status}|${pass_flag}|${duration_ms}|${log_file}")
+}
+
+run_integration_family() {
+    local family="$1"
+    local mode_label=""
+    local backend=""
+    local log_name=""
+    local -a mode_flags=()
+    local family_status=0
+    local start_ts=0
+    local end_ts=0
+    local duration_ms=0
+
+    case "$family" in
+        llvm_base)
+            mode_label="default"
+            backend="llvm"
+            log_name="lfortran_integration_tests_liric_api.log"
+            ;;
+        llvm_fast)
+            mode_label="fast"
+            backend="llvm"
+            mode_flags=(-f -nf16)
+            log_name="lfortran_integration_tests_liric_api_fast.log"
+            ;;
+        llvm_sc)
+            mode_label="separate-compilation"
+            backend="llvm"
+            mode_flags=(-sc)
+            log_name="lfortran_integration_tests_liric_api_sc.log"
+            ;;
+        llvm_submodule)
+            mode_label="submodule"
+            backend="llvm_submodule"
+            log_name="lfortran_integration_tests_liric_api_submodule.log"
+            ;;
+        llvm_single_invocation)
+            mode_label="single-invocation"
+            backend="llvm_single_invocation"
+            log_name="lfortran_integration_tests_liric_api_single_invocation.log"
+            ;;
+        llvm_std_f23)
+            mode_label="std-f23"
+            backend="llvm"
+            mode_flags=(--std=f23)
+            log_name="lfortran_integration_tests_liric_api_std_f23.log"
+            ;;
+        *)
+            die "unsupported integration family: ${family}"
+            ;;
+    esac
+
+    start_ts="$(date +%s)"
+    (
+        cd "$lfortran_dir/integration_tests"
+        prepare_itest_env
+        echo "lfortran_api_compat: running WITH_LIRIC integration suite (${mode_label}, backend=${backend})" >&2
+        echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
+        run_with_itest_shards "$mode_label" "$backend" "${mode_flags[@]}"
+    ) 2>&1 | tee "${log_root}/${log_name}" || family_status=1
+    end_ts="$(date +%s)"
+    duration_ms=$(( (end_ts - start_ts) * 1000 ))
+
+    itest_families_executed+=("$family")
+    record_itest_family_result "$family" "$family_status" "$duration_ms" "${log_root}/${log_name}"
+    if [[ "$family_status" -ne 0 ]]; then
+        status=1
+    fi
 }
 
 require_tool_for_integration() {
@@ -326,8 +511,64 @@ json_escape() {
     printf '%s' "$s"
 }
 
+join_by_comma() {
+    local IFS=','
+    printf '%s' "$*"
+}
+
+json_array_from_list() {
+    local json="["
+    local sep=""
+    local item=""
+    for item in "$@"; do
+        json+="${sep}\"$(json_escape "$item")\""
+        sep=","
+    done
+    json+="]"
+    printf '%s' "$json"
+}
+
+build_itest_family_results_json() {
+    local json="{"
+    local sep=""
+    local entry=""
+    local family=""
+    local family_status=""
+    local pass_flag=""
+    local duration_ms=""
+    local log_file=""
+
+    for entry in "${itest_family_result_entries[@]}"; do
+        IFS='|' read -r family family_status pass_flag duration_ms log_file <<< "$entry"
+        json+="${sep}\"$(json_escape "$family")\":{"
+        json+="\"status\":${family_status},"
+        json+="\"pass\":${pass_flag},"
+        json+="\"duration_ms\":${duration_ms},"
+        json+="\"log\":\"$(json_escape "$log_file")\""
+        json+="}"
+        sep=","
+    done
+    json+="}"
+    printf '%s' "$json"
+}
+
 write_summary_json() {
     local out="$1"
+    local itest_families_requested_csv=""
+    local itest_families_executed_csv=""
+    local itest_families_requested_json="[]"
+    local itest_families_executed_json="[]"
+    local itest_family_results_json="{}"
+
+    if ((${#itest_families_requested[@]} > 0)); then
+        itest_families_requested_csv="$(join_by_comma "${itest_families_requested[@]}")"
+        itest_families_requested_json="$(json_array_from_list "${itest_families_requested[@]}")"
+    fi
+    if ((${#itest_families_executed[@]} > 0)); then
+        itest_families_executed_csv="$(join_by_comma "${itest_families_executed[@]}")"
+        itest_families_executed_json="$(json_array_from_list "${itest_families_executed[@]}")"
+    fi
+    itest_family_results_json="$(build_itest_family_results_json)"
 
     if command -v jq >/dev/null 2>&1; then
         if jq -n \
@@ -337,6 +578,10 @@ write_summary_json() {
             --arg lfortran_bin "$lfortran_liric_bin" \
             --arg run_ref_tests "$run_ref_tests" \
             --arg run_itests "$run_itests" \
+            --arg itest_family_set "$itest_family_set" \
+            --arg itest_families_requested "$itest_families_requested_csv" \
+            --arg itest_families_executed "$itest_families_executed_csv" \
+            --argjson itest_family_results "$itest_family_results_json" \
             --arg workers "$workers" \
             --arg status "$status" \
             '{
@@ -346,6 +591,10 @@ write_summary_json() {
               lfortran_liric_bin: $lfortran_bin,
               run_ref_tests: $run_ref_tests,
               run_itests: $run_itests,
+              itest_family_set: $itest_family_set,
+              itest_families_requested: (if $itest_families_requested == "" then [] else ($itest_families_requested|split(",")) end),
+              itest_families_executed: (if $itest_families_executed == "" then [] else ($itest_families_executed|split(",")) end),
+              itest_family_results: $itest_family_results,
               workers: ($workers|tonumber),
               status: ($status|tonumber),
               pass: (($status|tonumber) == 0)
@@ -361,6 +610,7 @@ write_summary_json() {
     local esc_lfortran_bin
     local esc_run_ref_tests
     local esc_run_itests
+    local esc_itest_family_set
     local pass_flag="false"
     if [[ "$status" -eq 0 ]]; then
         pass_flag="true"
@@ -371,6 +621,7 @@ write_summary_json() {
     esc_lfortran_bin="$(json_escape "$lfortran_liric_bin")"
     esc_run_ref_tests="$(json_escape "$run_ref_tests")"
     esc_run_itests="$(json_escape "$run_itests")"
+    esc_itest_family_set="$(json_escape "$itest_family_set")"
 
     cat > "$out" <<EOF
 {
@@ -380,6 +631,10 @@ write_summary_json() {
   "lfortran_liric_bin": "${esc_lfortran_bin}",
   "run_ref_tests": "${esc_run_ref_tests}",
   "run_itests": "${esc_run_itests}",
+  "itest_family_set": "${esc_itest_family_set}",
+  "itest_families_requested": ${itest_families_requested_json},
+  "itest_families_executed": ${itest_families_executed_json},
+  "itest_family_results": ${itest_family_results_json},
   "workers": ${workers},
   "status": ${status},
   "pass": ${pass_flag}
@@ -445,6 +700,8 @@ itest_pgroup_isolation="none"
 setsid_wait_flag=""
 timeout_cmd=""
 itest_shards="${LIRIC_LFORTRAN_ITEST_SHARDS:-}"
+itest_family_set="${LIRIC_LFORTRAN_ITEST_FAMILY_SET:-legacy}"
+itest_families="${LIRIC_LFORTRAN_ITEST_FAMILIES:-}"
 env_name="${LIRIC_LFORTRAN_ENV_NAME:-}"
 env_runner="${LIRIC_LFORTRAN_ENV_RUNNER:-}"
 ref_args=""
@@ -454,6 +711,9 @@ skip_checkout="no"
 fresh_workspace="no"
 lfortran_with_runtime_stacktrace="${LIRIC_LFORTRAN_WITH_RUNTIME_STACKTRACE:-OFF}"
 lfortran_ctest_exclude="${LIRIC_LFORTRAN_CTEST_EXCLUDE:-^test_lfortran$}"
+itest_families_requested=()
+itest_families_executed=()
+itest_family_result_entries=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -555,6 +815,16 @@ while [[ $# -gt 0 ]]; do
             itest_shards="$2"
             shift 2
             ;;
+        --itest-family-set)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_family_set="$2"
+            shift 2
+            ;;
+        --itest-families)
+            [[ $# -ge 2 ]] || die "missing value for $1"
+            itest_families="$2"
+            shift 2
+            ;;
         --env-name)
             [[ $# -ge 2 ]] || die "missing value for $1"
             env_name="$2"
@@ -604,6 +874,9 @@ is_nonneg_int "$itest_timeout_sec" || die "--itest-timeout-sec must be a non-neg
 is_nonneg_int "$itest_tasks_max" || die "--itest-tasks-max must be a non-negative integer"
 if [[ -n "$itest_shards" ]] && itest_args_has_filter "$itest_args"; then
     die "--itest-shards cannot be combined with --itest-args containing -t/--test"
+fi
+if [[ "$run_itests" == "yes" ]]; then
+    resolve_itest_families
 fi
 
 need_cmd git
@@ -881,41 +1154,13 @@ if [[ "$run_itests" == "yes" ]]; then
         # shellcheck disable=SC2206
         itest_extra=( $itest_args )
     fi
-
-    (
-        cd "$lfortran_dir/integration_tests"
-        clean_mod_artifacts "$PWD"
-        clean_integration_build_tree "$PWD"
-        unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
-        if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
-            export LFORTRAN_LINKER="gcc"
-            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
-        fi
-        if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
-            export LFORTRAN_NO_LINK_MODE="1"
-            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
-        fi
-        echo "lfortran_api_compat: running WITH_LIRIC integration suite (default mode)" >&2
-        echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
-        run_with_itest_shards "default" 
-    ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api.log" || status=1
-
-    (
-        cd "$lfortran_dir/integration_tests"
-        clean_mod_artifacts "$PWD"
-        clean_integration_build_tree "$PWD"
-        unset LFORTRAN_NO_LINK_MODULE_EMPTY_OBJECTS
-        if [[ -z "${LFORTRAN_LINKER:-}" ]]; then
-            export LFORTRAN_LINKER="gcc"
-            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_LINKER=${LFORTRAN_LINKER}" >&2
-        fi
-        if [[ -z "${LFORTRAN_NO_LINK_MODE:-}" ]]; then
-            export LFORTRAN_NO_LINK_MODE="1"
-            echo "lfortran_api_compat: applying WITH_LIRIC integration policy: LFORTRAN_NO_LINK_MODE=${LFORTRAN_NO_LINK_MODE}" >&2
-        fi
-        echo "lfortran_api_compat: running WITH_LIRIC integration suite (-f -nf16 mode)" >&2
-        run_with_itest_shards "fast" -f -nf16
-    ) 2>&1 | tee "${log_root}/lfortran_integration_tests_liric_api_fast.log" || status=1
+    echo "lfortran_api_compat: integration family set=${itest_family_set}" >&2
+    if [[ -n "$itest_families" ]]; then
+        echo "lfortran_api_compat: integration families override=${itest_families}" >&2
+    fi
+    for itest_family in "${itest_families_requested[@]}"; do
+        run_integration_family "$itest_family"
+    done
 fi
 
 summary_json="${output_root}/summary.json"
