@@ -82,8 +82,10 @@ execute_process(COMMAND "${CHMOD_EXE}" +x "${fake_ctest}")
 file(MAKE_DIRECTORY "${upstream_repo}/integration_tests")
 file(MAKE_DIRECTORY "${upstream_repo}/build-llvm/src/bin")
 file(MAKE_DIRECTORY "${upstream_repo}/build-liric/src/bin")
+file(MAKE_DIRECTORY "${upstream_repo}/src/libasr/runtime")
 file(WRITE "${upstream_repo}/run_tests.py" "print('stub')\n")
 file(WRITE "${upstream_repo}/integration_tests/run_tests.py" "print('stub')\n")
+file(WRITE "${upstream_repo}/src/libasr/runtime/lfortran_intrinsics.c" "void lfortran_intrinsics_stub(void) {}\n")
 file(WRITE "${upstream_repo}/build-llvm/src/bin/lfortran" "#!/usr/bin/env bash
 exit 0
 ")

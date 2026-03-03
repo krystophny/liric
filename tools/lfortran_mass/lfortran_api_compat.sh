@@ -293,6 +293,7 @@ run_with_itest_shards() {
     local raw_pattern=""
     local pattern=""
     local -a cmd=()
+    local shard_tmp_log=""
     local shard_idx=0
     local shard_count=1
 
@@ -315,7 +316,18 @@ run_with_itest_shards() {
         if [[ -n "$pattern" ]]; then
             cmd+=(-t "$pattern")
         fi
-        run_with_itest_guards "${cmd[@]}" ${itest_extra[@]+"${itest_extra[@]}"}
+        shard_tmp_log="$(mktemp)"
+        if ! run_with_itest_guards "${cmd[@]}" ${itest_extra[@]+"${itest_extra[@]}"} \
+            2>&1 | tee "$shard_tmp_log"; then
+            if [[ -n "$pattern" ]] && rg -q "No tests match pattern:|No tests were found!!!" "$shard_tmp_log"; then
+                echo "lfortran_api_compat: integration shard ${shard_idx}/${shard_count} (${mode_label}) had no matching tests; skipping" >&2
+                rm -f "$shard_tmp_log"
+                continue
+            fi
+            rm -f "$shard_tmp_log"
+            return 1
+        fi
+        rm -f "$shard_tmp_log"
     done
 }
 
@@ -1081,23 +1093,28 @@ if [[ -z "${LIRIC_RUNTIME_BC:-}" ]]; then
             break
         fi
     done
-    if [[ -n "$runtime_bc_clang" ]]; then
-        runtime_src="${lfortran_dir}/src/libasr/runtime/lfortran_intrinsics.c"
-        runtime_include="${lfortran_dir}/src"
-        runtime_bc_out="${output_root}/liric_runtime.bc"
-        if [[ -f "$runtime_src" ]]; then
-            echo "lfortran_api_compat: pre-building runtime BC with ${runtime_bc_clang}" >&2
-            "$runtime_bc_clang" -O0 -emit-llvm -c "$runtime_src" \
-                "-I${runtime_include}" -o "$runtime_bc_out"
-            export LIRIC_RUNTIME_BC="$runtime_bc_out"
-            echo "lfortran_api_compat: LIRIC_RUNTIME_BC=${LIRIC_RUNTIME_BC}" >&2
-        else
-            echo "lfortran_api_compat: runtime source not found, skipping BC pre-build" >&2
-        fi
-    else
-        echo "lfortran_api_compat: no clang found, skipping runtime BC pre-build" >&2
-    fi
+
+    [[ -n "$runtime_bc_clang" ]] || die "missing clang for WITH_LIRIC no-link runtime BC prebuild (set LIRIC_CLANG or install clang-21/clang)"
+
+    runtime_src="${lfortran_dir}/src/libasr/runtime/lfortran_intrinsics.c"
+    runtime_include="${lfortran_dir}/src"
+    runtime_bc_out="${output_root}/liric_runtime.bc"
+    [[ -f "$runtime_src" ]] || die "missing runtime source for WITH_LIRIC no-link BC prebuild: ${runtime_src}"
+
+    echo "lfortran_api_compat: pre-building runtime BC with ${runtime_bc_clang}" >&2
+    "$runtime_bc_clang" -O0 -emit-llvm -c "$runtime_src" \
+        "-I${runtime_include}" -o "$runtime_bc_out"
+    export LIRIC_RUNTIME_BC="$runtime_bc_out"
+    echo "lfortran_api_compat: LIRIC_RUNTIME_BC=${LIRIC_RUNTIME_BC}" >&2
+else
+    [[ -f "${LIRIC_RUNTIME_BC}" ]] \
+        || die "LIRIC_RUNTIME_BC is set but file does not exist: ${LIRIC_RUNTIME_BC}"
 fi
+
+[[ -n "${LIRIC_RUNTIME_BC:-}" ]] \
+    || die "LIRIC_RUNTIME_BC must be set for WITH_LIRIC no-link mode"
+[[ -f "${LIRIC_RUNTIME_BC}" ]] \
+    || die "LIRIC_RUNTIME_BC file is missing: ${LIRIC_RUNTIME_BC}"
 
 if [[ "$run_itests" == "yes" ]]; then
     # New stacktrace pipeline (no dwarfdump/python converters) writes
