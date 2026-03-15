@@ -1850,6 +1850,47 @@ static int test_irbuilder_bitwise() {
     return 0;
 }
 
+static int test_irbuilder_vector_fma_intrinsic_lowers_to_vector_ops() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("vector_fma_intrinsic_lowering", ctx);
+
+    llvm::Type *f32 = llvm::Type::getFloatTy(ctx);
+    llvm::FixedVectorType *v8f = llvm::FixedVectorType::get(f32, 8);
+    TEST_ASSERT(v8f != nullptr, "vector type created");
+
+    llvm::FunctionType *ft = llvm::FunctionType::get(v8f, false);
+    llvm::Function *fn = llvm::Function::Create(
+        ft, llvm::GlobalValue::ExternalLinkage, "vector_fma", mod);
+    TEST_ASSERT(fn != nullptr, "function created");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(entry != nullptr, "entry block");
+
+    llvm::IRBuilder<> builder(entry);
+    llvm::Value *slot = builder.CreateAlloca(v8f, nullptr, "slot");
+    TEST_ASSERT(slot != nullptr, "vector slot created");
+
+    llvm::Value *a = llvm::Constant::getNullValue(v8f);
+    llvm::Value *b = llvm::Constant::getNullValue(v8f);
+    llvm::Value *c = llvm::Constant::getNullValue(v8f);
+    llvm::Value *fma = builder.CreateIntrinsic(
+        llvm::Intrinsic::fma, {v8f}, {a, b, c}, "vfma");
+    TEST_ASSERT(fma != nullptr, "vector fma intrinsic lowered");
+    builder.CreateStore(fma, slot);
+    builder.CreateRet(fma);
+
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    mod.print(os, nullptr);
+    TEST_ASSERT(ir.find("fmul <8 x float>") != std::string::npos,
+                "vector fma lowers through vector multiply");
+    TEST_ASSERT(ir.find("fadd <8 x float>") != std::string::npos,
+                "vector fma lowers through vector add");
+    TEST_ASSERT(ir.find("store  null") == std::string::npos,
+                "vector fma does not collapse to null store");
+    return 0;
+}
+
 static int test_target_select_noop() {
     llvm::InitializeNativeTarget();
     llvm::InitializeNativeTargetAsmPrinter();
@@ -2407,6 +2448,7 @@ int main() {
     RUN_TEST(test_irbuilder_call);
     RUN_TEST(test_irbuilder_extractvalue_insertvalue);
     RUN_TEST(test_irbuilder_bitwise);
+    RUN_TEST(test_irbuilder_vector_fma_intrinsic_lowers_to_vector_ops);
 
     fprintf(stderr, "\nNo-op verification tests:\n");
     RUN_TEST(test_noop_passes);

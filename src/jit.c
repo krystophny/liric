@@ -1327,22 +1327,17 @@ int lr_jit_ensure_runtime_bc_loaded(lr_jit_t *j, lr_module_t *m,
 
 static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name) {
     const char *lookup = NULL;
-    const char *mapped = NULL;
     if (!j || !name || !name[0])
         return NULL;
     lookup = name;
     if ((unsigned char)lookup[0] == 1 && lookup[1] != '\0')
         lookup = lookup + 1;
-    mapped = lr_platform_intrinsic_libc_name(lookup);
     for (lr_lib_entry_t *l = j->libs; l; l = l->next) {
         void *addr = lr_platform_dlsym(l->handle, lookup);
         if (!addr && lookup[0] == '_')
             addr = lr_platform_dlsym(l->handle, lookup + 1);
-        if (!addr && mapped && mapped[0] && strcmp(mapped, lookup) != 0) {
-            addr = lr_platform_dlsym(l->handle, mapped);
-            if (!addr && mapped[0] == '_')
-                addr = lr_platform_dlsym(l->handle, mapped + 1);
-        }
+        if (!addr)
+            addr = lr_platform_intrinsic_resolve_addr(lookup, l->handle);
         if (addr)
             return addr;
     }
@@ -1351,7 +1346,6 @@ static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name)
 
 static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
     const char *lookup = NULL;
-    const char *mapped = NULL;
     void *addr = NULL;
     (void)j;
     if (!name || !name[0])
@@ -1364,13 +1358,7 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
         addr = lr_platform_dlsym_default(lookup + 1);
     if (addr)
         return addr;
-    mapped = lr_platform_intrinsic_libc_name(lookup);
-    if (mapped && mapped[0] && strcmp(mapped, lookup) != 0) {
-        addr = lr_platform_dlsym_default(mapped);
-        if (!addr && mapped[0] == '_')
-            addr = lr_platform_dlsym_default(mapped + 1);
-    }
-    return addr;
+    return lr_platform_intrinsic_resolve_addr(lookup, NULL);
 }
 
 static void *lookup_symbol_hashed_exact(lr_jit_t *j, const char *name,

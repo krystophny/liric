@@ -473,6 +473,62 @@ static uint64_t lr_intrin_cttz_i64(uint64_t x, uint8_t is_zero_undef) {
     return n;
 }
 
+static uint8_t lr_intrin_fshl_i8(uint8_t a, uint8_t b, uint8_t s) {
+    unsigned sh = (unsigned)s & 7u;
+    if (sh == 0u)
+        return a;
+    return (uint8_t)((uint8_t)(a << sh) | (uint8_t)(b >> (8u - sh)));
+}
+
+static uint16_t lr_intrin_fshl_i16(uint16_t a, uint16_t b, uint16_t s) {
+    unsigned sh = (unsigned)s & 15u;
+    if (sh == 0u)
+        return a;
+    return (uint16_t)((uint16_t)(a << sh) | (uint16_t)(b >> (16u - sh)));
+}
+
+static uint32_t lr_intrin_fshl_i32(uint32_t a, uint32_t b, uint32_t s) {
+    unsigned sh = s & 31u;
+    if (sh == 0u)
+        return a;
+    return (a << sh) | (b >> (32u - sh));
+}
+
+static uint64_t lr_intrin_fshl_i64(uint64_t a, uint64_t b, uint64_t s) {
+    unsigned sh = (unsigned)(s & 63u);
+    if (sh == 0u)
+        return a;
+    return (a << sh) | (b >> (64u - sh));
+}
+
+static uint8_t lr_intrin_fshr_i8(uint8_t a, uint8_t b, uint8_t s) {
+    unsigned sh = (unsigned)s & 7u;
+    if (sh == 0u)
+        return a;
+    return (uint8_t)((uint8_t)(a >> sh) | (uint8_t)(b << (8u - sh)));
+}
+
+static uint16_t lr_intrin_fshr_i16(uint16_t a, uint16_t b, uint16_t s) {
+    unsigned sh = (unsigned)s & 15u;
+    if (sh == 0u)
+        return a;
+    return (uint16_t)((uint16_t)(a >> sh) | (uint16_t)(b << (16u - sh)));
+}
+
+static uint32_t lr_intrin_fshr_i32(uint32_t a, uint32_t b, uint32_t s) {
+    unsigned sh = s & 31u;
+    if (sh == 0u)
+        return a;
+    return (a >> sh) | (b << (32u - sh));
+}
+
+static uint64_t lr_intrin_fshr_i64(uint64_t a, uint64_t b, uint64_t s) {
+    unsigned sh = (unsigned)(s & 63u);
+    if (sh == 0u)
+        return a;
+    return (a >> sh) | (b << (64u - sh));
+}
+
 static const char *intrinsic_libc_name_impl(const char *name) {
     if (!name || strncmp(name, "llvm.", 5) != 0)
         return NULL;
@@ -622,6 +678,20 @@ static void *resolve_builtin_intrinsic_addr(const char *name) {
         if (bits == 16) return (void *)(uintptr_t)lr_intrin_cttz_i16;
         if (bits == 32) return (void *)(uintptr_t)lr_intrin_cttz_i32;
         if (bits == 64) return (void *)(uintptr_t)lr_intrin_cttz_i64;
+        return NULL;
+    }
+    if (parse_int_suffix_bits(name, "llvm.fshl.i", &bits)) {
+        if (bits == 8) return (void *)(uintptr_t)lr_intrin_fshl_i8;
+        if (bits == 16) return (void *)(uintptr_t)lr_intrin_fshl_i16;
+        if (bits == 32) return (void *)(uintptr_t)lr_intrin_fshl_i32;
+        if (bits == 64) return (void *)(uintptr_t)lr_intrin_fshl_i64;
+        return NULL;
+    }
+    if (parse_int_suffix_bits(name, "llvm.fshr.i", &bits)) {
+        if (bits == 8) return (void *)(uintptr_t)lr_intrin_fshr_i8;
+        if (bits == 16) return (void *)(uintptr_t)lr_intrin_fshr_i16;
+        if (bits == 32) return (void *)(uintptr_t)lr_intrin_fshr_i32;
+        if (bits == 64) return (void *)(uintptr_t)lr_intrin_fshr_i64;
         return NULL;
     }
 

@@ -533,6 +533,15 @@ public:
         return CreateAlloca(Ty, ArraySize, Name);
     }
 
+    Value *CreateStackSave() {
+        // Constant-count allocas are lowered to static storage in liric.
+        return ConstantPointerNull::get(Type::getInt8PtrTy(ctx_));
+    }
+
+    void CreateStackRestore(Value *SavedPtr) {
+        (void)SavedPtr;
+    }
+
     Value *CreateLoad(Type *Ty, Value *Ptr, const Twine &Name = "") {
         return Value::wrap(lc_create_load(M(), B(), F(),
                            Ty->impl(), Ptr->impl(), Name.c_str()));
@@ -993,6 +1002,16 @@ public:
     Value *CreateIntrinsic(Intrinsic::ID ID, ArrayRef<Type *> Types,
                            ArrayRef<Value *> Args,
                            const Twine &Name = "") {
+        Type *over_ty = pickIntrinsicOverloadType(Types, Args);
+        if (over_ty && over_ty->isVectorTy() &&
+            (ID == Intrinsic::fma || ID == Intrinsic::fmuladd) &&
+            Args.size() == 3 && Args[0] && Args[1] && Args[2]) {
+            Value *mul = CreateFMul(Args[0], Args[1]);
+            if (!mul)
+                return nullptr;
+            return CreateFAdd(mul, Args[2], Name);
+        }
+
         std::string intrinsic_name = intrinsicNameForID(ID, Types, Args);
         if (intrinsic_name.empty()) return nullptr;
 
