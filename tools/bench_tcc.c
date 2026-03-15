@@ -306,17 +306,28 @@ static int create_tcc_stub_dir(const char *bench_dir, char *out_path, size_t out
     char stub_dir[PATH_MAX];
     char stub_path[PATH_MAX];
     FILE *f;
+    size_t bench_dir_len;
+    size_t stub_dir_len;
 
-    snprintf(stub_dir, sizeof(stub_dir), "%s/tcc_stubs", bench_dir);
+    if (!bench_dir || !out_path || out_sz == 0) return -1;
+
+    bench_dir_len = strlen(bench_dir);
+    if (bench_dir_len + strlen("/tcc_stubs") + 1 > sizeof(stub_dir)) return -1;
+    memcpy(stub_dir, bench_dir, bench_dir_len);
+    memcpy(stub_dir + bench_dir_len, "/tcc_stubs", strlen("/tcc_stubs") + 1);
     if (mkdir_p(stub_dir) != 0) return -1;
 
-    snprintf(stub_path, sizeof(stub_path), "%s/complex.h", stub_dir);
+    stub_dir_len = strlen(stub_dir);
+    if (stub_dir_len + strlen("/complex.h") + 1 > sizeof(stub_path)) return -1;
+    memcpy(stub_path, stub_dir, stub_dir_len);
+    memcpy(stub_path + stub_dir_len, "/complex.h", strlen("/complex.h") + 1);
     f = fopen(stub_path, "w");
     if (!f) return -1;
     fprintf(f, "/* TCC stub - no _Complex support */\n");
     fclose(f);
 
-    snprintf(out_path, out_sz, "%s", stub_dir);
+    if (stub_dir_len + 1 > out_sz) return -1;
+    memcpy(out_path, stub_dir, stub_dir_len + 1);
     return 0;
 }
 

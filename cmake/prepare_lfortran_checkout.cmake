@@ -67,10 +67,27 @@ if(NOT fetch_rc EQUAL 0)
     message(FATAL_ERROR "failed to fetch lfortran refs")
 endif()
 
-execute_process(
-    COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" checkout "${LFORTRAN_REF}"
-    RESULT_VARIABLE checkout_rc
-)
+set(_lfortran_checkout_ref "${LFORTRAN_REF}")
+if(LFORTRAN_REF MATCHES "^${LFORTRAN_REMOTE}/(.+)$")
+    set(_lfortran_branch_name "${CMAKE_MATCH_1}")
+    execute_process(
+        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" checkout -B "${_lfortran_branch_name}" "${LFORTRAN_REF}"
+        RESULT_VARIABLE checkout_rc
+    )
+    if(checkout_rc EQUAL 0)
+        execute_process(
+            COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" branch --set-upstream-to "${LFORTRAN_REF}" "${_lfortran_branch_name}"
+            RESULT_VARIABLE upstream_rc
+            ERROR_QUIET
+        )
+    endif()
+    set(_lfortran_checkout_ref "${_lfortran_branch_name}")
+else()
+    execute_process(
+        COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" checkout "${LFORTRAN_REF}"
+        RESULT_VARIABLE checkout_rc
+    )
+endif()
 if(NOT checkout_rc EQUAL 0)
     message(FATAL_ERROR "failed to checkout lfortran ref: ${LFORTRAN_REF}")
 endif()
