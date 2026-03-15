@@ -101,6 +101,7 @@ int lr_llvm_compat_block_move_after(lr_block_t *block, lr_block_t *anchor);
 int lr_llvm_compat_block_move_before(lr_block_t *block, lr_block_t *anchor);
 
 unsigned lr_llvm_compat_function_block_count(const lr_func_t *func);
+lr_block_t *lr_llvm_compat_function_last_block(const lr_func_t *func);
 int lr_llvm_compat_function_insert_block(lc_module_compat_t *mod,
                                          lr_func_t *func,
                                          lr_block_t *block,

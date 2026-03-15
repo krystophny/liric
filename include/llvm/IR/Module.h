@@ -175,6 +175,12 @@ public:
         return static_cast<Constant *>(Value::wrap(gv));
     }
 
+    Function *getOrInsertFunction(StringRef Name, FunctionType *Ty) {
+        if (Function *fn = getFunction(Name))
+            return fn;
+        return createFunction(Name.str().c_str(), Ty, true);
+    }
+
     void print(raw_ostream &OS, void * = nullptr) const {
         FILE *f = OS.getFileOrNull();
         if (f) {

@@ -214,6 +214,19 @@ public:
         return *BasicBlock::wrap(bv);
     }
 
+    BasicBlock &back() const {
+        static BasicBlock dummy;
+        lr_func_t *f = getIRFunc();
+        lr_block_t *block = nullptr;
+        if (!f || !compat_mod_) return dummy;
+        block = lr_llvm_compat_function_last_block(f);
+        if (!block) return dummy;
+        lc_value_t *bv = lc_value_block_ref(compat_mod_, block);
+        if (!bv) return dummy;
+        detail::register_block_parent(block, const_cast<Function *>(this));
+        return *BasicBlock::wrap(bv);
+    }
+
     BasicBlockListType &getBasicBlockList() {
         block_list_.setOwner(this);
         return block_list_;

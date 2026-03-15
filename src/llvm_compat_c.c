@@ -932,6 +932,12 @@ unsigned lr_llvm_compat_function_block_count(const lr_func_t *func) {
     return n;
 }
 
+lr_block_t *lr_llvm_compat_function_last_block(const lr_func_t *func) {
+    if (!func)
+        return NULL;
+    return func->last_block;
+}
+
 int lr_llvm_compat_function_insert_block(lc_module_compat_t *mod,
                                          lr_func_t *func,
                                          lr_block_t *block,
