@@ -1868,49 +1868,6 @@ static uint32_t compat_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f
     return lr_session_emit(mod->session, inst, &err);
 }
 
-static void compat_promote_last_alloca_in_entry_block(lr_block_t *b,
-                                                      lr_func_t *f) {
-    lr_inst_t *before_last = NULL;
-    lr_inst_t *last = NULL;
-    lr_inst_t *first_non_alloca = NULL;
-    lr_inst_t *prev_to_first_non_alloca = NULL;
-    if (!b || !f || b != f->first_block || !b->first || !b->last)
-        return;
-    last = b->last;
-    if (last->op != LR_OP_ALLOCA || b->first == last)
-        return;
-    for (lr_inst_t *it = b->first; it && it != last; it = it->next) {
-        if (!first_non_alloca && it->op != LR_OP_ALLOCA) {
-            first_non_alloca = it;
-            break;
-        }
-        before_last = it;
-    }
-    if (!first_non_alloca)
-        return;
-    for (lr_inst_t *it = b->first; it && it != first_non_alloca; it = it->next)
-        prev_to_first_non_alloca = it;
-    if (!before_last)
-        return;
-    before_last->next = NULL;
-    if (prev_to_first_non_alloca == NULL) {
-        last->next = b->first;
-        b->first = last;
-    } else {
-        prev_to_first_non_alloca->next = last;
-        last->next = first_non_alloca;
-    }
-    b->last = before_last;
-    b->inst_array = NULL;
-    b->num_insts = 0;
-    if (f) {
-        f->block_array = NULL;
-        f->linear_inst_array = NULL;
-        f->block_inst_offsets = NULL;
-        f->num_linear_insts = 0;
-    }
-}
-
 static lr_operand_desc_t block_operand_desc(lr_block_t *block) {
     lr_operand_desc_t d;
     memset(&d, 0, sizeof(d));
@@ -4797,7 +4754,6 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
         inst.num_operands = 1;
     }
     dest = compat_emit(mod, b, f, &inst);
-    compat_promote_last_alloca_in_entry_block(b, f);
     ai = (lc_alloca_inst_t *)malloc(sizeof(*ai));
     if (!ai)
         return NULL;

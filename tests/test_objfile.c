@@ -839,6 +839,80 @@ static built_module_t build_muldc3_import_module(void) {
     return result;
 }
 
+static built_module_t build_unwind_import_module(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+
+    lr_session_declare(s, "_Unwind_Backtrace", i32,
+                       (lr_type_t *[]){ptr, ptr}, 2, false, &err);
+
+    if (lr_session_func_begin(s, "main", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t backtrace_gid = lr_session_intern(s, "_Unwind_Backtrace");
+    lr_operand_desc_t call_args[] = {LR_NULL(ptr), LR_NULL(ptr)};
+    (void)lr_emit_call(s, i32, LR_GLOBAL(backtrace_gid, ptr), call_args, 2);
+    lr_emit_ret(s, LR_IMM(0, i32));
+
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
+static built_module_t build_fshl_import_module(void) {
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    cfg.mode = LR_MODE_IR;
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s) return result;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+
+    lr_session_declare(s, "llvm.fshl.i32", i32,
+                       (lr_type_t *[]){i32, i32, i32}, 3, false, &err);
+
+    if (lr_session_func_begin(s, "main", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t fshl_gid = lr_session_intern(s, "llvm.fshl.i32");
+    lr_operand_desc_t call_args[] = {
+        LR_IMM(9, i32),
+        LR_IMM(3, i32),
+        LR_IMM(1, i32),
+    };
+    uint32_t rv = lr_emit_call(s, i32, LR_GLOBAL(fshl_gid, ptr), call_args, 3);
+    lr_emit_ret(s, LR_VREG(rv, i32));
+
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
 static int host_supports_dynelf_tests(const lr_target_t *target) {
     const lr_target_t *x86_64 = lr_target_by_name("x86_64");
     return target && x86_64 && target == x86_64;
@@ -975,6 +1049,71 @@ int test_dynelf_complex_helper_adds_libgcc_needed(void) {
     snprintf(cmd, sizeof(cmd), "readelf -d %s 2>/dev/null | grep -q 'libgcc_s.so.1'", path);
     rc = system(cmd);
     TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0, "readelf shows DT_NEEDED libgcc_s.so.1");
+
+    remove(path);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+int test_dynelf_unwind_helper_adds_libgcc_needed(void) {
+    built_module_t bm = build_unwind_import_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+    if (!host_supports_dynelf_tests(target)) {
+        lr_session_destroy(bm.session);
+        return 0;
+    }
+
+    const char *path = "/tmp/liric_test_dynelf_unwind_libgcc_needed";
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_executable(bm.module, target, fp, "main");
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit dynamic executable");
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "readelf -d %s 2>/dev/null | grep -q 'libgcc_s.so.1'", path);
+    rc = system(cmd);
+    TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0, "readelf shows DT_NEEDED libgcc_s.so.1");
+
+    remove(path);
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+int test_dynelf_builtin_intrinsic_stub_runs(void) {
+    built_module_t bm = build_fshl_import_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+    if (!host_supports_dynelf_tests(target)) {
+        lr_session_destroy(bm.session);
+        return 0;
+    }
+
+    const char *path = "/tmp/liric_test_dynelf_fshl";
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_executable(bm.module, target, fp, "main");
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit dynamic executable");
+    chmod(path, 0755);
+
+    int status = system(path);
+    TEST_ASSERT(WIFEXITED(status), "exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 18, "exit code 18 from llvm.fshl.i32");
+
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+             "readelf -sW %s 2>/dev/null | grep -q 'llvm.fshl.i32'", path);
+    rc = system(cmd);
+    TEST_ASSERT(!(WIFEXITED(rc) && WEXITSTATUS(rc) == 0),
+                "embedded intrinsic stub is not a dynamic import");
 
     remove(path);
     lr_session_destroy(bm.session);

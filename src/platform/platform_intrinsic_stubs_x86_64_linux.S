@@ -858,6 +858,94 @@ lr_stub_llvm_abs_i64_begin:
     ret
 lr_stub_llvm_abs_i64_end:
 
+.globl lr_stub_llvm_fshl_i8_begin
+.globl lr_stub_llvm_fshl_i8_end
+lr_stub_llvm_fshl_i8_begin:
+    mov ecx, edx
+    and ecx, 7
+    mov eax, edi
+    and eax, 0xff
+    and esi, 0xff
+    shl esi, 8
+    or eax, esi
+    rol ax, cl
+    ret
+lr_stub_llvm_fshl_i8_end:
+
+.globl lr_stub_llvm_fshl_i16_begin
+.globl lr_stub_llvm_fshl_i16_end
+lr_stub_llvm_fshl_i16_begin:
+    mov ecx, edx
+    and ecx, 15
+    mov ax, di
+    shld ax, si, cl
+    ret
+lr_stub_llvm_fshl_i16_end:
+
+.globl lr_stub_llvm_fshl_i32_begin
+.globl lr_stub_llvm_fshl_i32_end
+lr_stub_llvm_fshl_i32_begin:
+    mov ecx, edx
+    and ecx, 31
+    mov eax, edi
+    shld eax, esi, cl
+    ret
+lr_stub_llvm_fshl_i32_end:
+
+.globl lr_stub_llvm_fshl_i64_begin
+.globl lr_stub_llvm_fshl_i64_end
+lr_stub_llvm_fshl_i64_begin:
+    mov ecx, edx
+    and ecx, 63
+    mov rax, rdi
+    shld rax, rsi, cl
+    ret
+lr_stub_llvm_fshl_i64_end:
+
+.globl lr_stub_llvm_fshr_i8_begin
+.globl lr_stub_llvm_fshr_i8_end
+lr_stub_llvm_fshr_i8_begin:
+    mov ecx, edx
+    and ecx, 7
+    mov eax, edi
+    and eax, 0xff
+    and esi, 0xff
+    shl esi, 8
+    or eax, esi
+    ror ax, cl
+    ret
+lr_stub_llvm_fshr_i8_end:
+
+.globl lr_stub_llvm_fshr_i16_begin
+.globl lr_stub_llvm_fshr_i16_end
+lr_stub_llvm_fshr_i16_begin:
+    mov ecx, edx
+    and ecx, 15
+    mov ax, di
+    shrd ax, si, cl
+    ret
+lr_stub_llvm_fshr_i16_end:
+
+.globl lr_stub_llvm_fshr_i32_begin
+.globl lr_stub_llvm_fshr_i32_end
+lr_stub_llvm_fshr_i32_begin:
+    mov ecx, edx
+    and ecx, 31
+    mov eax, edi
+    shrd eax, esi, cl
+    ret
+lr_stub_llvm_fshr_i32_end:
+
+.globl lr_stub_llvm_fshr_i64_begin
+.globl lr_stub_llvm_fshr_i64_end
+lr_stub_llvm_fshr_i64_begin:
+    mov ecx, edx
+    and ecx, 63
+    mov rax, rdi
+    shrd rax, rsi, cl
+    ret
+lr_stub_llvm_fshr_i64_end:
+
 .globl lr_stub_llvm_assume_begin
 .globl lr_stub_llvm_assume_end
 lr_stub_llvm_assume_begin:

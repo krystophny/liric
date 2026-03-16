@@ -169,6 +169,22 @@ static int check_vararg_double_no_decl(const char *tag, ...) {
     return x == 1.5 ? 1234 : -1;
 }
 
+static int check_vararg_stack_after_named7(void *a, void *b, void *c,
+                                           void *d, void *e, void *f,
+                                           int64_t tag, ...) {
+    va_list ap;
+    const char *s;
+    int64_t len;
+    (void)a; (void)b; (void)c; (void)d; (void)e; (void)f; (void)tag;
+    va_start(ap, tag);
+    s = va_arg(ap, const char *);
+    len = va_arg(ap, int64_t);
+    va_end(ap);
+    if (!s || len != 3)
+        return -1;
+    return (s[0] == 'H' && s[1] == 'H' && s[2] == 'H') ? 777 : -1;
+}
+
 int test_jit_add_symbol_updates_cached_lookup(void) {
     lr_jit_t *jit = lr_jit_create();
     TEST_ASSERT(jit != NULL, "jit create");
@@ -2110,6 +2126,44 @@ int test_jit_varargs_undeclared_signature_call(void) {
     fn_t fn; LR_JIT_GET_FN(fn, jit, "call_vararg_undeclared");
     TEST_ASSERT(fn != NULL, "function lookup");
     TEST_ASSERT_EQ(fn(), 1234, "undeclared vararg call receives correct double");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_varargs_overflow_stack_call(void) {
+    const char *src =
+        "@hhh = private constant [3 x i8] c\"HHH\"\n"
+        "declare i32 @check_vararg_stack_after_named7(ptr, ptr, ptr, ptr, ptr, ptr, i64, ...)\n"
+        "define i32 @call_vararg_stack_overflow() {\n"
+        "entry:\n"
+        "  %p = getelementptr [3 x i8], ptr @hhh, i32 0, i32 0\n"
+        "  %r = call i32 (ptr, ptr, ptr, ptr, ptr, ptr, i64, ...) "
+        "@check_vararg_stack_after_named7(ptr null, ptr null, ptr null, ptr null, ptr null, ptr null, i64 0, ptr %p, i64 3)\n"
+        "  ret i32 %r\n"
+        "}\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int (*check_fn)(void *, void *, void *, void *, void *, void *, int64_t, ...) =
+        check_vararg_stack_after_named7;
+    void *check_addr = NULL;
+    memcpy(&check_addr, &check_fn, sizeof(check_addr));
+    lr_jit_add_symbol(jit, "check_vararg_stack_after_named7", check_addr);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_vararg_stack_overflow");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 777, "stack-backed varargs after 7 named args survive");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);

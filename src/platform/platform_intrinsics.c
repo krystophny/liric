@@ -145,6 +145,22 @@ extern const uint8_t lr_stub_llvm_abs_i16_begin[];
 extern const uint8_t lr_stub_llvm_abs_i16_end[];
 extern const uint8_t lr_stub_llvm_abs_i64_begin[];
 extern const uint8_t lr_stub_llvm_abs_i64_end[];
+extern const uint8_t lr_stub_llvm_fshl_i8_begin[];
+extern const uint8_t lr_stub_llvm_fshl_i8_end[];
+extern const uint8_t lr_stub_llvm_fshl_i16_begin[];
+extern const uint8_t lr_stub_llvm_fshl_i16_end[];
+extern const uint8_t lr_stub_llvm_fshl_i32_begin[];
+extern const uint8_t lr_stub_llvm_fshl_i32_end[];
+extern const uint8_t lr_stub_llvm_fshl_i64_begin[];
+extern const uint8_t lr_stub_llvm_fshl_i64_end[];
+extern const uint8_t lr_stub_llvm_fshr_i8_begin[];
+extern const uint8_t lr_stub_llvm_fshr_i8_end[];
+extern const uint8_t lr_stub_llvm_fshr_i16_begin[];
+extern const uint8_t lr_stub_llvm_fshr_i16_end[];
+extern const uint8_t lr_stub_llvm_fshr_i32_begin[];
+extern const uint8_t lr_stub_llvm_fshr_i32_end[];
+extern const uint8_t lr_stub_llvm_fshr_i64_begin[];
+extern const uint8_t lr_stub_llvm_fshr_i64_end[];
 extern const uint8_t lr_stub_llvm_assume_begin[];
 extern const uint8_t lr_stub_llvm_assume_end[];
 extern const uint8_t lr_stub_llvm_trap_begin[];
@@ -254,6 +270,14 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.abs.i16", LR_STUB_BLOB(lr_stub_llvm_abs_i16_begin, lr_stub_llvm_abs_i16_end) },
     { "llvm.abs.i32", LR_STUB_BLOB(lr_stub_llvm_abs_i32_begin, lr_stub_llvm_abs_i32_end) },
     { "llvm.abs.i64", LR_STUB_BLOB(lr_stub_llvm_abs_i64_begin, lr_stub_llvm_abs_i64_end) },
+    { "llvm.fshl.i8", LR_STUB_BLOB(lr_stub_llvm_fshl_i8_begin, lr_stub_llvm_fshl_i8_end) },
+    { "llvm.fshl.i16", LR_STUB_BLOB(lr_stub_llvm_fshl_i16_begin, lr_stub_llvm_fshl_i16_end) },
+    { "llvm.fshl.i32", LR_STUB_BLOB(lr_stub_llvm_fshl_i32_begin, lr_stub_llvm_fshl_i32_end) },
+    { "llvm.fshl.i64", LR_STUB_BLOB(lr_stub_llvm_fshl_i64_begin, lr_stub_llvm_fshl_i64_end) },
+    { "llvm.fshr.i8", LR_STUB_BLOB(lr_stub_llvm_fshr_i8_begin, lr_stub_llvm_fshr_i8_end) },
+    { "llvm.fshr.i16", LR_STUB_BLOB(lr_stub_llvm_fshr_i16_begin, lr_stub_llvm_fshr_i16_end) },
+    { "llvm.fshr.i32", LR_STUB_BLOB(lr_stub_llvm_fshr_i32_begin, lr_stub_llvm_fshr_i32_end) },
+    { "llvm.fshr.i64", LR_STUB_BLOB(lr_stub_llvm_fshr_i64_begin, lr_stub_llvm_fshr_i64_end) },
     { "llvm.assume", LR_STUB_BLOB(lr_stub_llvm_assume_begin, lr_stub_llvm_assume_end) },
     { "llvm.trap", LR_STUB_BLOB(lr_stub_llvm_trap_begin, lr_stub_llvm_trap_end) },
     { "llvm.is.fpclass.f32", LR_STUB_BLOB(lr_stub_llvm_is_fpclass_f32_begin, lr_stub_llvm_is_fpclass_f32_end) },

@@ -155,6 +155,7 @@ int test_jit_varargs_printf_call(void);
 int test_jit_varargs_printf_double_call(void);
 int test_jit_varargs_declared_signature_call(void);
 int test_jit_varargs_undeclared_signature_call(void);
+int test_jit_varargs_overflow_stack_call(void);
 int test_jit_const_gep_vtable_function_ptr(void);
 int test_jit_llvm_intrinsic_fabs_f32(void);
 int test_jit_llvm_intrinsic_extended_blob_coverage(void);
@@ -286,6 +287,8 @@ int test_dynelf_puts_hello(void);
 int test_dynelf_readelf_dynamic(void);
 int test_dynelf_ldd_check(void);
 int test_dynelf_complex_helper_adds_libgcc_needed(void);
+int test_dynelf_unwind_helper_adds_libgcc_needed(void);
+int test_dynelf_builtin_intrinsic_stub_runs(void);
 #endif
 #else
 int test_objfile_macho_header(void);
@@ -462,6 +465,7 @@ int main(void) {
     RUN_TEST(test_jit_varargs_printf_double_call);
     RUN_TEST(test_jit_varargs_declared_signature_call);
     RUN_TEST(test_jit_varargs_undeclared_signature_call);
+    RUN_TEST(test_jit_varargs_overflow_stack_call);
     RUN_TEST(test_jit_const_gep_vtable_function_ptr);
     RUN_TEST(test_jit_llvm_intrinsic_fabs_f32);
     RUN_TEST(test_jit_llvm_intrinsic_extended_blob_coverage);
@@ -628,6 +632,8 @@ int main(void) {
     RUN_TEST(test_dynelf_readelf_dynamic);
     RUN_TEST(test_dynelf_ldd_check);
     RUN_TEST(test_dynelf_complex_helper_adds_libgcc_needed);
+    RUN_TEST(test_dynelf_unwind_helper_adds_libgcc_needed);
+    RUN_TEST(test_dynelf_builtin_intrinsic_stub_runs);
 #endif
 #else
     RUN_TEST(test_objfile_macho_header);

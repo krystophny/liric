@@ -1233,6 +1233,107 @@ static int test_recursive_named_struct_print() {
     return 0;
 }
 
+static int test_entry_alloca_hoist_keeps_prior_allocas_and_following_ops() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("entry_alloca_hoist", ctx);
+
+    llvm::Type *i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i64, false);
+    llvm::Function *fn = mod.createFunction("entry_alloca_hoist_probe", ft, false);
+    TEST_ASSERT(fn != nullptr, "function created");
+    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(bb != nullptr, "entry block created");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(fn);
+    builder.SetInsertPoint(bb);
+
+    llvm::AllocaInst *first = builder.CreateAlloca(i64, nullptr, "first");
+    TEST_ASSERT(first != nullptr, "first alloca created");
+    builder.CreateStore(llvm::ConstantInt::get(i64, 1), first);
+
+    llvm::AllocaInst *late = builder.CreateAlloca(i64, nullptr, "late");
+    TEST_ASSERT(late != nullptr, "late alloca created");
+    builder.CreateStore(llvm::ConstantInt::get(i64, 2), late);
+    builder.CreateRet(llvm::ConstantInt::get(i64, 0));
+
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    mod.print(os, nullptr);
+
+    const size_t first_alloca = ir.find("%first = alloca i64");
+    const size_t late_alloca = ir.find("%late = alloca i64");
+    const size_t first_store = ir.find("store i64 1");
+    const size_t late_store = ir.find("store i64 2");
+    TEST_ASSERT(first_alloca != std::string::npos, "first alloca still printed");
+    TEST_ASSERT(late_alloca != std::string::npos, "late alloca still printed");
+    TEST_ASSERT(first_store != std::string::npos, "store after first alloca kept");
+    TEST_ASSERT(late_store != std::string::npos, "store after late alloca kept");
+    TEST_ASSERT(first_alloca < first_store, "first alloca remains before first store");
+    TEST_ASSERT(late_alloca < first_store, "late alloca hoisted before first store");
+    TEST_ASSERT(late_alloca < late_store, "late alloca still dominates its store");
+    return 0;
+}
+
+static int test_dynamic_entry_alloca_keeps_operand_definition_order() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("dynamic_entry_alloca_order", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = mod.createFunction("dynamic_entry_alloca_probe", ft, false);
+    TEST_ASSERT(fn != nullptr, "function created");
+    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(bb != nullptr, "entry block created");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(fn);
+    builder.SetInsertPoint(bb);
+
+    llvm::AllocaInst *count_slot = builder.CreateAlloca(i32, nullptr, "count_slot");
+    TEST_ASSERT(count_slot != nullptr, "count slot alloca created");
+    builder.CreateStore(llvm::ConstantInt::get(i32, 2), count_slot);
+    llvm::Value *count = builder.CreateLoad(i32, count_slot, "count");
+    TEST_ASSERT(count != nullptr, "count load created");
+    llvm::AllocaInst *dyn = builder.CreateAlloca(i32, count, "dyn");
+    TEST_ASSERT(dyn != nullptr, "dynamic alloca created");
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+
+    lr_func_t *irf = fn->getIRFunc();
+    TEST_ASSERT(irf != nullptr, "IR function available");
+    TEST_ASSERT(irf->first_block != nullptr, "entry block present");
+
+    lr_inst_t *count_store = nullptr;
+    lr_inst_t *count_load = nullptr;
+    lr_inst_t *dyn_alloca = nullptr;
+    for (lr_inst_t *inst = irf->first_block->first; inst; inst = inst->next) {
+        if (inst->op == LR_OP_STORE && count_store == nullptr) {
+            count_store = inst;
+        } else if (inst->op == LR_OP_LOAD && inst->dest == count->impl()->vreg.id) {
+            count_load = inst;
+        } else if (inst->op == LR_OP_ALLOCA && inst->dest == dyn->impl()->vreg.id) {
+            dyn_alloca = inst;
+            break;
+        }
+    }
+
+    TEST_ASSERT(count_store != nullptr, "count store found in entry block");
+    TEST_ASSERT(count_load != nullptr, "count load found in entry block");
+    TEST_ASSERT(dyn_alloca != nullptr, "dynamic alloca found in entry block");
+    TEST_ASSERT(count_store->next == count_load, "count load stays after defining store");
+    TEST_ASSERT(count_load->next == dyn_alloca,
+                "dynamic alloca stays after its count operand definition");
+
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    mod.print(os, nullptr);
+    TEST_ASSERT(ir.find("%dyn = alloca i32, i32 %count") != std::string::npos,
+                "printed IR preserves named dynamic alloca");
+    return 0;
+}
+
 static int test_opaque_pointer_load_without_bitcast() {
     llvm::LLVMContext ctx;
     llvm::Module mod("opaque_pointer_load_without_bitcast", ctx);
@@ -2476,6 +2577,8 @@ int main() {
     RUN_TEST(test_irbuilder_control_flow);
     RUN_TEST(test_irbuilder_memory);
     RUN_TEST(test_recursive_named_struct_print);
+    RUN_TEST(test_entry_alloca_hoist_keeps_prior_allocas_and_following_ops);
+    RUN_TEST(test_dynamic_entry_alloca_keeps_operand_definition_order);
     RUN_TEST(test_opaque_pointer_load_without_bitcast);
     RUN_TEST(test_alloca_casting_precision);
     RUN_TEST(test_irbuilder_casts);

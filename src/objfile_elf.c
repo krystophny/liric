@@ -1141,7 +1141,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             strcmp(name, "__mulxc3") == 0 ||
             strcmp(name, "__divdc3") == 0 ||
             strcmp(name, "__divsc3") == 0 ||
-            strcmp(name, "__divxc3") == 0) {
+            strcmp(name, "__divxc3") == 0 ||
+            strncmp(name, "_Unwind_", 8) == 0) {
             needs_libgcc = true;
             break;
         }
@@ -1742,7 +1743,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         /* DT_NEEDED "libm.so.6" */
         w64(&dp, DT_NEEDED);  w64(&dp, libm_name_off);
         if (needs_libgcc) {
-            /* DT_NEEDED "libgcc_s.so.1" for compiler-rt complex helpers */
+            /* DT_NEEDED "libgcc_s.so.1" for compiler-rt complex/unwind helpers */
             w64(&dp, DT_NEEDED);  w64(&dp, libgcc_name_off);
         }
         if (has_runtime_lib) {
