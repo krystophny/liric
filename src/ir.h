@@ -210,6 +210,9 @@ size_t lr_type_size(const lr_type_t *t);
 size_t lr_type_align(const lr_type_t *t);
 size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx);
 void lr_dump_named_types(const lr_module_t *m, FILE *out);
+enum {
+    LR_DUMP_PRESERVE_SCOPED_LOCALS = 1u << 0,
+};
 bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
                              uint32_t num_indices, size_t *byte_offset_out,
                              const lr_type_t **leaf_type_out);
@@ -226,8 +229,15 @@ void lr_dump_func_signature(const lr_func_t *f, FILE *out);
 void lr_dump_block_label(const lr_func_t *f, const lr_block_t *b, FILE *out);
 void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                   const lr_func_t *f, FILE *out);
+void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
+                       const lr_func_t *f, FILE *out, unsigned dump_flags);
 void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out);
+void lr_dump_global_opts(const lr_module_t *m, const lr_global_t *g, FILE *out,
+                         unsigned dump_flags);
 void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out);
+void lr_dump_func_opts(const lr_func_t *f, const lr_module_t *m, FILE *out,
+                       unsigned dump_flags);
 void lr_module_dump(lr_module_t *m, FILE *out);
+void lr_module_dump_opts(lr_module_t *m, FILE *out, unsigned dump_flags);
 
 #endif

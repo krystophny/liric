@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+unsigned lr_dump_flags_current = 0;
+
 static uint32_t symbol_hash(const char *name) {
     uint32_t h = 2166136261u;
     while (*name) {
@@ -1528,7 +1530,9 @@ static const char *display_symbol_name(const char *name, size_t *len_out) {
             *len_out = 0;
         return NULL;
     }
-    suffix = strstr(name, scoped_suffix);
+    suffix = (lr_dump_flags_current & LR_DUMP_PRESERVE_SCOPED_LOCALS)
+                 ? NULL
+                 : strstr(name, scoped_suffix);
     len = suffix ? (size_t)(suffix - name) : strlen(name);
     if (len_out)
         *len_out = len;
@@ -2069,10 +2073,12 @@ static const char *noop_cast_opcode(const lr_type_t *t) {
     }
 }
 
-void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
-                  const lr_func_t *f, FILE *out) {
+void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
+                       const lr_func_t *f, FILE *out, unsigned dump_flags) {
+    unsigned saved_dump_flags = lr_dump_flags_current;
+    lr_dump_flags_current = dump_flags;
     if (!inst || !out)
-        return;
+        goto done;
 
     const lr_type_t *cast_src_ty = NULL;
     bool no_op_cast = false;
@@ -2527,6 +2533,14 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
         break;
     }
     fprintf(out, "\n");
+
+done:
+    lr_dump_flags_current = saved_dump_flags;
+}
+
+void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
+                  const lr_func_t *f, FILE *out) {
+    lr_dump_inst_opts(inst, m, f, out, 0);
 }
 
 /* ---- Module merge ------------------------------------------------------ */
@@ -2889,16 +2903,19 @@ static bool inst_is_terminator(const lr_inst_t *inst) {
     }
 }
 
-void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
+void lr_dump_func_opts(const lr_func_t *f, const lr_module_t *m, FILE *out,
+                       unsigned dump_flags) {
+    unsigned saved_dump_flags = lr_dump_flags_current;
+    lr_dump_flags_current = dump_flags;
     bool is_decl;
     if (!f || !out)
-        return;
+        goto done;
 
     is_decl = f->is_decl || !f->first_block;
     lr_dump_func_signature(f, out);
     if (is_decl) {
         fprintf(out, "\n");
-        return;
+        goto done;
     }
     fprintf(out, " {\n");
 
@@ -2931,11 +2948,11 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
 
         for (size_t i = 0; i < ninst; i++) {
             if (!inst_is_terminator(insts[i]))
-                lr_dump_inst(insts[i], m, f, out);
+                lr_dump_inst_opts(insts[i], m, f, out, dump_flags);
         }
 
         if (term_idx != (size_t)-1) {
-            lr_dump_inst(insts[term_idx], m, f, out);
+            lr_dump_inst_opts(insts[term_idx], m, f, out, dump_flags);
         } else {
             if (b->next) {
                 fprintf(out, "  br label ");
@@ -2948,6 +2965,13 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
         free(insts);
     }
     fprintf(out, "}\n");
+
+done:
+    lr_dump_flags_current = saved_dump_flags;
+}
+
+void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
+    lr_dump_func_opts(f, m, out, 0);
 }
 
 typedef struct lr_named_type_list {
@@ -3310,11 +3334,14 @@ static void dump_global_const_expr(const lr_module_t *m, const lr_global_t *g,
     }
 }
 
-void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
+void lr_dump_global_opts(const lr_module_t *m, const lr_global_t *g, FILE *out,
+                         unsigned dump_flags) {
+    unsigned saved_dump_flags = lr_dump_flags_current;
+    lr_dump_flags_current = dump_flags;
     static const lr_type_t fallback_ptr_type = { .kind = LR_TYPE_PTR };
     const lr_type_t *gty;
     if (!g || !out)
-        return;
+        goto done;
     if (g->type && g->type->kind == LR_TYPE_FUNC) {
         fprintf(out, "declare ");
         if (g->type->func.ret)
@@ -3338,7 +3365,7 @@ void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
             fprintf(out, "...");
         }
         fprintf(out, ")\n");
-        return;
+        goto done;
     }
     gty = g->type ? g->type : &fallback_ptr_type;
     print_display_symbol_ref(out, '@', g->name, m);
@@ -3347,7 +3374,7 @@ void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
         fprintf(out, "external global ");
         print_type(gty, out);
         fprintf(out, "\n");
-        return;
+        goto done;
     }
     if (global_is_i8_array_literal(g)) {
         if (global_is_nul_terminated_c_string(g))
@@ -3361,7 +3388,7 @@ void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
             fprintf(out, ", align 1\n");
         else
             fprintf(out, "\n");
-        return;
+        goto done;
     }
     fprintf(out, "private %s ", g->is_const ? "constant" : "global");
     print_type(gty, out);
@@ -3371,16 +3398,32 @@ void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
     else
         fprintf(out, "zeroinitializer");
     fprintf(out, "\n");
+
+done:
+    lr_dump_flags_current = saved_dump_flags;
 }
 
-void lr_module_dump(lr_module_t *m, FILE *out) {
+void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
+    lr_dump_global_opts(m, g, out, 0);
+}
+
+void lr_module_dump_opts(lr_module_t *m, FILE *out, unsigned dump_flags) {
+    unsigned saved_dump_flags = lr_dump_flags_current;
+    lr_dump_flags_current = dump_flags;
     if (!m || !out)
-        return;
+        goto done;
     lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
-        lr_dump_global(m, g, out);
+        lr_dump_global_opts(m, g, out, dump_flags);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
     for (lr_func_t *f = m->first_func; f; f = f->next)
-        lr_dump_func(f, m, out);
+        lr_dump_func_opts(f, m, out, dump_flags);
+
+done:
+    lr_dump_flags_current = saved_dump_flags;
+}
+
+void lr_module_dump(lr_module_t *m, FILE *out) {
+    lr_module_dump_opts(m, out, 0);
 }

@@ -106,6 +106,8 @@ typedef struct lr_parser {
     lr_session_t *session;
 } lr_parser_t;
 
+static const char *scoped_local_global_name(lr_parser_t *p, const char *name);
+
 static void error(lr_parser_t *p, const char *fmt, ...) {
     if (p->had_error) return;
     p->had_error = true;
@@ -673,6 +675,19 @@ static void register_global_n(lr_parser_t *p, const char *name, size_t name_len,
 
 static void register_global(lr_parser_t *p, const char *name, uint32_t id) {
     register_global_n(p, name, strlen(name), id);
+}
+
+static void register_global_override(lr_parser_t *p, const char *name,
+                                     uint32_t id) {
+    uint32_t idx;
+    if (!p || !name)
+        return;
+    idx = index_find_global_n(p, name, strlen(name), hash_name_n(name, strlen(name)));
+    if (idx != UINT32_MAX) {
+        p->global_map[idx].id = id;
+        return;
+    }
+    register_global(p, name, id);
 }
 
 static void register_func(lr_parser_t *p, const char *name, lr_func_t *f) {
@@ -2560,6 +2575,19 @@ static lr_type_t *parse_param_type(lr_parser_t *p) {
 }
 
 static void parse_function_def(lr_parser_t *p, bool is_decl) {
+    char *name = NULL;
+    const char *func_name = NULL;
+    bool linkage_local = false;
+
+    skip_attrs(p);
+    while (check(p, LR_TOK_EXTERNAL) || check(p, LR_TOK_INTERNAL) ||
+           check(p, LR_TOK_PRIVATE) || check(p, LR_TOK_COMMON) ||
+           check(p, LR_TOK_LINKONCE_ODR) || check(p, LR_TOK_DSOLOCAL) ||
+           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) {
+        if (check(p, LR_TOK_INTERNAL) || check(p, LR_TOK_PRIVATE))
+            linkage_local = true;
+        next(p);
+    }
     skip_attrs(p);
     lr_type_t *ret_type = parse_type(p);
 
@@ -2567,7 +2595,10 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
         error(p, "expected function name");
         return;
     }
-    char *name = tok_name(p, &p->cur);
+    name = tok_name(p, &p->cur);
+    func_name = name;
+    if (linkage_local && name && name[0])
+        func_name = scoped_local_global_name(p, name);
     next(p);
 
     expect(p, LR_TOK_LPAREN);
@@ -2619,24 +2650,28 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
     if (p->session) {
         lr_error_t serr;
         if (is_decl) {
-            lr_session_declare(p->session, name, ret_type, params, nparams,
+            lr_session_declare(p->session, func_name, ret_type, params, nparams,
                                vararg, &serr);
-            uint32_t sym_id = lr_session_intern(p->session, name);
+            uint32_t sym_id = lr_session_intern(p->session, func_name);
             lr_func_t *decl = NULL;
             lr_module_t *sm = lr_session_module(p->session);
             if (sm && sm->last_func && sm->last_func->name &&
-                strcmp(sm->last_func->name, name) == 0) {
+                strcmp(sm->last_func->name, func_name) == 0) {
                 decl = sm->last_func;
             }
             if (decl)
                 decl->uses_llvm_abi = true;
-            if (resolve_global(p, name) == UINT32_MAX)
+            if (linkage_local)
+                register_global_override(p, name, sym_id);
+            else if (resolve_global(p, name) == UINT32_MAX)
                 register_global(p, name, sym_id);
+            if (resolve_global(p, func_name) == UINT32_MAX)
+                register_global(p, func_name, sym_id);
         } else {
-            if (lr_session_func_begin(p->session, name, ret_type, params,
+            if (lr_session_func_begin(p->session, func_name, ret_type, params,
                                        nparams, vararg, &serr) != 0) {
                 error(p, "session func_begin failed for '%s': %s",
-                      name, serr.msg);
+                      func_name, serr.msg);
                 return;
             }
             lr_func_t *func = lr_session_module(p->session)->last_func;
@@ -2644,29 +2679,41 @@ static void parse_function_def(lr_parser_t *p, bool is_decl) {
             if (func->next_vreg == 0)
                 func->next_vreg = 1;
             func->uses_llvm_abi = true;
-            uint32_t sym_id = lr_frontend_intern_symbol(p->module, name);
-            if (resolve_global(p, name) == UINT32_MAX)
+            uint32_t sym_id = lr_frontend_intern_symbol(p->module, func_name);
+            if (linkage_local)
+                register_global_override(p, name, sym_id);
+            else if (resolve_global(p, name) == UINT32_MAX)
                 register_global(p, name, sym_id);
+            if (resolve_global(p, func_name) == UINT32_MAX)
+                register_global(p, func_name, sym_id);
             register_func(p, name, func);
+            if (strcmp(func_name, name) != 0)
+                register_func(p, func_name, func);
             parse_function_body(p, func, param_names);
             if (!p->had_error) {
                 if (lr_session_func_end(p->session, NULL, &serr) != 0) {
                     error(p, "session func_end failed for '%s': %s",
-                          name, serr.msg);
+                          func_name, serr.msg);
                 }
             }
         }
     } else {
         uint32_t sym_id = UINT32_MAX;
-        lr_func_t *func = lr_frontend_create_function(p->module, name,
+        lr_func_t *func = lr_frontend_create_function(p->module, func_name,
                                                       ret_type, params,
                                                       nparams, vararg,
                                                       is_decl, &sym_id);
         if (func)
             func->uses_llvm_abi = true;
-        if (resolve_global(p, name) == UINT32_MAX)
+        if (linkage_local)
+            register_global_override(p, name, sym_id);
+        else if (resolve_global(p, name) == UINT32_MAX)
             register_global(p, name, sym_id);
+        if (resolve_global(p, func_name) == UINT32_MAX)
+            register_global(p, func_name, sym_id);
         register_func(p, name, func);
+        if (strcmp(func_name, name) != 0)
+            register_func(p, func_name, func);
 
         if (!is_decl)
             parse_function_body(p, func, param_names);
@@ -2949,12 +2996,14 @@ static void parse_global(lr_parser_t *p) {
     }
 
     lr_type_t *ty = parse_type(p);
-    if (linkage_local && name && name[0] == '.' &&
+    if (linkage_local && name && name[0] &&
         strncmp(name, ".lc.constagg.", 12) != 0)
         global_name = scoped_local_global_name(p, name);
     lr_global_t *g = lr_global_create(p->module, global_name, ty, is_const);
     uint32_t sym_id = lr_frontend_intern_symbol(p->module, g->name);
-    if (resolve_global(p, name) == UINT32_MAX)
+    if (linkage_local)
+        register_global_override(p, name, sym_id);
+    else if (resolve_global(p, name) == UINT32_MAX)
         register_global(p, name, sym_id);
     if (resolve_global(p, g->name) == UINT32_MAX)
         register_global(p, g->name, sym_id);

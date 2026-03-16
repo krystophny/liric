@@ -667,18 +667,39 @@ void lr_llvm_compat_apply_global_linkage(lc_module_compat_t *compat,
                                          int linkage) {
     lr_module_t *m;
     lr_global_t *g;
+    const char *old_name;
     if (!compat || !global_value || global_value->kind != LC_VAL_GLOBAL ||
         !global_value->global.name)
         return;
     m = lc_module_get_ir(compat);
     if (!m)
         return;
+    old_name = global_value->global.name;
     for (g = m->first_global; g; g = g->next) {
         if (!g->name || strcmp(g->name, global_value->global.name) != 0)
             continue;
         g->is_local = lr_llvm_compat_is_local_global_linkage(linkage) ? true : false;
-        if (g->is_local)
+        if (g->is_local) {
+            char scoped_name[4096];
+            size_t scoped_len = 0;
             g->is_external = false;
+            scoped_len = lr_llvm_compat_linkage_scoped_global_name(
+                compat, g->name, linkage, scoped_name, sizeof(scoped_name));
+            if (scoped_len > 0 && strcmp(scoped_name, g->name) != 0) {
+                uint32_t scoped_sym_id = UINT32_MAX;
+                char *owned_name = lr_arena_strdup(m->arena, scoped_name, scoped_len);
+                if (!owned_name)
+                    return;
+                g->name = owned_name;
+                global_value->global.name = owned_name;
+                scoped_sym_id = lr_module_intern_symbol(m, owned_name);
+                if (scoped_sym_id != UINT32_MAX)
+                    global_value->global.id = scoped_sym_id;
+                lr_llvm_compat_register_global_alias(compat, old_name, owned_name);
+                if (global_value->name && strcmp(global_value->name, old_name) == 0)
+                    global_value->name = owned_name;
+            }
+        }
         if (linkage == LR_LLVM_LINKAGE_AVAILABLE_EXTERNALLY)
             g->is_external = true;
         return;

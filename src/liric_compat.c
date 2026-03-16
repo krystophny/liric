@@ -24,6 +24,7 @@
 static int compat_path_exists(const char *path);
 static const char *compat_select_runtime_clang(void);
 static int compat_parent_dir(char *path);
+static int compat_write_empty_lines_sidecar(const char *path);
 
 static int compat_policy_from_env(lr_session_mode_t *out_mode) {
     const char *p;
@@ -190,6 +191,373 @@ static char *compat_sidecar_path(const char *object_path, const char *suffix) {
     memcpy(out + a, suffix, b);
     out[a + b] = '\0';
     return out;
+}
+
+static int compat_write_empty_lines_sidecar(const char *path) {
+    static const char suffix[] = "_lines.dat.txt";
+    const char *dot = NULL;
+    size_t stem_len = 0;
+    char *sidecar = NULL;
+    int rc = -1;
+
+    if (!path || !path[0])
+        return -1;
+    dot = strrchr(path, '.');
+    stem_len = dot ? (size_t)(dot - path) : strlen(path);
+    sidecar = (char *)malloc(stem_len + sizeof(suffix));
+    if (!sidecar)
+        return -1;
+    memcpy(sidecar, path, stem_len);
+    memcpy(sidecar + stem_len, suffix, sizeof(suffix));
+    rc = write_file_bytes(sidecar, NULL, 0);
+    free(sidecar);
+    return rc;
+}
+
+typedef struct compat_scoped_local_name_map {
+    const char **exact_names;
+    size_t count;
+    size_t cap;
+} compat_scoped_local_name_map_t;
+
+static int compat_scoped_local_name_push(compat_scoped_local_name_map_t *map,
+                                         const char *exact_name) {
+    const char **new_names = NULL;
+    size_t new_cap = 0;
+    if (!map || !exact_name || !exact_name[0])
+        return -1;
+    if (map->count == map->cap) {
+        new_cap = map->cap == 0 ? 16u : map->cap * 2u;
+        new_names = (const char **)realloc(map->exact_names,
+                                           new_cap * sizeof(*new_names));
+        if (!new_names)
+            return -1;
+        map->exact_names = new_names;
+        map->cap = new_cap;
+    }
+    map->exact_names[map->count++] = exact_name;
+    return 0;
+}
+
+static int compat_name_in_list(const char *name,
+                               const char *const *names,
+                               size_t count) {
+    size_t i = 0;
+    if (!name || !names)
+        return 0;
+    for (i = 0; i < count; i++) {
+        if (names[i] && strcmp(names[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static void compat_collect_module_scoped_locals(const lr_module_t *m,
+                                                compat_scoped_local_name_map_t *map,
+                                                const char *const *exclude,
+                                                size_t exclude_count) {
+    static const char local_tag[] = ".__liric_local.";
+    const lr_global_t *g = NULL;
+    const lr_func_t *f = NULL;
+
+    if (!m || !map)
+        return;
+    for (g = m->first_global; g; g = g->next) {
+        if (!g->name || !strstr(g->name, local_tag))
+            continue;
+        if (compat_name_in_list(g->name, exclude, exclude_count))
+            continue;
+        (void)compat_scoped_local_name_push(map, g->name);
+    }
+    for (f = m->first_func; f; f = f->next) {
+        if (!f->name || !strstr(f->name, local_tag))
+            continue;
+        if (compat_name_in_list(f->name, exclude, exclude_count))
+            continue;
+        (void)compat_scoped_local_name_push(map, f->name);
+    }
+}
+
+static void compat_free_scoped_local_name_map(compat_scoped_local_name_map_t *map) {
+    if (!map)
+        return;
+    free(map->exact_names);
+    map->exact_names = NULL;
+    map->count = 0;
+    map->cap = 0;
+}
+
+static const char *compat_remap_scoped_local_name(
+    const compat_scoped_local_name_map_t *map, const char *name) {
+    static const char local_tag[] = ".__liric_local.";
+    const char *tag = NULL;
+    size_t base_len = 0;
+    size_t i = 0;
+
+    if (!map || !name || !name[0])
+        return name;
+    tag = strstr(name, local_tag);
+    if (!tag)
+        base_len = strlen(name);
+    else
+        base_len = (size_t)(tag - name);
+    for (i = 0; i < map->count; i++) {
+        const char *exact = map->exact_names[i];
+        const char *exact_tag = NULL;
+        size_t exact_base_len = 0;
+        if (!exact)
+            continue;
+        exact_tag = strstr(exact, local_tag);
+        if (!exact_tag)
+            continue;
+        exact_base_len = (size_t)(exact_tag - exact);
+        if (exact_base_len != base_len)
+            continue;
+        if (strncmp(exact, name, base_len) != 0)
+            continue;
+        return exact;
+    }
+    return name;
+}
+
+static void compat_blob_pkg_w32(uint8_t **p, uint32_t v) {
+    (*p)[0] = (uint8_t)(v & 0xffu);
+    (*p)[1] = (uint8_t)((v >> 8) & 0xffu);
+    (*p)[2] = (uint8_t)((v >> 16) & 0xffu);
+    (*p)[3] = (uint8_t)((v >> 24) & 0xffu);
+    *p += 4;
+}
+
+static void compat_blob_pkg_w64(uint8_t **p, uint64_t v) {
+    compat_blob_pkg_w32(p, (uint32_t)(v & 0xffffffffu));
+    compat_blob_pkg_w32(p, (uint32_t)(v >> 32));
+}
+
+static int compat_blob_pkg_r32(const uint8_t **p, const uint8_t *end,
+                               uint32_t *out) {
+    if (!p || !*p || !out || *p + 4 > end)
+        return -1;
+    *out = (uint32_t)(*p)[0] |
+           ((uint32_t)(*p)[1] << 8) |
+           ((uint32_t)(*p)[2] << 16) |
+           ((uint32_t)(*p)[3] << 24);
+    *p += 4;
+    return 0;
+}
+
+static int compat_blob_pkg_r64(const uint8_t **p, const uint8_t *end,
+                               uint64_t *out) {
+    uint32_t lo = 0;
+    uint32_t hi = 0;
+    if (compat_blob_pkg_r32(p, end, &lo) != 0 ||
+        compat_blob_pkg_r32(p, end, &hi) != 0) {
+        return -1;
+    }
+    *out = ((uint64_t)hi << 32) | (uint64_t)lo;
+    return 0;
+}
+
+static int compat_rewrite_blob_package_scoped_locals(
+    const uint8_t *data, size_t len, const compat_scoped_local_name_map_t *map,
+    uint8_t **out_data, size_t *out_len) {
+    static const uint8_t magic[8] = {'L', 'R', 'B', 'L', 'O', 'B', '1', '\0'};
+    const uint8_t *p = NULL;
+    const uint8_t *end = NULL;
+    uint32_t version = 0;
+    uint32_t blob_count = 0;
+    size_t total = 16u;
+    uint8_t *buf = NULL;
+    uint8_t *w = NULL;
+    uint32_t bi = 0;
+    const char *fail_reason = "unknown";
+    size_t fail_off = 0;
+
+    if (!data || len < 16u || !out_data || !out_len) {
+        fail_reason = "invalid blob rewrite arguments";
+        goto fail;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+    if (!map || map->count == 0) {
+        buf = (uint8_t *)malloc(len);
+        if (!buf) {
+            fail_reason = "blob rewrite copy allocation failed";
+            goto fail;
+        }
+        memcpy(buf, data, len);
+        *out_data = buf;
+        *out_len = len;
+        return 0;
+    }
+
+    p = data;
+    end = data + len;
+    if (memcmp(p, magic, sizeof(magic)) != 0) {
+        fail_reason = "blob rewrite saw invalid magic";
+        goto fail;
+    }
+    p += sizeof(magic);
+    if (compat_blob_pkg_r32(&p, end, &version) != 0 ||
+        compat_blob_pkg_r32(&p, end, &blob_count) != 0 ||
+        version != 1u) {
+        fail_reason = "blob rewrite saw invalid header";
+        goto fail;
+    }
+
+    for (bi = 0; bi < blob_count; bi++) {
+        uint32_t name_len = 0;
+        uint64_t code_len = 0;
+        uint32_t num_relocs = 0;
+        char *name = NULL;
+        const char *mapped_name = NULL;
+        size_t mapped_name_len = 0;
+        uint32_t ri = 0;
+
+        if (compat_blob_pkg_r32(&p, end, &name_len) != 0 ||
+            name_len == 0 || p + name_len > end) {
+            fail_reason = "blob rewrite saw invalid function name";
+            goto fail;
+        }
+        name = (char *)malloc((size_t)name_len + 1u);
+        if (!name) {
+            fail_reason = "blob rewrite function-name allocation failed";
+            goto fail;
+        }
+        memcpy(name, p, name_len);
+        name[name_len] = '\0';
+        mapped_name = compat_remap_scoped_local_name(map, name);
+        mapped_name_len = strlen(mapped_name);
+        total += 4u + mapped_name_len;
+        p += name_len;
+        free(name);
+        if (compat_blob_pkg_r64(&p, end, &code_len) != 0 ||
+            p + code_len > end ||
+            compat_blob_pkg_r32(&p, end, &num_relocs) != 0) {
+            fail_reason = "blob rewrite saw invalid code payload";
+            goto fail;
+        }
+        total += 8u + 4u + (size_t)code_len;
+        p += (size_t)code_len;
+        for (ri = 0; ri < num_relocs; ri++) {
+            uint32_t off = 0;
+            uint32_t sym_len = 0;
+            char *sym = NULL;
+            const char *mapped_sym = NULL;
+            size_t mapped_sym_len = 0;
+
+            if (compat_blob_pkg_r32(&p, end, &off) != 0 || p + 4 > end) {
+                fail_reason = "blob rewrite saw invalid relocation header";
+                goto fail;
+            }
+            p += 4;
+            if (compat_blob_pkg_r32(&p, end, &sym_len) != 0 ||
+                sym_len == 0 || p + sym_len > end) {
+                fail_reason = "blob rewrite saw invalid relocation symbol";
+                goto fail;
+            }
+            sym = (char *)malloc((size_t)sym_len + 1u);
+            if (!sym) {
+                fail_reason = "blob rewrite relocation-symbol allocation failed";
+                goto fail;
+            }
+            memcpy(sym, p, sym_len);
+            sym[sym_len] = '\0';
+            mapped_sym = compat_remap_scoped_local_name(map, sym);
+            mapped_sym_len = strlen(mapped_sym);
+            total += 4u + 4u + 4u + mapped_sym_len;
+            p += sym_len;
+            free(sym);
+            (void)off;
+        }
+    }
+    if (p != end) {
+        fail_reason = "blob rewrite found trailing input bytes";
+        goto fail;
+    }
+
+    buf = (uint8_t *)malloc(total);
+    if (!buf) {
+        fail_reason = "blob rewrite output allocation failed";
+        goto fail;
+    }
+    w = buf;
+    memcpy(w, magic, sizeof(magic));
+    w += sizeof(magic);
+    compat_blob_pkg_w32(&w, 1u);
+    compat_blob_pkg_w32(&w, blob_count);
+
+    p = data + 16u;
+    for (bi = 0; bi < blob_count; bi++) {
+        uint32_t name_len = 0;
+        uint64_t code_len = 0;
+        uint32_t num_relocs = 0;
+        char *name = NULL;
+        const char *mapped_name = NULL;
+        uint32_t ri = 0;
+
+        (void)compat_blob_pkg_r32(&p, end, &name_len);
+        name = (char *)malloc((size_t)name_len + 1u);
+        if (!name) {
+            fail_reason = "blob rewrite second-pass function-name allocation failed";
+            goto fail;
+        }
+        memcpy(name, p, name_len);
+        name[name_len] = '\0';
+        mapped_name = compat_remap_scoped_local_name(map, name);
+        compat_blob_pkg_w32(&w, (uint32_t)strlen(mapped_name));
+        memcpy(w, mapped_name, strlen(mapped_name));
+        w += strlen(mapped_name);
+        p += name_len;
+        free(name);
+        (void)compat_blob_pkg_r64(&p, end, &code_len);
+        compat_blob_pkg_w64(&w, code_len);
+        (void)compat_blob_pkg_r32(&p, end, &num_relocs);
+        compat_blob_pkg_w32(&w, num_relocs);
+        memcpy(w, p, (size_t)code_len);
+        w += (size_t)code_len;
+        p += (size_t)code_len;
+        for (ri = 0; ri < num_relocs; ri++) {
+            uint32_t off = 0;
+            uint8_t type = 0;
+            uint32_t sym_len = 0;
+            char *sym = NULL;
+            const char *mapped_sym = NULL;
+
+            (void)compat_blob_pkg_r32(&p, end, &off);
+            compat_blob_pkg_w32(&w, off);
+            type = *p++;
+            *w++ = type;
+            *w++ = *p++;
+            *w++ = *p++;
+            *w++ = *p++;
+            (void)compat_blob_pkg_r32(&p, end, &sym_len);
+            sym = (char *)malloc((size_t)sym_len + 1u);
+            if (!sym) {
+                fail_reason = "blob rewrite second-pass relocation-symbol allocation failed";
+                goto fail;
+            }
+            memcpy(sym, p, sym_len);
+            sym[sym_len] = '\0';
+            mapped_sym = compat_remap_scoped_local_name(map, sym);
+            compat_blob_pkg_w32(&w, (uint32_t)strlen(mapped_sym));
+            memcpy(w, mapped_sym, strlen(mapped_sym));
+            w += strlen(mapped_sym);
+            p += sym_len;
+            free(sym);
+        }
+    }
+    *out_data = buf;
+    *out_len = total;
+    return 0;
+
+fail:
+    fail_off = (p && data && p >= data) ? (size_t)(p - data) : 0u;
+    if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
+        fprintf(stderr, "compat_rewrite_blob_package_scoped_locals: %s (offset=%zu, len=%zu)\n",
+                fail_reason, fail_off, len);
+    }
+    free(buf);
+    return -1;
 }
 
 static int compat_object_has_sidecars(const char *obj_path) {
@@ -2267,7 +2635,8 @@ static void compat_write_vreg_named_ir(FILE *out,
 
 static void compat_dump_function(lc_module_compat_t *mod,
                                  const lr_func_t *f,
-                                 FILE *out) {
+                                 FILE *out,
+                                 unsigned dump_flags) {
     char *raw = NULL;
     size_t raw_len = 0;
     FILE *mem = NULL;
@@ -2280,7 +2649,7 @@ static void compat_dump_function(lc_module_compat_t *mod,
     mem = open_memstream(&raw, &raw_len);
     if (!mem)
         return;
-    lr_dump_func(f, mod->mod, mem);
+    lr_dump_func_opts(f, mod->mod, mem, dump_flags);
     fclose(mem);
     cap = f->next_vreg > 0 ? f->next_vreg : 1u;
     explicit_names = (char **)calloc(cap, sizeof(char *));
@@ -2314,7 +2683,8 @@ static void compat_dump_function(lc_module_compat_t *mod,
     free(raw);
 }
 
-static void compat_dump_module(lc_module_compat_t *mod, FILE *out) {
+static void compat_dump_module(lc_module_compat_t *mod, FILE *out,
+                               unsigned dump_flags) {
     lr_module_t *m;
     if (!mod || !out)
         return;
@@ -2329,22 +2699,22 @@ static void compat_dump_module(lc_module_compat_t *mod, FILE *out) {
     }
     lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
-        lr_dump_global(m, g, out);
+        lr_dump_global_opts(m, g, out, dump_flags);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        compat_dump_function(mod, f, out);
+        compat_dump_function(mod, f, out, dump_flags);
         if (f->next)
             fprintf(out, "\n");
     }
 }
 
 void lc_module_dump(lc_module_compat_t *mod) {
-    compat_dump_module(mod, stderr);
+    compat_dump_module(mod, stderr, 0);
 }
 
 void lc_module_print(lc_module_compat_t *mod, FILE *out) {
-    compat_dump_module(mod, out ? out : stdout);
+    compat_dump_module(mod, out ? out : stdout, 0);
 }
 
 char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
@@ -2352,7 +2722,7 @@ char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
     if (!f) return NULL;
-    compat_dump_module(mod, f);
+    compat_dump_module(mod, f, 0);
     fclose(f);
     if (out_len) *out_len = len;
     return buf;
@@ -2582,9 +2952,14 @@ lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod) {
 lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem) {
     if (!mod || !mod->mod)
         return NULL;
-    if (!elem)
-        return mod->mod->type_ptr;
-    return lr_type_ptr(mod->mod->arena, elem);
+    (void)elem;
+    /* Modern LLVM API clients such as current LFortran operate in opaque
+       pointer mode. Materializing typed pointers in the compat layer
+       changes both the printed IR and the lowered semantics for stack
+       temporaries, class wrappers, and recursive pointer structures. Keep
+       API-created pointers opaque and let loads/GEPs carry the element
+       type explicitly, matching upstream LLVM. */
+    return mod->mod->type_ptr;
 }
 
 bool lc_type_is_integer(lr_type_t *ty) {
@@ -5599,7 +5974,7 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
     if (!f)
         return;
     fprintf(f, "; ---- module ----\n");
-    compat_dump_module(mod, f);
+    compat_dump_module(mod, f, 0);
     if (mod->session) {
         session_mod = lr_session_module(mod->session);
         if (session_mod && session_mod != mod->mod) {
@@ -5873,6 +6248,7 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
                                const char *runtime_ll, size_t runtime_len) {
     lr_error_t err = {0};
     const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
+    int emit_rc = 0;
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
     if (compat_sync_session_module(mod, &err) != 0)
@@ -5890,18 +6266,27 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
             }
             return -1;
         }
-        if (lr_session_emit_exe(mod->session, filename, &err) != 0) {
+        emit_rc = lr_session_emit_exe(mod->session, filename, &err);
+        if (emit_rc != 0) {
             if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
                 fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
             return -1;
         }
-        return 0;
+    } else {
+        emit_rc = lr_session_emit_exe_with_runtime(mod->session, filename,
+                                                   runtime_ll, runtime_len,
+                                                   &err);
+        if (emit_rc != 0) {
+            if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+                fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
+            return -1;
+        }
     }
-    if (lr_session_emit_exe_with_runtime(mod->session, filename,
-                                         runtime_ll, runtime_len,
-                                         &err) != 0) {
+    if (compat_write_empty_lines_sidecar(filename) != 0) {
         if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
-            fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
+            fprintf(stderr,
+                    "lc_module_emit_executable: failed to write %s_lines.dat.txt\n",
+                    filename);
         return -1;
     }
     return 0;
@@ -5991,10 +6376,14 @@ int lc_module_export_sidecar_files(lc_module_compat_t *mod,
         goto done;
     }
 
-    ll_text = lc_module_sprint(mod, &ll_len);
-    if (!ll_text && ll_len > 0) {
-        compat_set_err(err, errlen, "sidecar LLVM IR export failed");
-        goto done;
+    {
+        FILE *mem = open_memstream(&ll_text, &ll_len);
+        if (!mem) {
+            compat_set_err(err, errlen, "sidecar LLVM IR export failed");
+            goto done;
+        }
+        compat_dump_module(mod, mem, LR_DUMP_PRESERVE_SCOPED_LOCALS);
+        fclose(mem);
     }
     if (write_file_bytes(ll_path, (const uint8_t *)ll_text, ll_len) != 0) {
         compat_set_err(err, errlen, "WITH_LIRIC no-link sidecar write failed: %s",
@@ -6047,9 +6436,13 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
         char *blob_path = NULL;
         char *ll_path = NULL;
         uint8_t *blob_data = NULL;
+        uint8_t *blob_import_data = NULL;
         size_t blob_len = 0;
+        size_t blob_import_len = 0;
         uint8_t *ll_data = NULL;
         size_t ll_len = 0;
+        compat_scoped_local_name_map_t before_locals = {0};
+        compat_scoped_local_name_map_t new_locals = {0};
 
         if (!obj_path || !obj_path[0]) {
             compat_set_err(err, errlen, "WITH_LIRIC AOT no-link mode requires non-empty object path");
@@ -6072,12 +6465,16 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
             goto fail_file;
         }
         if (ll_len > 0) {
+            compat_collect_module_scoped_locals(mod->mod, &before_locals, NULL, 0);
             if (lc_module_merge_ll_text(mod, (const char *)ll_data, ll_len) != 0) {
                 compat_set_err(err, errlen,
                                "WITH_LIRIC no-link sidecar IR merge failed: %s",
                                ll_path);
                 goto fail_file;
             }
+            compat_collect_module_scoped_locals(mod->mod, &new_locals,
+                                                before_locals.exact_names,
+                                                before_locals.count);
             merged_ll_count++;
         }
 
@@ -6088,7 +6485,17 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
             goto fail_file;
         }
         if (blob_len > 0) {
-            if (lc_module_import_blob_package(mod, blob_data, blob_len) != 0) {
+            if (compat_rewrite_blob_package_scoped_locals(blob_data, blob_len,
+                                                          &new_locals,
+                                                          &blob_import_data,
+                                                          &blob_import_len) != 0) {
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link sidecar local remap failed: %s",
+                               blob_path);
+                goto fail_file;
+            }
+            if (lc_module_import_blob_package(mod, blob_import_data,
+                                              blob_import_len) != 0) {
                 compat_set_err(err, errlen,
                                "WITH_LIRIC no-link sidecar import failed: %s",
                                blob_path);
@@ -6101,10 +6508,14 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
             free(blob_path);
         if (ll_path)
             free(ll_path);
+        if (blob_import_data)
+            free(blob_import_data);
         if (blob_data)
             free(blob_data);
         if (ll_data)
             free(ll_data);
+        compat_free_scoped_local_name_map(&before_locals);
+        compat_free_scoped_local_name_map(&new_locals);
         continue;
 
 fail_file:
@@ -6112,10 +6523,14 @@ fail_file:
             free(blob_path);
         if (ll_path)
             free(ll_path);
+        if (blob_import_data)
+            free(blob_import_data);
         if (blob_data)
             free(blob_data);
         if (ll_data)
             free(ll_data);
+        compat_free_scoped_local_name_map(&before_locals);
+        compat_free_scoped_local_name_map(&new_locals);
         goto done;
     }
 

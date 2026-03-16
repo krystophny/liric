@@ -593,6 +593,35 @@ typedef struct {
     size_t errlen;
 } bc_decoder_t;
 
+static bool bc_linkage_is_local(uint32_t linkage) {
+    switch (linkage) {
+    case 3u:  /* internal */
+    case 9u:  /* private */
+    case 13u: /* linker_private */
+    case 14u: /* linker_private_weak */
+        return true;
+    default:
+        return false;
+    }
+}
+
+static const char *bc_scoped_local_name(bc_decoder_t *d, const char *name) {
+    static const char local_tag[] = ".__liric_local.";
+    char suffix[32];
+    size_t n;
+    char *scoped;
+
+    if (!d || !d->module || !name || !name[0] || strstr(name, local_tag) != NULL)
+        return name;
+    snprintf(suffix, sizeof(suffix), "%p", (void *)d->module);
+    n = strlen(name) + strlen(local_tag) + strlen(suffix) + 1u;
+    scoped = lr_arena_array(d->arena, char, n);
+    if (!scoped)
+        return name;
+    (void)snprintf(scoped, n, "%s%s%s", name, local_tag, suffix);
+    return scoped;
+}
+
 static void bc_dec_error(bc_decoder_t *d, const char *fmt, ...) {
     va_list ap;
     size_t used;
@@ -4398,13 +4427,14 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 break;
             case MODULE_CODE_FUNCTION: {
                 uint32_t strtab_off = 0, strtab_size = 0;
-                uint32_t type_idx, is_proto;
+                uint32_t type_idx, is_proto, linkage = 0;
                 lr_type_t *fn_type;
                 char *name = NULL;
+                const char *func_name = NULL;
                 lr_type_t *ret_ty;
                 lr_type_t **params = NULL;
                 uint32_t nparams;
-                bool is_decl, vararg;
+                bool is_decl, vararg, is_local;
                 lr_func_t *fn;
                 bc_value_t fv;
 
@@ -4413,9 +4443,11 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                     strtab_size = (uint32_t)r->record[1];
                     type_idx = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
                     is_proto = r->record_len > 4 ? (uint32_t)r->record[4] : 0;
+                    linkage = r->record_len > 5 ? (uint32_t)r->record[5] : 0;
                 } else {
                     type_idx = r->record_len > 0 ? (uint32_t)r->record[0] : 0;
                     is_proto = r->record_len > 2 ? (uint32_t)r->record[2] : 0;
+                    linkage = r->record_len > 3 ? (uint32_t)r->record[3] : 0;
                 }
 
                 fn_type = bc_get_type(d, type_idx);
@@ -4438,6 +4470,10 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 }
                 if (!name)
                     name = lr_arena_strdup(d->arena, "unknown", 7);
+                func_name = name;
+                is_local = bc_linkage_is_local(linkage);
+                if (is_local)
+                    func_name = bc_scoped_local_name(d, name);
 
                 ret_ty = fn_type->func.ret;
                 nparams = fn_type->func.num_params;
@@ -4448,10 +4484,10 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 }
                 is_decl = (is_proto != 0);
 
-                fn = lr_frontend_create_function(d->module, name, ret_ty, params,
+                fn = lr_frontend_create_function(d->module, func_name, ret_ty, params,
                                                   nparams, vararg, is_decl, NULL);
                 if (!fn) {
-                    bc_dec_error(d, "failed to create function '%s'", name);
+                    bc_dec_error(d, "failed to create function '%s'", func_name);
                     return false;
                 }
                 /* LLVM bitcode modules use the LLVM-compatible C ABI for all
@@ -4477,9 +4513,10 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 uint32_t init_id = 0;
                 lr_type_t *gtype;
                 char *gname = NULL;
+                const char *global_name = NULL;
                 lr_global_t *g;
                 bc_value_t gv;
-                bool is_const, is_external;
+                bool is_const, is_external, is_local;
 
                 if (d->bc_version >= 2 && r->record_len >= 2) {
                     uint32_t flags = 0;
@@ -4519,14 +4556,20 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 }
                 if (!gname)
                     gname = lr_arena_strdup(d->arena, "global", 6);
+                global_name = gname;
+                is_local = bc_linkage_is_local(linkage);
+                if (is_local)
+                    global_name = bc_scoped_local_name(d, gname);
 
                 is_external = (init_id == 0 && linkage != 8u /* common */);
 
-                g = lr_global_create(d->module, gname, gtype, is_const);
-                if (g)
+                g = lr_global_create(d->module, global_name, gtype, is_const);
+                if (g) {
                     g->is_external = is_external;
+                    g->is_local = is_local;
+                }
 
-                lr_frontend_intern_symbol(d->module, gname);
+                lr_frontend_intern_symbol(d->module, global_name);
 
                 gv.kind = BC_VAL_GLOBAL;
                 gv.type = d->module->type_ptr;
@@ -4534,7 +4577,7 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 gv.init_size = 0;
                 gv.agg_elem_ids = NULL;
                 gv.agg_elem_count = 0;
-                gv.global_sym = lr_frontend_intern_symbol(d->module, gname);
+                gv.global_sym = lr_frontend_intern_symbol(d->module, global_name);
                 bc_value_push(&d->global_values, gv);
                 bc_global_init_ref_push(d, g, init_id);
                 break;

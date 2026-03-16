@@ -858,6 +858,174 @@ lr_stub_llvm_abs_i64_begin:
     ret
 lr_stub_llvm_abs_i64_end:
 
+.globl lr_stub_llvm_ctpop_i8_begin
+.globl lr_stub_llvm_ctpop_i8_end
+lr_stub_llvm_ctpop_i8_begin:
+    movzx eax, dil
+    xor ecx, ecx
+.Lctpop_i8_loop:
+    test eax, eax
+    je .Lctpop_i8_done
+    lea edx, [rax - 1]
+    and eax, edx
+    inc ecx
+    jmp .Lctpop_i8_loop
+.Lctpop_i8_done:
+    mov eax, ecx
+    ret
+lr_stub_llvm_ctpop_i8_end:
+
+.globl lr_stub_llvm_ctpop_i16_begin
+.globl lr_stub_llvm_ctpop_i16_end
+lr_stub_llvm_ctpop_i16_begin:
+    movzx eax, di
+    xor ecx, ecx
+.Lctpop_i16_loop:
+    test eax, eax
+    je .Lctpop_i16_done
+    lea edx, [rax - 1]
+    and eax, edx
+    inc ecx
+    jmp .Lctpop_i16_loop
+.Lctpop_i16_done:
+    mov eax, ecx
+    ret
+lr_stub_llvm_ctpop_i16_end:
+
+.globl lr_stub_llvm_ctpop_i32_begin
+.globl lr_stub_llvm_ctpop_i32_end
+lr_stub_llvm_ctpop_i32_begin:
+    mov eax, edi
+    xor ecx, ecx
+.Lctpop_i32_loop:
+    test eax, eax
+    je .Lctpop_i32_done
+    lea edx, [rax - 1]
+    and eax, edx
+    inc ecx
+    jmp .Lctpop_i32_loop
+.Lctpop_i32_done:
+    mov eax, ecx
+    ret
+lr_stub_llvm_ctpop_i32_end:
+
+.globl lr_stub_llvm_ctpop_i64_begin
+.globl lr_stub_llvm_ctpop_i64_end
+lr_stub_llvm_ctpop_i64_begin:
+    mov rax, rdi
+    xor ecx, ecx
+.Lctpop_i64_loop:
+    test rax, rax
+    je .Lctpop_i64_done
+    lea rdx, [rax - 1]
+    and rax, rdx
+    inc ecx
+    jmp .Lctpop_i64_loop
+.Lctpop_i64_done:
+    mov eax, ecx
+    ret
+lr_stub_llvm_ctpop_i64_end:
+
+.globl lr_stub_llvm_cttz_i8_begin
+.globl lr_stub_llvm_cttz_i8_end
+lr_stub_llvm_cttz_i8_begin:
+    movzx eax, dil
+    test eax, eax
+    jne .Lcttz_i8_loop_entry
+    xor eax, eax
+    test sil, sil
+    jne .Lcttz_i8_done
+    mov eax, 8
+    ret
+.Lcttz_i8_loop_entry:
+    xor ecx, ecx
+.Lcttz_i8_loop:
+    test al, 1
+    jne .Lcttz_i8_finish
+    shr al, 1
+    inc ecx
+    jmp .Lcttz_i8_loop
+.Lcttz_i8_finish:
+    mov eax, ecx
+.Lcttz_i8_done:
+    ret
+lr_stub_llvm_cttz_i8_end:
+
+.globl lr_stub_llvm_cttz_i16_begin
+.globl lr_stub_llvm_cttz_i16_end
+lr_stub_llvm_cttz_i16_begin:
+    movzx eax, di
+    test eax, eax
+    jne .Lcttz_i16_loop_entry
+    xor eax, eax
+    test sil, sil
+    jne .Lcttz_i16_done
+    mov eax, 16
+    ret
+.Lcttz_i16_loop_entry:
+    xor ecx, ecx
+.Lcttz_i16_loop:
+    test ax, 1
+    jne .Lcttz_i16_finish
+    shr ax, 1
+    inc ecx
+    jmp .Lcttz_i16_loop
+.Lcttz_i16_finish:
+    mov eax, ecx
+.Lcttz_i16_done:
+    ret
+lr_stub_llvm_cttz_i16_end:
+
+.globl lr_stub_llvm_cttz_i32_begin
+.globl lr_stub_llvm_cttz_i32_end
+lr_stub_llvm_cttz_i32_begin:
+    mov eax, edi
+    test eax, eax
+    jne .Lcttz_i32_loop_entry
+    xor eax, eax
+    test sil, sil
+    jne .Lcttz_i32_done
+    mov eax, 32
+    ret
+.Lcttz_i32_loop_entry:
+    xor ecx, ecx
+.Lcttz_i32_loop:
+    test eax, 1
+    jne .Lcttz_i32_finish
+    shr eax, 1
+    inc ecx
+    jmp .Lcttz_i32_loop
+.Lcttz_i32_finish:
+    mov eax, ecx
+.Lcttz_i32_done:
+    ret
+lr_stub_llvm_cttz_i32_end:
+
+.globl lr_stub_llvm_cttz_i64_begin
+.globl lr_stub_llvm_cttz_i64_end
+lr_stub_llvm_cttz_i64_begin:
+    mov rax, rdi
+    test rax, rax
+    jne .Lcttz_i64_loop_entry
+    xor eax, eax
+    test sil, sil
+    jne .Lcttz_i64_done
+    mov eax, 64
+    ret
+.Lcttz_i64_loop_entry:
+    xor ecx, ecx
+.Lcttz_i64_loop:
+    test rax, 1
+    jne .Lcttz_i64_finish
+    shr rax, 1
+    inc ecx
+    jmp .Lcttz_i64_loop
+.Lcttz_i64_finish:
+    mov eax, ecx
+.Lcttz_i64_done:
+    ret
+lr_stub_llvm_cttz_i64_end:
+
 .globl lr_stub_llvm_fshl_i8_begin
 .globl lr_stub_llvm_fshl_i8_end
 lr_stub_llvm_fshl_i8_begin:

@@ -145,6 +145,22 @@ extern const uint8_t lr_stub_llvm_abs_i16_begin[];
 extern const uint8_t lr_stub_llvm_abs_i16_end[];
 extern const uint8_t lr_stub_llvm_abs_i64_begin[];
 extern const uint8_t lr_stub_llvm_abs_i64_end[];
+extern const uint8_t lr_stub_llvm_ctpop_i8_begin[];
+extern const uint8_t lr_stub_llvm_ctpop_i8_end[];
+extern const uint8_t lr_stub_llvm_ctpop_i16_begin[];
+extern const uint8_t lr_stub_llvm_ctpop_i16_end[];
+extern const uint8_t lr_stub_llvm_ctpop_i32_begin[];
+extern const uint8_t lr_stub_llvm_ctpop_i32_end[];
+extern const uint8_t lr_stub_llvm_ctpop_i64_begin[];
+extern const uint8_t lr_stub_llvm_ctpop_i64_end[];
+extern const uint8_t lr_stub_llvm_cttz_i8_begin[];
+extern const uint8_t lr_stub_llvm_cttz_i8_end[];
+extern const uint8_t lr_stub_llvm_cttz_i16_begin[];
+extern const uint8_t lr_stub_llvm_cttz_i16_end[];
+extern const uint8_t lr_stub_llvm_cttz_i32_begin[];
+extern const uint8_t lr_stub_llvm_cttz_i32_end[];
+extern const uint8_t lr_stub_llvm_cttz_i64_begin[];
+extern const uint8_t lr_stub_llvm_cttz_i64_end[];
 extern const uint8_t lr_stub_llvm_fshl_i8_begin[];
 extern const uint8_t lr_stub_llvm_fshl_i8_end[];
 extern const uint8_t lr_stub_llvm_fshl_i16_begin[];
@@ -270,6 +286,14 @@ static const lr_platform_intrinsic_desc_t g_intrinsics[] = {
     { "llvm.abs.i16", LR_STUB_BLOB(lr_stub_llvm_abs_i16_begin, lr_stub_llvm_abs_i16_end) },
     { "llvm.abs.i32", LR_STUB_BLOB(lr_stub_llvm_abs_i32_begin, lr_stub_llvm_abs_i32_end) },
     { "llvm.abs.i64", LR_STUB_BLOB(lr_stub_llvm_abs_i64_begin, lr_stub_llvm_abs_i64_end) },
+    { "llvm.ctpop.i8", LR_STUB_BLOB(lr_stub_llvm_ctpop_i8_begin, lr_stub_llvm_ctpop_i8_end) },
+    { "llvm.ctpop.i16", LR_STUB_BLOB(lr_stub_llvm_ctpop_i16_begin, lr_stub_llvm_ctpop_i16_end) },
+    { "llvm.ctpop.i32", LR_STUB_BLOB(lr_stub_llvm_ctpop_i32_begin, lr_stub_llvm_ctpop_i32_end) },
+    { "llvm.ctpop.i64", LR_STUB_BLOB(lr_stub_llvm_ctpop_i64_begin, lr_stub_llvm_ctpop_i64_end) },
+    { "llvm.cttz.i8", LR_STUB_BLOB(lr_stub_llvm_cttz_i8_begin, lr_stub_llvm_cttz_i8_end) },
+    { "llvm.cttz.i16", LR_STUB_BLOB(lr_stub_llvm_cttz_i16_begin, lr_stub_llvm_cttz_i16_end) },
+    { "llvm.cttz.i32", LR_STUB_BLOB(lr_stub_llvm_cttz_i32_begin, lr_stub_llvm_cttz_i32_end) },
+    { "llvm.cttz.i64", LR_STUB_BLOB(lr_stub_llvm_cttz_i64_begin, lr_stub_llvm_cttz_i64_end) },
     { "llvm.fshl.i8", LR_STUB_BLOB(lr_stub_llvm_fshl_i8_begin, lr_stub_llvm_fshl_i8_end) },
     { "llvm.fshl.i16", LR_STUB_BLOB(lr_stub_llvm_fshl_i16_begin, lr_stub_llvm_fshl_i16_end) },
     { "llvm.fshl.i32", LR_STUB_BLOB(lr_stub_llvm_fshl_i32_begin, lr_stub_llvm_fshl_i32_end) },
