@@ -75,6 +75,18 @@ typedef struct lr_owned_module {
     struct lr_owned_module *next;
 } lr_owned_module_t;
 
+struct lr_session *lr_session_create(const void *cfg_ptr, session_error_t *err);
+void lr_session_destroy(struct lr_session *s);
+int lr_session_export_blob_package(struct lr_session *s,
+                                   uint8_t **out_data,
+                                   size_t *out_len,
+                                   session_error_t *err);
+int lr_session_import_blob_package(struct lr_session *s,
+                                   const uint8_t *data,
+                                   size_t len,
+                                   session_error_t *err);
+lr_module_t *lr_session_module(struct lr_session *s);
+
 typedef struct session_phi_copy_entry {
     uint32_t pred_block_id;
     lr_phi_copy_desc_t copy;
@@ -401,10 +413,55 @@ static int merge_runtime_bc_into_module(struct lr_session *s, lr_module_t *m,
                                         session_error_t *err) {
     char parse_err[256] = {0};
     lr_module_t *rt = NULL;
+    lr_session_t *rt_session = NULL;
+    uint8_t *rt_blob_pkg = NULL;
+    size_t rt_blob_pkg_len = 0;
+    session_config_t rt_cfg;
     if (!s || !m || !s->runtime_bc_data || s->runtime_bc_len == 0)
         return 0;
     if (merged_flag && *merged_flag)
         return 0;
+    if (s->blob_count > 0) {
+        memset(&rt_cfg, 0, sizeof(rt_cfg));
+        rt_cfg.mode = SESSION_MODE_DIRECT;
+        rt_cfg.target = s->cfg.target;
+        rt_cfg.backend = s->cfg.backend;
+        rt_session = lr_session_create(&rt_cfg, NULL);
+        if (!rt_session) {
+            err_set(err, S_ERR_BACKEND, "runtime bc session allocation failed");
+            return -1;
+        }
+        if (lr_parse_bc_to_session(s->runtime_bc_data, s->runtime_bc_len,
+                                   rt_session, parse_err,
+                                   sizeof(parse_err)) != 0) {
+            err_set(err, S_ERR_PARSE, "runtime bc replay failed: %s",
+                    parse_err[0] ? parse_err : "unknown parse error");
+            lr_session_destroy(rt_session);
+            return -1;
+        }
+        if (lr_module_merge(m, lr_session_module(rt_session)) != 0) {
+            err_set(err, S_ERR_BACKEND, "runtime bc merge failed");
+            lr_session_destroy(rt_session);
+            return -1;
+        }
+        if (lr_session_export_blob_package(rt_session, &rt_blob_pkg,
+                                           &rt_blob_pkg_len, err) != 0) {
+            lr_session_destroy(rt_session);
+            return -1;
+        }
+        if (rt_blob_pkg_len > 0 &&
+            lr_session_import_blob_package(s, rt_blob_pkg, rt_blob_pkg_len,
+                                           err) != 0) {
+            free(rt_blob_pkg);
+            lr_session_destroy(rt_session);
+            return -1;
+        }
+        free(rt_blob_pkg);
+        lr_session_destroy(rt_session);
+        if (merged_flag)
+            *merged_flag = true;
+        return 0;
+    }
     rt = lr_parse_bc_with_arena(s->runtime_bc_data, s->runtime_bc_len,
                                 m->arena, parse_err, sizeof(parse_err));
     if (!rt) {
