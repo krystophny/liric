@@ -178,6 +178,7 @@ typedef struct lr_module {
 lr_module_t *lr_module_create(lr_arena_t *arena);
 lr_type_t *lr_type_func(lr_arena_t *a, lr_type_t *ret, lr_type_t **params,
                          uint32_t num_params, bool vararg);
+lr_type_t *lr_type_ptr(lr_arena_t *a, lr_type_t *elem);
 lr_type_t *lr_type_array(lr_arena_t *a, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_vector(lr_arena_t *a, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_struct(lr_arena_t *a, lr_type_t **fields, uint32_t n,
@@ -208,6 +209,7 @@ const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
 size_t lr_type_size(const lr_type_t *t);
 size_t lr_type_align(const lr_type_t *t);
 size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx);
+void lr_dump_named_types(const lr_module_t *m, FILE *out);
 bool lr_aggregate_index_path(const lr_type_t *base, const uint32_t *indices,
                              uint32_t num_indices, size_t *byte_offset_out,
                              const lr_type_t **leaf_type_out);
@@ -221,9 +223,10 @@ lr_operand_t lr_canonicalize_gep_index(lr_module_t *m, lr_block_t *b,
 int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 
 void lr_dump_func_signature(const lr_func_t *f, FILE *out);
-void lr_dump_block_label(const lr_block_t *b, FILE *out);
+void lr_dump_block_label(const lr_func_t *f, const lr_block_t *b, FILE *out);
 void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                   const lr_func_t *f, FILE *out);
+void lr_dump_global(const lr_global_t *g, FILE *out);
 void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out);
 void lr_module_dump(lr_module_t *m, FILE *out);
 

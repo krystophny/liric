@@ -1,6 +1,8 @@
 #include "ir.h"
+#include <ctype.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -83,6 +85,14 @@ lr_type_t *lr_type_func(lr_arena_t *a, lr_type_t *ret, lr_type_t **params,
     }
     t->func.num_params = num_params;
     t->func.vararg = vararg;
+    return t;
+}
+
+lr_type_t *lr_type_ptr(lr_arena_t *a, lr_type_t *elem) {
+    lr_type_t *t = lr_arena_new(a, lr_type_t);
+    t->kind = LR_TYPE_PTR;
+    t->array.elem = elem;
+    t->array.count = 0;
     return t;
 }
 
@@ -1045,6 +1055,27 @@ size_t lr_type_align(const lr_type_t *t) {
     return 1;
 }
 
+static size_t ir_type_abi_align(const lr_type_t *t) {
+    if (!t)
+        return 1;
+    switch (t->kind) {
+    case LR_TYPE_I64:
+        return 4;
+    default:
+        return lr_type_align(t);
+    }
+}
+
+static size_t ir_type_alloca_align(const lr_type_t *t) {
+    size_t align;
+    if (!t)
+        return 1;
+    align = lr_type_align(t);
+    if (t->kind == LR_TYPE_STRUCT && align < 8)
+        return 8;
+    return align;
+}
+
 size_t lr_struct_field_offset(const lr_type_t *st, uint32_t field_idx) {
     size_t off = 0;
     if (!st || st->kind != LR_TYPE_STRUCT)
@@ -1292,42 +1323,45 @@ static const char *type_name(const lr_type_t *t) {
     return "?";
 }
 
-static void print_type(const lr_type_t *t, FILE *out) {
+static void print_ir_symbol_ref(FILE *out, char prefix, const char *name);
+
+static void print_struct_body(const lr_type_t *t, FILE *out);
+
+static void print_type_impl(const lr_type_t *t, FILE *out,
+                            bool expand_named_struct) {
     if (!t) {
         fprintf(out, "void");
         return;
     }
-    if (t->kind <= LR_TYPE_PTR) {
+    if (t->kind == LR_TYPE_PTR && t->array.elem) {
+        print_type_impl(t->array.elem, out, false);
+        fprintf(out, "*");
+    } else if (t->kind <= LR_TYPE_PTR) {
         fprintf(out, "%s", type_name(t));
     } else if (t->kind == LR_TYPE_ARRAY) {
         fprintf(out, "[%lu x ", (unsigned long)t->array.count);
-        print_type(t->array.elem, out);
+        print_type_impl(t->array.elem, out, false);
         fprintf(out, "]");
     } else if (t->kind == LR_TYPE_VECTOR) {
         fprintf(out, "<%lu x ", (unsigned long)t->array.count);
-        print_type(t->array.elem, out);
+        print_type_impl(t->array.elem, out, false);
         fprintf(out, ">");
     } else if (t->kind == LR_TYPE_STRUCT) {
-        if (t->struc.packed)
-            fprintf(out, "<");
-        fprintf(out, "{ ");
-        for (uint32_t i = 0; i < t->struc.num_fields; i++) {
-            if (i > 0) fprintf(out, ", ");
-            print_type(t->struc.fields[i], out);
+        if (!expand_named_struct && t->struc.name && t->struc.name[0]) {
+            print_ir_symbol_ref(out, '%', t->struc.name);
+        } else {
+            print_struct_body(t, out);
         }
-        fprintf(out, " }");
-        if (t->struc.packed)
-            fprintf(out, ">");
     } else if (t->kind == LR_TYPE_FUNC) {
         if (t->func.ret)
-            print_type(t->func.ret, out);
+            print_type_impl(t->func.ret, out, false);
         else
             fprintf(out, "void");
         fprintf(out, " (");
         for (uint32_t i = 0; i < t->func.num_params; i++) {
             if (i > 0)
                 fprintf(out, ", ");
-            print_type(t->func.params[i], out);
+            print_type_impl(t->func.params[i], out, false);
         }
         if (t->func.vararg) {
             if (t->func.num_params > 0)
@@ -1336,6 +1370,28 @@ static void print_type(const lr_type_t *t, FILE *out) {
         }
         fprintf(out, ")");
     }
+}
+
+static void print_struct_body(const lr_type_t *t, FILE *out) {
+    if (!t || t->kind != LR_TYPE_STRUCT) {
+        fprintf(out, "{ }");
+        return;
+    }
+    if (t->struc.packed)
+        fprintf(out, "<");
+    fprintf(out, "{ ");
+    for (uint32_t i = 0; i < t->struc.num_fields; i++) {
+        if (i > 0)
+            fprintf(out, ", ");
+        print_type_impl(t->struc.fields[i], out, false);
+    }
+    fprintf(out, " }");
+    if (t->struc.packed)
+        fprintf(out, ">");
+}
+
+static void print_type(const lr_type_t *t, FILE *out) {
+    print_type_impl(t, out, false);
 }
 
 static bool ir_name_is_plain(const char *name) {
@@ -1365,7 +1421,8 @@ static void print_ir_escaped_name(FILE *out, const char *name) {
 }
 
 static void print_ir_symbol_ref(FILE *out, char prefix, const char *name) {
-    fputc(prefix, out);
+    if (prefix != '\0')
+        fputc(prefix, out);
     if (!name || !name[0]) {
         fputc('?', out);
         return;
@@ -1377,13 +1434,316 @@ static void print_ir_symbol_ref(FILE *out, char prefix, const char *name) {
     }
 }
 
+static const lr_block_t *find_block_by_id(const lr_func_t *f, uint32_t block_id) {
+    const lr_block_t *b;
+    if (!f)
+        return NULL;
+    for (b = f->first_block; b; b = b->next) {
+        if (b->id == block_id)
+            return b;
+    }
+    return NULL;
+}
+
+static void print_block_ref(FILE *out, const lr_func_t *f, uint32_t block_id) {
+    const lr_block_t *b = find_block_by_id(f, block_id);
+    if (b && b->name && b->name[0]) {
+        print_ir_symbol_ref(out, '%', b->name);
+    } else {
+        fprintf(out, "%%bb%u", block_id);
+    }
+}
+
+static uint32_t count_block_predecessors(const lr_func_t *f,
+                                         const lr_block_t *target) {
+    uint32_t count = 0;
+    if (!f || !target)
+        return 0;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst->op == LR_OP_BR &&
+                inst->num_operands >= 1 &&
+                inst->operands[0].kind == LR_VAL_BLOCK &&
+                inst->operands[0].block_id == target->id) {
+                count++;
+            } else if (inst->op == LR_OP_CONDBR &&
+                       inst->num_operands >= 3) {
+                if (inst->operands[1].kind == LR_VAL_BLOCK &&
+                    inst->operands[1].block_id == target->id) {
+                    count++;
+                }
+                if (inst->operands[2].kind == LR_VAL_BLOCK &&
+                    inst->operands[2].block_id == target->id) {
+                    count++;
+                }
+            }
+        }
+    }
+    return count;
+}
+
+static void dump_block_predecessors(FILE *out, const lr_func_t *f,
+                                    const lr_block_t *target) {
+    const lr_block_t *preds[128];
+    uint32_t npreds = 0;
+    if (!out || !f || !target)
+        return;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            bool is_pred = false;
+            if (inst->op == LR_OP_BR &&
+                inst->num_operands >= 1 &&
+                inst->operands[0].kind == LR_VAL_BLOCK &&
+                inst->operands[0].block_id == target->id) {
+                is_pred = true;
+            } else if (inst->op == LR_OP_CONDBR &&
+                       inst->num_operands >= 3 &&
+                       ((inst->operands[1].kind == LR_VAL_BLOCK &&
+                         inst->operands[1].block_id == target->id) ||
+                        (inst->operands[2].kind == LR_VAL_BLOCK &&
+                         inst->operands[2].block_id == target->id))) {
+                is_pred = true;
+            }
+            if (!is_pred)
+                continue;
+            if (npreds < sizeof(preds) / sizeof(preds[0]))
+                preds[npreds++] = b;
+            break;
+        }
+    }
+    for (uint32_t i = 0; i < npreds; i++) {
+        if (i > 0)
+            fprintf(out, ", ");
+        print_block_ref(out, f, preds[npreds - 1u - i]->id);
+    }
+}
+
+static const char *display_symbol_name(const char *name, size_t *len_out) {
+    static const char scoped_suffix[] = ".__liric_local.";
+    const char *suffix;
+    size_t len;
+
+    if (!name) {
+        if (len_out)
+            *len_out = 0;
+        return NULL;
+    }
+    suffix = strstr(name, scoped_suffix);
+    len = suffix ? (size_t)(suffix - name) : strlen(name);
+    if (len_out)
+        *len_out = len;
+    return name;
+}
+
+static void print_display_symbol_ref(FILE *out, char prefix, const char *name) {
+    size_t len = 0;
+    const char *display = display_symbol_name(name, &len);
+    if (!display) {
+        fprintf(out, "%cg0", prefix);
+        return;
+    }
+    fprintf(out, "%c", prefix);
+    if (len == 0) {
+        fprintf(out, "\"\"");
+        return;
+    }
+    if (display[0] == '"' || !(isalnum((unsigned char)display[0]) ||
+                               display[0] == '_' || display[0] == '.' ||
+                               display[0] == '$')) {
+        fputc('"', out);
+        for (size_t i = 0; i < len; i++) {
+            unsigned char c = (unsigned char)display[i];
+            if (c == '"' || c == '\\')
+                fputc('\\', out);
+            fputc(c, out);
+        }
+        fputc('"', out);
+        return;
+    }
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)display[i];
+        if (!(isalnum(c) || c == '_' || c == '.' || c == '$')) {
+            fputc('"', out);
+            for (size_t j = 0; j < len; j++) {
+                unsigned char cj = (unsigned char)display[j];
+                if (cj == '"' || cj == '\\')
+                    fputc('\\', out);
+                fputc(cj, out);
+            }
+            fputc('"', out);
+            return;
+        }
+    }
+    fwrite(display, 1, len, out);
+}
+
+static const lr_global_t *find_global_by_symbol_id(const lr_module_t *m,
+                                                   uint32_t global_id) {
+    const char *name;
+    if (!m)
+        return NULL;
+    name = lr_module_symbol_name(m, global_id);
+    if (!name)
+        return NULL;
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return g;
+    }
+    return NULL;
+}
+
+static const lr_type_t *find_func_type_by_symbol_id(const lr_module_t *m,
+                                                    uint32_t global_id) {
+    const char *name;
+    if (!m)
+        return NULL;
+    name = lr_module_symbol_name(m, global_id);
+    if (!name)
+        return NULL;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f->type;
+    }
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0 &&
+            g->type && g->type->kind == LR_TYPE_FUNC)
+            return g->type;
+    }
+    return NULL;
+}
+
+static bool global_is_plain_c_string(const lr_global_t *g) {
+    const uint8_t *bytes;
+    if (!g || !g->type || !g->is_const || g->relocs)
+        return false;
+    if (g->type->kind != LR_TYPE_ARRAY || !g->type->array.elem ||
+        g->type->array.elem->kind != LR_TYPE_I8)
+        return false;
+    if (!g->init_data || g->init_size != g->type->array.count || g->init_size == 0)
+        return false;
+    bytes = (const uint8_t *)g->init_data;
+    if (bytes[g->init_size - 1u] != 0)
+        return false;
+    return true;
+}
+
+static void dump_c_string_literal(const uint8_t *bytes, size_t len, FILE *out) {
+    fputc('c', out);
+    fputc('"', out);
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = bytes[i];
+        if (c == '\\' || c == '"') {
+            fputc('\\', out);
+            fputc((int)c, out);
+        } else if (c >= 32 && c <= 126) {
+            fputc((int)c, out);
+        } else {
+            fprintf(out, "\\%02X", c);
+        }
+    }
+    fputc('"', out);
+}
+
+static bool print_global_i8_ptr_gep(FILE *out, const lr_module_t *m,
+                                    const lr_operand_t *op) {
+    const lr_global_t *g;
+    if (!out || !m || !op || op->kind != LR_VAL_GLOBAL || !op->type)
+        return false;
+    if (op->type->kind != LR_TYPE_PTR || op->global_offset != 0)
+        return false;
+    g = find_global_by_symbol_id(m, op->global_id);
+    if (!global_is_plain_c_string(g))
+        return false;
+    fprintf(out, "getelementptr inbounds (");
+    print_type(g->type, out);
+    fprintf(out, ", ");
+    print_type(g->type, out);
+    fprintf(out, "* ");
+    print_display_symbol_ref(out, '@', g->name);
+    fprintf(out, ", i32 0, i32 0)");
+    return true;
+}
+
+static bool format_fp_literal_float(char *buf, size_t buf_size, float value) {
+    long double parsed;
+    char *end = NULL;
+    long double exact_value;
+
+    if (!buf || buf_size == 0 || !isfinite(value))
+        return false;
+    if (snprintf(buf, buf_size, "%.6e", (double)value) <= 0)
+        return false;
+    parsed = strtold(buf, &end);
+    if (!end || *end != '\0')
+        return false;
+    exact_value = (long double)value;
+    if (parsed != exact_value)
+        return false;
+    if (value == 0.0f && signbit(parsed) != signbit(exact_value))
+        return false;
+    return true;
+}
+
+static bool format_fp_literal_double(char *buf, size_t buf_size, double value) {
+    union {
+        double d;
+        uint64_t u;
+    } orig, parsed;
+    char *end = NULL;
+    double roundtrip;
+
+    if (!buf || buf_size == 0 || !isfinite(value))
+        return false;
+    if (snprintf(buf, buf_size, "%.6e", value) <= 0)
+        return false;
+    roundtrip = strtod(buf, &end);
+    if (!end || *end != '\0')
+        return false;
+    orig.d = value;
+    parsed.d = roundtrip;
+    return orig.u == parsed.u;
+}
+
+static void print_fp_literal(FILE *out, const lr_type_t *ty, double value) {
+    char buf[64];
+    union {
+        double d;
+        uint64_t u;
+    } bits64;
+
+    if (!out || !ty)
+        return;
+    if (ty->kind == LR_TYPE_FLOAT) {
+        float fv = (float)value;
+        if (format_fp_literal_float(buf, sizeof(buf), fv)) {
+            fputs(buf, out);
+            return;
+        }
+        bits64.d = (double)fv;
+        fprintf(out, "0x%016" PRIX64, bits64.u);
+        return;
+    }
+    if (ty->kind == LR_TYPE_DOUBLE) {
+        if (format_fp_literal_double(buf, sizeof(buf), value)) {
+            fputs(buf, out);
+            return;
+        }
+        bits64.d = value;
+        fprintf(out, "0x%016" PRIX64, bits64.u);
+        return;
+    }
+    bits64.d = value;
+    fprintf(out, "0x%016" PRIX64, bits64.u);
+}
+
 static void print_operand(const lr_operand_t *op, const lr_module_t *m,
                           const lr_func_t *f, FILE *out) {
-    (void)f;
     switch (op->kind) {
     case LR_VAL_VREG:    fprintf(out, "%%v%u", op->vreg); break;
     case LR_VAL_IMM_I64:
-        if (op->type &&
+        if (op->type && op->type->kind == LR_TYPE_I1) {
+            fprintf(out, "%s", op->imm_i64 ? "true" : "false");
+        } else if (op->type &&
             (op->type->kind == LR_TYPE_STRUCT || op->type->kind == LR_TYPE_ARRAY ||
              op->type->kind == LR_TYPE_VECTOR)) {
             fprintf(out, "zeroinitializer");
@@ -1403,21 +1763,24 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         }
         break;
     case LR_VAL_IMM_F64: {
-        union {
-            double d;
-            uint64_t u;
-        } bits;
-        if (op->type && op->type->kind == LR_TYPE_FLOAT) {
-            float fv = (float)op->imm_f64;
-            bits.d = (double)fv;
+        if (op->type &&
+            (op->type->kind == LR_TYPE_FLOAT ||
+             op->type->kind == LR_TYPE_DOUBLE ||
+             op->type->kind == LR_TYPE_X86_FP80)) {
+            print_fp_literal(out, op->type, op->imm_f64);
         } else {
+            union {
+                double d;
+                uint64_t u;
+            } bits;
             bits.d = op->imm_f64;
+            fprintf(out, "0x%016" PRIX64, bits.u);
         }
-        fprintf(out, "0x%016" PRIX64, bits.u);
         break;
     }
     case LR_VAL_BLOCK: {
-        fprintf(out, "label %%bb%u", op->block_id);
+        fprintf(out, "label ");
+        print_block_ref(out, f, op->block_id);
         break;
     }
     case LR_VAL_GLOBAL: {
@@ -1425,18 +1788,20 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         bool need_ptrtoint = op->type &&
             op->type->kind >= LR_TYPE_I1 &&
             op->type->kind <= LR_TYPE_I64;
+        if (!need_ptrtoint && print_global_i8_ptr_gep(out, m, op))
+            break;
         if (need_ptrtoint)
             fprintf(out, "ptrtoint (ptr ");
         if (op->global_offset != 0) {
             fprintf(out, "getelementptr (i8, ptr ");
             if (name)
-                print_ir_symbol_ref(out, '@', name);
+                print_display_symbol_ref(out, '@', name);
             else
                 fprintf(out, "@g%u", op->global_id);
             fprintf(out, ", i64 %ld)", (long)op->global_offset);
         } else {
             if (name)
-                print_ir_symbol_ref(out, '@', name);
+                print_display_symbol_ref(out, '@', name);
             else
                 fprintf(out, "@g%u", op->global_id);
         }
@@ -1651,8 +2016,12 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
     } else if (vector_insert) {
         fprintf(out, "insertelement ");
     } else {
-        fprintf(out, "%s ", no_op_cast ? noop_cast_opcode(inst->type)
-                                       : opcode_name(inst->op));
+        const char *opname = no_op_cast ? noop_cast_opcode(inst->type)
+                                        : opcode_name(inst->op);
+        if (inst->op == LR_OP_RET_VOID || inst->op == LR_OP_UNREACHABLE)
+            fprintf(out, "%s", opname);
+        else
+            fprintf(out, "%s ", opname);
     }
 
     switch (inst->op) {
@@ -1692,16 +2061,36 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                 print_type(inst->operands[0].type, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
-            fprintf(out, ", ptr ");
+            fprintf(out, ", ");
+            if (inst->operands[0].type)
+                print_type(inst->operands[0].type, out);
+            else
+                fprintf(out, "ptr");
+            fprintf(out, "* ");
             print_operand(&inst->operands[1], m, f, out);
+            if (inst->operands[0].type) {
+                size_t align = ir_type_abi_align(inst->operands[0].type);
+                if (align > 0)
+                    fprintf(out, ", align %zu", align);
+            }
         }
         break;
 
     case LR_OP_LOAD:
         if (inst->type) print_type(inst->type, out);
         if (inst->num_operands > 0) {
-            fprintf(out, ", ptr ");
+            fprintf(out, ", ");
+            if (inst->type)
+                print_type(inst->type, out);
+            else
+                fprintf(out, "ptr");
+            fprintf(out, "* ");
             print_operand(&inst->operands[0], m, f, out);
+            if (inst->type) {
+                size_t align = ir_type_abi_align(inst->type);
+                if (align > 0)
+                    fprintf(out, ", align %zu", align);
+            }
         }
         break;
 
@@ -1717,12 +2106,45 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
         }
+        if (inst->type) {
+            size_t align = ir_type_alloca_align(inst->type);
+            if (align > 0)
+                fprintf(out, ", align %zu", align);
+        }
         break;
 
     case LR_OP_CALL:
-        print_type(inst->type, out);
-        fprintf(out, " ");
         if (inst->num_operands > 0) {
+            if (inst->call_vararg) {
+                uint32_t fixed_args = inst->call_fixed_args;
+                print_type(inst->type, out);
+                fprintf(out, " (");
+                for (uint32_t i = 0; i < fixed_args && (1u + i) < inst->num_operands; i++) {
+                    if (i > 0)
+                        fprintf(out, ", ");
+                    if (inst->operands[1u + i].type) {
+                        print_type(inst->operands[1u + i].type, out);
+                    } else {
+                        fprintf(out, "ptr");
+                    }
+                }
+                if (fixed_args > 0)
+                    fprintf(out, ", ");
+                fprintf(out, "...) ");
+            } else {
+                print_type(inst->type, out);
+                fprintf(out, " ");
+            }
+            if (!inst->call_vararg &&
+                inst->operands[0].kind == LR_VAL_GLOBAL && m) {
+                const lr_type_t *callee_ty =
+                    find_func_type_by_symbol_id(m, inst->operands[0].global_id);
+                if (callee_ty && callee_ty->kind == LR_TYPE_FUNC &&
+                    callee_ty->func.vararg) {
+                    print_type(callee_ty, out);
+                    fprintf(out, " ");
+                }
+            }
             print_operand(&inst->operands[0], m, f, out);
             fprintf(out, "(");
             for (uint32_t i = 1; i < inst->num_operands; i++) {
@@ -1782,8 +2204,20 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                 }
                 fprintf(out, ", ");
                 if (i == 0) {
-                    fprintf(out, "ptr ");
+                    if (inst->operands[0].type) {
+                        print_type(inst->operands[0].type, out);
+                        fprintf(out, " ");
+                    } else {
+                        fprintf(out, "ptr ");
+                    }
                 } else if (idx_ty) {
+                    if (first_index &&
+                        inst->operands[i].kind == LR_VAL_IMM_I64 &&
+                        inst->operands[i].imm_i64 >= INT32_MIN &&
+                        inst->operands[i].imm_i64 <= INT32_MAX &&
+                        m && m->type_i32) {
+                        idx_ty = m->type_i32;
+                    }
                     print_type(idx_ty, out);
                     fprintf(out, " ");
                 }
@@ -1814,7 +2248,7 @@ void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
             print_operand(val, m, f, out);
             fprintf(out, ", ");
             if (blk->kind == LR_VAL_BLOCK) {
-                fprintf(out, "%%bb%u", blk->block_id);
+                print_block_ref(out, f, blk->block_id);
             } else {
                 print_operand(blk, m, f, out);
             }
@@ -2040,7 +2474,10 @@ static lr_type_t *merge_remap_type(lr_module_t *dest, const lr_type_t *t) {
     case LR_TYPE_FLOAT:  return dest->type_float;
     case LR_TYPE_DOUBLE: return dest->type_double;
     case LR_TYPE_X86_FP80: return dest->type_x86_fp80;
-    case LR_TYPE_PTR:    return dest->type_ptr;
+    case LR_TYPE_PTR:
+        return t->array.elem
+            ? lr_type_ptr(dest->arena, merge_remap_type(dest, t->array.elem))
+            : dest->type_ptr;
     case LR_TYPE_ARRAY:
         return lr_type_array(dest->arena,
                              merge_remap_type(dest, t->array.elem),
@@ -2322,10 +2759,29 @@ void lr_dump_func_signature(const lr_func_t *f, FILE *out) {
     fprintf(out, ")");
 }
 
-void lr_dump_block_label(const lr_block_t *b, FILE *out) {
+void lr_dump_block_label(const lr_func_t *f, const lr_block_t *b, FILE *out) {
+    uint32_t preds;
+    size_t label_len = 0;
     if (!b || !out)
         return;
-    fprintf(out, "bb%u:\n", b->id);
+    if (b->name && b->name[0]) {
+        print_ir_symbol_ref(out, '\0', b->name);
+        label_len = strlen(b->name) + 1u;
+    } else {
+        fprintf(out, "bb%u", b->id);
+        label_len = snprintf(NULL, 0, "bb%u", b->id) + 1u;
+    }
+    fprintf(out, ":");
+    preds = count_block_predecessors(f, b);
+    if (preds > 0) {
+        while (label_len < 50u) {
+            fputc(' ', out);
+            label_len++;
+        }
+        fprintf(out, "; preds = ");
+        dump_block_predecessors(out, f, b);
+    }
+    fprintf(out, "\n");
 }
 
 static bool inst_is_terminator(const lr_inst_t *inst) {
@@ -2351,7 +2807,7 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
     is_decl = f->is_decl || !f->first_block;
     lr_dump_func_signature(f, out);
     if (is_decl) {
-        fprintf(out, "\n\n");
+        fprintf(out, "\n");
         return;
     }
     fprintf(out, " {\n");
@@ -2362,7 +2818,9 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
         size_t cap = 0;
         size_t term_idx = (size_t)-1;
 
-        lr_dump_block_label(b, out);
+        if (b != f->first_block)
+            fprintf(out, "\n");
+        lr_dump_block_label(f, b, out);
         for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
             if (ninst == cap) {
                 size_t new_cap = cap ? cap * 2u : 16u;
@@ -2389,14 +2847,150 @@ void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out) {
         if (term_idx != (size_t)-1) {
             lr_dump_inst(insts[term_idx], m, f, out);
         } else {
-            if (b->next)
-                fprintf(out, "  br label %%bb%u\n", b->next->id);
-            else
+            if (b->next) {
+                fprintf(out, "  br label ");
+                print_block_ref(out, f, b->next->id);
+                fprintf(out, "\n");
+            } else {
                 fprintf(out, "  unreachable\n");
+            }
         }
         free(insts);
     }
     fprintf(out, "}\n");
+}
+
+typedef struct lr_named_type_list {
+    const lr_type_t **items;
+    size_t count;
+    size_t cap;
+} lr_named_type_list_t;
+
+static bool named_type_list_has(const lr_named_type_list_t *list,
+                                const lr_type_t *ty) {
+    const char *name;
+    if (!list || !ty || ty->kind != LR_TYPE_STRUCT ||
+        !ty->struc.name || !ty->struc.name[0]) {
+        return false;
+    }
+    name = ty->struc.name;
+    for (size_t i = 0; i < list->count; i++) {
+        const lr_type_t *cur = list->items[i];
+        if (cur && cur->kind == LR_TYPE_STRUCT &&
+            cur->struc.name && strcmp(cur->struc.name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool named_type_list_push(lr_named_type_list_t *list,
+                                 const lr_type_t *ty) {
+    const lr_type_t **tmp;
+    size_t new_cap;
+    if (!list || !ty || ty->kind != LR_TYPE_STRUCT ||
+        !ty->struc.name || !ty->struc.name[0] ||
+        named_type_list_has(list, ty)) {
+        return true;
+    }
+    if (list->count == list->cap) {
+        new_cap = list->cap ? list->cap * 2u : 16u;
+        tmp = (const lr_type_t **)realloc(list->items,
+                                          new_cap * sizeof(*tmp));
+        if (!tmp)
+            return false;
+        list->items = tmp;
+        list->cap = new_cap;
+    }
+    list->items[list->count++] = ty;
+    return true;
+}
+
+static bool collect_named_types_from_type(lr_named_type_list_t *list,
+                                          const lr_type_t *ty) {
+    if (!ty)
+        return true;
+    switch (ty->kind) {
+    case LR_TYPE_PTR:
+    case LR_TYPE_ARRAY:
+    case LR_TYPE_VECTOR:
+        return collect_named_types_from_type(list, ty->array.elem);
+    case LR_TYPE_STRUCT:
+        if (!named_type_list_push(list, ty))
+            return false;
+        for (uint32_t i = 0; i < ty->struc.num_fields; i++) {
+            if (!collect_named_types_from_type(list, ty->struc.fields[i]))
+                return false;
+        }
+        return true;
+    case LR_TYPE_FUNC:
+        if (!collect_named_types_from_type(list, ty->func.ret))
+            return false;
+        for (uint32_t i = 0; i < ty->func.num_params; i++) {
+            if (!collect_named_types_from_type(list, ty->func.params[i]))
+                return false;
+        }
+        return true;
+    default:
+        return true;
+    }
+}
+
+static bool collect_named_types_from_module(lr_named_type_list_t *list,
+                                            const lr_module_t *m) {
+    if (!list || !m)
+        return false;
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (!collect_named_types_from_type(list, g->type))
+            return false;
+    }
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!collect_named_types_from_type(list, f->ret_type) ||
+            !collect_named_types_from_type(list, f->type)) {
+            return false;
+        }
+        for (uint32_t i = 0; i < f->num_params; i++) {
+            if (!collect_named_types_from_type(list, f->param_types[i]))
+                return false;
+        }
+        for (const lr_block_t *b = f->first_block; b; b = b->next) {
+            for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                if (!collect_named_types_from_type(list, inst->type))
+                    return false;
+                for (uint32_t i = 0; i < inst->num_operands; i++) {
+                    if (!collect_named_types_from_type(list,
+                                                       inst->operands[i].type)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+void lr_dump_named_types(const lr_module_t *m, FILE *out) {
+    lr_named_type_list_t list = {0};
+    if (!m || !out)
+        return;
+    if (!collect_named_types_from_module(&list, m)) {
+        free(list.items);
+        return;
+    }
+    for (size_t i = 0; i < list.count; i++) {
+        const lr_type_t *ty = list.items[i];
+        if (!ty || ty->kind != LR_TYPE_STRUCT ||
+            !ty->struc.name || !ty->struc.name[0]) {
+            continue;
+        }
+        print_ir_symbol_ref(out, '%', ty->struc.name);
+        fprintf(out, " = type ");
+        print_struct_body(ty, out);
+        fprintf(out, "\n");
+    }
+    if (list.count > 0)
+        fprintf(out, "\n");
+    free(list.items);
 }
 
 static uint8_t global_init_byte(const lr_global_t *g, size_t off) {
@@ -2492,13 +3086,8 @@ static void dump_global_scalar_expr(const lr_global_t *g, const lr_type_t *ty,
             uint32_t u;
             float f;
         } bits32;
-        union {
-            double d;
-            uint64_t u;
-        } bits64;
         bits32.u = (uint32_t)global_read_le_u64(g, off, 4);
-        bits64.d = (double)bits32.f;
-        fprintf(out, "0x%016" PRIX64, bits64.u);
+        print_fp_literal(out, ty, (double)bits32.f);
         break;
     }
     case LR_TYPE_DOUBLE: {
@@ -2507,17 +3096,17 @@ static void dump_global_scalar_expr(const lr_global_t *g, const lr_type_t *ty,
             double d;
         } bits;
         bits.u = global_read_le_u64(g, off, 8);
-        fprintf(out, "0x%016" PRIX64, bits.u);
+        print_fp_literal(out, ty, bits.d);
         break;
     }
     case LR_TYPE_PTR: {
         const lr_reloc_t *r = global_reloc_at(g, off);
         if (r && r->symbol_name && r->symbol_name[0]) {
             if (r->addend == 0) {
-                print_ir_symbol_ref(out, '@', r->symbol_name);
+                print_display_symbol_ref(out, '@', r->symbol_name);
             } else {
                 fprintf(out, "getelementptr (i8, ptr ");
-                print_ir_symbol_ref(out, '@', r->symbol_name);
+                print_display_symbol_ref(out, '@', r->symbol_name);
                 fprintf(out, ", i64 %" PRId64 ")", r->addend);
             }
             break;
@@ -2610,7 +3199,7 @@ static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
     }
 }
 
-static void lr_dump_global(const lr_global_t *g, FILE *out) {
+void lr_dump_global(const lr_global_t *g, FILE *out) {
     static const lr_type_t fallback_ptr_type = { .kind = LR_TYPE_PTR };
     const lr_type_t *gty;
     if (!g || !out)
@@ -2641,12 +3230,20 @@ static void lr_dump_global(const lr_global_t *g, FILE *out) {
         return;
     }
     gty = g->type ? g->type : &fallback_ptr_type;
-    print_ir_symbol_ref(out, '@', g->name);
+    print_display_symbol_ref(out, '@', g->name);
     fprintf(out, " = ");
     if (g->is_external) {
         fprintf(out, "external global ");
         print_type(gty, out);
         fprintf(out, "\n");
+        return;
+    }
+    if (global_is_plain_c_string(g)) {
+        fprintf(out, "private unnamed_addr constant ");
+        print_type(gty, out);
+        fprintf(out, " ");
+        dump_c_string_literal((const uint8_t *)g->init_data, g->init_size, out);
+        fprintf(out, ", align 1\n");
         return;
     }
     fprintf(out, "private %s ", g->is_const ? "constant" : "global");
@@ -2662,6 +3259,7 @@ static void lr_dump_global(const lr_global_t *g, FILE *out) {
 void lr_module_dump(lr_module_t *m, FILE *out) {
     if (!m || !out)
         return;
+    lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
         lr_dump_global(g, out);
     if (m->first_global && m->first_func)

@@ -581,7 +581,7 @@ static int bc_stream_dump_cb(lr_func_t *func, lr_block_t *block,
         state->cur_block = NULL;
     }
     if (state->cur_block != block) {
-        lr_dump_block_label(block, state->out);
+        lr_dump_block_label(block ? block->func : NULL, block, state->out);
         state->cur_block = block;
     }
     bc_stream_dump_inst(state->out, inst);

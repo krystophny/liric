@@ -148,7 +148,7 @@ static int bc_dump_callback(lr_func_t *func, lr_block_t *block,
         ctx->cur_block = NULL;
     }
     if (ctx->cur_block != block) {
-        lr_dump_block_label(block, ctx->out);
+        lr_dump_block_label(block ? block->func : NULL, block, ctx->out);
         ctx->cur_block = block;
     }
 

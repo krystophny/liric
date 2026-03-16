@@ -2527,6 +2527,24 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
     return 0;
 }
 
+int lr_session_func_end_preserve_ir(struct lr_session *s, session_error_t *err) {
+    err_clear(err);
+    if (!s || !s->cur_func) {
+        err_set(err, S_ERR_STATE, "no active function");
+        return -1;
+    }
+
+    if (validate_block_termination(s, err) != 0)
+        return -1;
+    if (close_active_direct_reloc_range(s) != 0) {
+        err_set(err, S_ERR_BACKEND, "failed to close direct relocation range");
+        return -1;
+    }
+
+    finish_function_state(s);
+    return 0;
+}
+
 /* ---- Blocks ------------------------------------------------------------ */
 
 uint32_t lr_session_block(struct lr_session *s) {

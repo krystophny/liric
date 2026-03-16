@@ -413,9 +413,15 @@ inline void Type::print(raw_ostream &OS, bool IsForDebug) const {
 }
 
 inline Type *Type::getPointerElementType() const {
+    lr_type_t *t = impl();
+    Type *ty = nullptr;
     LLVMContext &ctx = getContext();
     lc_module_compat_t *mod = ctx.getDefaultModule();
-    Type *ty = mod ? Type::wrap(lc_get_ptr_type(mod)) : nullptr;
+    if (t && t->kind == LR_TYPE_PTR && t->array.elem) {
+        ty = Type::wrap(t->array.elem);
+    } else {
+        ty = mod ? Type::wrap(lc_get_ptr_type(mod)) : nullptr;
+    }
     if (ty) detail::register_type_context(ty->impl(), &ctx);
     return ty;
 }
@@ -431,7 +437,11 @@ inline IntegerType *Type::getIntNTy(LLVMContext &C, unsigned N) {
 
 inline PointerType *Type::getPointerTo(unsigned AddrSpace) const {
     (void)AddrSpace;
-    return PointerType::get(getContext(), 0);
+    LLVMContext &ctx = getContext();
+    lc_module_compat_t *mod = ctx.getDefaultModule();
+    PointerType *ty = mod ? PointerType::wrap(lc_get_ptr_type_to(mod, impl())) : nullptr;
+    if (ty) detail::register_type_context(ty->impl(), &ctx);
+    return ty;
 }
 
 inline LLVMContext &Type::getContext() const {
@@ -543,7 +553,15 @@ inline PointerType *PointerType::get(LLVMContext &C, unsigned AddressSpace) {
 }
 
 inline PointerType *PointerType::getUnqual(Type *ElementType) {
-    if (ElementType) return PointerType::get(ElementType->getContext(), 0);
+    if (ElementType) {
+        LLVMContext &ctx = ElementType->getContext();
+        lc_module_compat_t *mod = ctx.getDefaultModule();
+        PointerType *ty =
+            mod ? PointerType::wrap(lc_get_ptr_type_to(mod, ElementType->impl()))
+                : nullptr;
+        if (ty) detail::register_type_context(ty->impl(), &ctx);
+        return ty;
+    }
     return PointerType::get(LLVMContext::getGlobal(), 0);
 }
 

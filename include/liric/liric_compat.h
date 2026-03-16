@@ -26,6 +26,8 @@ typedef enum lc_value_kind {
 typedef struct lc_value {
     lc_value_kind_t kind;
     lr_type_t *type;
+    const char *name;
+    bool prefer_entry_dump;
     union {
         struct { uint32_t id; lr_func_t *func; } vreg;
         struct { int64_t val; unsigned width; } const_int;
@@ -136,6 +138,11 @@ lc_value_t *lc_value_argument(lc_module_compat_t *mod, uint32_t param_idx,
 lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block);
 lc_value_t *lc_value_const_aggregate(lc_module_compat_t *mod, lr_type_t *type,
                                       const void *data, size_t size);
+void lc_value_set_name(lc_value_t *val, const char *name);
+const char *lc_value_get_name(const lc_value_t *val);
+bool lc_value_has_name(const lc_value_t *val);
+void lc_value_set_prefer_entry_dump(lc_value_t *val, bool prefer_entry_dump);
+bool lc_value_get_prefer_entry_dump(const lc_value_t *val);
 int lc_value_const_aggregate_add_reloc(lc_module_compat_t *mod,
                                         lc_value_t *aggregate,
                                         size_t offset,
@@ -152,6 +159,7 @@ lr_type_t *lc_get_float_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_double_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_x86_fp80_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod);
+lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem);
 bool lc_type_is_integer(lr_type_t *ty);
 bool lc_type_is_floating(lr_type_t *ty);
 bool lc_type_is_pointer(lr_type_t *ty);

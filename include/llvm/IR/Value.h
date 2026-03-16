@@ -37,10 +37,13 @@ public:
         return static_cast<unsigned>(impl()->kind);
     }
 
-    void setName(StringRef name) { (void)name; }
-    StringRef getName() const { return ""; }
+    void setName(StringRef name) { lc_value_set_name(impl(), name.str().c_str()); }
+    StringRef getName() const {
+        const char *name = lc_value_get_name(impl());
+        return name ? StringRef(name) : StringRef("");
+    }
 
-    bool hasName() const { return false; }
+    bool hasName() const { return lc_value_has_name(impl()); }
 
     void print(raw_ostream &OS, bool IsForDebug = false) const {
         (void)OS; (void)IsForDebug;

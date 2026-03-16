@@ -38,6 +38,7 @@ class IRBuilder {
     lc_module_compat_t *mod_;
     lr_block_t *block_;
     lr_func_t *func_;
+    bool prefer_entry_alloca_dump_;
     LLVMContext &ctx_;
 
     lc_module_compat_t *M() const {
@@ -98,16 +99,18 @@ class IRBuilder {
 
 public:
     explicit IRBuilder(LLVMContext &C)
-        : mod_(nullptr), block_(nullptr), func_(nullptr), ctx_(C) {}
+        : mod_(nullptr), block_(nullptr), func_(nullptr),
+          prefer_entry_alloca_dump_(false), ctx_(C) {}
 
     explicit IRBuilder(BasicBlock *BB)
         : mod_(nullptr), block_(nullptr), func_(nullptr),
-          ctx_(LLVMContext::getGlobal()) {
+          prefer_entry_alloca_dump_(false), ctx_(LLVMContext::getGlobal()) {
         SetInsertPoint(BB);
     }
 
     IRBuilder(BasicBlock *BB, LLVMContext &C)
-        : mod_(nullptr), block_(nullptr), func_(nullptr), ctx_(C) {
+        : mod_(nullptr), block_(nullptr), func_(nullptr),
+          prefer_entry_alloca_dump_(false), ctx_(C) {
         SetInsertPoint(BB);
     }
 
@@ -120,12 +123,14 @@ public:
         if (!BB) {
             block_ = nullptr;
             func_ = nullptr;
+            prefer_entry_alloca_dump_ = false;
             detail::insertion_point_active_ref() = false;
             detail::current_insert_block_ref() = nullptr;
             detail::current_function_ref() = nullptr;
             return;
         }
         block_ = BB->impl_block();
+        prefer_entry_alloca_dump_ = false;
         detail::insertion_point_active_ref() = true;
         detail::current_insert_block_ref() = block_;
         lr_func_t *f = lc_value_get_block_func(BB->impl());
@@ -154,12 +159,16 @@ public:
         }
     }
 
-    void SetInsertPoint(BasicBlock *BB, BasicBlock::iterator) {
+    void SetInsertPoint(BasicBlock *BB, BasicBlock::iterator IP) {
         SetInsertPoint(BB);
+        prefer_entry_alloca_dump_ =
+            (BB != nullptr &&
+             IP.kind() == BasicBlock::iterator::first_insertion);
     }
 
     void SetInsertPoint(BasicBlock *BB, BasicBlock::use_iterator) {
         SetInsertPoint(BB);
+        prefer_entry_alloca_dump_ = false;
     }
 
     BasicBlock *GetInsertBlock() const {
@@ -176,6 +185,7 @@ public:
 
     void SetFunction(lr_func_t *f) {
         func_ = f;
+        prefer_entry_alloca_dump_ = false;
         detail::insertion_point_active_ref() = (f != nullptr);
         detail::current_insert_block_ref() = block_;
         Function *fn = detail::lookup_function_wrapper(func_);
@@ -190,6 +200,7 @@ public:
         mod_ = fn->getCompatMod();
         func_ = fn->getIRFunc();
         block_ = nullptr;
+        prefer_entry_alloca_dump_ = false;
         detail::insertion_point_active_ref() = true;
         detail::current_insert_block_ref() = nullptr;
         detail::current_function_ref() = fn;
@@ -198,6 +209,7 @@ public:
     void ClearInsertionPoint() {
         block_ = nullptr;
         func_ = nullptr;
+        prefer_entry_alloca_dump_ = false;
         detail::insertion_point_active_ref() = false;
         detail::current_insert_block_ref() = nullptr;
         detail::current_function_ref() = nullptr;
@@ -523,6 +535,8 @@ public:
         if (!ai) return static_cast<AllocaInst *>(Value::wrap(nullptr));
         lc_value_t *result = ai->result;
         free(ai);
+        if (prefer_entry_alloca_dump_)
+            lc_value_set_prefer_entry_dump(result, true);
         return AllocaInst::wrap(result);
     }
 
@@ -618,7 +632,11 @@ public:
     }
 
     ReturnInst *CreateRet(Value *V) {
-        lc_create_ret(M(), B(), V->impl());
+        if (!V) {
+            lc_create_ret_void(M(), B());
+        } else {
+            lc_create_ret(M(), B(), V->impl());
+        }
         return nullptr;
     }
 
@@ -976,22 +994,27 @@ public:
         std::string generated_name;
         std::string actual_name;
         std::string explicit_name = Name.str();
+        std::string requested_name;
         if (!explicit_name.empty()) {
-            actual_name = Module::linkageScopedGlobalName(
-                mod, explicit_name, GlobalValue::PrivateLinkage);
+            requested_name = explicit_name;
         } else {
             static thread_local unsigned long long str_id = 0;
-            generated_name = ".str." + std::to_string(str_id++);
-            actual_name = Module::linkageScopedGlobalName(
-                mod, generated_name, GlobalValue::PrivateLinkage);
+            generated_name = std::to_string(str_id++);
+            requested_name = generated_name;
         }
+        actual_name = Module::linkageScopedGlobalName(
+            mod, requested_name, GlobalValue::PrivateLinkage);
         lc_value_t *gv = lc_global_create(
             mod, actual_name.c_str(), arr_ty, true, data.data(), data.size());
-        if (!explicit_name.empty() && gv && gv->kind == LC_VAL_GLOBAL &&
-            gv->global.name && explicit_name != gv->global.name) {
-            detail::register_global_alias(mod, explicit_name, gv->global.name);
+        if (gv && gv->kind == LC_VAL_GLOBAL && gv->global.name &&
+            requested_name != gv->global.name) {
+            detail::register_global_alias(mod, requested_name, gv->global.name);
         }
-        return static_cast<Constant *>(Value::wrap(gv));
+        lc_value_t *ptr = lc_value_global_with_addend(mod, gv, 0);
+        if (ptr) {
+            ptr->type = lc_get_ptr_type_to(mod, elem_ty);
+        }
+        return static_cast<Constant *>(Value::wrap(ptr));
     }
 
     Value *CreateGlobalString(StringRef Str, const Twine &Name = "",

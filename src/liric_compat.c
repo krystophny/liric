@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <ctype.h>
 #include <stdint.h>
+#include <math.h>
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -884,6 +886,8 @@ enum {
 typedef struct lc_value {
     lc_value_kind_t kind;
     lr_type_t *type;
+    const char *name;
+    bool prefer_entry_dump;
     union {
         struct { uint32_t id; lr_func_t *func; void *phi_node; lr_type_t *alloc_type; } vreg;
         struct { int64_t val; unsigned width; } const_int;
@@ -987,6 +991,7 @@ typedef struct lc_switch_builder {
 lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type);
 void lc_create_memcpy(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                       lc_value_t *dst, lc_value_t *src, lc_value_t *size);
+void lc_create_ret_void(lc_module_compat_t *mod, lr_block_t *b);
 void lc_create_br(lc_module_compat_t *mod, lr_block_t *b, lr_block_t *target);
 void lc_create_cond_br(lc_module_compat_t *mod, lr_block_t *b,
                        lc_value_t *cond, lr_block_t *true_bb,
@@ -1152,6 +1157,148 @@ static int symbol_name_in_use(lc_module_compat_t *mod, const char *name) {
         return 0;
     return find_func_linear(mod->mod, name) != NULL ||
            find_global_linear(mod->mod, name) != NULL;
+}
+
+static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
+                             const char *name) {
+    uint32_t remaining;
+    lc_value_slab_t *slab;
+    if (!mod || !func || !name || !name[0])
+        return 0;
+    for (const lr_block_t *b = func->first_block; b; b = b->next) {
+        if (b->name && strcmp(b->name, name) == 0)
+            return 1;
+    }
+    for (uint32_t i = 0; i < mod->detached_count; i++) {
+        const lr_block_t *b = mod->detached_blocks[i];
+        if (b && b->func == func && b->name && strcmp(b->name, name) == 0)
+            return 1;
+    }
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            if (!value->name || strcmp(value->name, name) != 0)
+                continue;
+            if (value->kind == LC_VAL_VREG && value->vreg.func == func)
+                return 1;
+            if (value->kind == LC_VAL_ARGUMENT && value->argument.func == func)
+                return 1;
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+    return 0;
+}
+
+static uint32_t local_name_next_suffix(lc_module_compat_t *mod,
+                                       const lr_func_t *func) {
+    uint32_t remaining;
+    uint32_t max_suffix = 0;
+    lc_value_slab_t *slab;
+    if (!mod || !func)
+        return 1;
+    for (const lr_block_t *b = func->first_block; b; b = b->next) {
+        const char *name = b->name;
+        char *endptr = NULL;
+        unsigned long suffix;
+        if (!name || !name[0])
+            continue;
+        while (*name && !isdigit((unsigned char)*name))
+            name++;
+        if (!*name)
+            continue;
+        suffix = strtoul(name, &endptr, 10);
+        if (endptr && *endptr == '\0' && suffix <= UINT32_MAX &&
+            suffix > max_suffix) {
+            max_suffix = (uint32_t)suffix;
+        }
+    }
+    for (uint32_t i = 0; i < mod->detached_count; i++) {
+        const lr_block_t *b = mod->detached_blocks[i];
+        const char *name;
+        char *endptr = NULL;
+        unsigned long suffix;
+        if (!b || b->func != func || !b->name || !b->name[0])
+            continue;
+        name = b->name;
+        while (*name && !isdigit((unsigned char)*name))
+            name++;
+        if (!*name)
+            continue;
+        suffix = strtoul(name, &endptr, 10);
+        if (endptr && *endptr == '\0' && suffix <= UINT32_MAX &&
+            suffix > max_suffix) {
+            max_suffix = (uint32_t)suffix;
+        }
+    }
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            const char *name;
+            char *endptr = NULL;
+            unsigned long suffix;
+            if (!value->name || !value->name[0])
+                continue;
+            if (!((value->kind == LC_VAL_VREG && value->vreg.func == func) ||
+                  (value->kind == LC_VAL_ARGUMENT &&
+                   value->argument.func == func))) {
+                continue;
+            }
+            name = value->name;
+            while (*name && !isdigit((unsigned char)*name))
+                name++;
+            if (!*name)
+                continue;
+            suffix = strtoul(name, &endptr, 10);
+            if (endptr && *endptr == '\0' && suffix <= UINT32_MAX &&
+                suffix > max_suffix) {
+                max_suffix = (uint32_t)suffix;
+            }
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+    return max_suffix + 1u;
+}
+
+static char *make_unique_local_name(lc_module_compat_t *mod,
+                                    const lr_func_t *func,
+                                    const char *name) {
+    size_t base_len;
+    uint32_t suffix;
+    if (!mod || !func || !name || !name[0])
+        return NULL;
+    if (!local_name_in_use(mod, func, name))
+        return dup_cstr(name);
+    base_len = strlen(name);
+    for (suffix = local_name_next_suffix(mod, func);
+         suffix < UINT32_MAX;
+         suffix++) {
+        char suffix_buf[32];
+        int ns = snprintf(suffix_buf, sizeof(suffix_buf), "%u", suffix);
+        char *candidate;
+        if (ns <= 0 || (size_t)ns >= sizeof(suffix_buf))
+            return NULL;
+        candidate = (char *)malloc(base_len + (size_t)ns + 1);
+        if (!candidate)
+            return NULL;
+        memcpy(candidate, name, base_len);
+        memcpy(candidate + base_len, suffix_buf, (size_t)ns + 1);
+        if (!local_name_in_use(mod, func, candidate))
+            return candidate;
+        free(candidate);
+    }
+    return NULL;
 }
 
 static char *make_unique_symbol_name(lc_module_compat_t *mod,
@@ -1519,6 +1666,23 @@ static int compat_finish_one_func(lc_module_compat_t *mod) {
     return rc;
 }
 
+static int compat_finish_one_func_for_dump(lc_module_compat_t *mod) {
+    lr_error_t err;
+    int rc;
+    if (!mod)
+        return -1;
+    if (!mod->session)
+        return 0;
+    if (!lr_session_cur_func(mod->session))
+        return 0;
+    memset(&err, 0, sizeof(err));
+    rc = lr_session_func_end_preserve_ir(mod->session, &err);
+    if (rc != 0 && err.msg[0]) {
+        fprintf(stderr, "liric compat dump finalize failed: %s\n", err.msg);
+    }
+    return rc;
+}
+
 static int compat_finish_active_func(lc_module_compat_t *mod) {
     lr_error_t err;
     int suspended_idx;
@@ -1544,6 +1708,32 @@ static int compat_finish_active_func(lc_module_compat_t *mod) {
         if (lr_session_resume_func(mod->session, 0) != 0)
             return -1;
         if (compat_finish_one_func(mod) != 0)
+            return -1;
+    }
+
+    return 0;
+}
+
+static int compat_finish_active_func_for_dump(lc_module_compat_t *mod) {
+    lr_error_t err;
+    int suspended_idx;
+
+    if (!mod)
+        return -1;
+    if (!mod->session)
+        return 0;
+
+    if (compat_finish_one_func_for_dump(mod) != 0)
+        return -1;
+
+    for (;;) {
+        suspended_idx = lr_session_find_suspended(mod->session, NULL);
+        if (suspended_idx < 0)
+            break;
+        memset(&err, 0, sizeof(err));
+        if (lr_session_resume_func(mod->session, 0) != 0)
+            return -1;
+        if (compat_finish_one_func_for_dump(mod) != 0)
             return -1;
     }
 
@@ -1614,6 +1804,49 @@ static uint32_t compat_emit(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f
     if (compat_bind_emit(mod, b, f, &err) != 0)
         return 0;
     return lr_session_emit(mod->session, inst, &err);
+}
+
+static void compat_promote_last_alloca_in_entry_block(lr_block_t *b,
+                                                      lr_func_t *f) {
+    lr_inst_t *before_last = NULL;
+    lr_inst_t *last = NULL;
+    lr_inst_t *first_non_alloca = NULL;
+    lr_inst_t *prev_to_first_non_alloca = NULL;
+    if (!b || !f || b != f->first_block || !b->first || !b->last)
+        return;
+    last = b->last;
+    if (last->op != LR_OP_ALLOCA || b->first == last)
+        return;
+    for (lr_inst_t *it = b->first; it && it != last; it = it->next) {
+        if (!first_non_alloca && it->op != LR_OP_ALLOCA) {
+            first_non_alloca = it;
+            break;
+        }
+        before_last = it;
+    }
+    if (!first_non_alloca)
+        return;
+    for (lr_inst_t *it = b->first; it && it != first_non_alloca; it = it->next)
+        prev_to_first_non_alloca = it;
+    if (!before_last)
+        return;
+    before_last->next = NULL;
+    if (prev_to_first_non_alloca == NULL) {
+        last->next = b->first;
+        b->first = last;
+    } else {
+        prev_to_first_non_alloca->next = last;
+        last->next = first_non_alloca;
+    }
+    b->last = before_last;
+    b->inst_array = NULL;
+    b->num_insts = 0;
+    if (f) {
+        f->block_array = NULL;
+        f->linear_inst_array = NULL;
+        f->block_inst_offsets = NULL;
+        f->num_linear_insts = 0;
+    }
 }
 
 static lr_operand_desc_t block_operand_desc(lr_block_t *block) {
@@ -1771,18 +2004,328 @@ lr_module_t *lc_module_get_ir(lc_module_compat_t *mod) {
     return mod->mod;
 }
 
-static void compat_dump_module(lr_module_t *m, FILE *out) {
-    if (!m || !out)
+static bool compat_inst_has_dest(const lr_inst_t *inst) {
+    if (!inst)
+        return false;
+    switch (inst->op) {
+    case LR_OP_RET:
+    case LR_OP_RET_VOID:
+    case LR_OP_BR:
+    case LR_OP_CONDBR:
+    case LR_OP_STORE:
+    case LR_OP_UNREACHABLE:
+        return false;
+    case LR_OP_CALL:
+        return inst->type && inst->type->kind != LR_TYPE_VOID;
+    default:
+        return true;
+    }
+}
+
+static char *compat_format_unnamed_vreg(uint32_t ordinal) {
+    char buf[32];
+    int n = snprintf(buf, sizeof(buf), "%u", ordinal);
+    if (n <= 0 || (size_t)n >= sizeof(buf))
+        return NULL;
+    return dup_cstr(buf);
+}
+
+static void compat_collect_explicit_vreg_names(lc_module_compat_t *mod,
+                                               const lr_func_t *f,
+                                               char **explicit_names,
+                                               uint32_t explicit_cap) {
+    uint32_t remaining;
+    lc_value_slab_t *slab;
+    if (!mod || !f || !explicit_names || explicit_cap == 0)
         return;
-    lr_module_dump(m, out);
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            if (!value->name || !value->name[0])
+                continue;
+            if (value->kind == LC_VAL_VREG &&
+                value->vreg.func == f &&
+                value->vreg.id < explicit_cap &&
+                !explicit_names[value->vreg.id]) {
+                explicit_names[value->vreg.id] = (char *)value->name;
+            } else if (value->kind == LC_VAL_ARGUMENT &&
+                       value->argument.func == f &&
+                       value->argument.param_idx < f->num_params) {
+                uint32_t vreg = f->param_vregs[value->argument.param_idx];
+                if (vreg < explicit_cap && !explicit_names[vreg])
+                    explicit_names[vreg] = (char *)value->name;
+            }
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+}
+
+static void compat_collect_entry_dump_vregs(lc_module_compat_t *mod,
+                                            const lr_func_t *f,
+                                            bool *entry_dump_vregs,
+                                            uint32_t cap) {
+    uint32_t remaining;
+    lc_value_slab_t *slab;
+    if (!mod || !f || !entry_dump_vregs || cap == 0)
+        return;
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            if (value->kind == LC_VAL_VREG &&
+                value->vreg.func == f &&
+                value->vreg.id < cap &&
+                value->prefer_entry_dump) {
+                entry_dump_vregs[value->vreg.id] = true;
+            }
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+}
+
+static bool compat_line_is_hoisted_alloca(const char *line, size_t len,
+                                          const bool *entry_dump_vregs,
+                                          uint32_t cap) {
+    const char *p = line;
+    const char *digits;
+    char *endptr = NULL;
+    unsigned long vreg;
+    if (!line || len < 14 || !entry_dump_vregs)
+        return false;
+    if (len >= 1 && line[len - 1] == '\n')
+        len--;
+    if (len < 13)
+        return false;
+    if (p[0] != ' ' || p[1] != ' ' || p[2] != '%' || p[3] != 'v')
+        return false;
+    digits = p + 4;
+    vreg = strtoul(digits, &endptr, 10);
+    if (!endptr || endptr == digits || vreg >= cap || !entry_dump_vregs[vreg])
+        return false;
+    if ((size_t)(endptr - line) + 9 > len)
+        return false;
+    return memcmp(endptr, " = alloca", 9) == 0;
+}
+
+static char *compat_reorder_entry_allocas(const char *raw,
+                                          const bool *entry_dump_vregs,
+                                          uint32_t cap) {
+    const char *body = NULL;
+    const char *label_end = NULL;
+    const char *block_start = NULL;
+    const char *block_end = NULL;
+    const char *p = NULL;
+    char *out = NULL;
+    size_t out_len = 0;
+    FILE *mem = NULL;
+    bool changed = false;
+    if (!raw || !entry_dump_vregs)
+        return NULL;
+    body = strstr(raw, "{\n");
+    if (!body)
+        return NULL;
+    label_end = strchr(body + 2, '\n');
+    if (!label_end)
+        return NULL;
+    block_start = label_end + 1;
+    block_end = strstr(block_start, "\n\n");
+    if (!block_end) {
+        block_end = strstr(block_start, "\n}");
+        if (!block_end)
+            return NULL;
+    }
+    mem = open_memstream(&out, &out_len);
+    if (!mem)
+        return NULL;
+    fwrite(raw, 1, (size_t)(block_start - raw), mem);
+    for (p = block_start; p < block_end; ) {
+        const char *line_end = strchr(p, '\n');
+        size_t len;
+        if (!line_end || line_end > block_end)
+            line_end = block_end;
+        len = (size_t)(line_end - p);
+        if (line_end < block_end)
+            len++;
+        if (compat_line_is_hoisted_alloca(p, len, entry_dump_vregs, cap)) {
+            fwrite(p, 1, len, mem);
+            changed = true;
+        }
+        p = line_end < block_end ? line_end + 1 : block_end;
+    }
+    for (p = block_start; p < block_end; ) {
+        const char *line_end = strchr(p, '\n');
+        size_t len;
+        if (!line_end || line_end > block_end)
+            line_end = block_end;
+        len = (size_t)(line_end - p);
+        if (line_end < block_end)
+            len++;
+        if (!compat_line_is_hoisted_alloca(p, len, entry_dump_vregs, cap))
+            fwrite(p, 1, len, mem);
+        p = line_end < block_end ? line_end + 1 : block_end;
+    }
+    fputs(block_end, mem);
+    fclose(mem);
+    if (!changed) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+static void compat_assign_display_vreg_names(const lr_func_t *f,
+                                             char **explicit_names,
+                                             char **display_names,
+                                             uint32_t display_cap) {
+    uint32_t next_unnamed = 0;
+    if (!f || !display_names || display_cap == 0)
+        return;
+    for (uint32_t i = 0; i < f->num_params; i++) {
+        uint32_t vreg = f->param_vregs[i];
+        if (vreg >= display_cap || display_names[vreg])
+            continue;
+        if (explicit_names && explicit_names[vreg]) {
+            display_names[vreg] = explicit_names[vreg];
+        } else {
+            display_names[vreg] = compat_format_unnamed_vreg(next_unnamed++);
+        }
+    }
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            uint32_t vreg;
+            if (!compat_inst_has_dest(inst))
+                continue;
+            vreg = inst->dest;
+            if (vreg >= display_cap || display_names[vreg])
+                continue;
+            if (explicit_names && explicit_names[vreg]) {
+                display_names[vreg] = explicit_names[vreg];
+            } else {
+                display_names[vreg] = compat_format_unnamed_vreg(next_unnamed++);
+            }
+        }
+    }
+}
+
+static void compat_write_vreg_named_ir(FILE *out,
+                                       const char *raw,
+                                       char **display_names,
+                                       uint32_t display_cap) {
+    const char *p = raw;
+    if (!out || !raw)
+        return;
+    while (*p) {
+        if (p[0] == '%' && p[1] == 'v') {
+            const char *digits = p + 2;
+            char *endptr = NULL;
+            unsigned long vreg = 0;
+            if (*digits >= '0' && *digits <= '9') {
+                vreg = strtoul(digits, &endptr, 10);
+                if (endptr && endptr > digits &&
+                    vreg < display_cap &&
+                    display_names[vreg] && display_names[vreg][0]) {
+                    fprintf(out, "%%%s", display_names[vreg]);
+                    p = endptr;
+                    continue;
+                }
+            }
+        }
+        fputc((unsigned char)*p, out);
+        p++;
+    }
+}
+
+static void compat_dump_function(lc_module_compat_t *mod,
+                                 const lr_func_t *f,
+                                 FILE *out) {
+    char *raw = NULL;
+    size_t raw_len = 0;
+    FILE *mem = NULL;
+    char **explicit_names = NULL;
+    char **display_names = NULL;
+    bool *entry_dump_vregs = NULL;
+    uint32_t cap = 0;
+    if (!mod || !f || !out)
+        return;
+    mem = open_memstream(&raw, &raw_len);
+    if (!mem)
+        return;
+    lr_dump_func(f, mod->mod, mem);
+    fclose(mem);
+    cap = f->next_vreg > 0 ? f->next_vreg : 1u;
+    explicit_names = (char **)calloc(cap, sizeof(char *));
+    display_names = (char **)calloc(cap, sizeof(char *));
+    entry_dump_vregs = (bool *)calloc(cap, sizeof(bool));
+    if (explicit_names && display_names && entry_dump_vregs) {
+        char *reordered = NULL;
+        compat_collect_explicit_vreg_names(mod, f, explicit_names, cap);
+        compat_collect_entry_dump_vregs(mod, f, entry_dump_vregs, cap);
+        reordered = compat_reorder_entry_allocas(raw, entry_dump_vregs, cap);
+        if (reordered) {
+            free(raw);
+            raw = reordered;
+        }
+        compat_assign_display_vreg_names(f, explicit_names, display_names, cap);
+        compat_write_vreg_named_ir(out, raw, display_names, cap);
+    } else if (raw) {
+        fputs(raw, out);
+    }
+    if (display_names) {
+        for (uint32_t i = 0; i < cap; i++) {
+            if (display_names[i] &&
+                (!explicit_names || display_names[i] != explicit_names[i])) {
+                free(display_names[i]);
+            }
+        }
+    }
+    free(display_names);
+    free(explicit_names);
+    free(entry_dump_vregs);
+    free(raw);
+}
+
+static void compat_dump_module(lc_module_compat_t *mod, FILE *out) {
+    lr_module_t *m;
+    if (!mod || !out)
+        return;
+    if (compat_finish_active_func_for_dump(mod) != 0)
+        return;
+    m = mod->mod;
+    if (!m)
+        return;
+    if (mod->name && mod->name[0]) {
+        fprintf(out, "; ModuleID = '%s'\n", mod->name);
+        fprintf(out, "source_filename = \"%s\"\n\n", mod->name);
+    }
+    lr_dump_named_types(m, out);
+    for (lr_global_t *g = m->first_global; g; g = g->next)
+        lr_dump_global(g, out);
+    if (m->first_global && m->first_func)
+        fprintf(out, "\n");
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        compat_dump_function(mod, f, out);
+        if (f->next)
+            fprintf(out, "\n");
+    }
 }
 
 void lc_module_dump(lc_module_compat_t *mod) {
-    compat_dump_module(mod->mod, stderr);
+    compat_dump_module(mod, stderr);
 }
 
 void lc_module_print(lc_module_compat_t *mod, FILE *out) {
-    compat_dump_module(mod->mod, out ? out : stdout);
+    compat_dump_module(mod, out ? out : stdout);
 }
 
 char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
@@ -1790,7 +2333,7 @@ char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
     if (!f) return NULL;
-    compat_dump_module(mod->mod, f);
+    compat_dump_module(mod, f);
     fclose(f);
     if (out_len) *out_len = len;
     return buf;
@@ -1808,6 +2351,7 @@ lc_value_t *lc_value_vreg(lc_module_compat_t *mod, uint32_t id,
     if (!v) return NULL;
     v->kind = LC_VAL_VREG;
     v->type = type;
+    v->name = NULL;
     v->vreg.id = id;
     v->vreg.func = func;
     v->vreg.phi_node = NULL;
@@ -1858,6 +2402,7 @@ lc_value_t *lc_value_global(lc_module_compat_t *mod, uint32_t id,
     if (!v) return NULL;
     v->kind = LC_VAL_GLOBAL;
     v->type = type;
+    v->name = NULL;
     v->global.id = id;
     v->global.name = name;
     v->global.func = NULL;
@@ -1890,6 +2435,7 @@ lc_value_t *lc_value_argument(lc_module_compat_t *mod, uint32_t param_idx,
     if (!v) return NULL;
     v->kind = LC_VAL_ARGUMENT;
     v->type = type;
+    v->name = NULL;
     v->argument.param_idx = param_idx;
     v->argument.func = func;
     return v;
@@ -1900,6 +2446,7 @@ lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block) {
     if (!v) return NULL;
     v->kind = LC_VAL_BLOCK;
     v->type = NULL;
+    v->name = NULL;
     v->block.block = block;
     v->block.func = block ? block->func : NULL;
     return v;
@@ -1922,6 +2469,35 @@ lc_value_t *lc_value_const_aggregate(lc_module_compat_t *mod, lr_type_t *type,
         v->aggregate.size = 0;
     }
     return v;
+}
+
+void lc_value_set_name(lc_value_t *val, const char *name) {
+    if (!val) return;
+    if (!name || !name[0]) {
+        val->name = NULL;
+        return;
+    }
+    val->name = dup_cstr(name);
+}
+
+const char *lc_value_get_name(const lc_value_t *val) {
+    if (!val)
+        return NULL;
+    return val->name;
+}
+
+bool lc_value_has_name(const lc_value_t *val) {
+    return val && val->name && val->name[0];
+}
+
+void lc_value_set_prefer_entry_dump(lc_value_t *val, bool prefer_entry_dump) {
+    if (!val)
+        return;
+    val->prefer_entry_dump = prefer_entry_dump;
+}
+
+bool lc_value_get_prefer_entry_dump(const lc_value_t *val) {
+    return val ? val->prefer_entry_dump : false;
 }
 
 int lc_value_const_aggregate_add_reloc(lc_module_compat_t *mod,
@@ -1982,6 +2558,14 @@ lr_type_t *lc_get_x86_fp80_type(lc_module_compat_t *mod) {
 
 lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod) {
     return mod->mod->type_ptr;
+}
+
+lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem) {
+    if (!mod || !mod->mod)
+        return NULL;
+    if (!elem)
+        return mod->mod->type_ptr;
+    return lr_type_ptr(mod->mod->arena, elem);
 }
 
 bool lc_type_is_integer(lr_type_t *ty) {
@@ -2061,6 +2645,8 @@ lr_type_t *lc_type_contained(lr_type_t *ty, unsigned idx) {
     case LR_TYPE_ARRAY:
     case LR_TYPE_VECTOR:
         return ty->array.elem;
+    case LR_TYPE_PTR:
+        return idx == 0 ? ty->array.elem : NULL;
     default:
         return NULL;
     }
@@ -2920,8 +3506,17 @@ unsigned lc_func_arg_count(lc_value_t *func_val) {
 
 lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
                              const char *name) {
+    char *unique_name = NULL;
+    const char *actual_name = name;
     if (!mod || !func) return safe_undef(mod);
-    lr_block_t *b = lr_block_create(func, mod->mod->arena, name);
+    if (name && name[0]) {
+        unique_name = make_unique_local_name(mod, func, name);
+        if (unique_name)
+            actual_name = unique_name;
+    }
+    lr_block_t *b = lr_block_create(func, mod->mod->arena,
+                                    actual_name ? actual_name : "");
+    free(unique_name);
     lc_value_t *v = lc_value_block_ref(mod, b);
     if (v) v->block.func = func;
     return v ? v : safe_undef(mod);
@@ -3000,12 +3595,20 @@ int lc_block_bind_func(lc_module_compat_t *mod, lr_block_t *block,
 
 lc_value_t *lc_block_create_detached(lc_module_compat_t *mod, lr_func_t *func,
                                       const char *name) {
+    char *unique_name = NULL;
+    const char *actual_name = name;
     if (!mod) return safe_undef(mod);
     if (!name) name = "";
+    if (func && name[0]) {
+        unique_name = make_unique_local_name(mod, func, name);
+        if (unique_name)
+            actual_name = unique_name;
+    }
     lr_arena_t *arena = mod->mod->arena;
     lr_block_t *b = lr_arena_new(arena, lr_block_t);
     if (!b) return safe_undef(mod);
-    b->name = lr_arena_strdup(arena, name, strlen(name));
+    b->name = lr_arena_strdup(arena, actual_name, strlen(actual_name));
+    free(unique_name);
     if (func) {
         b->id = func->num_blocks++;
         b->func = func;
@@ -3456,6 +4059,22 @@ static lc_value_t *wrap_vreg(lc_module_compat_t *mod, uint32_t vreg_id,
     return lc_value_vreg(mod, vreg_id, type, func);
 }
 
+static lc_value_t *wrap_vreg_named(lc_module_compat_t *mod, uint32_t vreg_id,
+                                   lr_type_t *type, lr_func_t *func,
+                                   const char *name) {
+    lc_value_t *v = wrap_vreg(mod, vreg_id, type, func);
+    if (v && name && name[0]) {
+        char *unique_name = make_unique_local_name(mod, func, name);
+        if (unique_name) {
+            lc_value_set_name(v, unique_name);
+            free(unique_name);
+        } else {
+            lc_value_set_name(v, name);
+        }
+    }
+    return v;
+}
+
 static uint32_t build_binop(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
                             lr_opcode_t op, lr_type_t *ty,
                             lr_operand_desc_t lhs, lr_operand_desc_t rhs) {
@@ -3485,14 +4104,213 @@ static uint32_t build_cast(lc_module_compat_t *mod, lr_block_t *b, lr_func_t *f,
     return compat_emit(mod, b, f, &inst);
 }
 
+static lc_value_t *compat_fold_int_binop(lc_module_compat_t *mod,
+                                         lr_opcode_t op,
+                                         lc_value_t *lhs,
+                                         lc_value_t *rhs) {
+    int64_t a, b, r;
+    unsigned width;
+    uint64_t ua, ub, ur;
+    if (!mod || !lhs || !rhs ||
+        lhs->kind != LC_VAL_CONST_INT ||
+        rhs->kind != LC_VAL_CONST_INT) {
+        return NULL;
+    }
+    a = lhs->const_int.val;
+    b = rhs->const_int.val;
+    width = lhs->const_int.width ? lhs->const_int.width : rhs->const_int.width;
+    switch (op) {
+    case LR_OP_ADD:
+        r = a + b;
+        return lc_value_const_int(mod, lhs->type, r, width);
+    case LR_OP_SUB:
+        r = a - b;
+        return lc_value_const_int(mod, lhs->type, r, width);
+    case LR_OP_MUL:
+        r = a * b;
+        return lc_value_const_int(mod, lhs->type, r, width);
+    case LR_OP_SDIV:
+        if (b == 0)
+            return NULL;
+        return lc_value_const_int(mod, lhs->type, a / b, width);
+    case LR_OP_SREM:
+        if (b == 0)
+            return NULL;
+        return lc_value_const_int(mod, lhs->type, a % b, width);
+    case LR_OP_UDIV:
+        if (b == 0)
+            return NULL;
+        ua = (uint64_t)a;
+        ub = (uint64_t)b;
+        ur = ua / ub;
+        return lc_value_const_int(mod, lhs->type, (int64_t)ur, width);
+    case LR_OP_UREM:
+        if (b == 0)
+            return NULL;
+        ua = (uint64_t)a;
+        ub = (uint64_t)b;
+        ur = ua % ub;
+        return lc_value_const_int(mod, lhs->type, (int64_t)ur, width);
+    case LR_OP_AND:
+        return lc_value_const_int(mod, lhs->type, a & b, width);
+    case LR_OP_OR:
+        return lc_value_const_int(mod, lhs->type, a | b, width);
+    case LR_OP_XOR:
+        return lc_value_const_int(mod, lhs->type, a ^ b, width);
+    case LR_OP_SHL:
+        return lc_value_const_int(mod, lhs->type, a << b, width);
+    case LR_OP_LSHR:
+        ua = (uint64_t)a;
+        ur = ua >> b;
+        return lc_value_const_int(mod, lhs->type, (int64_t)ur, width);
+    case LR_OP_ASHR:
+        return lc_value_const_int(mod, lhs->type, a >> b, width);
+    default:
+        return NULL;
+    }
+}
+
+static lc_value_t *compat_fold_fp_binop(lc_module_compat_t *mod,
+                                        lr_opcode_t op,
+                                        lc_value_t *lhs,
+                                        lc_value_t *rhs) {
+    double a, b, r;
+    if (!mod || !lhs || !rhs ||
+        lhs->kind != LC_VAL_CONST_FP ||
+        rhs->kind != LC_VAL_CONST_FP) {
+        return NULL;
+    }
+    a = lhs->const_fp.val;
+    b = rhs->const_fp.val;
+    switch (op) {
+    case LR_OP_FADD:
+        r = a + b;
+        break;
+    case LR_OP_FSUB:
+        r = a - b;
+        break;
+    case LR_OP_FMUL:
+        r = a * b;
+        break;
+    case LR_OP_FDIV:
+        r = a / b;
+        break;
+    case LR_OP_FREM:
+        r = fmod(a, b);
+        break;
+    default:
+        return NULL;
+    }
+    return lc_value_const_fp(mod, lhs->type, r, lhs->const_fp.is_double);
+}
+
+static bool compat_const_int_like(const lc_value_t *value,
+                                  int64_t *signed_value,
+                                  uint64_t *unsigned_value) {
+    uint64_t raw = 0;
+    if (!value)
+        return false;
+    switch (value->kind) {
+    case LC_VAL_CONST_NULL:
+        raw = 0;
+        break;
+    case LC_VAL_CONST_INT:
+        raw = (uint64_t)value->const_int.val;
+        break;
+    default:
+        return false;
+    }
+    if (signed_value)
+        *signed_value = (int64_t)raw;
+    if (unsigned_value)
+        *unsigned_value = raw;
+    return true;
+}
+
+static lc_value_t *compat_fold_icmp(lc_module_compat_t *mod,
+                                    int pred,
+                                    lc_value_t *lhs,
+                                    lc_value_t *rhs) {
+    int64_t s_lhs = 0, s_rhs = 0;
+    uint64_t u_lhs = 0, u_rhs = 0;
+    bool result;
+    if (!mod ||
+        !compat_const_int_like(lhs, &s_lhs, &u_lhs) ||
+        !compat_const_int_like(rhs, &s_rhs, &u_rhs)) {
+        return NULL;
+    }
+    switch (pred) {
+    case LR_ICMP_EQ:  result = (u_lhs == u_rhs); break;
+    case LR_ICMP_NE:  result = (u_lhs != u_rhs); break;
+    case LR_ICMP_SGT: result = (s_lhs > s_rhs); break;
+    case LR_ICMP_SGE: result = (s_lhs >= s_rhs); break;
+    case LR_ICMP_SLT: result = (s_lhs < s_rhs); break;
+    case LR_ICMP_SLE: result = (s_lhs <= s_rhs); break;
+    case LR_ICMP_UGT: result = (u_lhs > u_rhs); break;
+    case LR_ICMP_UGE: result = (u_lhs >= u_rhs); break;
+    case LR_ICMP_ULT: result = (u_lhs < u_rhs); break;
+    case LR_ICMP_ULE: result = (u_lhs <= u_rhs); break;
+    default:
+        return NULL;
+    }
+    return lc_value_const_int(mod, mod->mod->type_i1, result ? 1 : 0, 1);
+}
+
+static lc_value_t *compat_fold_fcmp(lc_module_compat_t *mod,
+                                    int pred,
+                                    lc_value_t *lhs,
+                                    lc_value_t *rhs) {
+    double a, b;
+    bool unordered, result;
+    if (!mod || !lhs || !rhs ||
+        lhs->kind != LC_VAL_CONST_FP ||
+        rhs->kind != LC_VAL_CONST_FP) {
+        return NULL;
+    }
+    a = lhs->const_fp.val;
+    b = rhs->const_fp.val;
+    unordered = isnan(a) || isnan(b);
+    switch (pred) {
+    case LR_FCMP_FALSE: result = false; break;
+    case LR_FCMP_OEQ:   result = !unordered && (a == b); break;
+    case LR_FCMP_OGT:   result = !unordered && (a > b); break;
+    case LR_FCMP_OGE:   result = !unordered && (a >= b); break;
+    case LR_FCMP_OLT:   result = !unordered && (a < b); break;
+    case LR_FCMP_OLE:   result = !unordered && (a <= b); break;
+    case LR_FCMP_ONE:   result = !unordered && (a != b); break;
+    case LR_FCMP_ORD:   result = !unordered; break;
+    case LR_FCMP_UEQ:   result = unordered || (a == b); break;
+    case LR_FCMP_UGT:   result = unordered || (a > b); break;
+    case LR_FCMP_UGE:   result = unordered || (a >= b); break;
+    case LR_FCMP_ULT:   result = unordered || (a < b); break;
+    case LR_FCMP_ULE:   result = unordered || (a <= b); break;
+    case LR_FCMP_UNE:   result = unordered || (a != b); break;
+    case LR_FCMP_UNO:   result = unordered; break;
+    case LR_FCMP_TRUE:  result = true; break;
+    default:
+        return NULL;
+    }
+    return lc_value_const_int(mod, mod->mod->type_i1, result ? 1 : 0, 1);
+}
+
 static lc_value_t *compat_binop(lc_module_compat_t *mod, lr_block_t *b,
                                   lr_func_t *f, lr_opcode_t op,
-                                  lc_value_t *lhs, lc_value_t *rhs) {
+                                  lc_value_t *lhs, lc_value_t *rhs,
+                                  const char *name) {
+    lc_value_t *folded;
     if (!mod || !b || !f || !lhs) return safe_undef(mod);
+    folded = compat_fold_int_binop(mod, op, lhs, rhs);
+    if (!folded)
+        folded = compat_fold_fp_binop(mod, op, lhs, rhs);
+    if (folded) {
+        if (name && name[0])
+            lc_value_set_name(folded, name);
+        return folded;
+    }
     lr_type_t *ty = lhs->type ? lhs->type : mod->mod->type_i64;
     uint32_t v = build_binop(mod, b, f, op, ty,
                              lc_value_to_desc(lhs), lc_value_to_desc(rhs));
-    return wrap_vreg(mod, v, ty, f);
+    return wrap_vreg_named(mod, v, ty, f, name);
 }
 
 static bool compat_types_equivalent(const lr_type_t *a, const lr_type_t *b) {
@@ -3501,6 +4319,8 @@ static bool compat_types_equivalent(const lr_type_t *a, const lr_type_t *b) {
     if (!a || !b || a->kind != b->kind)
         return false;
     switch (a->kind) {
+    case LR_TYPE_PTR:
+        return compat_types_equivalent(a->array.elem, b->array.elem);
     case LR_TYPE_ARRAY:
     case LR_TYPE_VECTOR:
         return a->array.count == b->array.count &&
@@ -3531,7 +4351,8 @@ static bool compat_types_equivalent(const lr_type_t *a, const lr_type_t *b) {
 
 static lc_value_t *compat_cast(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, lr_opcode_t op,
-                                 lc_value_t *val, lr_type_t *to_type) {
+                                 lc_value_t *val, lr_type_t *to_type,
+                                 const char *name) {
     if (!mod || !b || !f || !val) return safe_undef(mod);
 
     /* Preserve no-op cast semantics instead of materializing a backend cast.
@@ -3556,16 +4377,24 @@ static lc_value_t *compat_cast(lc_module_compat_t *mod, lr_block_t *b,
     }
 
     uint32_t v = build_cast(mod, b, f, op, to_type, lc_value_to_desc(val));
-    return wrap_vreg(mod, v, to_type, f);
+    return wrap_vreg_named(mod, v, to_type, f, name);
 }
 
 static lc_value_t *compat_icmp(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, int pred,
-                                 lc_value_t *lhs, lc_value_t *rhs) {
+                                 lc_value_t *lhs, lc_value_t *rhs,
+                                 const char *name) {
+    lc_value_t *folded;
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[2];
     uint32_t dest;
     if (!mod || !b || !f) return safe_undef(mod);
+    folded = compat_fold_icmp(mod, pred, lhs, rhs);
+    if (folded) {
+        if (name && name[0])
+            lc_value_set_name(folded, name);
+        return folded;
+    }
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(lhs);
     ops[1] = lc_value_to_desc(rhs);
@@ -3575,16 +4404,24 @@ static lc_value_t *compat_icmp(lc_module_compat_t *mod, lr_block_t *b,
     inst.num_operands = 2;
     inst.icmp_pred = pred;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, mod->mod->type_i1, f);
+    return wrap_vreg_named(mod, dest, mod->mod->type_i1, f, name);
 }
 
 static lc_value_t *compat_fcmp(lc_module_compat_t *mod, lr_block_t *b,
                                  lr_func_t *f, int pred,
-                                 lc_value_t *lhs, lc_value_t *rhs) {
+                                 lc_value_t *lhs, lc_value_t *rhs,
+                                 const char *name) {
+    lc_value_t *folded;
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[2];
     uint32_t dest;
     if (!mod || !b || !f) return safe_undef(mod);
+    folded = compat_fold_fcmp(mod, pred, lhs, rhs);
+    if (folded) {
+        if (name && name[0])
+            lc_value_set_name(folded, name);
+        return folded;
+    }
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(lhs);
     ops[1] = lc_value_to_desc(rhs);
@@ -3594,7 +4431,7 @@ static lc_value_t *compat_fcmp(lc_module_compat_t *mod, lr_block_t *b,
     inst.num_operands = 2;
     inst.fcmp_pred = pred;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, mod->mod->type_i1, f);
+    return wrap_vreg_named(mod, dest, mod->mod->type_i1, f, name);
 }
 
 /* ---- Arithmetic ---- */
@@ -3602,59 +4439,51 @@ static lc_value_t *compat_fcmp(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_add(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                            const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_ADD, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_ADD, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_sub(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                            const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_SUB, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_SUB, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_mul(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                            const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_MUL, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_MUL, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_sdiv(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_SDIV, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_SDIV, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_srem(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_SREM, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_SREM, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_udiv(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_UDIV, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_UDIV, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_urem(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_UREM, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_UREM, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_neg(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *val, const char *name) {
-    (void)name;
     if (!val) return safe_undef(mod);
     lc_value_t *zero = lc_value_const_int(mod, val->type, 0,
                                            lc_type_int_width(val->type));
-    return compat_binop(mod, b, f, LR_OP_SUB, zero, val);
+    return compat_binop(mod, b, f, LR_OP_SUB, zero, val, name);
 }
 
 /* ---- Bitwise ---- */
@@ -3662,48 +4491,41 @@ lc_value_t *lc_create_neg(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_and(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                            const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_AND, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_AND, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_or(lc_module_compat_t *mod, lr_block_t *b,
                           lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                           const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_OR, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_OR, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_xor(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                            const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_XOR, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_XOR, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_shl(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                            const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_SHL, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_SHL, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_lshr(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_LSHR, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_LSHR, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_ashr(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_ASHR, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_ASHR, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_not(lc_module_compat_t *mod, lr_block_t *b,
                            lr_func_t *f, lc_value_t *val, const char *name) {
-    (void)name;
     int64_t mask = -1;
     unsigned width;
     if (!val) return safe_undef(mod);
@@ -3712,7 +4534,7 @@ lc_value_t *lc_create_not(lc_module_compat_t *mod, lr_block_t *b,
     if (width == 1)
         mask = 1;
     lc_value_t *neg1 = lc_value_const_int(mod, val->type, mask, width);
-    return compat_binop(mod, b, f, LR_OP_XOR, val, neg1);
+    return compat_binop(mod, b, f, LR_OP_XOR, val, neg1, name);
 }
 
 /* ---- FP arithmetic ---- */
@@ -3720,36 +4542,31 @@ lc_value_t *lc_create_not(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_fadd(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_FADD, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_FADD, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fsub(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_FSUB, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_FSUB, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fmul(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_FMUL, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_FMUL, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fdiv(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_FDIV, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_FDIV, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_frem(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *lhs, lc_value_t *rhs,
                             const char *name) {
-    (void)name;
-    return compat_binop(mod, b, f, LR_OP_FREM, lhs, rhs);
+    return compat_binop(mod, b, f, LR_OP_FREM, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,
@@ -3758,7 +4575,6 @@ lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[1];
     uint32_t dest;
-    (void)name;
     if (!val) return safe_undef(mod);
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(val);
@@ -3767,7 +4583,7 @@ lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,
     inst.operands = ops;
     inst.num_operands = 1;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, inst.type, f);
+    return wrap_vreg_named(mod, dest, inst.type, f, name);
 }
 
 /* ---- Comparison ---- */
@@ -3775,141 +4591,121 @@ lc_value_t *lc_create_fneg(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_icmp_eq(lc_module_compat_t *mod, lr_block_t *b,
                                lr_func_t *f, lc_value_t *lhs,
                                lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_EQ, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_EQ, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_ne(lc_module_compat_t *mod, lr_block_t *b,
                                lr_func_t *f, lc_value_t *lhs,
                                lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_NE, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_NE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_slt(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_SLT, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_SLT, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_sle(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_SLE, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_SLE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_sgt(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_SGT, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_SGT, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_sge(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_SGE, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_SGE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_ult(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_ULT, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_ULT, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_uge(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_UGE, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_UGE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_ugt(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_UGT, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_UGT, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_icmp_ule(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_icmp(mod, b, f, LR_ICMP_ULE, lhs, rhs);
+    return compat_icmp(mod, b, f, LR_ICMP_ULE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_oeq(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_OEQ, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_OEQ, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_one(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_ONE, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_ONE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_olt(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_OLT, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_OLT, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_ole(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_OLE, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_OLE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_ogt(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_OGT, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_OGT, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_oge(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_OGE, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_OGE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_une(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_UNE, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_UNE, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_ord(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_ORD, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_ORD, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_uno(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_UNO, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_UNO, lhs, rhs, name);
 }
 
 lc_value_t *lc_create_fcmp_ueq(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *lhs,
                                 lc_value_t *rhs, const char *name) {
-    (void)name;
-    return compat_fcmp(mod, b, f, LR_FCMP_UEQ, lhs, rhs);
+    return compat_fcmp(mod, b, f, LR_FCMP_UEQ, lhs, rhs, name);
 }
 
 /* ---- Memory ---- */
@@ -3923,7 +4719,6 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
     uint32_t dest;
     lc_alloca_inst_t *ai;
     lc_value_t *result;
-    (void)name;
     if (!mod || !b || !f || !type) {
         ai = (lc_alloca_inst_t *)calloc(1, sizeof(*ai));
         if (!ai) return NULL;
@@ -3940,10 +4735,11 @@ lc_alloca_inst_t *lc_create_alloca(lc_module_compat_t *mod, lr_block_t *b,
         inst.num_operands = 1;
     }
     dest = compat_emit(mod, b, f, &inst);
+    compat_promote_last_alloca_in_entry_block(b, f);
     ai = (lc_alloca_inst_t *)malloc(sizeof(*ai));
     if (!ai)
         return NULL;
-    result = wrap_vreg(mod, dest, mod->mod->type_ptr, f);
+    result = wrap_vreg_named(mod, dest, lc_get_ptr_type_to(mod, type), f, name);
     result->vreg.alloc_type = type;
     ai->result = result;
     ai->alloc_type = type;
@@ -3956,7 +4752,6 @@ lc_value_t *lc_create_load(lc_module_compat_t *mod, lr_block_t *b,
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[1];
     uint32_t dest;
-    (void)name;
     if (!mod || !b || !f) return safe_undef(mod);
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(ptr);
@@ -3965,7 +4760,7 @@ lc_value_t *lc_create_load(lc_module_compat_t *mod, lr_block_t *b,
     inst.operands = ops;
     inst.num_operands = 1;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, ty, f);
+    return wrap_vreg_named(mod, dest, ty, f, name);
 }
 
 void lc_create_store(lc_module_compat_t *mod, lr_block_t *b,
@@ -4001,11 +4796,10 @@ lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
                            unsigned num_indices, const char *name) {
     lr_inst_desc_t inst;
     lr_operand_desc_t *ops;
+    lr_type_t *result_pointee = base_type;
     unsigned trimmed_num_indices = num_indices;
     uint32_t nops;
     uint32_t dest;
-    (void)name;
-
     if (base_type &&
         base_type->kind != LR_TYPE_STRUCT &&
         base_type->kind != LR_TYPE_ARRAY &&
@@ -4038,9 +4832,46 @@ lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
     inst.type = base_type;
     inst.operands = ops;
     inst.num_operands = nops;
+    if (base_type) {
+        for (unsigned i = 0; i < trimmed_num_indices; i++) {
+            lr_gep_step_t step;
+            lr_operand_t idx_op;
+            memset(&idx_op, 0, sizeof(idx_op));
+            idx_op.kind = (lr_operand_kind_t)ops[1u + i].kind;
+            idx_op.type = ops[1u + i].type;
+            idx_op.global_offset = ops[1u + i].global_offset;
+            switch (idx_op.kind) {
+            case LR_VAL_VREG:
+                idx_op.vreg = ops[1u + i].vreg;
+                break;
+            case LR_VAL_IMM_I64:
+                idx_op.imm_i64 = ops[1u + i].imm_i64;
+                break;
+            case LR_VAL_IMM_F64:
+                idx_op.imm_f64 = ops[1u + i].imm_f64;
+                break;
+            case LR_VAL_BLOCK:
+                idx_op.block_id = ops[1u + i].block_id;
+                break;
+            case LR_VAL_GLOBAL:
+                idx_op.global_id = ops[1u + i].global_id;
+                break;
+            case LR_VAL_NULL:
+            case LR_VAL_UNDEF:
+                break;
+            }
+            if (!lr_gep_analyze_step(result_pointee, i == 0u, &idx_op, &step))
+                break;
+            result_pointee = (lr_type_t *)step.next_type;
+        }
+    }
     dest = compat_emit(mod, b, f, &inst);
     free(ops);
-    return wrap_vreg(mod, dest, mod->mod->type_ptr, f);
+    if (result_pointee)
+        return wrap_vreg_named(mod, dest,
+                               lc_get_ptr_type_to(mod, result_pointee),
+                               f, name);
+    return wrap_vreg_named(mod, dest, mod->mod->type_ptr, f, name);
 }
 
 lc_value_t *lc_create_inbounds_gep(lc_module_compat_t *mod, lr_block_t *b,
@@ -4066,10 +4897,14 @@ lc_value_t *lc_create_struct_gep(lc_module_compat_t *mod, lr_block_t *b,
 /* ---- Control flow ---- */
 
 void lc_create_ret(lc_module_compat_t *mod, lr_block_t *b,
-                    lc_value_t *val) {
+                   lc_value_t *val) {
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[1];
-    if (!mod || !b || !val) return;
+    if (!mod || !b) return;
+    if (!val) {
+        lc_create_ret_void(mod, b);
+        return;
+    }
     if (val->kind == LC_VAL_CONST_AGGREGATE && val->type &&
         (val->type->kind == LR_TYPE_STRUCT ||
          val->type->kind == LR_TYPE_ARRAY ||
@@ -4160,7 +4995,6 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
     lr_operand_desc_t *ops;
     uint32_t nops = 1 + num_args;
     uint32_t dest;
-    (void)name;
     if (!mod || !b || !f || !func_type) return safe_undef(mod);
     lr_type_t *ret_type = func_type->func.ret;
     if (!ret_type) ret_type = mod->mod->type_void;
@@ -4190,7 +5024,7 @@ lc_value_t *lc_create_call(lc_module_compat_t *mod, lr_block_t *b,
     free(ops);
     if (is_void)
         return NULL;
-    return wrap_vreg(mod, dest, ret_type, f);
+    return wrap_vreg_named(mod, dest, ret_type, f, name);
 }
 
 /* ---- PHI ---- */
@@ -4294,7 +5128,6 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
     lr_inst_desc_t inst;
     uint32_t dest_vreg;
     lc_phi_node_t *phi;
-    (void)name;
     if (!mod || !b || !f || !ty)
         return NULL;
     memset(&inst, 0, sizeof(inst));
@@ -4305,7 +5138,7 @@ lc_phi_node_t *lc_create_phi(lc_module_compat_t *mod, lr_block_t *b,
     phi = (lc_phi_node_t *)calloc(1, sizeof(lc_phi_node_t));
     if (!phi)
         return NULL;
-    phi->result = wrap_vreg(mod, dest_vreg, ty, f);
+    phi->result = wrap_vreg_named(mod, dest_vreg, ty, f, name);
     phi->result->vreg.phi_node = phi;
     phi->inst = find_phi_inst(b, dest_vreg);
     phi->type = ty;
@@ -4423,7 +5256,6 @@ lc_value_t *lc_create_select(lc_module_compat_t *mod, lr_block_t *b,
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[3];
     uint32_t dest;
-    (void)name;
     if (!mod || !b || !f || !true_val) return safe_undef(mod);
     lr_type_t *ty = true_val->type ? true_val->type : mod->mod->type_i64;
     memset(&inst, 0, sizeof(inst));
@@ -4435,7 +5267,7 @@ lc_value_t *lc_create_select(lc_module_compat_t *mod, lr_block_t *b,
     inst.operands = ops;
     inst.num_operands = 3;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, ty, f);
+    return wrap_vreg_named(mod, dest, ty, f, name);
 }
 
 /* ---- Type conversions ---- */
@@ -4443,49 +5275,42 @@ lc_value_t *lc_create_select(lc_module_compat_t *mod, lr_block_t *b,
 lc_value_t *lc_create_sext(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *val,
                             lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_SEXT, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_SEXT, val, to_type, name);
 }
 
 lc_value_t *lc_create_zext(lc_module_compat_t *mod, lr_block_t *b,
                             lr_func_t *f, lc_value_t *val,
                             lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_ZEXT, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_ZEXT, val, to_type, name);
 }
 
 lc_value_t *lc_create_trunc(lc_module_compat_t *mod, lr_block_t *b,
                              lr_func_t *f, lc_value_t *val,
                              lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_TRUNC, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_TRUNC, val, to_type, name);
 }
 
 lc_value_t *lc_create_bitcast(lc_module_compat_t *mod, lr_block_t *b,
                                lr_func_t *f, lc_value_t *val,
                                lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_BITCAST, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_BITCAST, val, to_type, name);
 }
 
 lc_value_t *lc_create_ptrtoint(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *val,
                                 lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_PTRTOINT, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_PTRTOINT, val, to_type, name);
 }
 
 lc_value_t *lc_create_inttoptr(lc_module_compat_t *mod, lr_block_t *b,
                                 lr_func_t *f, lc_value_t *val,
                                 lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_INTTOPTR, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_INTTOPTR, val, to_type, name);
 }
 
 lc_value_t *lc_create_sitofp(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
-    (void)name;
     if (getenv("LIRIC_TRACE_CASTS")) {
         fprintf(stderr,
                 "[liric_cast] sitofp src_kind=%d src_ty=%d dst_ty=%d imm=%lld\n",
@@ -4496,13 +5321,12 @@ lc_value_t *lc_create_sitofp(lc_module_compat_t *mod, lr_block_t *b,
                                 ? val->const_int.val
                                 : 0));
     }
-    return compat_cast(mod, b, f, LR_OP_SITOFP, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_SITOFP, val, to_type, name);
 }
 
 lc_value_t *lc_create_uitofp(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
-    (void)name;
     if (getenv("LIRIC_TRACE_CASTS")) {
         fprintf(stderr,
                 "[liric_cast] uitofp src_kind=%d src_ty=%d dst_ty=%d imm=%lld\n",
@@ -4513,39 +5337,35 @@ lc_value_t *lc_create_uitofp(lc_module_compat_t *mod, lr_block_t *b,
                                 ? val->const_int.val
                                 : 0));
     }
-    return compat_cast(mod, b, f, LR_OP_UITOFP, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_UITOFP, val, to_type, name);
 }
 
 lc_value_t *lc_create_fptosi(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_FPTOSI, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_FPTOSI, val, to_type, name);
 }
 
 lc_value_t *lc_create_fptoui(lc_module_compat_t *mod, lr_block_t *b,
                               lr_func_t *f, lc_value_t *val,
                               lr_type_t *to_type, const char *name) {
-    (void)name;
-    return compat_cast(mod, b, f, LR_OP_FPTOUI, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_FPTOUI, val, to_type, name);
 }
 
 lc_value_t *lc_create_fpext(lc_module_compat_t *mod, lr_block_t *b,
                              lr_func_t *f, lc_value_t *val,
                              lr_type_t *to_type, const char *name) {
-    (void)name;
     if (val && val->type && to_type && val->type->kind == to_type->kind)
         return val;
-    return compat_cast(mod, b, f, LR_OP_FPEXT, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_FPEXT, val, to_type, name);
 }
 
 lc_value_t *lc_create_fptrunc(lc_module_compat_t *mod, lr_block_t *b,
                                lr_func_t *f, lc_value_t *val,
                                lr_type_t *to_type, const char *name) {
-    (void)name;
     if (val && val->type && to_type && val->type->kind == to_type->kind)
         return val;
-    return compat_cast(mod, b, f, LR_OP_FPTRUNC, val, to_type);
+    return compat_cast(mod, b, f, LR_OP_FPTRUNC, val, to_type, name);
 }
 
 lc_value_t *lc_create_sext_or_trunc(lc_module_compat_t *mod, lr_block_t *b,
@@ -4579,7 +5399,6 @@ lc_value_t *lc_create_extractvalue(lc_module_compat_t *mod, lr_block_t *b,
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[1];
     uint32_t dest;
-    (void)name;
     if (!mod || !b || !f || !agg) return safe_undef(mod);
     lr_module_t *m = mod->mod;
 
@@ -4609,7 +5428,7 @@ lc_value_t *lc_create_extractvalue(lc_module_compat_t *mod, lr_block_t *b,
     inst.indices = indices;
     inst.num_indices = num_indices;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, result_ty, f);
+    return wrap_vreg_named(mod, dest, result_ty, f, name);
 }
 
 lc_value_t *lc_create_insertvalue(lc_module_compat_t *mod, lr_block_t *b,
@@ -4619,7 +5438,6 @@ lc_value_t *lc_create_insertvalue(lc_module_compat_t *mod, lr_block_t *b,
     lr_inst_desc_t inst;
     lr_operand_desc_t ops[2];
     uint32_t dest;
-    (void)name;
     if (!mod || !b || !f || !agg) return safe_undef(mod);
     memset(&inst, 0, sizeof(inst));
     ops[0] = lc_value_to_desc(agg);
@@ -4631,7 +5449,7 @@ lc_value_t *lc_create_insertvalue(lc_module_compat_t *mod, lr_block_t *b,
     inst.indices = indices;
     inst.num_indices = num_indices;
     dest = compat_emit(mod, b, f, &inst);
-    return wrap_vreg(mod, dest, agg->type, f);
+    return wrap_vreg_named(mod, dest, agg->type, f, name);
 }
 
 /* ---- MemCpy / MemSet ---- */
@@ -4763,12 +5581,12 @@ static void compat_maybe_dump_final_ir(lc_module_compat_t *mod) {
     if (!f)
         return;
     fprintf(f, "; ---- module ----\n");
-    compat_dump_module(mod->mod, f);
+    compat_dump_module(mod, f);
     if (mod->session) {
         session_mod = lr_session_module(mod->session);
         if (session_mod && session_mod != mod->mod) {
             fprintf(f, "\n; ---- session module ----\n");
-            compat_dump_module(session_mod, f);
+            lr_module_dump(session_mod, f);
         }
     }
     fprintf(f, "\n");

@@ -571,9 +571,14 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
                                                  int linkage,
                                                  char *out_name,
                                                  size_t out_name_cap) {
-    char suffix[32];
-    size_t n;
+    lr_module_t *m = NULL;
+    const lr_global_t *g = NULL;
     const char *local_tag = ".__liric_local.";
+    char unique_base[4096];
+    char suffix[32];
+    bool collision = false;
+    unsigned ordinal = 0;
+    size_t n;
     if (!name)
         name = "";
     if (!compat || !name[0] || !lr_llvm_compat_is_local_global_linkage(linkage) ||
@@ -581,13 +586,46 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
         lr_copy_out_string(name, out_name, out_name_cap, &n);
         return n;
     }
+    m = lc_module_get_ir((lc_module_compat_t *)compat);
+    if (snprintf(unique_base, sizeof(unique_base), "%s", name) >= (int)sizeof(unique_base)) {
+        lr_copy_out_string(name, out_name, out_name_cap, &n);
+        return n;
+    }
+    if (m) {
+        do {
+            size_t candidate_len = strlen(unique_base);
+            collision = false;
+            for (g = m->first_global; g; g = g->next) {
+                const char *tag;
+                size_t base_len;
+                if (!g->name)
+                    continue;
+                tag = strstr(g->name, local_tag);
+                if (!tag)
+                    continue;
+                base_len = (size_t)(tag - g->name);
+                if (base_len == candidate_len &&
+                    strncmp(g->name, unique_base, candidate_len) == 0) {
+                    collision = true;
+                    break;
+                }
+            }
+            if (!collision)
+                break;
+            ordinal++;
+            if (snprintf(unique_base, sizeof(unique_base), "%s.%u",
+                         name, ordinal) >= (int)sizeof(unique_base)) {
+                break;
+            }
+        } while (1);
+    }
     snprintf(suffix, sizeof(suffix), "%" PRIxPTR, (uintptr_t)compat);
-    n = strlen(name) + strlen(local_tag) + strlen(suffix);
+    n = strlen(unique_base) + strlen(local_tag) + strlen(suffix);
     if (out_name && out_name_cap > 0) {
         size_t w = 0;
         out_name[0] = '\0';
-        if (name[0]) {
-            strncat(out_name, name, out_name_cap - 1);
+        if (unique_base[0]) {
+            strncat(out_name, unique_base, out_name_cap - 1);
             w = strlen(out_name);
         }
         if (w < out_name_cap - 1)

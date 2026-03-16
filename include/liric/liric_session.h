@@ -143,6 +143,7 @@ int lr_session_add_phi_copy(lr_session_t *s, uint32_t pred_block_id,
                             const lr_phi_copy_desc_t *copy,
                             lr_error_t *err);
 int lr_session_func_end(lr_session_t *s, void **out_addr, lr_error_t *err);
+int lr_session_func_end_preserve_ir(lr_session_t *s, lr_error_t *err);
 
 /* ---- Blocks ------------------------------------------------------------ */
 

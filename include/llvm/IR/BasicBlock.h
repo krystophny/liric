@@ -24,7 +24,20 @@ namespace detail {
 
 class BasicBlock : public Value {
 public:
-    using iterator = Instruction *;
+    class iterator {
+    public:
+        enum kind_t {
+            at_end,
+            first_insertion,
+        };
+
+        explicit iterator(kind_t kind = at_end) : kind_(kind) {}
+
+        kind_t kind() const { return kind_; }
+
+    private:
+        kind_t kind_;
+    };
 
     lr_block_t *impl_block() const {
         return lc_value_get_block(impl());
@@ -67,8 +80,10 @@ public:
         return !b || !b->first;
     }
 
-    iterator end() { return nullptr; }
-    iterator getFirstInsertionPt() { return nullptr; }
+    iterator end() { return iterator(iterator::at_end); }
+    iterator getFirstInsertionPt() {
+        return iterator(iterator::first_insertion);
+    }
 
     Instruction *getTerminator() const {
         lr_block_t *b = impl_block();
