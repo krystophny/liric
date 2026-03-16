@@ -671,6 +671,7 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
     /* _start for C-style main(int argc, char **argv):
      *   mov rdi, [rsp]
      *   lea rsi, [rsp+8]
+     *   and rsp, -16
      *   call <entry_symbol>
      *   mov edi, eax
      *   mov eax, 60
@@ -679,6 +680,7 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
     static const uint8_t start_stub_main_abi[] = {
         0x48, 0x8B, 0x3C, 0x24,
         0x48, 0x8D, 0x74, 0x24, 0x08,
+        0x48, 0x83, 0xE4, 0xF0,
         0xE8, 0x00, 0x00, 0x00, 0x00,
         0x89, 0xC7,
         0xB8, 0x3C, 0x00, 0x00, 0x00,
@@ -689,7 +691,7 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
                                                : start_stub_legacy;
     size_t start_stub_size = entry_is_main ? sizeof(start_stub_main_abi)
                                            : sizeof(start_stub_legacy);
-    size_t entry_call_off = entry_is_main ? 10u : 1u;
+    size_t entry_call_off = entry_is_main ? 14u : 1u;
 
     uint32_t *got_slot_off = NULL;
     if (oc->num_symbols > 0) {
@@ -1001,29 +1003,43 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
 
     /* _start legacy:
      *   call <entry>
-     *   mov edi, eax
+     *   mov ebx, eax
+     *   xor edi, edi
+     *   call <fflush_trampoline>
+     *   mov edi, ebx
      *   call <exit_trampoline>
      *   hlt
      * Using libc exit() instead of raw syscall ensures stdio buffers are flushed. */
     static const uint8_t start_stub_legacy[] = {
         0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (entry) */
-        0x89, 0xC7,                      /* mov edi, eax */
+        0x89, 0xC3,                      /* mov ebx, eax */
+        0x31, 0xFF,                      /* xor edi, edi */
+        0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (fflush trampoline) */
+        0x89, 0xDF,                      /* mov edi, ebx */
         0xE8, 0x00, 0x00, 0x00, 0x00,  /* call rel32 (exit trampoline) */
         0xF4                             /* hlt (unreachable) */
     };
     /* _start for C-style main(int argc, char **argv):
      *   mov rdi, [rsp]
      *   lea rsi, [rsp+8]
+     *   and rsp, -16
      *   call <entry>
-     *   mov edi, eax
+     *   mov ebx, eax
+     *   xor edi, edi
+     *   call <fflush_trampoline>
+     *   mov edi, ebx
      *   call <exit_trampoline>
      *   hlt
      */
     static const uint8_t start_stub_main_abi[] = {
         0x48, 0x8B, 0x3C, 0x24,
         0x48, 0x8D, 0x74, 0x24, 0x08,
+        0x48, 0x83, 0xE4, 0xF0,
         0xE8, 0x00, 0x00, 0x00, 0x00,
-        0x89, 0xC7,
+        0x89, 0xC3,
+        0x31, 0xFF,
+        0xE8, 0x00, 0x00, 0x00, 0x00,
+        0x89, 0xDF,
         0xE8, 0x00, 0x00, 0x00, 0x00,
         0xF4
     };
@@ -1032,8 +1048,9 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                                                : start_stub_legacy;
     size_t start_stub_size = entry_is_main ? sizeof(start_stub_main_abi)
                                            : sizeof(start_stub_legacy);
-    size_t entry_call_off = entry_is_main ? 10u : 1u;
-    size_t exit_call_off = entry_is_main ? 17u : 8u;
+    size_t entry_call_off = entry_is_main ? 14u : 1u;
+    size_t fflush_call_off = entry_is_main ? 23u : 10u;
+    size_t exit_call_off = entry_is_main ? 30u : 17u;
 
     static const char interp[] = "/lib64/ld-linux-x86-64.so.2";
     const size_t interp_size = sizeof(interp); /* includes NUL */
@@ -1048,6 +1065,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     uint32_t num_undef = 0;
     uint32_t num_textrel_abs64 = 0;
     bool exit_in_oc = false;
+    bool fflush_in_oc = false;
     uint8_t *undef_needed = NULL;
     if (oc->num_symbols > 0) {
         undef_needed = (uint8_t *)calloc(oc->num_symbols, 1);
@@ -1064,15 +1082,18 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                 num_undef++;
                 if (strcmp(oc->symbols[rel->symbol_idx].name, "exit") == 0)
                     exit_in_oc = true;
+                if (strcmp(oc->symbols[rel->symbol_idx].name, "fflush") == 0)
+                    fflush_in_oc = true;
             }
             if (rel->type == LR_RELOC_X86_64_64)
                 num_textrel_abs64++;
         }
     }
 
-    /* num_dynimport = referenced undefined symbols + synthetic "exit" if needed */
-    uint32_t num_dynimport = num_undef + (exit_in_oc ? 0 : 1);
+    /* num_dynimport = referenced undefined symbols + synthetic start-stub imports if needed */
+    uint32_t num_dynimport = num_undef + (exit_in_oc ? 0 : 1) + (fflush_in_oc ? 0 : 1);
     uint32_t exit_dyn_idx = 0; /* 0-based index into dyn_* arrays */
+    uint32_t fflush_dyn_idx = 0; /* 0-based index into dyn_* arrays */
 
     const char **dyn_names = (const char **)malloc(num_dynimport * sizeof(char *));
     uint32_t *dyn_oc_idx = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
@@ -1091,6 +1112,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                 sym_to_dynsym[i] = di + 1;
                 if (strcmp(oc->symbols[i].name, "exit") == 0)
                     exit_dyn_idx = di;
+                if (strcmp(oc->symbols[i].name, "fflush") == 0)
+                    fflush_dyn_idx = di;
                 di++;
             }
         }
@@ -1098,6 +1121,12 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             dyn_names[di] = "exit";
             dyn_oc_idx[di] = UINT32_MAX;
             exit_dyn_idx = di;
+            di++;
+        }
+        if (!fflush_in_oc) {
+            dyn_names[di] = "fflush";
+            dyn_oc_idx[di] = UINT32_MAX;
+            fflush_dyn_idx = di;
             di++;
         }
     }
@@ -1660,6 +1689,15 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
                           entry_vaddr + entry_call_off,
                           code_vaddr + entry_sym->offset) != 0)
         goto fail;
+
+    /* Patch _start call to fflush(NULL) trampoline */
+    {
+        uint64_t fflush_tramp_va = tramp_vaddr + (uint64_t)fflush_dyn_idx * 6;
+        uint64_t fflush_call_ip = entry_vaddr + fflush_call_off;
+        if (patch_rel32_vaddr(buf, total_size, (uint32_t)(text_off + fflush_call_off),
+                              fflush_call_ip, fflush_tramp_va) != 0)
+            goto fail;
+    }
 
     /* Patch _start call to exit trampoline */
     {

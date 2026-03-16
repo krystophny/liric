@@ -101,6 +101,69 @@ static int run_exe_expect(const std::string &path, int expect_rc) {
 #endif
 }
 
+static int run_exe_capture_stdout(const std::string &path, int expect_rc,
+                                  std::string &stdout_out) {
+#if defined(__unix__) || defined(__APPLE__)
+    char capture_path[] = "/tmp/liric_llvm_stdout_XXXXXX";
+    int capture_fd = mkstemp(capture_path);
+    int status = 0;
+    if (capture_fd < 0) {
+        std::fprintf(stderr, "mkstemp failed: %s\n", std::strerror(errno));
+        return 1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        std::fprintf(stderr, "fork failed: %s\n", std::strerror(errno));
+        close(capture_fd);
+        unlink(capture_path);
+        return 1;
+    }
+    if (pid == 0) {
+        if (dup2(capture_fd, STDOUT_FILENO) < 0)
+            _exit(127);
+        close(capture_fd);
+        execl(path.c_str(), path.c_str(), (char *)NULL);
+        _exit(127);
+    }
+
+    close(capture_fd);
+    if (waitpid(pid, &status, 0) < 0) {
+        std::fprintf(stderr, "waitpid failed: %s\n", std::strerror(errno));
+        unlink(capture_path);
+        return 1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != expect_rc) {
+        unlink(capture_path);
+        return 1;
+    }
+
+    FILE *fp = std::fopen(capture_path, "rb");
+    if (!fp) {
+        std::fprintf(stderr, "fopen failed: %s\n", std::strerror(errno));
+        unlink(capture_path);
+        return 1;
+    }
+    char buf[256];
+    stdout_out.clear();
+    while (true) {
+        size_t n = std::fread(buf, 1, sizeof(buf), fp);
+        if (n > 0)
+            stdout_out.append(buf, n);
+        if (n < sizeof(buf))
+            break;
+    }
+    std::fclose(fp);
+    unlink(capture_path);
+    return 0;
+#else
+    (void)path;
+    (void)expect_rc;
+    stdout_out.clear();
+    return 0;
+#endif
+}
+
 static void build_main_ret42_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
     llvm::FunctionType *fty = llvm::FunctionType::get(i32, false);
@@ -109,6 +172,67 @@ static void build_main_ret42_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
     llvm::IRBuilder<> b(entry, ctx);
     b.CreateRet(llvm::ConstantInt::get(i32, 42));
+}
+
+static void build_main_ret_private_global_module(llvm::Module &mod,
+                                                 llvm::LLVMContext &ctx) {
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    const int32_t init = 42;
+    llvm::GlobalVariable *answer = mod.createGlobalVariable(
+        "private_answer", i32, true, llvm::GlobalValue::InternalLinkage,
+        &init, sizeof(init));
+    if (!answer)
+        return;
+
+    llvm::FunctionType *fty = llvm::FunctionType::get(i32, false);
+    llvm::Function *main_fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage, "main", mod);
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
+    llvm::IRBuilder<> b(entry, ctx);
+    llvm::Value *loaded = b.CreateLoad(i32, answer, "loaded");
+    b.CreateRet(loaded);
+}
+
+static void build_main_ret_duplicate_private_global_module(llvm::Module &mod,
+                                                           llvm::LLVMContext &ctx) {
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    const int32_t init_a = 7;
+    const int32_t init_b = 42;
+    llvm::GlobalVariable *first = mod.createGlobalVariable(
+        "dup_private_answer", i32, true, llvm::GlobalValue::InternalLinkage,
+        &init_a, sizeof(init_a));
+    llvm::GlobalVariable *second = mod.createGlobalVariable(
+        "dup_private_answer", i32, true, llvm::GlobalValue::InternalLinkage,
+        &init_b, sizeof(init_b));
+    if (!first || !second)
+        return;
+
+    llvm::FunctionType *fty = llvm::FunctionType::get(i32, false);
+    llvm::Function *main_fn = llvm::Function::Create(
+        fty, llvm::GlobalValue::ExternalLinkage, "main", mod);
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
+    llvm::IRBuilder<> b(entry, ctx);
+    llvm::Value *loaded = b.CreateLoad(i32, second, "loaded");
+    b.CreateRet(loaded);
+}
+
+static void build_main_puts_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::Type *i8 = llvm::Type::getInt8Ty(ctx);
+    llvm::PointerType *i8ptr = llvm::PointerType::getUnqual(i8);
+
+    llvm::FunctionType *puts_ty = llvm::FunctionType::get(i32, {i8ptr}, false);
+    llvm::FunctionCallee puts_fn = mod.getOrInsertFunction("puts", puts_ty);
+
+    llvm::FunctionType *main_ty = llvm::FunctionType::get(i32, false);
+    llvm::Function *main_fn = llvm::Function::Create(
+        main_ty, llvm::GlobalValue::ExternalLinkage, "main", mod);
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
+    llvm::IRBuilder<> b(entry, ctx);
+
+    llvm::Value *msg = b.CreateGlobalStringPtr("HHH", "puts_msg");
+    b.CreateCall(puts_fn, {msg});
+    b.CreateRet(llvm::ConstantInt::get(i32, 0));
 }
 
 static int test_wrapper_object_emit_mode_llvm(void) {
@@ -172,6 +296,92 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
     return 0;
 }
 
+static int test_wrapper_to_api_executable_roundtrip_with_private_global(void) {
+    if (!lr_llvm_jit_is_available())
+        return 0;
+
+    llvm::LLVMContext ctx;
+    lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
+    llvm::Module mod("roundtrip_exe_private_global", ctx);
+    build_main_ret_private_global_module(mod, ctx);
+    std::string exe_path = make_temp_path("exe_private_global");
+
+    static const char *runtime_ll =
+        "define i32 @__lfortran_rt_dummy() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
+                                       runtime_ll, std::strlen(runtime_ll));
+    TEST_ASSERT_EQ(rc, 0, "compat executable emission with private global");
+
+#if defined(__unix__) || defined(__APPLE__)
+    rc = run_exe_expect(exe_path, 42);
+    TEST_ASSERT_EQ(rc, 0, "private-global executable exits with 42");
+#endif
+
+    std::remove(exe_path.c_str());
+    return 0;
+}
+
+static int test_wrapper_to_api_executable_roundtrip_with_duplicate_private_globals(void) {
+    if (!lr_llvm_jit_is_available())
+        return 0;
+
+    llvm::LLVMContext ctx;
+    lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
+    llvm::Module mod("roundtrip_exe_duplicate_private_globals", ctx);
+    build_main_ret_duplicate_private_global_module(mod, ctx);
+    std::string exe_path = make_temp_path("exe_duplicate_private_globals");
+
+    static const char *runtime_ll =
+        "define i32 @__lfortran_rt_dummy() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
+                                       runtime_ll, std::strlen(runtime_ll));
+    TEST_ASSERT_EQ(rc, 0, "compat executable emission with duplicate private globals");
+
+#if defined(__unix__) || defined(__APPLE__)
+    rc = run_exe_expect(exe_path, 42);
+    TEST_ASSERT_EQ(rc, 0, "duplicate-private-global executable exits with 42");
+#endif
+
+    std::remove(exe_path.c_str());
+    return 0;
+}
+
+static int test_wrapper_to_api_executable_roundtrip_flushes_stdout(void) {
+    if (!lr_llvm_jit_is_available())
+        return 0;
+
+    llvm::LLVMContext ctx;
+    lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
+    llvm::Module mod("roundtrip_exe_stdout", ctx);
+    build_main_puts_module(mod, ctx);
+    std::string exe_path = make_temp_path("exe_stdout");
+
+    static const char *runtime_ll =
+        "define i32 @__lfortran_rt_dummy() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
+                                       runtime_ll, std::strlen(runtime_ll));
+    TEST_ASSERT_EQ(rc, 0, "compat executable emission with stdout");
+
+#if defined(__unix__) || defined(__APPLE__)
+    std::string stdout_text;
+    rc = run_exe_capture_stdout(exe_path, 0, stdout_text);
+    TEST_ASSERT_EQ(rc, 0, "stdout executable exits with 0");
+    TEST_ASSERT(stdout_text == "HHH\n", "stdout from emitted executable");
+#endif
+
+    std::remove(exe_path.c_str());
+    return 0;
+}
+
 static int test_wrapper_jit_mode_llvm(void) {
     if (!lr_llvm_jit_is_available())
         return 0;
@@ -226,6 +436,9 @@ int main(void) {
 
     RUN_TEST(test_wrapper_object_emit_mode_llvm);
     RUN_TEST(test_wrapper_to_api_executable_roundtrip);
+    RUN_TEST(test_wrapper_to_api_executable_roundtrip_with_private_global);
+    RUN_TEST(test_wrapper_to_api_executable_roundtrip_with_duplicate_private_globals);
+    RUN_TEST(test_wrapper_to_api_executable_roundtrip_flushes_stdout);
     RUN_TEST(test_wrapper_jit_mode_llvm);
 
     std::fprintf(stderr, "\nSummary: %d/%d passed, %d failed\n",

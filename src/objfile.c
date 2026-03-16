@@ -940,6 +940,181 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
     return idx;
 }
 
+static void lr_obj_bind_scoped_local_aliases(lr_objfile_ctx_t *oc,
+                                             const char *base_name,
+                                             uint8_t section,
+                                             uint32_t offset,
+                                             bool is_local,
+                                             bool is_weak) {
+    static const char local_tag[] = ".__liric_local.";
+    size_t base_len;
+    uint32_t i;
+
+    if (!oc || !base_name || !base_name[0] || !is_local)
+        return;
+    if (strstr(base_name, local_tag) != NULL)
+        return;
+
+    base_len = strlen(base_name);
+    for (i = 0; i < oc->num_symbols; i++) {
+        lr_obj_symbol_t *sym = &oc->symbols[i];
+        if (!sym->name || sym->is_defined)
+            continue;
+        if (strncmp(sym->name, base_name, base_len) != 0)
+            continue;
+        if (strncmp(sym->name + base_len, local_tag,
+                    sizeof(local_tag) - 1u) != 0) {
+            continue;
+        }
+        sym->is_defined = true;
+        sym->section = section;
+        sym->offset = offset;
+        sym->is_local = true;
+        if (is_weak)
+            sym->is_weak = true;
+    }
+}
+
+static const char *obj_lookup_module_symbol_name(const lr_module_t *m,
+                                                 const char *name) {
+    const lr_global_t *g;
+    const lr_func_t *f;
+
+    if (!m || !name || !name[0])
+        return NULL;
+    for (g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return g->name;
+    }
+    for (f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f->name;
+    }
+    return NULL;
+}
+
+static bool obj_split_numeric_suffix(const char *name,
+                                     char *root,
+                                     size_t root_cap,
+                                     size_t *ordinal_out) {
+    const char *dot = NULL;
+    const char *p = NULL;
+    size_t root_len = 0;
+    size_t ordinal = 0;
+
+    if (ordinal_out)
+        *ordinal_out = 0;
+    if (!name || !name[0] || !root || root_cap == 0)
+        return false;
+
+    dot = strrchr(name, '.');
+    if (!dot || dot == name || !dot[1])
+        return false;
+    for (p = dot + 1; *p; p++) {
+        if (*p < '0' || *p > '9')
+            return false;
+        ordinal = ordinal * 10u + (size_t)(*p - '0');
+    }
+
+    root_len = (size_t)(dot - name);
+    if (root_len == 0 || root_len >= root_cap)
+        return false;
+    memcpy(root, name, root_len);
+    root[root_len] = '\0';
+    if (ordinal_out)
+        *ordinal_out = ordinal;
+    return true;
+}
+
+static bool obj_symbol_name_matches_family(const char *candidate,
+                                           const char *root) {
+    size_t root_len;
+    const char *suffix;
+
+    if (!candidate || !root)
+        return false;
+    if (strcmp(candidate, root) == 0)
+        return true;
+
+    root_len = strlen(root);
+    if (strncmp(candidate, root, root_len) != 0)
+        return false;
+    suffix = candidate + root_len;
+    if (*suffix != '.')
+        return false;
+    suffix++;
+    if (!*suffix)
+        return false;
+    while (*suffix) {
+        if (*suffix < '0' || *suffix > '9')
+            return false;
+        suffix++;
+    }
+    return true;
+}
+
+static const char *obj_lookup_module_symbol_family_ordinal(const lr_module_t *m,
+                                                           const char *name) {
+    char root[4096];
+    size_t ordinal = 0;
+    size_t seen = 0;
+    const lr_global_t *g;
+    const lr_func_t *f;
+
+    if (!m || !name || !name[0])
+        return NULL;
+    if (!obj_split_numeric_suffix(name, root, sizeof(root), &ordinal))
+        return NULL;
+
+    for (g = m->first_global; g; g = g->next) {
+        if (!g->name || !obj_symbol_name_matches_family(g->name, root))
+            continue;
+        if (seen == ordinal)
+            return g->name;
+        seen++;
+    }
+    for (f = m->first_func; f; f = f->next) {
+        if (!f->name || !obj_symbol_name_matches_family(f->name, root))
+            continue;
+        if (seen == ordinal)
+            return f->name;
+        seen++;
+    }
+
+    return NULL;
+}
+
+static const char *obj_resolve_blob_reloc_symbol_name(const lr_module_t *m,
+                                                      const char *name) {
+    static const char local_tag[] = ".__liric_local.";
+    const char *scoped;
+    const char *suffix;
+    size_t base_len;
+    char base_name[4096];
+
+    if (!m || !name || !name[0])
+        return name;
+
+    scoped = obj_lookup_module_symbol_name(m, name);
+    if (scoped)
+        return scoped;
+
+    suffix = strstr(name, local_tag);
+    if (!suffix)
+        return name;
+
+    base_len = (size_t)(suffix - name);
+    if (base_len == 0 || base_len >= sizeof(base_name))
+        return name;
+    memcpy(base_name, name, base_len);
+    base_name[base_len] = '\0';
+
+    scoped = obj_lookup_module_symbol_family_ordinal(m, base_name);
+    if (!scoped)
+        scoped = obj_lookup_module_symbol_name(m, base_name);
+    return scoped ? scoped : name;
+}
+
 void lr_obj_add_reloc(lr_objfile_ctx_t *oc, uint32_t offset,
                        uint32_t symbol_idx, uint8_t type) {
     if (oc->num_relocs == oc->reloc_cap) {
@@ -1192,6 +1367,10 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
             return -1;
         }
         out->ctx.symbols[gsym].is_local = g->is_local;
+        lr_obj_bind_scoped_local_aliases(&out->ctx, g->name, 2,
+                                         (uint32_t)out->data_pos,
+                                         g->is_local,
+                                         out->ctx.symbols[gsym].is_weak);
 
         for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
             uint32_t sym_idx = lr_obj_ensure_symbol(
@@ -1279,10 +1458,12 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
 
         for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
             const lr_cached_reloc_t *rel = &blob->relocs[ri];
+            const char *symbol_name;
             if (!rel->symbol_name || !rel->symbol_name[0])
                 continue;
+            symbol_name = obj_resolve_blob_reloc_symbol_name(m, rel->symbol_name);
             uint32_t reloc_sym = lr_obj_ensure_symbol(&out->ctx,
-                                                      rel->symbol_name,
+                                                      symbol_name,
                                                       false, 0, 0);
             if (reloc_sym == UINT32_MAX) {
                 obj_build_result_destroy(out);

@@ -3006,6 +3006,10 @@ static bool collect_named_types_from_type(lr_named_type_list_t *list,
     case LR_TYPE_VECTOR:
         return collect_named_types_from_type(list, ty->array.elem);
     case LR_TYPE_STRUCT:
+        if (ty->struc.name && ty->struc.name[0] &&
+            named_type_list_has(list, ty)) {
+            return true;
+        }
         if (!named_type_list_push(list, ty))
             return false;
         for (uint32_t i = 0; i < ty->struc.num_fields; i++) {

@@ -1196,6 +1196,43 @@ static int test_irbuilder_memory() {
     return 0;
 }
 
+static int test_recursive_named_struct_print() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("recursive_named_struct_print", ctx);
+
+    llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
+    llvm::StructType *node = llvm::StructType::create(ctx, "node");
+    TEST_ASSERT(node != nullptr, "named recursive struct created");
+
+    llvm::Type *fields[] = {i32, llvm::PointerType::getUnqual(node)};
+    node->setBody(fields);
+    TEST_ASSERT(!node->isOpaque(), "recursive struct body set");
+
+    llvm::FunctionType *ft = llvm::FunctionType::get(i32, false);
+    llvm::Function *fn = mod.createFunction("recursive_node_probe", ft, false);
+    TEST_ASSERT(fn != nullptr, "probe function created");
+    llvm::BasicBlock *bb = llvm::BasicBlock::Create(ctx, "entry", fn);
+    TEST_ASSERT(bb != nullptr, "probe block created");
+
+    llvm::IRBuilder<> builder(ctx);
+    builder.SetModule(mod.getCompat());
+    builder.SetInsertPointForFunction(fn);
+    builder.SetInsertPoint(bb);
+
+    llvm::Value *slot = builder.CreateAlloca(node, nullptr, "slot");
+    TEST_ASSERT(slot != nullptr, "recursive struct alloca created");
+    builder.CreateRet(llvm::ConstantInt::get(i32, 0));
+
+    std::string ir;
+    llvm::raw_string_ostream os(ir);
+    mod.print(os, nullptr);
+    TEST_ASSERT(ir.find("%node = type { i32, ptr }") != std::string::npos,
+                "recursive named struct printed once");
+    TEST_ASSERT(ir.find("alloca %node") != std::string::npos,
+                "function body keeps recursive struct alloca");
+    return 0;
+}
+
 static int test_opaque_pointer_load_without_bitcast() {
     llvm::LLVMContext ctx;
     llvm::Module mod("opaque_pointer_load_without_bitcast", ctx);
@@ -2438,6 +2475,7 @@ int main() {
     RUN_TEST(test_irbuilder_arithmetic);
     RUN_TEST(test_irbuilder_control_flow);
     RUN_TEST(test_irbuilder_memory);
+    RUN_TEST(test_recursive_named_struct_print);
     RUN_TEST(test_opaque_pointer_load_without_bitcast);
     RUN_TEST(test_alloca_casting_precision);
     RUN_TEST(test_irbuilder_casts);
