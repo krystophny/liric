@@ -1152,11 +1152,73 @@ static char *dup_cstr(const char *s) {
     return out;
 }
 
+static int sibling_data_suffix_in_use(lc_module_compat_t *mod, const char *name) {
+    static const char data_suffix[] = "_data";
+    static const char local_tag[] = ".__liric_local.";
+    const char *dot;
+    const char *expected;
+    size_t base_len;
+    size_t suffix_len;
+    char candidate[4096];
+    char expected_buf[4096];
+
+    if (!mod || !mod->mod || !name || !name[0])
+        return 0;
+    dot = strrchr(name, '.');
+    if (!dot || dot == name || !isdigit((unsigned char)dot[1]))
+        return 0;
+    base_len = (size_t)(dot - name);
+    suffix_len = strlen(dot);
+
+    if (base_len >= sizeof(candidate))
+        return 0;
+    if (base_len >= sizeof(data_suffix) - 1 &&
+        memcmp(name + base_len - (sizeof(data_suffix) - 1),
+               data_suffix, sizeof(data_suffix) - 1) == 0) {
+        size_t root_len = base_len - (sizeof(data_suffix) - 1);
+        if (root_len + suffix_len >= sizeof(candidate))
+            return 0;
+        memcpy(candidate, name, root_len);
+        memcpy(candidate + root_len, dot, suffix_len + 1);
+    } else {
+        if (base_len + (sizeof(data_suffix) - 1) + suffix_len >= sizeof(candidate))
+            return 0;
+        memcpy(candidate, name, base_len);
+        memcpy(candidate + base_len, data_suffix, sizeof(data_suffix) - 1);
+        memcpy(candidate + base_len + (sizeof(data_suffix) - 1), dot, suffix_len + 1);
+    }
+
+    expected = candidate;
+    if (strlen(expected) >= sizeof(expected_buf))
+        return 0;
+    memcpy(expected_buf, expected, strlen(expected) + 1);
+
+    if (find_func_linear(mod->mod, expected) != NULL ||
+        find_global_linear(mod->mod, expected) != NULL) {
+        return 1;
+    }
+
+    for (const lr_global_t *g = mod->mod->first_global; g; g = g->next) {
+        const char *tag;
+        size_t visible_len;
+        if (!g->name)
+            continue;
+        tag = strstr(g->name, local_tag);
+        visible_len = tag ? (size_t)(tag - g->name) : strlen(g->name);
+        if (visible_len == strlen(expected_buf) &&
+            strncmp(g->name, expected_buf, visible_len) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int symbol_name_in_use(lc_module_compat_t *mod, const char *name) {
     if (!mod || !mod->mod || !name || !name[0])
         return 0;
     return find_func_linear(mod->mod, name) != NULL ||
-           find_global_linear(mod->mod, name) != NULL;
+           find_global_linear(mod->mod, name) != NULL ||
+           sibling_data_suffix_in_use(mod, name);
 }
 
 static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
@@ -2310,7 +2372,7 @@ static void compat_dump_module(lc_module_compat_t *mod, FILE *out) {
     }
     lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
-        lr_dump_global(g, out);
+        lr_dump_global(m, g, out);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
     for (lr_func_t *f = m->first_func; f; f = f->next) {
@@ -2700,7 +2762,7 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
         g->is_external = true;
         cache_global_by_symbol(mod, sym_id, g);
     }
-    return lc_value_global(mod, sym_id, m->type_ptr, g->name);
+    return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
 /* ---- Compat utility helpers ---- */
@@ -3902,7 +3964,7 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
         if (sym_id == UINT32_MAX)
             return safe_undef(mod);
         cache_global_by_symbol(mod, sym_id, g);
-        return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+        return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
     }
     unique_name = make_unique_symbol_name(mod, actual_name);
     if (!unique_name)
@@ -3918,7 +3980,7 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
-    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+    return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
 lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
@@ -3937,7 +3999,7 @@ lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
-    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+    return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
 lc_value_t *lc_global_lookup(lc_module_compat_t *mod, const char *name) {
@@ -3948,7 +4010,7 @@ lc_value_t *lc_global_lookup(lc_module_compat_t *mod, const char *name) {
     g = lookup_global_cached(mod, name, &sym_id);
     if (!g || sym_id == UINT32_MAX)
         return NULL;
-    return lc_value_global(mod, sym_id, mod->mod->type_ptr, g->name);
+    return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
 int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,

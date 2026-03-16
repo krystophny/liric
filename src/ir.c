@@ -1535,7 +1535,59 @@ static const char *display_symbol_name(const char *name, size_t *len_out) {
     return name;
 }
 
-static void print_display_symbol_ref(FILE *out, char prefix, const char *name) {
+static const char *display_name_last_dot(const char *name, size_t len) {
+    if (!name || len == 0)
+        return NULL;
+    for (size_t i = len; i > 0; i--) {
+        if (name[i - 1] == '.')
+            return name + (i - 1);
+    }
+    return NULL;
+}
+
+static uint32_t count_sibling_data_suffixes(const lr_module_t *m,
+                                            const char *base,
+                                            size_t base_len,
+                                            uint32_t upto_suffix) {
+    uint32_t count = 0;
+    char expected[4096];
+    if (!m || !base || base_len == 0)
+        return 0;
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        size_t visible_len = 0;
+        const char *visible = display_symbol_name(g->name, &visible_len);
+        const char *dot;
+        unsigned long suffix;
+        char *endptr = NULL;
+        if (!visible || visible_len <= base_len + sizeof("_data"))
+            continue;
+        dot = display_name_last_dot(visible, visible_len);
+        if (!dot || dot <= visible || !isdigit((unsigned char)dot[1]))
+            continue;
+        if ((size_t)(dot - visible) != base_len + (sizeof("_data") - 1))
+            continue;
+        if (strncmp(visible, base, base_len) != 0)
+            continue;
+        if (memcmp(visible + base_len, "_data", sizeof("_data") - 1) != 0)
+            continue;
+        suffix = strtoul(dot + 1, &endptr, 10);
+        if (!endptr || (size_t)(endptr - visible) != visible_len || suffix == 0 ||
+            suffix > upto_suffix || suffix > UINT32_MAX) {
+            continue;
+        }
+        if (snprintf(expected, sizeof(expected), "%.*s_data.%lu",
+                     (int)base_len, base, suffix) < 0)
+            continue;
+        if (strlen(expected) == visible_len &&
+            strncmp(visible, expected, visible_len) == 0) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static void print_display_symbol_ref(FILE *out, char prefix, const char *name,
+                                     const lr_module_t *m) {
     size_t len = 0;
     const char *display = display_symbol_name(name, &len);
     if (!display) {
@@ -1546,6 +1598,30 @@ static void print_display_symbol_ref(FILE *out, char prefix, const char *name) {
     if (len == 0) {
         fprintf(out, "\"\"");
         return;
+    }
+    if (m) {
+        const char *dot = display_name_last_dot(display, len);
+        if (dot && dot > display && isdigit((unsigned char)dot[1])) {
+            size_t base_len = (size_t)(dot - display);
+            unsigned long suffix;
+            char *endptr = NULL;
+            suffix = strtoul(dot + 1, &endptr, 10);
+            if (endptr && (size_t)(endptr - display) == len &&
+                suffix > 0 && suffix <= UINT32_MAX) {
+                uint32_t extra = count_sibling_data_suffixes(
+                    m, display, base_len, (uint32_t)suffix);
+                if (extra > 0 && base_len + 32 < 4096) {
+                    char adjusted[4096];
+                    int ns = snprintf(adjusted, sizeof(adjusted), "%.*s.%u",
+                                      (int)base_len, display,
+                                      (unsigned)((uint32_t)suffix + extra));
+                    if (ns > 0 && (size_t)ns < sizeof(adjusted)) {
+                        display = adjusted;
+                        len = (size_t)ns;
+                    }
+                }
+            }
+        }
     }
     if (display[0] == '"' || !(isalnum((unsigned char)display[0]) ||
                                display[0] == '_' || display[0] == '.' ||
@@ -1612,19 +1688,32 @@ static const lr_type_t *find_func_type_by_symbol_id(const lr_module_t *m,
     return NULL;
 }
 
-static bool global_is_plain_c_string(const lr_global_t *g) {
-    const uint8_t *bytes;
+static const lr_global_t *find_global_by_name(const lr_module_t *m,
+                                              const char *name) {
+    if (!m || !name || !name[0])
+        return NULL;
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return g;
+    }
+    return NULL;
+}
+
+static bool global_is_i8_array_literal(const lr_global_t *g) {
     if (!g || !g->type || !g->is_const || g->relocs)
         return false;
     if (g->type->kind != LR_TYPE_ARRAY || !g->type->array.elem ||
         g->type->array.elem->kind != LR_TYPE_I8)
         return false;
-    if (!g->init_data || g->init_size != g->type->array.count || g->init_size == 0)
+    return g->init_data && g->init_size == g->type->array.count && g->init_size > 0;
+}
+
+static bool global_is_nul_terminated_c_string(const lr_global_t *g) {
+    const uint8_t *bytes;
+    if (!global_is_i8_array_literal(g))
         return false;
     bytes = (const uint8_t *)g->init_data;
-    if (bytes[g->init_size - 1u] != 0)
-        return false;
-    return true;
+    return bytes[g->init_size - 1u] == 0;
 }
 
 static void dump_c_string_literal(const uint8_t *bytes, size_t len, FILE *out) {
@@ -1632,10 +1721,7 @@ static void dump_c_string_literal(const uint8_t *bytes, size_t len, FILE *out) {
     fputc('"', out);
     for (size_t i = 0; i < len; i++) {
         unsigned char c = bytes[i];
-        if (c == '\\' || c == '"') {
-            fputc('\\', out);
-            fputc((int)c, out);
-        } else if (c >= 32 && c <= 126) {
+        if (c >= 32 && c <= 126 && c != '"' && c != '\\') {
             fputc((int)c, out);
         } else {
             fprintf(out, "\\%02X", c);
@@ -1652,14 +1738,14 @@ static bool print_global_i8_ptr_gep(FILE *out, const lr_module_t *m,
     if (op->type->kind != LR_TYPE_PTR || op->global_offset != 0)
         return false;
     g = find_global_by_symbol_id(m, op->global_id);
-    if (!global_is_plain_c_string(g))
+    if (!global_is_i8_array_literal(g))
         return false;
     fprintf(out, "getelementptr inbounds (");
     print_type(g->type, out);
     fprintf(out, ", ");
     print_type(g->type, out);
     fprintf(out, "* ");
-    print_display_symbol_ref(out, '@', g->name);
+    print_display_symbol_ref(out, '@', g->name, m);
     fprintf(out, ", i32 0, i32 0)");
     return true;
 }
@@ -1795,13 +1881,13 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         if (op->global_offset != 0) {
             fprintf(out, "getelementptr (i8, ptr ");
             if (name)
-                print_display_symbol_ref(out, '@', name);
+                print_display_symbol_ref(out, '@', name, m);
             else
                 fprintf(out, "@g%u", op->global_id);
             fprintf(out, ", i64 %ld)", (long)op->global_offset);
         } else {
             if (name)
-                print_display_symbol_ref(out, '@', name);
+                print_display_symbol_ref(out, '@', name, m);
             else
                 fprintf(out, "@g%u", op->global_id);
         }
@@ -2761,6 +2847,7 @@ void lr_dump_func_signature(const lr_func_t *f, FILE *out) {
 
 void lr_dump_block_label(const lr_func_t *f, const lr_block_t *b, FILE *out) {
     uint32_t preds;
+    bool padded = false;
     size_t label_len = 0;
     if (!b || !out)
         return;
@@ -2777,7 +2864,10 @@ void lr_dump_block_label(const lr_func_t *f, const lr_block_t *b, FILE *out) {
         while (label_len < 50u) {
             fputc(' ', out);
             label_len++;
+            padded = true;
         }
+        if (!padded)
+            fputc(' ', out);
         fprintf(out, "; preds = ");
         dump_block_predecessors(out, f, b);
     }
@@ -3050,11 +3140,13 @@ static int64_t sign_extend_u64(uint64_t raw, uint8_t bits) {
     return (int64_t)raw;
 }
 
-static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
-                                   size_t off, bool with_type, FILE *out);
+static void dump_global_const_expr(const lr_module_t *m, const lr_global_t *g,
+                                   const lr_type_t *ty, size_t off,
+                                   bool with_type, FILE *out);
 
-static void dump_global_scalar_expr(const lr_global_t *g, const lr_type_t *ty,
-                                    size_t off, FILE *out) {
+static void dump_global_scalar_expr(const lr_module_t *m, const lr_global_t *g,
+                                    const lr_type_t *ty, size_t off,
+                                    FILE *out) {
     switch (ty->kind) {
     case LR_TYPE_I1: {
         uint64_t v = global_read_le_u64(g, off, 1);
@@ -3102,11 +3194,23 @@ static void dump_global_scalar_expr(const lr_global_t *g, const lr_type_t *ty,
     case LR_TYPE_PTR: {
         const lr_reloc_t *r = global_reloc_at(g, off);
         if (r && r->symbol_name && r->symbol_name[0]) {
-            if (r->addend == 0) {
-                print_display_symbol_ref(out, '@', r->symbol_name);
+            const lr_global_t *target = find_global_by_name(m, r->symbol_name);
+            if (target && target->type && target->type->kind == LR_TYPE_ARRAY &&
+                target->type->array.elem &&
+                target->type->array.elem->kind == LR_TYPE_I8 &&
+                r->addend == 0) {
+                fprintf(out, "getelementptr inbounds (");
+                print_type(target->type, out);
+                fprintf(out, ", ");
+                print_type(target->type, out);
+                fprintf(out, "* ");
+                print_display_symbol_ref(out, '@', r->symbol_name, m);
+                fprintf(out, ", i32 0, i32 0)");
+            } else if (r->addend == 0) {
+                print_display_symbol_ref(out, '@', r->symbol_name, m);
             } else {
                 fprintf(out, "getelementptr (i8, ptr ");
-                print_display_symbol_ref(out, '@', r->symbol_name);
+                print_display_symbol_ref(out, '@', r->symbol_name, m);
                 fprintf(out, ", i64 %" PRId64 ")", r->addend);
             }
             break;
@@ -3125,8 +3229,9 @@ static void dump_global_scalar_expr(const lr_global_t *g, const lr_type_t *ty,
     }
 }
 
-static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
-                                   size_t off, bool with_type, FILE *out) {
+static void dump_global_const_expr(const lr_module_t *m, const lr_global_t *g,
+                                   const lr_type_t *ty, size_t off,
+                                   bool with_type, FILE *out) {
     if (!ty) {
         fprintf(out, "zeroinitializer");
         return;
@@ -3147,7 +3252,8 @@ static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
         for (uint64_t i = 0; i < n; i++) {
             if (i > 0)
                 fprintf(out, ", ");
-            dump_global_const_expr(g, ty->array.elem, off + (size_t)i * elem_sz, true, out);
+            dump_global_const_expr(m, g, ty->array.elem,
+                                   off + (size_t)i * elem_sz, true, out);
         }
         fprintf(out, "]");
         break;
@@ -3163,7 +3269,8 @@ static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
         for (uint64_t i = 0; i < n; i++) {
             if (i > 0)
                 fprintf(out, ", ");
-            dump_global_const_expr(g, ty->array.elem, off + (size_t)i * elem_sz, true, out);
+            dump_global_const_expr(m, g, ty->array.elem,
+                                   off + (size_t)i * elem_sz, true, out);
         }
         fprintf(out, ">");
         break;
@@ -3181,7 +3288,7 @@ static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
             if (i > 0)
                 fprintf(out, ", ");
             size_t field_off = off + lr_struct_field_offset(ty, i);
-            dump_global_const_expr(g, ty->struc.fields[i], field_off, true, out);
+            dump_global_const_expr(m, g, ty->struc.fields[i], field_off, true, out);
         }
         if (ty->struc.packed)
             fprintf(out, " }>");
@@ -3194,12 +3301,12 @@ static void dump_global_const_expr(const lr_global_t *g, const lr_type_t *ty,
         fprintf(out, "zeroinitializer");
         break;
     default:
-        dump_global_scalar_expr(g, ty, off, out);
+        dump_global_scalar_expr(m, g, ty, off, out);
         break;
     }
 }
 
-void lr_dump_global(const lr_global_t *g, FILE *out) {
+void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
     static const lr_type_t fallback_ptr_type = { .kind = LR_TYPE_PTR };
     const lr_type_t *gty;
     if (!g || !out)
@@ -3230,7 +3337,7 @@ void lr_dump_global(const lr_global_t *g, FILE *out) {
         return;
     }
     gty = g->type ? g->type : &fallback_ptr_type;
-    print_display_symbol_ref(out, '@', g->name);
+    print_display_symbol_ref(out, '@', g->name, m);
     fprintf(out, " = ");
     if (g->is_external) {
         fprintf(out, "external global ");
@@ -3238,19 +3345,25 @@ void lr_dump_global(const lr_global_t *g, FILE *out) {
         fprintf(out, "\n");
         return;
     }
-    if (global_is_plain_c_string(g)) {
-        fprintf(out, "private unnamed_addr constant ");
+    if (global_is_i8_array_literal(g)) {
+        if (global_is_nul_terminated_c_string(g))
+            fprintf(out, "private unnamed_addr constant ");
+        else
+            fprintf(out, "private constant ");
         print_type(gty, out);
         fprintf(out, " ");
         dump_c_string_literal((const uint8_t *)g->init_data, g->init_size, out);
-        fprintf(out, ", align 1\n");
+        if (global_is_nul_terminated_c_string(g))
+            fprintf(out, ", align 1\n");
+        else
+            fprintf(out, "\n");
         return;
     }
     fprintf(out, "private %s ", g->is_const ? "constant" : "global");
     print_type(gty, out);
     fprintf(out, " ");
     if ((g->init_data && g->init_size > 0) || g->relocs)
-        dump_global_const_expr(g, gty, 0, false, out);
+        dump_global_const_expr(m, g, gty, 0, false, out);
     else
         fprintf(out, "zeroinitializer");
     fprintf(out, "\n");
@@ -3261,7 +3374,7 @@ void lr_module_dump(lr_module_t *m, FILE *out) {
         return;
     lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
-        lr_dump_global(g, out);
+        lr_dump_global(m, g, out);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
     for (lr_func_t *f = m->first_func; f; f = f->next)

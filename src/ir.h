@@ -226,7 +226,7 @@ void lr_dump_func_signature(const lr_func_t *f, FILE *out);
 void lr_dump_block_label(const lr_func_t *f, const lr_block_t *b, FILE *out);
 void lr_dump_inst(const lr_inst_t *inst, const lr_module_t *m,
                   const lr_func_t *f, FILE *out);
-void lr_dump_global(const lr_global_t *g, FILE *out);
+void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out);
 void lr_dump_func(const lr_func_t *f, const lr_module_t *m, FILE *out);
 void lr_module_dump(lr_module_t *m, FILE *out);
 
