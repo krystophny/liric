@@ -70,6 +70,7 @@ typedef struct {
     const char *test_dir;
     const char *runtime_bc;
     const char *runtime_lib;
+    const char *runtime_archive;
     const char *corpus;
     const char *cache_dir;
 
@@ -552,6 +553,7 @@ static void usage(void) {
     printf("  --allow-partial          report failures but return 0\n");
     printf("  --runtime-bc PATH        runtime bitcode\n");
     printf("  --runtime-lib PATH       runtime shared library\n");
+    printf("  --runtime-archive PATH   static runtime archive for bench_api\n");
     printf("  --corpus PATH            corpus TSV\n");
     printf("  --cache-dir PATH         corpus cache directory\n");
     printf("  --lfortran PATH          lfortran LLVM binary (bench_api/compat)\n");
@@ -602,6 +604,9 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.runtime_lib = file_exists(default_runtime_dylib)
                           ? default_runtime_dylib
                           : (file_exists(default_runtime_so) ? default_runtime_so : NULL);
+    cfg.runtime_archive = getenv("LIRIC_RUNTIME_ARCHIVE");
+    if (cfg.runtime_archive && !cfg.runtime_archive[0])
+        cfg.runtime_archive = NULL;
 
     set_default_modes(&cfg);
     set_all_policies(&cfg, 1);
@@ -646,6 +651,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
             cfg.runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-archive") == 0 && i + 1 < argc) {
+            cfg.runtime_archive = argv[++i];
         } else if (strcmp(argv[i], "--corpus") == 0 && i + 1 < argc) {
             cfg.corpus = argv[++i];
         } else if (strcmp(argv[i], "--cache-dir") == 0 && i + 1 < argc) {
@@ -1393,13 +1400,9 @@ static void run_api_provider(const cfg_t *cfg,
         cmd[n++] = "--test-dir";
         cmd[n++] = (char *)cfg->test_dir;
     }
-    if (cfg->runtime_bc) {
-        cmd[n++] = "--runtime-bc";
-        cmd[n++] = (char *)cfg->runtime_bc;
-    }
-    if (cfg->runtime_lib) {
-        cmd[n++] = "--runtime-lib";
-        cmd[n++] = (char *)cfg->runtime_lib;
+    if (cfg->runtime_archive) {
+        cmd[n++] = "--runtime-archive";
+        cmd[n++] = (char *)cfg->runtime_archive;
     }
     cmd[n++] = NULL;
 
