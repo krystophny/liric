@@ -23,6 +23,7 @@ typedef struct lr_bc_inst_desc {
     uint32_t num_operands;
     const uint32_t *indices;
     uint32_t num_indices;
+    uint32_t align;
     int icmp_pred;
     int fcmp_pred;
     bool call_external_abi;

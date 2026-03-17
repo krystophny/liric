@@ -73,6 +73,7 @@ typedef struct lr_inst {
         uint32_t *indices;
     };
     uint32_t num_indices;
+    uint32_t align;
     bool call_external_abi;
     bool call_vararg;
     uint32_t call_fixed_args;
@@ -205,6 +206,7 @@ lr_operand_t lr_op_global(uint32_t id, lr_type_t *type);
 lr_operand_t lr_op_null(lr_type_t *type);
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
 const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
+void lr_module_disambiguate_local_function_collisions(lr_module_t *m);
 
 size_t lr_type_size(const lr_type_t *t);
 size_t lr_type_align(const lr_type_t *t);

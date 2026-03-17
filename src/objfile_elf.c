@@ -130,6 +130,13 @@ static uint32_t read_u32_le(const uint8_t *buf, uint32_t off) {
          | ((uint32_t)buf[off + 3] << 24);
 }
 
+static uint64_t read_u64_le(const uint8_t *buf, uint32_t off) {
+    uint64_t value = 0;
+    for (int i = 0; i < 8; i++)
+        value |= ((uint64_t)buf[off + i]) << (i * 8);
+    return value;
+}
+
 static int patch_aarch64_branch26_vaddr(uint8_t *buf, size_t buflen, uint32_t off,
                                         uint64_t place_vaddr, uint64_t target_vaddr) {
     if ((size_t)off + 4 > buflen)
@@ -852,6 +859,7 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
 
     for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->data_relocs[i];
+        uint64_t addend = 0;
         if (rel->symbol_idx >= oc->num_symbols ||
             rel->type != LR_RELOC_X86_64_64) {
             free(buf);
@@ -890,8 +898,9 @@ int write_elf_executable_x86_64(FILE *out, const uint8_t *code, size_t code_size
             return -1;
         }
 
+        addend = read_u64_le(data_mut, rel->offset);
         if (write_u64_le(data_mut, data_runtime_size, rel->offset,
-                          target_vaddr) != 0) {
+                          target_vaddr + addend) != 0) {
             free(buf);
             free(code_mut);
             free(data_mut);
@@ -1540,6 +1549,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     /* Apply data relocations for defined symbols */
     for (uint32_t i = 0; i < oc->num_data_relocs; i++) {
         const lr_obj_reloc_t *rel = &oc->data_relocs[i];
+        uint64_t addend = 0;
         if (rel->symbol_idx >= oc->num_symbols ||
             rel->type != LR_RELOC_X86_64_64) {
             if (verbose_fail) {
@@ -1582,7 +1592,9 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             }
             goto fail;
         }
-        if (write_u64_le(data_area, data_area_size, da_off, target_vaddr) != 0) {
+        addend = read_u64_le(data_area, da_off);
+        if (write_u64_le(data_area, data_area_size, da_off,
+                         target_vaddr + addend) != 0) {
             if (verbose_fail) {
                 fprintf(stderr,
                         "write_elf_dynamic_executable_x86_64: write_u64_le failed for data reloc symbol=%s off=%u\n",

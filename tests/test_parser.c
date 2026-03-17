@@ -284,10 +284,41 @@ int test_parser_named_type_operand(void) {
     lr_inst_t *alloca_inst = b->first;
     TEST_ASSERT(alloca_inst != NULL, "has alloca");
     TEST_ASSERT_EQ(alloca_inst->op, LR_OP_ALLOCA, "first op is alloca");
+    TEST_ASSERT_EQ(alloca_inst->align, 8, "alloca preserves explicit align");
     TEST_ASSERT_EQ(alloca_inst->type->kind, LR_TYPE_STRUCT, "named type resolved to struct");
     TEST_ASSERT_EQ(alloca_inst->type->struc.packed, true, "struct is packed");
     TEST_ASSERT_EQ(alloca_inst->type->struc.num_fields, 2, "struct has 2 fields");
     TEST_ASSERT_EQ(lr_type_size(alloca_inst->type), 16, "packed struct is 16 bytes");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_alloca_explicit_align(void) {
+    const char *src =
+        "define i32 @f() {\n"
+        ".entry:\n"
+        "  %buf = alloca [32 x i8], align 16\n"
+        "  %arr = alloca i8, i32 4, align 32\n"
+        "  ret i32 0\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    lr_func_t *f = m->first_func;
+    lr_block_t *b = f ? f->first_block : NULL;
+    lr_inst_t *buf = b ? b->first : NULL;
+    lr_inst_t *arr = buf ? buf->next : NULL;
+
+    TEST_ASSERT(buf != NULL, "static alloca exists");
+    TEST_ASSERT_EQ(buf->op, LR_OP_ALLOCA, "first op is alloca");
+    TEST_ASSERT_EQ(buf->align, 16, "static alloca keeps align 16");
+    TEST_ASSERT(arr != NULL, "dynamic alloca exists");
+    TEST_ASSERT_EQ(arr->op, LR_OP_ALLOCA, "second op is alloca");
+    TEST_ASSERT_EQ(arr->align, 32, "dynamic alloca keeps align 32");
 
     lr_arena_destroy(arena);
     return 0;
@@ -1019,6 +1050,80 @@ int test_parser_named_params_no_collision(void) {
     TEST_ASSERT_EQ(store->operands[0].kind, LR_VAL_VREG, "store value is vreg");
     TEST_ASSERT_EQ(store->operands[1].kind, LR_VAL_VREG, "store address is vreg");
     TEST_ASSERT_EQ(store->operands[1].vreg, f->param_vregs[0], "store to param vreg");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_parser_disambiguates_llvm_abi_local_function_collision(void) {
+    const char *src =
+        "declare double @floor(double)\n"
+        "define i32 @use_local(ptr %x) {\n"
+        "entry:\n"
+        "  %0 = call i32 @floor(ptr %x)\n"
+        "  ret i32 %0\n"
+        "}\n"
+        "define double @use_libc(double %x) {\n"
+        "entry:\n"
+        "  %0 = call double @floor(double %x)\n"
+        "  ret double %0\n"
+        "}\n"
+        "define i32 @floor(ptr %x) {\n"
+        "entry:\n"
+        "  ret i32 7\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    lr_func_t *use_local = NULL;
+    lr_func_t *use_libc = NULL;
+    lr_func_t *renamed_floor = NULL;
+    lr_func_t *decl_floor = NULL;
+    lr_block_t *b = NULL;
+    lr_inst_t *call = NULL;
+
+    TEST_ASSERT(m != NULL, err);
+
+    lr_module_disambiguate_local_function_collisions(m);
+
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name)
+            continue;
+        if (strcmp(f->name, "use_local") == 0) {
+            use_local = f;
+        } else if (strcmp(f->name, "use_libc") == 0) {
+            use_libc = f;
+        } else if (strcmp(f->name, "floor") == 0) {
+            decl_floor = f;
+        } else if (strncmp(f->name, "floor.__liric_local.", 20) == 0) {
+            renamed_floor = f;
+        }
+    }
+
+    TEST_ASSERT(use_local != NULL, "use_local function exists");
+    TEST_ASSERT(use_libc != NULL, "use_libc function exists");
+    TEST_ASSERT(decl_floor != NULL, "libc floor declaration preserved");
+    TEST_ASSERT(decl_floor->is_decl, "plain floor remains declaration");
+    TEST_ASSERT(renamed_floor != NULL, "local floor definition renamed");
+    TEST_ASSERT(!renamed_floor->is_decl, "renamed floor stays definition");
+
+    b = use_local->first_block;
+    TEST_ASSERT(b != NULL, "use_local has block");
+    call = b->first;
+    TEST_ASSERT(call != NULL && call->op == LR_OP_CALL, "use_local starts with call");
+    TEST_ASSERT(call->operands[0].kind == LR_VAL_GLOBAL, "use_local callee is global");
+    TEST_ASSERT_EQ(call->operands[0].global_id,
+                   lr_module_intern_symbol(m, renamed_floor->name),
+                   "local call retargeted to renamed floor");
+
+    b = use_libc->first_block;
+    TEST_ASSERT(b != NULL, "use_libc has block");
+    call = b->first;
+    TEST_ASSERT(call != NULL && call->op == LR_OP_CALL, "use_libc starts with call");
+    TEST_ASSERT(call->operands[0].kind == LR_VAL_GLOBAL, "use_libc callee is global");
+    TEST_ASSERT_EQ(call->operands[0].global_id,
+                   lr_module_intern_symbol(m, "floor"),
+                   "libc-style call keeps plain floor symbol");
 
     lr_arena_destroy(arena);
     return 0;

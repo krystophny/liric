@@ -432,6 +432,8 @@ static int sig_serialize_inst(lr_sig_buf_t *sb, const lr_inst_t *inst,
         return -1;
     if (sig_buf_u32(sb, inst->num_indices) != 0)
         return -1;
+    if (sig_buf_u32(sb, inst->align) != 0)
+        return -1;
     if (sig_buf_u8(sb, inst->call_external_abi ? 1u : 0u) != 0)
         return -1;
     if (sig_buf_u8(sb, inst->call_vararg ? 1u : 0u) != 0)
@@ -1704,6 +1706,9 @@ static int jit_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
     }
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
+        lr_func_t *prev = NULL;
+        int prev_score = -1;
+        int score = 0;
         if (!f->name || !f->name[0])
             continue;
         uint32_t hash = symbol_hash(f->name);
@@ -1712,7 +1717,23 @@ static int jit_build_module_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
             return -1;
         if (sym_id >= oc->module_sym_count)
             continue;
-        oc->module_sym_funcs[sym_id] = f;
+        prev = oc->module_sym_funcs[sym_id];
+        if (prev) {
+            if (prev->first_block)
+                prev_score += 4;
+            if (prev->uses_llvm_abi)
+                prev_score += 2;
+            if (!prev->is_decl)
+                prev_score += 1;
+        }
+        if (f->first_block)
+            score += 4;
+        if (f->uses_llvm_abi)
+            score += 2;
+        if (!f->is_decl)
+            score += 1;
+        if (!prev || score > prev_score)
+            oc->module_sym_funcs[sym_id] = f;
         if (f->first_block)
             oc->module_sym_defined[sym_id] = 1;
     }

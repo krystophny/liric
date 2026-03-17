@@ -1461,14 +1461,26 @@ static bool bc_call_is_nop_intrinsic(const lr_module_t *m, lr_operand_t callee_o
 
 static lr_func_t *bc_find_module_function(const lr_module_t *m,
                                           const char *name) {
-    lr_func_t *f;
+    lr_func_t *best = NULL;
+    int best_score = -1;
     if (!m || !name || !name[0])
         return NULL;
-    for (f = m->first_func; f; f = f->next) {
-        if (f->name && strcmp(f->name, name) == 0)
-            return f;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        int score = 0;
+        if (!f->name || strcmp(f->name, name) != 0)
+            continue;
+        if (f->first_block)
+            score += 4;
+        if (f->uses_llvm_abi)
+            score += 2;
+        if (!f->is_decl)
+            score += 1;
+        if (!best || score > best_score) {
+            best = f;
+            best_score = score;
+        }
     }
-    return NULL;
+    return best;
 }
 
 static lr_func_t *bc_resolve_call_callee_func(const bc_decoder_t *d,
@@ -2545,6 +2557,7 @@ static bool bc_emit_inst(bc_decoder_t *d, lr_func_t *func,
         desc.num_operands = inst->num_operands;
         desc.indices = inst->indices;
         desc.num_indices = inst->num_indices;
+        desc.align = inst->align;
         desc.icmp_pred = 0;
         desc.fcmp_pred = 0;
         if (inst->op == LR_OP_ICMP)
@@ -2564,6 +2577,18 @@ static bool bc_emit_inst(bc_decoder_t *d, lr_func_t *func,
     free(op_descs);
     lr_block_append(block, inst);
     return true;
+}
+
+static uint32_t bc_decode_alloca_alignment(uint64_t packed) {
+    uint32_t lower = (uint32_t)(packed & 0x1fu);
+    uint32_t upper = (uint32_t)((packed >> 8) & 0x7u);
+    uint32_t encoded = lower | (upper << 5);
+
+    if (encoded == 0)
+        return 0;
+    if (encoded > 31u)
+        return 0;
+    return 1u << (encoded - 1u);
 }
 
 /* ---- Function block decoder -------------------------------------------- */
@@ -2998,6 +3023,7 @@ cmp_emit_done:
                 lr_type_t *elem_ty;
                 lr_type_t *op_ty;
                 lr_operand_t size_op;
+                uint32_t align;
                 uint32_t dest;
                 lr_inst_t *inst;
 
@@ -3019,6 +3045,7 @@ cmp_emit_done:
                 /* ALLOCA uses absolute value IDs for the size operand. */
                 size_op = bc_make_operand_from_value(d, &local_vt, (uint32_t)r->record[2],
                                                      func, op_ty);
+                align = bc_decode_alloca_alignment((uint64_t)r->record[3]);
 
                 if (!bc_define_vreg_value(d, &local_vt, func, next_value_id,
                                           d->module->type_ptr, &dest)) {
@@ -3029,8 +3056,10 @@ cmp_emit_done:
 
                 inst = lr_inst_create(d->arena, LR_OP_ALLOCA,
                                        d->module->type_ptr, dest, &size_op, 1);
-                if (inst)
+                if (inst) {
                     inst->type = elem_ty;
+                    inst->align = align;
+                }
                 if (!bc_emit_inst(d, func, blocks[cur_block], inst)) {
                     ok = false;
                     break;
@@ -4870,7 +4899,7 @@ static lr_type_t *bc_map_type_to_session(lr_session_t *session,
     case LR_TYPE_I64:    return lr_type_i64_s(session);
     case LR_TYPE_FLOAT:  return lr_type_f32_s(session);
     case LR_TYPE_DOUBLE: return lr_type_f64_s(session);
-    case LR_TYPE_X86_FP80: return lr_type_f64_s(session);
+    case LR_TYPE_X86_FP80: return lr_type_x86_fp80_s(session);
     case LR_TYPE_PTR:    return lr_type_ptr_s(session);
     case LR_TYPE_ARRAY:
         return lr_type_array_s(session,
@@ -5002,12 +5031,47 @@ static bool bc_opcode_has_dest(lr_opcode_t op, lr_type_t *type) {
     }
 }
 
+static bool bc_func_signature_matches(const lr_func_t *func,
+                                      lr_type_t *ret_type,
+                                      lr_type_t **params,
+                                      uint32_t num_params,
+                                      bool vararg) {
+    if (!func || func->ret_type != ret_type ||
+        func->num_params != num_params || func->vararg != vararg) {
+        return false;
+    }
+    for (uint32_t i = 0; i < num_params; i++) {
+        if (func->param_types[i] != params[i])
+            return false;
+    }
+    return true;
+}
+
+static lr_func_t *bc_find_session_decl(lr_module_t *module, const char *name,
+                                       lr_type_t *ret_type, lr_type_t **params,
+                                       uint32_t num_params, bool vararg) {
+    if (!module || !name || !name[0])
+        return NULL;
+    for (lr_func_t *func = module->first_func; func; func = func->next) {
+        if (!func->name || strcmp(func->name, name) != 0)
+            continue;
+        if (!(func->is_decl || !func->first_block))
+            continue;
+        if (bc_func_signature_matches(func, ret_type, params, num_params,
+                                      vararg)) {
+            return func;
+        }
+    }
+    return NULL;
+}
+
 static int bc_replay_func_to_session(const lr_module_t *src_mod,
                                       const lr_func_t *src_func,
                                       lr_session_t *session,
                                       char *err, size_t errlen) {
     lr_type_t **params = NULL;
     lr_type_t *ret_type = NULL;
+    lr_func_t *existing_decl = NULL;
     uint32_t i;
     const lr_block_t *block;
     lr_error_t serr = {0};
@@ -5034,12 +5098,27 @@ static int bc_replay_func_to_session(const lr_module_t *src_mod,
         }
     }
 
-    rc = lr_session_func_begin(session, src_func->name, ret_type, params,
-                               src_func->num_params, src_func->vararg, &serr);
+    existing_decl = bc_find_session_decl(lr_session_module(session),
+                                         src_func->name, ret_type, params,
+                                         src_func->num_params,
+                                         src_func->vararg);
+    if (existing_decl) {
+        rc = lr_session_func_begin_existing(session, lr_session_module(session),
+                                            existing_decl, &serr);
+    } else {
+        rc = lr_session_func_begin(session, src_func->name, ret_type, params,
+                                   src_func->num_params, src_func->vararg,
+                                   &serr);
+    }
     free(params);
     if (rc != 0) {
         lr_frontend_set_error(err, errlen, "%s", serr.msg);
         return -1;
+    }
+    if (src_func->uses_llvm_abi) {
+        lr_func_t *dst_func = lr_session_cur_func(session);
+        if (dst_func)
+            dst_func->uses_llvm_abi = true;
     }
 
     for (i = 0; i < src_func->num_blocks; i++) {
@@ -5072,6 +5151,7 @@ static int bc_replay_func_to_session(const lr_module_t *src_mod,
             desc.num_operands = inst->num_operands;
             desc.num_indices = inst->num_indices;
             desc.indices = inst->indices;
+            desc.align = inst->align;
             desc.icmp_pred = inst->icmp_pred;
             desc.fcmp_pred = inst->fcmp_pred;
             desc.call_external_abi = inst->call_external_abi;
@@ -5225,6 +5305,14 @@ int lr_parse_bc_to_session(const uint8_t *data, size_t len,
                 lr_arena_destroy(tmp_arena);
                 lr_frontend_set_error(err, errlen, "%s", serr.msg);
                 return -1;
+            }
+            if (func->uses_llvm_abi) {
+                lr_module_t *smod = lr_session_module(session);
+                if (smod && smod->last_func &&
+                    smod->last_func->name &&
+                    strcmp(smod->last_func->name, func->name) == 0) {
+                    smod->last_func->uses_llvm_abi = true;
+                }
             }
         }
     }

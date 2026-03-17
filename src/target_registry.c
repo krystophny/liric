@@ -197,6 +197,7 @@ int lr_replay_function_stream(const lr_target_t *target, void *compile_ctx,
             desc.dest = inst->dest;
             desc.num_operands = inst->num_operands;
             desc.num_indices = inst->num_indices;
+            desc.align = inst->align;
             desc.icmp_pred = (int)inst->icmp_pred;
             desc.fcmp_pred = (int)inst->fcmp_pred;
             desc.call_external_abi = inst->call_external_abi;

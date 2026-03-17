@@ -63,6 +63,7 @@ typedef struct session_inst_desc {
     uint32_t num_operands;
     const uint32_t *indices;
     uint32_t num_indices;
+    uint32_t align;
     int icmp_pred;
     int fcmp_pred;
     bool call_external_abi;
@@ -396,6 +397,195 @@ static const char *session_blob_entry_symbol(const struct lr_session *s,
     return first ? first : (fallback ? fallback : "_start");
 }
 
+static bool session_type_compatible(const lr_type_t *a, const lr_type_t *b) {
+    if (a == b)
+        return true;
+    if (!a || !b || a->kind != b->kind)
+        return false;
+    switch (a->kind) {
+    case LR_TYPE_VOID:
+    case LR_TYPE_I1:
+    case LR_TYPE_I8:
+    case LR_TYPE_I16:
+    case LR_TYPE_I32:
+    case LR_TYPE_I64:
+    case LR_TYPE_FLOAT:
+    case LR_TYPE_DOUBLE:
+    case LR_TYPE_X86_FP80:
+    case LR_TYPE_PTR:
+        return true;
+    case LR_TYPE_ARRAY:
+    case LR_TYPE_VECTOR:
+        return a->array.count == b->array.count &&
+               session_type_compatible(a->array.elem, b->array.elem);
+    case LR_TYPE_STRUCT:
+        if (a->struc.num_fields != b->struc.num_fields ||
+            a->struc.packed != b->struc.packed)
+            return false;
+        for (uint32_t i = 0; i < a->struc.num_fields; i++) {
+            if (!session_type_compatible(a->struc.fields[i], b->struc.fields[i]))
+                return false;
+        }
+        return true;
+    case LR_TYPE_FUNC:
+        if (!session_type_compatible(a->func.ret, b->func.ret) ||
+            a->func.num_params != b->func.num_params ||
+            a->func.vararg != b->func.vararg)
+            return false;
+        for (uint32_t i = 0; i < a->func.num_params; i++) {
+            if (!session_type_compatible(a->func.params[i], b->func.params[i]))
+                return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+static bool session_func_signature_compatible(const lr_func_t *a,
+                                              const lr_func_t *b) {
+    if (!a || !b)
+        return false;
+    if (!session_type_compatible(a->ret_type, b->ret_type) ||
+        a->num_params != b->num_params ||
+        a->vararg != b->vararg) {
+        return false;
+    }
+    for (uint32_t i = 0; i < a->num_params; i++) {
+        if (!session_type_compatible(a->param_types[i], b->param_types[i]))
+            return false;
+    }
+    return true;
+}
+
+static lr_func_t *session_find_defined_func(lr_module_t *m, const char *name) {
+    if (!m || !name || !name[0])
+        return NULL;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || strcmp(f->name, name) != 0)
+            continue;
+        if (!f->is_decl && f->first_block)
+            return f;
+    }
+    return NULL;
+}
+
+typedef struct session_runtime_extern_remap {
+    const char *from_name;
+    const char *to_name;
+} session_runtime_extern_remap_t;
+
+static int session_runtime_extern_remap_push(session_runtime_extern_remap_t **items,
+                                             uint32_t *count,
+                                             uint32_t *cap,
+                                             const char *from_name,
+                                             const char *to_name) {
+    session_runtime_extern_remap_t *tmp = NULL;
+    if (!items || !count || !cap || !from_name || !to_name)
+        return -1;
+    for (uint32_t i = 0; i < *count; i++) {
+        if (strcmp((*items)[i].from_name, from_name) == 0)
+            return 0;
+    }
+    if (*count == *cap) {
+        uint32_t new_cap = *cap == 0 ? 8u : (*cap * 2u);
+        tmp = (session_runtime_extern_remap_t *)realloc(
+            *items, new_cap * sizeof(*tmp));
+        if (!tmp)
+            return -1;
+        *items = tmp;
+        *cap = new_cap;
+    }
+    (*items)[*count].from_name = from_name;
+    (*items)[*count].to_name = to_name;
+    (*count)++;
+    return 0;
+}
+
+static const char *session_runtime_extern_remap_lookup(
+    const session_runtime_extern_remap_t *items,
+    uint32_t count,
+    const char *name) {
+    if (!items || !name)
+        return NULL;
+    for (uint32_t i = 0; i < count; i++) {
+        if (strcmp(items[i].from_name, name) == 0)
+            return items[i].to_name;
+    }
+    return NULL;
+}
+
+static int session_rewrite_runtime_blob_extern_conflicts(struct lr_session *dst,
+                                                         struct lr_session *rt_session,
+                                                         session_error_t *err) {
+    lr_module_t *rt_module = NULL;
+    session_runtime_extern_remap_t *remaps = NULL;
+    uint32_t remap_count = 0;
+    uint32_t remap_cap = 0;
+
+    if (!dst || !dst->module || !rt_session)
+        return 0;
+    rt_module = lr_session_module(rt_session);
+    if (!rt_module)
+        return 0;
+
+    for (lr_func_t *rf = rt_module->first_func; rf; rf = rf->next) {
+        lr_func_t *df = NULL;
+        char *alias_name = NULL;
+        int needed = 0;
+        if (!rf->name || !rf->name[0] || (!rf->is_decl && rf->first_block))
+            continue;
+        df = session_find_defined_func(dst->module, rf->name);
+        if (!df || session_func_signature_compatible(df, rf))
+            continue;
+        needed = snprintf(NULL, 0, "%s.__liric_extern.%u",
+                          rf->name, remap_count);
+        if (needed < 0) {
+            free(remaps);
+            err_set(err, S_ERR_BACKEND,
+                    "runtime extern alias formatting failed");
+            return -1;
+        }
+        alias_name = (char *)lr_arena_alloc_uninit(rt_module->arena,
+                                                   (size_t)needed + 1u, 1u);
+        if (!alias_name) {
+            free(remaps);
+            err_set(err, S_ERR_BACKEND,
+                    "runtime extern alias allocation failed");
+            return -1;
+        }
+        (void)snprintf(alias_name, (size_t)needed + 1u,
+                       "%s.__liric_extern.%u", rf->name, remap_count);
+        if (session_runtime_extern_remap_push(&remaps, &remap_count, &remap_cap,
+                                              rf->name, alias_name) != 0) {
+            free(remaps);
+            err_set(err, S_ERR_BACKEND,
+                    "runtime extern remap registration failed");
+            return -1;
+        }
+    }
+
+    if (remap_count == 0) {
+        free(remaps);
+        return 0;
+    }
+
+    for (uint32_t bi = 0; bi < rt_session->blob_count; bi++) {
+        lr_func_blob_t *blob = &rt_session->blobs[bi];
+        lr_cached_reloc_t *relocs = (lr_cached_reloc_t *)blob->relocs;
+        if (!relocs || blob->num_relocs == 0)
+            continue;
+        for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
+            const char *mapped = session_runtime_extern_remap_lookup(
+                remaps, remap_count, relocs[ri].symbol_name);
+            if (mapped)
+                relocs[ri].symbol_name = mapped;
+        }
+    }
+
+    free(remaps);
+    return 0;
+}
+
 /* For no-link executable emission, prefer dynamic runtime imports when
  * an explicit runtime shared library is configured. This avoids merging
  * runtime IR/BC into the client module and keeps runtime behavior aligned
@@ -436,6 +626,10 @@ static int merge_runtime_bc_into_module(struct lr_session *s, lr_module_t *m,
                                    sizeof(parse_err)) != 0) {
             err_set(err, S_ERR_PARSE, "runtime bc replay failed: %s",
                     parse_err[0] ? parse_err : "unknown parse error");
+            lr_session_destroy(rt_session);
+            return -1;
+        }
+        if (session_rewrite_runtime_blob_extern_conflicts(s, rt_session, err) != 0) {
             lr_session_destroy(rt_session);
             return -1;
         }
@@ -733,6 +927,7 @@ static int init_direct_obj_ctx(struct lr_session *s) {
     if (s->direct_obj_ctx_active)
         return 0;
     memset(&s->direct_obj_ctx, 0, sizeof(s->direct_obj_ctx));
+    s->direct_obj_ctx.preserve_symbol_names = true;
     if (lr_obj_build_symbol_cache(&s->direct_obj_ctx, s->module) != 0)
         return -1;
     s->direct_obj_ctx_active = true;
@@ -1005,6 +1200,8 @@ static const uint8_t k_blob_pkg_magic[8] = {
     'L', 'R', 'B', 'L', 'O', 'B', '1', '\0'
 };
 
+static const char k_scoped_local_suffix[] = ".__liric_local.";
+
 static void blob_pkg_w32(uint8_t **p, uint32_t v) {
     (*p)[0] = (uint8_t)(v);
     (*p)[1] = (uint8_t)(v >> 8);
@@ -1060,6 +1257,171 @@ static int module_intern_name_slice(lr_module_t *m,
         return -1;
     *out_name = interned;
     return 0;
+}
+
+typedef struct session_scoped_local_remap {
+    const char *base_name;
+    const char *exact_name;
+} session_scoped_local_remap_t;
+
+static const char *session_find_scoped_local_func_name(const lr_module_t *m,
+                                                       const char *base_name) {
+    size_t base_len = 0;
+    const lr_func_t *f = NULL;
+    if (!m || !base_name || !base_name[0])
+        return NULL;
+    base_len = strlen(base_name);
+    for (f = m->first_func; f; f = f->next) {
+        const char *tag = NULL;
+        if (!f->name)
+            continue;
+        tag = strstr(f->name, k_scoped_local_suffix);
+        if (!tag)
+            continue;
+        if ((size_t)(tag - f->name) != base_len)
+            continue;
+        if (strncmp(f->name, base_name, base_len) == 0)
+            return f->name;
+    }
+    return NULL;
+}
+
+static const lr_func_t *session_find_blob_owner_func(const lr_module_t *m,
+                                                     const char *blob_name) {
+    const lr_func_t *f = NULL;
+    const char *mapped = NULL;
+    if (!m || !blob_name || !blob_name[0])
+        return NULL;
+    for (f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, blob_name) == 0)
+            return f;
+    }
+    mapped = session_find_scoped_local_func_name(m, blob_name);
+    if (!mapped)
+        return NULL;
+    for (f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, mapped) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static int session_scoped_local_remap_push(session_scoped_local_remap_t **items,
+                                           uint32_t *count,
+                                           uint32_t *cap,
+                                           const char *base_name,
+                                           const char *exact_name) {
+    session_scoped_local_remap_t *tmp = NULL;
+    if (!items || !count || !cap || !base_name || !exact_name)
+        return -1;
+    for (uint32_t i = 0; i < *count; i++) {
+        if ((*items)[i].exact_name &&
+            strcmp((*items)[i].exact_name, exact_name) == 0) {
+            return 0;
+        }
+    }
+    if (*count == *cap) {
+        uint32_t new_cap = *cap == 0 ? 4u : *cap * 2u;
+        tmp = (session_scoped_local_remap_t *)realloc(
+            *items, (size_t)new_cap * sizeof(**items));
+        if (!tmp)
+            return -1;
+        *items = tmp;
+        *cap = new_cap;
+    }
+    (*items)[*count].base_name = base_name;
+    (*items)[*count].exact_name = exact_name;
+    (*count)++;
+    return 0;
+}
+
+static void session_collect_owner_scoped_local_calls(
+    const lr_module_t *m, const lr_func_t *owner,
+    session_scoped_local_remap_t **items, uint32_t *count, uint32_t *cap) {
+    const lr_block_t *b = NULL;
+    if (!m || !owner || !items || !count || !cap)
+        return;
+    for (b = owner->first_block; b; b = b->next) {
+        const lr_inst_t *inst = NULL;
+        for (inst = b->first; inst; inst = inst->next) {
+            const char *sym_name = NULL;
+            const char *tag = NULL;
+            size_t base_len = 0;
+            char *base_name = NULL;
+            if (inst->op != LR_OP_CALL || inst->num_operands == 0 ||
+                inst->operands[0].kind != LR_VAL_GLOBAL) {
+                continue;
+            }
+            sym_name = lr_module_symbol_name(m, inst->operands[0].global_id);
+            if (!sym_name)
+                continue;
+            tag = strstr(sym_name, k_scoped_local_suffix);
+            if (!tag)
+                continue;
+            base_len = (size_t)(tag - sym_name);
+            base_name = (char *)malloc(base_len + 1u);
+            if (!base_name)
+                return;
+            memcpy(base_name, sym_name, base_len);
+            base_name[base_len] = '\0';
+            if (session_scoped_local_remap_push(items, count, cap,
+                                                base_name, sym_name) != 0) {
+                free(base_name);
+                return;
+            }
+        }
+    }
+}
+
+static void session_free_scoped_local_remaps(
+    session_scoped_local_remap_t *items, uint32_t count) {
+    if (!items)
+        return;
+    for (uint32_t i = 0; i < count; i++)
+        free((void *)items[i].base_name);
+    free(items);
+}
+
+static void session_sync_blob_scoped_locals(struct lr_session *s) {
+    if (!s || !s->module || s->blob_count == 0)
+        return;
+    for (uint32_t bi = 0; bi < s->blob_count; bi++) {
+        lr_func_blob_t *blob = &s->blobs[bi];
+        const lr_func_t *owner = NULL;
+        const char *mapped_name = NULL;
+        session_scoped_local_remap_t *remaps = NULL;
+        uint32_t remap_count = 0;
+        uint32_t remap_cap = 0;
+
+        if (!blob->name || !blob->name[0])
+            continue;
+
+        mapped_name = session_find_scoped_local_func_name(s->module, blob->name);
+        if (mapped_name)
+            blob->name = mapped_name;
+
+        owner = session_find_blob_owner_func(s->module, blob->name);
+        if (!owner)
+            continue;
+
+        session_collect_owner_scoped_local_calls(s->module, owner,
+                                                 &remaps, &remap_count,
+                                                 &remap_cap);
+        if (blob->relocs && remap_count > 0) {
+            lr_cached_reloc_t *relocs = (lr_cached_reloc_t *)blob->relocs;
+            for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
+                for (uint32_t mi = 0; mi < remap_count; mi++) {
+                    if (relocs[ri].symbol_name &&
+                        strcmp(relocs[ri].symbol_name,
+                               remaps[mi].base_name) == 0) {
+                        relocs[ri].symbol_name = remaps[mi].exact_name;
+                        break;
+                    }
+                }
+            }
+        }
+        session_free_scoped_local_remaps(remaps, remap_count);
+    }
 }
 
 int lr_session_export_blob_package(struct lr_session *s,
@@ -1567,6 +1929,7 @@ static int emit_ir_instruction(struct lr_session *s, const session_inst_desc_t *
         out->icmp_pred = (lr_icmp_pred_t)inst->icmp_pred;
     if (inst->op == LR_OP_FCMP)
         out->fcmp_pred = (lr_fcmp_pred_t)inst->fcmp_pred;
+    out->align = inst->align;
     if (inst->op == LR_OP_CALL) {
         out->call_external_abi = inst->call_external_abi;
         out->call_vararg = inst->call_vararg;
@@ -2311,6 +2674,10 @@ lr_type_t *lr_type_f64_s(struct lr_session *s) {
     return (s && s->module) ? s->module->type_double : NULL;
 }
 
+lr_type_t *lr_type_x86_fp80_s(struct lr_session *s) {
+    return (s && s->module) ? s->module->type_x86_fp80 : NULL;
+}
+
 lr_type_t *lr_type_ptr_s(struct lr_session *s) {
     return (s && s->module) ? s->module->type_ptr : NULL;
 }
@@ -2832,6 +3199,7 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
             compile_desc.num_operands = normalized.num_operands;
             compile_desc.indices = normalized.indices;
             compile_desc.num_indices = normalized.num_indices;
+            compile_desc.align = normalized.align;
             compile_desc.icmp_pred = normalized.icmp_pred;
             compile_desc.fcmp_pred = normalized.fcmp_pred;
             compile_desc.call_external_abi = normalized.call_external_abi;
@@ -3089,6 +3457,8 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "target not found");
             return -1;
         }
+        lr_module_disambiguate_local_function_collisions(s->module);
+        session_sync_blob_scoped_locals(s);
         FILE *out = fopen(path, "wb");
         if (!out) {
             err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
@@ -3128,6 +3498,8 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
             err_set(err, S_ERR_BACKEND, "target not found");
             return -1;
         }
+        lr_module_disambiguate_local_function_collisions(s->module);
+        session_sync_blob_scoped_locals(s);
         return lr_emit_object_from_blobs(s->blobs, s->blob_count,
                                          s->module, target, out);
     }
@@ -3210,6 +3582,8 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "target not found");
             return -1;
         }
+        lr_module_disambiguate_local_function_collisions(s->module);
+        session_sync_blob_scoped_locals(s);
         FILE *out = fopen(path, "wb");
         if (!out) {
             err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);

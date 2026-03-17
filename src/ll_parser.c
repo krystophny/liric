@@ -1484,7 +1484,8 @@ static void operand_to_desc(const lr_operand_t *op, lr_operand_desc_t *out) {
 static uint32_t stream_emit(lr_parser_t *p, lr_opcode_t op, lr_type_t *type,
                              uint32_t dest, const lr_operand_t *ops,
                              uint32_t nops, const uint32_t *indices,
-                             uint32_t num_indices, int icmp_pred,
+                             uint32_t num_indices, uint32_t align,
+                             int icmp_pred,
                              int fcmp_pred, bool call_external_abi,
                              bool call_vararg, uint32_t call_fixed_args) {
     lr_operand_desc_t desc_ops[66];
@@ -1501,6 +1502,7 @@ static uint32_t stream_emit(lr_parser_t *p, lr_opcode_t op, lr_type_t *type,
     desc.num_operands = n;
     desc.indices = indices;
     desc.num_indices = num_indices;
+    desc.align = align;
     desc.icmp_pred = icmp_pred;
     desc.fcmp_pred = fcmp_pred;
     desc.call_external_abi = call_external_abi;
@@ -1528,10 +1530,25 @@ static void emit_inst(lr_parser_t *p, lr_block_t *block, lr_opcode_t op,
                        lr_operand_t *ops, uint32_t nops) {
     record_dest_type(p, dest, inst_result_type(p, op, type));
     if (p->session) {
-        stream_emit(p, op, type, dest, ops, nops, NULL, 0, 0, 0,
+        stream_emit(p, op, type, dest, ops, nops, NULL, 0, 0, 0, 0,
                     false, false, 0);
     } else {
         lr_inst_t *inst = lr_inst_create(p->arena, op, type, dest, ops, nops);
+        lr_block_append(block, inst);
+    }
+}
+
+static void emit_alloca(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
+                        uint32_t dest, lr_operand_t *ops, uint32_t nops,
+                        uint32_t align) {
+    record_dest_type(p, dest, p->module->type_ptr);
+    if (p->session) {
+        stream_emit(p, LR_OP_ALLOCA, type, dest, ops, nops, NULL, 0, align,
+                    0, 0, false, false, 0);
+    } else {
+        lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_ALLOCA, type, dest,
+                                         ops, nops);
+        inst->align = align;
         lr_block_append(block, inst);
     }
 }
@@ -1541,7 +1558,7 @@ static void emit_icmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
                        int pred) {
     record_dest_type(p, dest, type);
     if (p->session) {
-        stream_emit(p, LR_OP_ICMP, type, dest, ops, nops, NULL, 0,
+        stream_emit(p, LR_OP_ICMP, type, dest, ops, nops, NULL, 0, 0,
                     pred, 0, false, false, 0);
     } else {
         lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_ICMP, type,
@@ -1556,7 +1573,7 @@ static void emit_fcmp(lr_parser_t *p, lr_block_t *block, lr_type_t *type,
                        int pred) {
     record_dest_type(p, dest, type);
     if (p->session) {
-        stream_emit(p, LR_OP_FCMP, type, dest, ops, nops, NULL, 0,
+        stream_emit(p, LR_OP_FCMP, type, dest, ops, nops, NULL, 0, 0,
                     0, pred, false, false, 0);
     } else {
         lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_FCMP, type,
@@ -1572,7 +1589,7 @@ static void emit_call(lr_parser_t *p, lr_block_t *block, lr_type_t *ret_ty,
                        bool external_abi) {
     record_dest_type(p, dest, ret_ty);
     if (p->session) {
-        stream_emit(p, LR_OP_CALL, ret_ty, dest, ops, nops, NULL, 0,
+        stream_emit(p, LR_OP_CALL, ret_ty, dest, ops, nops, NULL, 0, 0,
                     0, 0, external_abi, vararg, fixed_args);
     } else {
         lr_inst_t *inst = lr_inst_create(p->arena, LR_OP_CALL, ret_ty,
@@ -1591,7 +1608,7 @@ static void emit_with_indices(lr_parser_t *p, lr_block_t *block,
                                uint32_t num_indices) {
     record_dest_type(p, dest, type);
     if (p->session) {
-        stream_emit(p, op, type, dest, ops, nops, indices, num_indices,
+        stream_emit(p, op, type, dest, ops, nops, indices, num_indices, 0,
                     0, 0, false, false, 0);
     } else {
         lr_inst_t *inst = lr_inst_create(p->arena, op, type, dest, ops, nops);
@@ -1620,7 +1637,7 @@ static lr_operand_t canonicalize_gep_index_operand(lr_parser_t *p,
         lr_operand_t cast_ops[1] = {*op};
         if (p->session) {
             stream_emit(p, LR_OP_SEXT, p->module->type_i64, tmp_vreg,
-                        cast_ops, 1, NULL, 0, 0, 0, false, false, 0);
+                        cast_ops, 1, NULL, 0, 0, 0, 0, false, false, 0);
         } else {
             lr_inst_t *cast = lr_inst_create(p->arena, LR_OP_SEXT,
                                              p->module->type_i64,
@@ -1723,12 +1740,14 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
             case LR_TOK_ALLOCA: {
                 lr_type_t *ty = parse_type(p);
                 lr_operand_t count_op = {0};
+                uint32_t align = 0;
                 bool has_count = false;
                 /* check for optional count: ", <inttype> <operand>" */
                 if (match(p, LR_TOK_COMMA)) {
                     if (check(p, LR_TOK_ALIGN)) {
-                        /* just align, no count */
-                        next(p); next(p);
+                        next(p);
+                        align = (uint32_t)p->cur.int_val;
+                        next(p);
                     } else {
                         /* parse count operand */
                         lr_type_t *count_ty = parse_type(p);
@@ -1736,15 +1755,19 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                         has_count = true;
                         /* check for optional ", align N" after count */
                         if (match(p, LR_TOK_COMMA)) {
-                            if (check(p, LR_TOK_ALIGN)) { next(p); next(p); }
+                            if (check(p, LR_TOK_ALIGN)) {
+                                next(p);
+                                align = (uint32_t)p->cur.int_val;
+                                next(p);
+                            }
                         }
                     }
                 }
                 if (has_count) {
                     lr_operand_t ops[1] = {count_op};
-                    emit_inst(p, block, LR_OP_ALLOCA, ty, dest, ops, 1);
+                    emit_alloca(p, block, ty, dest, ops, 1, align);
                 } else {
-                    emit_inst(p, block, LR_OP_ALLOCA, ty, dest, NULL, 0);
+                    emit_alloca(p, block, ty, dest, NULL, 0, align);
                 }
                 break;
             }

@@ -67,6 +67,7 @@ typedef struct lr_inst_desc {
     uint32_t num_operands;
     const uint32_t *indices;
     uint32_t num_indices;
+    uint32_t align;
     int icmp_pred;
     int fcmp_pred;
     bool call_external_abi;
@@ -109,6 +110,7 @@ lr_type_t *lr_type_i32_s(lr_session_t *s);
 lr_type_t *lr_type_i64_s(lr_session_t *s);
 lr_type_t *lr_type_f32_s(lr_session_t *s);
 lr_type_t *lr_type_f64_s(lr_session_t *s);
+lr_type_t *lr_type_x86_fp80_s(lr_session_t *s);
 lr_type_t *lr_type_ptr_s(lr_session_t *s);
 lr_type_t *lr_type_array_s(lr_session_t *s, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_vector_s(lr_session_t *s, lr_type_t *elem, uint64_t count);

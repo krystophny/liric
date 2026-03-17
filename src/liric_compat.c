@@ -1489,13 +1489,35 @@ static uint32_t compat_symbol_id(lc_module_compat_t *mod, const char *name) {
     return sym_id;
 }
 
+static int compat_func_candidate_score(const lr_func_t *f) {
+    int score = 0;
+    if (!f)
+        return -1;
+    if (f->first_block)
+        score += 4;
+    if (f->uses_llvm_abi)
+        score += 2;
+    if (!f->is_decl)
+        score += 1;
+    return score;
+}
+
 static lr_func_t *find_func_linear(lr_module_t *m, const char *name) {
-    if (!m || !name) return NULL;
+    lr_func_t *best = NULL;
+    int best_score = -1;
+    if (!m || !name)
+        return NULL;
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (f->name && strcmp(f->name, name) == 0)
-            return f;
+        int score = 0;
+        if (!f->name || strcmp(f->name, name) != 0)
+            continue;
+        score = compat_func_candidate_score(f);
+        if (!best || score > best_score) {
+            best = f;
+            best_score = score;
+        }
     }
-    return NULL;
+    return best;
 }
 
 static lr_global_t *find_global_linear(lr_module_t *m, const char *name) {

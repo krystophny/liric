@@ -150,10 +150,22 @@ static int add_unique_u32(uint32_t *vals, size_t *count, size_t cap,
 }
 
 static const char *normalize_external_lookup_name(const char *name) {
+    static const char external_alias_tag[] = ".__liric_extern.";
+    const char *suffix = NULL;
     if (!name)
         return NULL;
     while (*name == '\1')
         name++;
+    suffix = strstr(name, external_alias_tag);
+    if (suffix && suffix != name) {
+        size_t n = (size_t)(suffix - name);
+        static _Thread_local char buf[4096];
+        if (n + 1u > sizeof(buf))
+            return name;
+        memcpy(buf, name, n);
+        buf[n] = '\0';
+        return buf;
+    }
     return name;
 }
 
@@ -829,12 +841,31 @@ int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
     }
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
+        lr_func_t *prev = NULL;
+        int prev_score = -1;
+        int score = 0;
         if (!f->name || !f->name[0])
             continue;
         uint32_t sym_id = lr_module_intern_symbol(m, f->name);
         if (sym_id >= oc->module_sym_count)
             continue;
-        oc->module_sym_funcs[sym_id] = f;
+        prev = oc->module_sym_funcs[sym_id];
+        if (prev) {
+            if (prev->first_block)
+                prev_score += 4;
+            if (prev->uses_llvm_abi)
+                prev_score += 2;
+            if (!prev->is_decl)
+                prev_score += 1;
+        }
+        if (f->first_block)
+            score += 4;
+        if (f->uses_llvm_abi)
+            score += 2;
+        if (!f->is_decl)
+            score += 1;
+        if (!prev || score > prev_score)
+            oc->module_sym_funcs[sym_id] = f;
         if (f->first_block)
             oc->module_sym_defined[sym_id] = 1;
     }
@@ -850,6 +881,34 @@ int lr_obj_build_symbol_cache(lr_objfile_ctx_t *oc, lr_module_t *m) {
 
 static const char *remap_intrinsic(const char *name) {
     return lr_platform_intrinsic_libc_name(name);
+}
+
+static bool obj_strip_external_alias_in_place(char *name) {
+    static const char external_alias_tag[] = ".__liric_extern.";
+    char *suffix;
+    if (!name || !name[0])
+        return false;
+    suffix = strstr(name, external_alias_tag);
+    if (!suffix || suffix == name)
+        return false;
+    *suffix = '\0';
+    return true;
+}
+
+static void obj_finalize_undefined_symbol_names(lr_objfile_ctx_t *ctx) {
+    if (!ctx)
+        return;
+    for (uint32_t i = 0; i < ctx->num_symbols; i++) {
+        lr_obj_symbol_t *sym = &ctx->symbols[i];
+        const char *mapped;
+        if (sym->is_defined || !sym->name || !sym->name[0])
+            continue;
+        if (obj_strip_external_alias_in_place((char *)sym->name))
+            continue;
+        mapped = remap_intrinsic(sym->name);
+        if (mapped != sym->name)
+            sym->name = mapped;
+    }
 }
 
 static bool obj_symbol_should_be_weak(const char *name) {
@@ -1505,7 +1564,26 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         uint32_t sym_idx;
         uint32_t reloc_base;
         size_t func_len = 0;
+        lr_func_t *best = NULL;
+        int best_score = -1;
         if (!f->name || !f->name[0] || f->is_decl || !f->first_block)
+            continue;
+        for (lr_func_t *cand = m->first_func; cand; cand = cand->next) {
+            int score = 0;
+            if (!cand->name || strcmp(cand->name, f->name) != 0)
+                continue;
+            if (cand->first_block)
+                score += 4;
+            if (cand->uses_llvm_abi)
+                score += 2;
+            if (!cand->is_decl)
+                score += 1;
+            if (!best || score > best_score) {
+                best = cand;
+                best_score = score;
+            }
+        }
+        if (best && best != f)
             continue;
 
         sym_idx = lr_obj_ensure_symbol(&out->ctx, f->name, false, 0, 0);
@@ -1720,6 +1798,8 @@ int lr_emit_object_from_blobs(const lr_func_blob_t *blobs,
     if (obj_build_from_blobs(blobs, num_blobs, m, target, false, &build) != 0)
         return -1;
 
+    obj_finalize_undefined_symbol_names(&build.ctx);
+
     int result = write_object_payload(out, target, &build);
     obj_build_result_destroy(&build);
     return result;
@@ -1739,15 +1819,7 @@ int lr_emit_executable_from_blobs(const lr_func_blob_t *blobs,
     lr_obj_build_result_t build;
     if (obj_build_from_blobs(blobs, num_blobs, m, target, true, &build) != 0)
         return -1;
-
-    for (uint32_t i = 0; i < build.ctx.num_symbols; i++) {
-        if (build.ctx.symbols[i].is_defined)
-            continue;
-        const char *orig = build.ctx.symbols[i].name;
-        const char *mapped = remap_intrinsic(orig);
-        if (mapped != orig)
-            build.ctx.symbols[i].name = mapped;
-    }
+    obj_finalize_undefined_symbol_names(&build.ctx);
 
     int result = -1;
 #if defined(__linux__)
@@ -1843,18 +1915,7 @@ int lr_emit_executable(lr_module_t *m, const lr_target_t *target, FILE *out,
     lr_obj_build_result_t build;
     if (obj_build_module(m, target, true, &build) != 0)
         return -1;
-
-    /* Remap remaining undefined llvm.* intrinsics to libc equivalents.
-       This runs after intrinsic stub embedding, so only truly unresolved
-       intrinsics (like llvm.memcpy) get remapped. */
-    for (uint32_t i = 0; i < build.ctx.num_symbols; i++) {
-        if (build.ctx.symbols[i].is_defined)
-            continue;
-        const char *orig = build.ctx.symbols[i].name;
-        const char *mapped = remap_intrinsic(orig);
-        if (mapped != orig)
-            build.ctx.symbols[i].name = mapped;
-    }
+    obj_finalize_undefined_symbol_names(&build.ctx);
 
     int result = -1;
 #if defined(__linux__)

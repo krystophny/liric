@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 
 /*
@@ -541,13 +542,54 @@ static uint8_t int_type_width_bits(const lr_type_t *type) {
     return (uint8_t)fallback_bits;
 }
 
-static lr_func_t *find_module_function(lr_module_t *mod, const char *name) {
-    if (!mod || !name) return NULL;
-    for (lr_func_t *f = mod->first_func; f; f = f->next) {
-        if (strcmp(f->name, name) == 0)
-            return f;
+static bool call_signature_matches_func(const lr_inst_t *call_inst,
+                                        const lr_func_t *func) {
+    uint32_t num_args = 0;
+    if (!call_inst || !func)
+        return false;
+    if (call_inst->op != LR_OP_CALL)
+        return false;
+    if (func->ret_type != call_inst->type)
+        return false;
+    num_args = call_inst->num_operands > 0 ? call_inst->num_operands - 1u : 0u;
+    if (func->vararg) {
+        if (num_args < func->num_params)
+            return false;
+    } else if (func->num_params != num_args) {
+        return false;
     }
-    return NULL;
+    for (uint32_t i = 0; i < func->num_params; i++) {
+        const lr_operand_t *arg = &call_inst->operands[i + 1u];
+        if (!func->param_types || func->param_types[i] != arg->type)
+            return false;
+    }
+    return true;
+}
+
+static lr_func_t *find_module_function_for_call(x86_compile_ctx_t *cc,
+                                                const char *name) {
+    lr_func_t *best = NULL;
+    int best_score = -1;
+    if (!cc || !cc->mod || !name)
+        return NULL;
+    for (lr_func_t *f = cc->mod->first_func; f; f = f->next) {
+        int score = 0;
+        if (!f->name || strcmp(f->name, name) != 0)
+            continue;
+        if (!call_signature_matches_func(cc->current_inst, f))
+            continue;
+        if (f->first_block)
+            score += 4;
+        if (f->uses_llvm_abi)
+            score += 2;
+        if (!f->is_decl)
+            score += 1;
+        if (!best || score > best_score) {
+            best = f;
+            best_score = score;
+        }
+    }
+    return best;
 }
 
 
@@ -1739,6 +1781,9 @@ static bool direct_call_uses_external_sysv_abi(x86_compile_ctx_t *cc,
                                                lr_func_t **callee_func_out,
                                                bool *out_vararg) {
     lr_func_t *callee_func = NULL;
+    lr_func_t *named_func = NULL;
+    const char *sym_name = NULL;
+    bool sym_defined = false;
     if (callee_func_out) *callee_func_out = NULL;
     if (out_vararg) *out_vararg = call_vararg;
 
@@ -1746,29 +1791,53 @@ static bool direct_call_uses_external_sysv_abi(x86_compile_ctx_t *cc,
         return false;
 
     if (callee_op->kind == LR_VAL_GLOBAL) {
+        sym_name = lr_module_symbol_name(cc->mod, callee_op->global_id);
         if (callee_op->global_id < cc->sym_count) {
+            sym_defined = cc->sym_defined &&
+                          cc->sym_defined[callee_op->global_id] != 0;
             callee_func = cc->sym_funcs[callee_op->global_id];
+            if (callee_func &&
+                !call_signature_matches_func(cc->current_inst, callee_func)) {
+                callee_func = NULL;
+            }
+            if (sym_name) {
+                named_func = find_module_function_for_call(cc, sym_name);
+                if (named_func && (!callee_func ||
+                        (named_func->uses_llvm_abi && !callee_func->uses_llvm_abi) ||
+                        (named_func->first_block && !callee_func->first_block))) {
+                    callee_func = named_func;
+                }
+            }
             if (callee_func_out) *callee_func_out = callee_func;
             if (callee_func) {
                 if (out_vararg)
                     *out_vararg = callee_func->vararg || call_vararg;
-                return callee_func->first_block == NULL ||
-                       callee_func->uses_llvm_abi;
+                if (callee_func->vararg || call_vararg)
+                    return true;
+                if (callee_func->uses_llvm_abi)
+                    return true;
+                if (callee_func->first_block != NULL)
+                    return false;
+                return !sym_defined;
             }
-            return cc->sym_defined[callee_op->global_id] == 0;
+            if (sym_name)
+                sym_defined = is_symbol_defined_in_module(cc->mod, sym_name);
+            return !sym_defined;
         }
-        const char *sym_name = lr_module_symbol_name(cc->mod,
-                                                      callee_op->global_id);
         if (!sym_name) return false;
-        callee_func = find_module_function(cc->mod, sym_name);
+        callee_func = find_module_function_for_call(cc, sym_name);
         if (callee_func_out) *callee_func_out = callee_func;
+        sym_defined = is_symbol_defined_in_module(cc->mod, sym_name);
         if (callee_func) {
             if (out_vararg)
                 *out_vararg = callee_func->vararg || call_vararg;
-            return callee_func->first_block == NULL ||
-                   callee_func->uses_llvm_abi;
+            if (callee_func->uses_llvm_abi)
+                return true;
+            if (callee_func->first_block != NULL)
+                return false;
+            return !sym_defined;
         }
-        return !is_symbol_defined_in_module(cc->mod, sym_name);
+        return !sym_defined;
     }
 
     if (out_vararg) *out_vararg = call_vararg;
@@ -1865,6 +1934,7 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->vararg_named_stack_gp = 0;
     cc->func_uses_external_sysv_fp = function_uses_external_sysv_fp_abi(func_meta);
 
+    lr_module_disambiguate_local_function_collisions(mod);
     attach_obj_symbol_meta_cache(cc);
 
     ctx->prologue_patch_pos = emit_prologue(cc);
@@ -2105,6 +2175,7 @@ static int x86_64_compile_emit(void *compile_ctx,
     inst_header.dest = desc->dest;
     inst_header.icmp_pred = (lr_icmp_pred_t)desc->icmp_pred;
     inst_header.fcmp_pred = (lr_fcmp_pred_t)desc->fcmp_pred;
+    inst_header.align = desc->align;
     inst_header.call_external_abi = desc->call_external_abi;
     inst_header.call_vararg = desc->call_vararg;
     inst_header.call_fixed_args = desc->call_fixed_args;
@@ -2384,7 +2455,10 @@ static int x86_64_compile_emit(void *compile_ctx,
     }
     case LR_OP_ALLOCA: {
         size_t elem_sz = lr_type_size(desc->type);
+        size_t elem_align = desc->align ? (size_t)desc->align
+                                        : lr_type_align(desc->type);
         if (elem_sz < 1) elem_sz = 1;
+        if (elem_align == 0) elem_align = 1;
         /* Treat all constant-count allocas as static: LLVM semantics
            guarantee alloca is entry-block regardless of IR position,
            so we use the fixed frame for any compile-time-known size. */
@@ -2398,8 +2472,6 @@ static int x86_64_compile_emit(void *compile_ctx,
                 cc->static_alloca_offsets, cc->num_static_alloca_offsets,
                 desc->dest);
             if (off == 0) {
-                size_t elem_align = lr_type_align(desc->type);
-                if (elem_align == 0) elem_align = 1;
                 cc->stack_size = (uint32_t)align_up(cc->stack_size,
                                                      elem_align);
                 cc->stack_size += (uint32_t)total_sz;
@@ -2417,10 +2489,12 @@ static int x86_64_compile_emit(void *compile_ctx,
                 emit_mov_imm(cc, X86_RCX, (int64_t)elem_sz, false);
                 emit_imul_rr(cc, X86_RAX, X86_RCX, 8);
             }
-            emit_mov_imm(cc, X86_RCX, 15, false);
+            if (elem_align < 16)
+                elem_align = 16;
+            emit_mov_imm(cc, X86_RCX, (int64_t)(elem_align - 1u), false);
             encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x01,
                           X86_RAX, X86_RCX, 8);
-            emit_mov_imm(cc, X86_RCX, ~15LL, false);
+            emit_mov_imm(cc, X86_RCX, -(int64_t)elem_align, false);
             encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x21,
                           X86_RAX, X86_RCX, 8);
             encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x29,
