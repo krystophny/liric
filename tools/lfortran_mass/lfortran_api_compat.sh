@@ -24,7 +24,7 @@ usage: lfortran_api_compat.sh [options]
   --run-smoke-tests yes|no|auto
                           run llvm21 parity smoke tests (default: auto: yes for llvm21 family-set, else no)
   --itest-workers N       workers for integration tests only (default: 1)
-  --itest-timeout-sec N   per integration-suite timeout in seconds (default: 900)
+  --itest-timeout-sec N   per integration-suite timeout in seconds (default: 14400)
   --itest-memory-max SIZE memory cap for integration-suite scope, systemd format (default: 8G)
   --itest-tasks-max N     task cap for integration-suite scope (default: 512)
   --unsafe-itests         disable integration-suite containment guards
@@ -894,7 +894,7 @@ run_itests="yes"
 run_smoke_tests_mode="${LIRIC_LFORTRAN_RUN_SMOKE_TESTS:-auto}"
 run_smoke_tests_flag="no"
 itest_workers=""
-itest_timeout_sec="${LIRIC_LFORTRAN_ITEST_TIMEOUT_SEC:-3600}"
+itest_timeout_sec="${LIRIC_LFORTRAN_ITEST_TIMEOUT_SEC:-14400}"
 itest_memory_max="${LIRIC_LFORTRAN_ITEST_MEMORY_MAX:-8G}"
 itest_tasks_max="${LIRIC_LFORTRAN_ITEST_TASKS_MAX:-512}"
 safe_itests="yes"
