@@ -159,27 +159,6 @@ static lr_module_t *clone_module(lr_module_t *m, char *err, size_t err_cap) {
     return out;
 }
 
-static int merge_runtime_into(lr_module_t *work, const char *runtime_ll,
-                              size_t runtime_len, char *err, size_t err_cap) {
-    char parse_err[256] = {0};
-    lr_module_t *rt = NULL;
-    if (!runtime_ll || runtime_len == 0)
-        return 0;
-    rt = lr_parse_ll(runtime_ll, runtime_len, parse_err, sizeof(parse_err));
-    if (!rt) {
-        set_err(err, err_cap, "failed to parse runtime ll: %s",
-                parse_err[0] ? parse_err : "unknown parse error");
-        return -1;
-    }
-    if (lr_module_merge(work, rt) != 0) {
-        lr_module_free(rt);
-        set_err(err, err_cap, "failed to merge runtime module");
-        return -1;
-    }
-    lr_module_free(rt);
-    return 0;
-}
-
 /* Emit a simple wrapper main() that calls entry_symbol() with no args. */
 static int add_entry_wrapper_if_needed(lr_module_t *work, const char *entry_symbol,
                                        char *err, size_t err_cap) {
@@ -651,16 +630,12 @@ int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
     return rc;
 }
 
-int lr_llvm_emit_executable_path(lr_module_t *m, const char *runtime_ll,
-                                 size_t runtime_len,
-                                 const lr_target_t *target,
+int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
                                  const char *path,
                                  const char *entry_symbol,
                                  char *err, size_t err_cap) {
 #if !LR_LLVM_BACKEND_CAN_LINK
     (void)m;
-    (void)runtime_ll;
-    (void)runtime_len;
     (void)target;
     (void)path;
     (void)entry_symbol;
@@ -685,8 +660,6 @@ int lr_llvm_emit_executable_path(lr_module_t *m, const char *runtime_ll,
     work = clone_module(m, err, err_cap);
     if (!work)
         return -1;
-    if (merge_runtime_into(work, runtime_ll, runtime_len, err, err_cap) != 0)
-        goto done;
     if (add_entry_wrapper_if_needed(work, entry_symbol, err, err_cap) != 0)
         goto done;
 
@@ -748,15 +721,11 @@ int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
     return -1;
 }
 
-int lr_llvm_emit_executable_path(lr_module_t *m, const char *runtime_ll,
-                                 size_t runtime_len,
-                                 const lr_target_t *target,
+int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
                                  const char *path,
                                  const char *entry_symbol,
                                  char *err, size_t err_cap) {
     (void)m;
-    (void)runtime_ll;
-    (void)runtime_len;
     (void)target;
     (void)path;
     (void)entry_symbol;

@@ -7,6 +7,7 @@
 #include "llvm_backend.h"
 #include "module_emit.h"
 #include "objfile.h"
+#include "runtime_archive.h"
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -186,6 +187,10 @@ struct lr_session {
     bool runtime_bc_borrowed;  /* true = process-lifetime pointer, skip free */
     bool runtime_bc_registered_with_jit;
     bool runtime_bc_merged_into_main_module;
+    uint8_t *runtime_archive_data;
+    size_t runtime_archive_len;
+    bool runtime_archive_borrowed;
+    bool runtime_archive_merged_into_main_module;
 
     /* Bitset tracking vregs known to hold null-derived values (e.g. GEP
        from null).  Used in the streaming compile path to skip backend
@@ -397,274 +402,42 @@ static const char *session_blob_entry_symbol(const struct lr_session *s,
     return first ? first : (fallback ? fallback : "_start");
 }
 
-static bool session_type_compatible(const lr_type_t *a, const lr_type_t *b) {
-    if (a == b)
-        return true;
-    if (!a || !b || a->kind != b->kind)
-        return false;
-    switch (a->kind) {
-    case LR_TYPE_VOID:
-    case LR_TYPE_I1:
-    case LR_TYPE_I8:
-    case LR_TYPE_I16:
-    case LR_TYPE_I32:
-    case LR_TYPE_I64:
-    case LR_TYPE_FLOAT:
-    case LR_TYPE_DOUBLE:
-    case LR_TYPE_X86_FP80:
-    case LR_TYPE_PTR:
-        return true;
-    case LR_TYPE_ARRAY:
-    case LR_TYPE_VECTOR:
-        return a->array.count == b->array.count &&
-               session_type_compatible(a->array.elem, b->array.elem);
-    case LR_TYPE_STRUCT:
-        if (a->struc.num_fields != b->struc.num_fields ||
-            a->struc.packed != b->struc.packed)
-            return false;
-        for (uint32_t i = 0; i < a->struc.num_fields; i++) {
-            if (!session_type_compatible(a->struc.fields[i], b->struc.fields[i]))
-                return false;
-        }
-        return true;
-    case LR_TYPE_FUNC:
-        if (!session_type_compatible(a->func.ret, b->func.ret) ||
-            a->func.num_params != b->func.num_params ||
-            a->func.vararg != b->func.vararg)
-            return false;
-        for (uint32_t i = 0; i < a->func.num_params; i++) {
-            if (!session_type_compatible(a->func.params[i], b->func.params[i]))
-                return false;
-        }
-        return true;
-    }
-    return false;
-}
-
-static bool session_func_signature_compatible(const lr_func_t *a,
-                                              const lr_func_t *b) {
-    if (!a || !b)
-        return false;
-    if (!session_type_compatible(a->ret_type, b->ret_type) ||
-        a->num_params != b->num_params ||
-        a->vararg != b->vararg) {
-        return false;
-    }
-    for (uint32_t i = 0; i < a->num_params; i++) {
-        if (!session_type_compatible(a->param_types[i], b->param_types[i]))
-            return false;
-    }
-    return true;
-}
-
-static lr_func_t *session_find_defined_func(lr_module_t *m, const char *name) {
-    if (!m || !name || !name[0])
-        return NULL;
-    for (lr_func_t *f = m->first_func; f; f = f->next) {
-        if (!f->name || strcmp(f->name, name) != 0)
-            continue;
-        if (!f->is_decl && f->first_block)
-            return f;
-    }
-    return NULL;
-}
-
-typedef struct session_runtime_extern_remap {
-    const char *from_name;
-    const char *to_name;
-} session_runtime_extern_remap_t;
-
-static int session_runtime_extern_remap_push(session_runtime_extern_remap_t **items,
-                                             uint32_t *count,
-                                             uint32_t *cap,
-                                             const char *from_name,
-                                             const char *to_name) {
-    session_runtime_extern_remap_t *tmp = NULL;
-    if (!items || !count || !cap || !from_name || !to_name)
-        return -1;
-    for (uint32_t i = 0; i < *count; i++) {
-        if (strcmp((*items)[i].from_name, from_name) == 0)
-            return 0;
-    }
-    if (*count == *cap) {
-        uint32_t new_cap = *cap == 0 ? 8u : (*cap * 2u);
-        tmp = (session_runtime_extern_remap_t *)realloc(
-            *items, new_cap * sizeof(*tmp));
-        if (!tmp)
-            return -1;
-        *items = tmp;
-        *cap = new_cap;
-    }
-    (*items)[*count].from_name = from_name;
-    (*items)[*count].to_name = to_name;
-    (*count)++;
-    return 0;
-}
-
-static const char *session_runtime_extern_remap_lookup(
-    const session_runtime_extern_remap_t *items,
-    uint32_t count,
-    const char *name) {
-    if (!items || !name)
-        return NULL;
-    for (uint32_t i = 0; i < count; i++) {
-        if (strcmp(items[i].from_name, name) == 0)
-            return items[i].to_name;
-    }
-    return NULL;
-}
-
-static int session_rewrite_runtime_blob_extern_conflicts(struct lr_session *dst,
-                                                         struct lr_session *rt_session,
-                                                         session_error_t *err) {
-    lr_module_t *rt_module = NULL;
-    session_runtime_extern_remap_t *remaps = NULL;
-    uint32_t remap_count = 0;
-    uint32_t remap_cap = 0;
-
-    if (!dst || !dst->module || !rt_session)
-        return 0;
-    rt_module = lr_session_module(rt_session);
-    if (!rt_module)
-        return 0;
-
-    for (lr_func_t *rf = rt_module->first_func; rf; rf = rf->next) {
-        lr_func_t *df = NULL;
-        char *alias_name = NULL;
-        int needed = 0;
-        if (!rf->name || !rf->name[0] || (!rf->is_decl && rf->first_block))
-            continue;
-        df = session_find_defined_func(dst->module, rf->name);
-        if (!df || session_func_signature_compatible(df, rf))
-            continue;
-        needed = snprintf(NULL, 0, "%s.__liric_extern.%u",
-                          rf->name, remap_count);
-        if (needed < 0) {
-            free(remaps);
-            err_set(err, S_ERR_BACKEND,
-                    "runtime extern alias formatting failed");
-            return -1;
-        }
-        alias_name = (char *)lr_arena_alloc_uninit(rt_module->arena,
-                                                   (size_t)needed + 1u, 1u);
-        if (!alias_name) {
-            free(remaps);
-            err_set(err, S_ERR_BACKEND,
-                    "runtime extern alias allocation failed");
-            return -1;
-        }
-        (void)snprintf(alias_name, (size_t)needed + 1u,
-                       "%s.__liric_extern.%u", rf->name, remap_count);
-        if (session_runtime_extern_remap_push(&remaps, &remap_count, &remap_cap,
-                                              rf->name, alias_name) != 0) {
-            free(remaps);
-            err_set(err, S_ERR_BACKEND,
-                    "runtime extern remap registration failed");
-            return -1;
-        }
-    }
-
-    if (remap_count == 0) {
-        free(remaps);
-        return 0;
-    }
-
-    for (uint32_t bi = 0; bi < rt_session->blob_count; bi++) {
-        lr_func_blob_t *blob = &rt_session->blobs[bi];
-        lr_cached_reloc_t *relocs = (lr_cached_reloc_t *)blob->relocs;
-        if (!relocs || blob->num_relocs == 0)
-            continue;
-        for (uint32_t ri = 0; ri < blob->num_relocs; ri++) {
-            const char *mapped = session_runtime_extern_remap_lookup(
-                remaps, remap_count, relocs[ri].symbol_name);
-            if (mapped)
-                relocs[ri].symbol_name = mapped;
-        }
-    }
-
-    free(remaps);
-    return 0;
-}
-
-/* For no-link executable emission, prefer dynamic runtime imports when
- * an explicit runtime shared library is configured. This avoids merging
- * runtime IR/BC into the client module and keeps runtime behavior aligned
- * with the shared runtime used by downstream integration tests. */
-static bool session_emit_prefers_runtime_lib(void) {
-    const char *force_merge = getenv("LIRIC_FORCE_RUNTIME_MERGE");
-    const char *runtime_lib = getenv("LIRIC_RUNTIME_LIB");
-    if (force_merge && force_merge[0] && strcmp(force_merge, "0") != 0)
-        return false;
-    return runtime_lib && runtime_lib[0];
-}
-
-static int merge_runtime_bc_into_module(struct lr_session *s, lr_module_t *m,
-                                        bool *merged_flag,
-                                        session_error_t *err) {
+static int merge_runtime_archive_into_module(struct lr_session *s,
+                                             lr_module_t *m,
+                                             bool *merged_flag,
+                                             session_error_t *err) {
+    const char *archive_ir = NULL;
+    size_t archive_ir_len = 0;
+    const uint8_t *archive_blob_pkg = NULL;
+    size_t archive_blob_pkg_len = 0;
     char parse_err[256] = {0};
     lr_module_t *rt = NULL;
-    lr_session_t *rt_session = NULL;
-    uint8_t *rt_blob_pkg = NULL;
-    size_t rt_blob_pkg_len = 0;
-    session_config_t rt_cfg;
-    if (!s || !m || !s->runtime_bc_data || s->runtime_bc_len == 0)
+    if (!s || !m || !s->runtime_archive_data || s->runtime_archive_len == 0)
         return 0;
     if (merged_flag && *merged_flag)
         return 0;
-    if (s->blob_count > 0) {
-        memset(&rt_cfg, 0, sizeof(rt_cfg));
-        rt_cfg.mode = SESSION_MODE_DIRECT;
-        rt_cfg.target = s->cfg.target;
-        rt_cfg.backend = s->cfg.backend;
-        rt_session = lr_session_create(&rt_cfg, NULL);
-        if (!rt_session) {
-            err_set(err, S_ERR_BACKEND, "runtime bc session allocation failed");
-            return -1;
-        }
-        if (lr_parse_bc_to_session(s->runtime_bc_data, s->runtime_bc_len,
-                                   rt_session, parse_err,
-                                   sizeof(parse_err)) != 0) {
-            err_set(err, S_ERR_PARSE, "runtime bc replay failed: %s",
-                    parse_err[0] ? parse_err : "unknown parse error");
-            lr_session_destroy(rt_session);
-            return -1;
-        }
-        if (session_rewrite_runtime_blob_extern_conflicts(s, rt_session, err) != 0) {
-            lr_session_destroy(rt_session);
-            return -1;
-        }
-        if (lr_module_merge(m, lr_session_module(rt_session)) != 0) {
-            err_set(err, S_ERR_BACKEND, "runtime bc merge failed");
-            lr_session_destroy(rt_session);
-            return -1;
-        }
-        if (lr_session_export_blob_package(rt_session, &rt_blob_pkg,
-                                           &rt_blob_pkg_len, err) != 0) {
-            lr_session_destroy(rt_session);
-            return -1;
-        }
-        if (rt_blob_pkg_len > 0 &&
-            lr_session_import_blob_package(s, rt_blob_pkg, rt_blob_pkg_len,
-                                           err) != 0) {
-            free(rt_blob_pkg);
-            lr_session_destroy(rt_session);
-            return -1;
-        }
-        free(rt_blob_pkg);
-        lr_session_destroy(rt_session);
-        if (merged_flag)
-            *merged_flag = true;
-        return 0;
+    if (lr_runtime_archive_parse(s->runtime_archive_data,
+                                 s->runtime_archive_len,
+                                 &archive_ir, &archive_ir_len,
+                                 &archive_blob_pkg, &archive_blob_pkg_len) != 0) {
+        err_set(err, S_ERR_PARSE, "runtime archive parse failed");
+        return -1;
     }
-    rt = lr_parse_bc_with_arena(s->runtime_bc_data, s->runtime_bc_len,
-                                m->arena, parse_err, sizeof(parse_err));
+    rt = lr_parse_ll(archive_ir, archive_ir_len, parse_err, sizeof(parse_err));
     if (!rt) {
-        err_set(err, S_ERR_PARSE, "runtime bc parse failed: %s",
+        err_set(err, S_ERR_PARSE, "runtime archive IR parse failed: %s",
                 parse_err[0] ? parse_err : "unknown parse error");
         return -1;
     }
     if (lr_module_merge(m, rt) != 0) {
-        err_set(err, S_ERR_BACKEND, "runtime bc merge failed");
+        lr_module_free(rt);
+        err_set(err, S_ERR_BACKEND, "runtime archive merge failed");
+        return -1;
+    }
+    lr_module_free(rt);
+    if (archive_blob_pkg_len > 0 &&
+        lr_session_import_blob_package(s, archive_blob_pkg, archive_blob_pkg_len,
+                                       err) != 0) {
         return -1;
     }
     if (merged_flag)
@@ -2510,6 +2283,8 @@ void lr_session_destroy(struct lr_session *s) {
     free(s->null_derived);
     if (!s->runtime_bc_borrowed)
         free(s->runtime_bc_data);
+    if (!s->runtime_archive_borrowed)
+        free(s->runtime_archive_data);
     free(s);
 }
 
@@ -2591,6 +2366,50 @@ int lr_session_set_runtime_bc_borrowed(struct lr_session *s,
                                        const uint8_t *bc_data, size_t bc_len,
                                        session_error_t *err) {
     return session_set_runtime_bc_impl(s, bc_data, bc_len, true, err);
+}
+
+static int session_set_runtime_archive_impl(struct lr_session *s,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            bool borrowed,
+                                            session_error_t *err) {
+    err_clear(err);
+    if (!s || !data || len == 0) {
+        err_set(err, S_ERR_ARGUMENT, "invalid runtime archive arguments");
+        return -1;
+    }
+    if (s->runtime_archive_data) {
+        err_set(err, S_ERR_STATE, "runtime archive already configured");
+        return -1;
+    }
+    if (borrowed) {
+        s->runtime_archive_data = (uint8_t *)data;
+        s->runtime_archive_borrowed = true;
+    } else {
+        uint8_t *owned = (uint8_t *)malloc(len);
+        if (!owned) {
+            err_set(err, S_ERR_BACKEND, "runtime archive allocation failed");
+            return -1;
+        }
+        memcpy(owned, data, len);
+        s->runtime_archive_data = owned;
+        s->runtime_archive_borrowed = false;
+    }
+    s->runtime_archive_len = len;
+    s->runtime_archive_merged_into_main_module = false;
+    return 0;
+}
+
+int lr_session_set_runtime_archive(struct lr_session *s, const uint8_t *data,
+                                   size_t len, session_error_t *err) {
+    return session_set_runtime_archive_impl(s, data, len, false, err);
+}
+
+int lr_session_set_runtime_archive_borrowed(struct lr_session *s,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            session_error_t *err) {
+    return session_set_runtime_archive_impl(s, data, len, true, err);
 }
 
 void lr_session_set_runtime_bc_preloaded(struct lr_session *s,
@@ -3563,16 +3382,15 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
                          session_error_t *err) {
     char backend_err[256] = {0};
     const char *entry = NULL;
-    bool prefer_runtime_lib = session_emit_prefers_runtime_lib();
 
     err_clear(err);
     if (!s || !s->module || !path) {
         err_set(err, S_ERR_ARGUMENT, "invalid emit_exe arguments");
         return -1;
     }
-    if (!prefer_runtime_lib && s->runtime_bc_data && s->runtime_bc_len > 0) {
-        if (merge_runtime_bc_into_module(s, s->module,
-                                         &s->runtime_bc_merged_into_main_module,
+    if (s->runtime_archive_data && s->runtime_archive_len > 0) {
+        if (merge_runtime_archive_into_module(
+                s, s->module, &s->runtime_archive_merged_into_main_module,
                                          err) != 0)
             return -1;
     }
@@ -3607,92 +3425,10 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
             s->jit ? s->jit->mode : LR_COMPILE_ISEL,
-            path, entry, NULL, 0,
+            path, entry,
             backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "executable emission failed");
-        return -1;
-    }
-    if (session_mark_output_executable(path, err) != 0)
-        return -1;
-    return 0;
-}
-
-int lr_session_emit_exe_with_runtime(struct lr_session *s, const char *path,
-                                      const char *runtime_ll, size_t runtime_len,
-                                      session_error_t *err) {
-    char backend_err[256] = {0};
-    bool has_runtime_bc;
-    const char *entry = NULL;
-    bool prefer_runtime_lib = session_emit_prefers_runtime_lib();
-
-    err_clear(err);
-    if (!s || !s->module || !path) {
-        err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
-        return -1;
-    }
-    if (prefer_runtime_lib) {
-        return lr_session_emit_exe(s, path, err);
-    }
-    has_runtime_bc = s->runtime_bc_data && s->runtime_bc_len > 0;
-    if (has_runtime_bc) {
-        return lr_session_emit_exe(s, path, err);
-    }
-    if (!runtime_ll || runtime_len == 0) {
-        err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_with_runtime arguments");
-        return -1;
-    }
-
-    if (s->blob_count > 0) {
-        char parse_err[256] = {0};
-        lr_module_t *parsed_runtime = NULL;
-
-        parsed_runtime = lr_parse_ll(runtime_ll, runtime_len, parse_err, sizeof(parse_err));
-        if (!parsed_runtime) {
-            err_set(err, S_ERR_PARSE, "runtime ll parse failed: %s",
-                    parse_err[0] ? parse_err : "unknown parse error");
-            return -1;
-        }
-        if (lr_module_merge(s->module, parsed_runtime) != 0) {
-            lr_module_free(parsed_runtime);
-            err_set(err, S_ERR_BACKEND, "runtime ll merge failed");
-            return -1;
-        }
-        lr_module_free(parsed_runtime);
-
-        const lr_target_t *target = session_resolve_target(s);
-        if (!target) {
-            err_set(err, S_ERR_BACKEND, "target not found");
-            return -1;
-        }
-        FILE *out = fopen(path, "wb");
-        if (!out) {
-            err_set(err, S_ERR_BACKEND, "cannot open output: %s", path);
-            return -1;
-        }
-        entry = session_blob_entry_symbol(s, session_entry_symbol(s->module));
-        int rc = lr_emit_executable_from_blobs(s->blobs, s->blob_count,
-                                               s->module, target, out,
-                                               entry);
-        (void)fclose(out);
-        if (rc != 0) {
-            err_set(err, S_ERR_BACKEND, "blob executable emission failed");
-            return -1;
-        }
-        if (session_mark_output_executable(path, err) != 0)
-            return -1;
-        return 0;
-    }
-
-    entry = session_entry_symbol(s->module);
-    if (lr_emit_module_executable_path_mode(
-            s->module, s->cfg.target,
-            s->jit ? s->jit->mode : LR_COMPILE_ISEL,
-            path, entry, runtime_ll, runtime_len,
-            backend_err, sizeof(backend_err)) != 0) {
-        err_set(err, S_ERR_BACKEND, "%s",
-                backend_err[0] ? backend_err :
-                "executable emission with runtime failed");
         return -1;
     }
     if (session_mark_output_executable(path, err) != 0)

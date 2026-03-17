@@ -904,11 +904,6 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void) {
     const char *path = "/tmp/liric_test_compat_emit_exe_llvm";
     lc_context_t *ctx = NULL;
     lc_module_compat_t *mod = NULL;
-    static const char *runtime_ll =
-        "define i32 @__lfortran_rt_dummy() {\n"
-        "entry:\n"
-        "  ret i32 0\n"
-        "}\n";
 
     ctx = lc_context_create();
     if (!ctx) {
@@ -926,7 +921,7 @@ int test_builder_compat_emit_executable_llvm_mode_contract(void) {
         goto cleanup;
     }
 
-    rc = lc_module_emit_executable(mod, path, runtime_ll, strlen(runtime_ll));
+    rc = lc_module_emit_executable(mod, path);
 #if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
     if (rc != 0) {
         fprintf(stderr, "  FAIL: llvm mode executable emission expected success\n");

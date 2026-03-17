@@ -1280,10 +1280,9 @@ if [[ -z "${LIRIC_POLICY:-}" ]]; then
     echo "lfortran_api_compat: applying WITH_LIRIC policy: LIRIC_POLICY=${LIRIC_POLICY}" >&2
 fi
 
-# Pre-build runtime BC once so individual lfortran invocations skip the
-# per-process clang fork (~330ms each).  Mirrors compat_select_runtime_clang()
-# and compat_build_runtime_bc() in src/liric_compat.c.
-if [[ -z "${LIRIC_RUNTIME_BC:-}" ]]; then
+# Pre-build a native runtime archive once so individual lfortran invocations
+# never parse runtime BC or preload runtime through the JIT path.
+if [[ -z "${LIRIC_RUNTIME_ARCHIVE:-}" ]]; then
     runtime_bc_clang=""
     for _cand in \
         "${LIRIC_CLANG:-}" \
@@ -1300,27 +1299,31 @@ if [[ -z "${LIRIC_RUNTIME_BC:-}" ]]; then
         fi
     done
 
-    [[ -n "$runtime_bc_clang" ]] || die "missing clang for WITH_LIRIC no-link runtime BC prebuild (set LIRIC_CLANG or install clang-21/clang)"
+    [[ -n "$runtime_bc_clang" ]] || die "missing clang for WITH_LIRIC runtime archive prebuild (set LIRIC_CLANG or install clang-21/clang)"
 
     runtime_src="${lfortran_dir}/src/libasr/runtime/lfortran_intrinsics.c"
     runtime_include="${lfortran_dir}/src"
     runtime_bc_out="${output_root}/liric_runtime.bc"
-    [[ -f "$runtime_src" ]] || die "missing runtime source for WITH_LIRIC no-link BC prebuild: ${runtime_src}"
+    runtime_archive_out="${output_root}/liric_runtime.lrarch"
+    runtime_archive_tool="${liric_build}/liric_runtime_archive"
+    [[ -x "$runtime_archive_tool" ]] || die "missing runtime archive tool: ${runtime_archive_tool}"
+    [[ -f "$runtime_src" ]] || die "missing runtime source for WITH_LIRIC runtime archive prebuild: ${runtime_src}"
 
     echo "lfortran_api_compat: pre-building runtime BC with ${runtime_bc_clang}" >&2
     "$runtime_bc_clang" -O0 -emit-llvm -c "$runtime_src" \
         "-I${runtime_include}" -o "$runtime_bc_out"
-    export LIRIC_RUNTIME_BC="$runtime_bc_out"
-    echo "lfortran_api_compat: LIRIC_RUNTIME_BC=${LIRIC_RUNTIME_BC}" >&2
+    "$runtime_archive_tool" --input-bc "$runtime_bc_out" --output "$runtime_archive_out"
+    export LIRIC_RUNTIME_ARCHIVE="$runtime_archive_out"
+    echo "lfortran_api_compat: LIRIC_RUNTIME_ARCHIVE=${LIRIC_RUNTIME_ARCHIVE}" >&2
 else
-    [[ -f "${LIRIC_RUNTIME_BC}" ]] \
-        || die "LIRIC_RUNTIME_BC is set but file does not exist: ${LIRIC_RUNTIME_BC}"
+    [[ -f "${LIRIC_RUNTIME_ARCHIVE}" ]] \
+        || die "LIRIC_RUNTIME_ARCHIVE is set but file does not exist: ${LIRIC_RUNTIME_ARCHIVE}"
 fi
 
-[[ -n "${LIRIC_RUNTIME_BC:-}" ]] \
-    || die "LIRIC_RUNTIME_BC must be set for WITH_LIRIC no-link mode"
-[[ -f "${LIRIC_RUNTIME_BC}" ]] \
-    || die "LIRIC_RUNTIME_BC file is missing: ${LIRIC_RUNTIME_BC}"
+[[ -n "${LIRIC_RUNTIME_ARCHIVE:-}" ]] \
+    || die "LIRIC_RUNTIME_ARCHIVE must be set for WITH_LIRIC static no-link mode"
+[[ -f "${LIRIC_RUNTIME_ARCHIVE}" ]] \
+    || die "LIRIC_RUNTIME_ARCHIVE file is missing: ${LIRIC_RUNTIME_ARCHIVE}"
 
 if [[ "$run_itests" == "yes" ]]; then
     # New stacktrace pipeline (no dwarfdump/python converters) writes

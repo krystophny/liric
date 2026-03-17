@@ -186,6 +186,22 @@ int lr_compiler_set_runtime_bc(lr_compiler_t *c, const uint8_t *bc_data,
     return 0;
 }
 
+int lr_compiler_set_runtime_archive(lr_compiler_t *c, const uint8_t *data,
+                                    size_t len, lr_compiler_error_t *err) {
+    lr_error_t sess_err = {0};
+    compiler_err_clear(err);
+    if (!c || !c->session || !data || len == 0) {
+        compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT,
+                         "invalid runtime archive");
+        return -1;
+    }
+    if (lr_session_set_runtime_archive(c->session, data, len, &sess_err) != 0) {
+        compiler_err_from_session(err, &sess_err);
+        return -1;
+    }
+    return 0;
+}
+
 int lr_compiler_feed_ll(lr_compiler_t *c, const char *src, size_t len,
                         lr_compiler_error_t *err) {
     char parse_err[512] = {0};
@@ -315,24 +331,6 @@ int lr_compiler_emit_exe(lr_compiler_t *c, const char *path,
         return -1;
     }
     if (lr_session_emit_exe(c->session, path, &sess_err) != 0) {
-        compiler_err_from_session(err, &sess_err);
-        return -1;
-    }
-    return 0;
-}
-
-int lr_compiler_emit_exe_with_runtime(lr_compiler_t *c, const char *path,
-                                      const char *runtime_ll, size_t runtime_len,
-                                      lr_compiler_error_t *err) {
-    lr_error_t sess_err = {0};
-    compiler_err_clear(err);
-    if (!c || !c->session || !path || !path[0] || !runtime_ll || runtime_len == 0) {
-        compiler_err_set(err, LR_COMPILER_ERR_ARGUMENT,
-                         "invalid emit_exe_with_runtime arguments");
-        return -1;
-    }
-    if (lr_session_emit_exe_with_runtime(c->session, path, runtime_ll, runtime_len,
-                                         &sess_err) != 0) {
         compiler_err_from_session(err, &sess_err);
         return -1;
     }

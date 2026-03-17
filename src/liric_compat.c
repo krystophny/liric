@@ -834,6 +834,8 @@ static compat_runtime_bc_cache_t g_runtime_bc_cache = {0, NULL, 0};
    (already unwrapped from any Mach-O wrapper). */
 static const uint8_t *g_embedded_runtime_bc = NULL;
 static size_t g_embedded_runtime_bc_len = 0;
+static const uint8_t *g_embedded_runtime_archive = NULL;
+static size_t g_embedded_runtime_archive_len = 0;
 
 /* Singleton JIT reused across lc_module_create() calls to avoid
    repeated 32MB mmap + hash table init per file. */
@@ -1215,6 +1217,40 @@ static int compat_try_attach_runtime_bc(lr_session_t *session) {
     return 1;
 }
 
+static int compat_try_attach_runtime_archive(lr_session_t *session) {
+    const char *runtime_archive = getenv("LIRIC_RUNTIME_ARCHIVE");
+    lr_error_t rt_err = {0};
+    uint8_t *archive_data = NULL;
+    size_t archive_len = 0;
+
+    if (!session)
+        return -1;
+    if (runtime_archive && runtime_archive[0]) {
+        if (read_file_bytes(runtime_archive, &archive_data, &archive_len) != 0)
+            return -1;
+        if (lr_session_set_runtime_archive(session, archive_data, archive_len,
+                                           &rt_err) != 0) {
+            free(archive_data);
+            if (rt_err.code == LR_ERR_STATE)
+                return 1;
+            return -1;
+        }
+        free(archive_data);
+        return 1;
+    }
+    if (g_embedded_runtime_archive && g_embedded_runtime_archive_len > 0) {
+        if (lr_session_set_runtime_archive_borrowed(
+                session, g_embedded_runtime_archive, g_embedded_runtime_archive_len,
+                &rt_err) != 0) {
+            if (rt_err.code == LR_ERR_STATE)
+                return 1;
+            return -1;
+        }
+        return 1;
+    }
+    return 0;
+}
+
 void lr_compat_set_embedded_runtime_bc(const uint8_t *data, size_t len) {
     size_t off = 0;
     size_t raw_len = 0;
@@ -1228,6 +1264,13 @@ void lr_compat_set_embedded_runtime_bc(const uint8_t *data, size_t len) {
         g_embedded_runtime_bc = data + off;
         g_embedded_runtime_bc_len = raw_len;
     }
+}
+
+void lr_compat_set_embedded_runtime_archive(const uint8_t *data, size_t len) {
+    if (!data || len == 0)
+        return;
+    g_embedded_runtime_archive = data;
+    g_embedded_runtime_archive_len = len;
 }
 
 /* ---- Compat types (must match the public header exactly) ---- */
@@ -6247,43 +6290,35 @@ int lc_module_merge_ll_text(lc_module_compat_t *mod,
     return 0;
 }
 
-int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
-                               const char *runtime_ll, size_t runtime_len) {
+int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename) {
     lr_error_t err = {0};
-    const char *runtime_bc = getenv("LIRIC_RUNTIME_BC");
     int emit_rc = 0;
     if (!mod || !filename) return -1;
     if (compat_finish_active_func(mod) != 0) return -1;
     if (compat_sync_session_module(mod, &err) != 0)
         return -1;
     compat_maybe_dump_final_ir(mod);
-
-    if ((runtime_bc && runtime_bc[0]) || !runtime_ll || runtime_len == 0) {
-        int rt_rc = compat_try_attach_runtime_bc(mod->session);
-        if (rt_rc <= 0) {
-            if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
-                fprintf(stderr,
-                        "lc_module_emit_executable: runtime unavailable; "
-                        "set LIRIC_RUNTIME_LL or LIRIC_RUNTIME_BC, or provide "
-                        "lfortran runtime source for auto-discovery\n");
-            }
-            return -1;
+    if (getenv("LIRIC_RUNTIME_BC") || getenv("LIRIC_RUNTIME_LIB")) {
+        if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
+            fprintf(stderr,
+                    "lc_module_emit_executable: legacy runtime BC/runtime lib "
+                    "configuration has been removed; use LIRIC_RUNTIME_ARCHIVE\n");
         }
-        emit_rc = lr_session_emit_exe(mod->session, filename, &err);
-        if (emit_rc != 0) {
-            if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
-                fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
-            return -1;
+        return -1;
+    }
+    if (compat_try_attach_runtime_archive(mod->session) <= 0) {
+        if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
+            fprintf(stderr,
+                    "lc_module_emit_executable: runtime unavailable; "
+                    "set LIRIC_RUNTIME_ARCHIVE\n");
         }
-    } else {
-        emit_rc = lr_session_emit_exe_with_runtime(mod->session, filename,
-                                                   runtime_ll, runtime_len,
-                                                   &err);
-        if (emit_rc != 0) {
-            if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
-                fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
-            return -1;
-        }
+        return -1;
+    }
+    emit_rc = lr_session_emit_exe(mod->session, filename, &err);
+    if (emit_rc != 0) {
+        if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_emit_executable: %s\n", err.msg);
+        return -1;
     }
     if (compat_write_empty_lines_sidecar(filename) != 0) {
         if (err.msg[0] && getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
@@ -6543,7 +6578,7 @@ fail_file:
         goto done;
     }
 
-    if (lc_module_emit_executable(mod, outfile, NULL, 0) != 0) {
+    if (lc_module_emit_executable(mod, outfile) != 0) {
         compat_set_err(err, errlen,
                        "WITH_LIRIC no-link executable emission from sidecar blobs failed.");
         goto done;

@@ -172,14 +172,11 @@ int lr_emit_module_executable_path_mode(lr_module_t *module,
                                         lr_compile_mode_t mode,
                                         const char *path,
                                         const char *entry,
-                                        const char *runtime_ll,
-                                        size_t runtime_len,
                                         char *err,
                                         size_t err_cap) {
     const lr_target_t *target = NULL;
     int rc = -1;
     FILE *out = NULL;
-    bool with_runtime = (runtime_ll && runtime_len > 0);
 
     if (!module || !path || !entry || !entry[0]) {
         emit_err(err, err_cap, "invalid executable emission arguments");
@@ -191,10 +188,7 @@ int lr_emit_module_executable_path_mode(lr_module_t *module,
 
     if (mode == LR_COMPILE_LLVM) {
         char backend_err[256] = {0};
-        rc = lr_llvm_emit_executable_path(module,
-                                          with_runtime ? runtime_ll : NULL,
-                                          with_runtime ? runtime_len : 0,
-                                          target, path, entry,
+        rc = lr_llvm_emit_executable_path(module, target, path, entry,
                                           backend_err, sizeof(backend_err));
         if (rc != 0) {
             emit_err(err, err_cap, "llvm executable emission failed: %s",
@@ -209,17 +203,10 @@ int lr_emit_module_executable_path_mode(lr_module_t *module,
         emit_err(err, err_cap, "cannot open output file: %s", path);
         return -1;
     }
-    if (with_runtime) {
-        rc = lr_emit_executable_with_runtime(module, runtime_ll, runtime_len,
-                                             target, out, entry);
-    } else {
-        rc = lr_emit_executable(module, target, out, entry);
-    }
+    rc = lr_emit_executable(module, target, out, entry);
     (void)fclose(out);
     if (rc != 0) {
-        emit_err(err, err_cap, with_runtime
-                 ? "executable emission with runtime failed"
-                 : "executable emission failed");
+        emit_err(err, err_cap, "executable emission failed");
         return -1;
     }
     return 0;
@@ -229,13 +216,10 @@ int lr_emit_module_executable_path(lr_module_t *module,
                                    const char *target_name,
                                    const char *path,
                                    const char *entry,
-                                   const char *runtime_ll,
-                                   size_t runtime_len,
                                    char *err,
                                    size_t err_cap) {
     return lr_emit_module_executable_path_mode(module, target_name,
                                                lr_compile_mode_from_env(),
                                                path, entry,
-                                               runtime_ll, runtime_len,
                                                err, err_cap);
 }

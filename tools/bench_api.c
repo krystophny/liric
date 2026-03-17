@@ -32,8 +32,7 @@ typedef struct {
     const char *lfortran;
     const char *lfortran_liric;
     const char *lfortran_exec_mode;
-    const char *runtime_bc;
-    const char *runtime_lib;
+    const char *runtime_archive;
     const char *liric_compile_mode;
     const char *liric_policy;
     const char *test_dir;
@@ -269,8 +268,7 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
                                          const char *extra_opt,
                                          const char *source_path,
                                          const char *object_path,
-                                         const char *runtime_bc,
-                                         const char *runtime_lib,
+                                         const char *runtime_archive,
                                          const char *liric_compile_mode,
                                          const char *liric_policy,
                                          int use_jit_flag,
@@ -286,16 +284,13 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
     char **argv = (char **)calloc(argc + 1, sizeof(char *));
     size_t k = 0;
     cmd_result_t r;
-    const char *saved_runtime_bc = NULL;
-    const char *saved_runtime = NULL;
+    const char *saved_runtime_archive = NULL;
     const char *saved_mode = NULL;
     const char *saved_policy = NULL;
-    char *saved_runtime_bc_copy = NULL;
-    char *saved_runtime_copy = NULL;
+    char *saved_runtime_archive_copy = NULL;
     char *saved_mode_copy = NULL;
     char *saved_policy_copy = NULL;
-    int had_runtime_bc_env = 0;
-    int had_runtime_env = 0;
+    int had_runtime_archive_env = 0;
     int had_mode_env = 0;
     int had_policy_env = 0;
     if (!argv) die("out of memory", NULL);
@@ -320,21 +315,13 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
     argv[k++] = (char *)source_path;
     argv[k] = NULL;
 
-    if (runtime_bc && runtime_bc[0]) {
-        saved_runtime_bc = getenv("LIRIC_RUNTIME_BC");
-        if (saved_runtime_bc) {
-            had_runtime_bc_env = 1;
-            saved_runtime_bc_copy = xstrdup(saved_runtime_bc);
+    if (runtime_archive && runtime_archive[0]) {
+        saved_runtime_archive = getenv("LIRIC_RUNTIME_ARCHIVE");
+        if (saved_runtime_archive) {
+            had_runtime_archive_env = 1;
+            saved_runtime_archive_copy = xstrdup(saved_runtime_archive);
         }
-        setenv("LIRIC_RUNTIME_BC", runtime_bc, 1);
-    }
-    if (runtime_lib && runtime_lib[0]) {
-        saved_runtime = getenv("LIRIC_RUNTIME_LIB");
-        if (saved_runtime) {
-            had_runtime_env = 1;
-            saved_runtime_copy = xstrdup(saved_runtime);
-        }
-        setenv("LIRIC_RUNTIME_LIB", runtime_lib, 1);
+        setenv("LIRIC_RUNTIME_ARCHIVE", runtime_archive, 1);
     }
     if (liric_compile_mode && liric_compile_mode[0]) {
         saved_mode = getenv("LIRIC_COMPILE_MODE");
@@ -355,17 +342,11 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
 
     r = run_cmd(argv, timeout_ms, NULL, work_dir);
 
-    if (runtime_bc && runtime_bc[0]) {
-        if (had_runtime_bc_env)
-            setenv("LIRIC_RUNTIME_BC", saved_runtime_bc_copy, 1);
+    if (runtime_archive && runtime_archive[0]) {
+        if (had_runtime_archive_env)
+            setenv("LIRIC_RUNTIME_ARCHIVE", saved_runtime_archive_copy, 1);
         else
-            unsetenv("LIRIC_RUNTIME_BC");
-    }
-    if (runtime_lib && runtime_lib[0]) {
-        if (had_runtime_env)
-            setenv("LIRIC_RUNTIME_LIB", saved_runtime_copy, 1);
-        else
-            unsetenv("LIRIC_RUNTIME_LIB");
+            unsetenv("LIRIC_RUNTIME_ARCHIVE");
     }
     if (liric_compile_mode && liric_compile_mode[0]) {
         if (had_mode_env)
@@ -380,8 +361,7 @@ static cmd_result_t run_lfortran_cmd(const char *lfortran_bin,
             unsetenv("LIRIC_POLICY");
     }
 
-    free(saved_runtime_bc_copy);
-    free(saved_runtime_copy);
+    free(saved_runtime_archive_copy);
     free(saved_mode_copy);
     free(saved_policy_copy);
     free(argv);
@@ -1601,8 +1581,7 @@ static void usage(void) {
     printf("  --lfortran PATH      path to lfortran+LLVM binary (default: build/deps/lfortran/build-llvm/src/bin/lfortran)\n");
     printf("  --lfortran-liric PATH path to lfortran+WITH_LIRIC binary (default: build/deps/lfortran/build-liric/src/bin/lfortran)\n");
     printf("  --lfortran-exec-mode MODE  lfortran execution mode: aot (default; compile-only, no link)\n");
-    printf("  --runtime-bc PATH    runtime bitcode to preload in liric sessions\n");
-    printf("  --runtime-lib PATH   runtime shared library to preload in liric sessions\n");
+    printf("  --runtime-archive PATH  static runtime archive for WITH_LIRIC AOT runs\n");
     printf("  --liric-compile-mode MODE  liric compile mode: isel|copy_patch|stencil|llvm\n");
     printf("  --liric-policy MODE  liric session policy: direct|ir\n");
     printf("  --test-dir PATH      path to integration_tests/ dir\n");
@@ -1630,8 +1609,7 @@ static cfg_t parse_args(int argc, char **argv) {
                              ? default_lfortran_liric
                              : NULL;
     cfg.lfortran_exec_mode = "aot";
-    cfg.runtime_bc = NULL;
-    cfg.runtime_lib = NULL;
+    cfg.runtime_archive = NULL;
     cfg.liric_compile_mode = getenv("LIRIC_COMPILE_MODE");
     if (!cfg.liric_compile_mode || !cfg.liric_compile_mode[0])
         cfg.liric_compile_mode = "isel";
@@ -1661,10 +1639,8 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.lfortran_liric = argv[++i];
         } else if (strcmp(argv[i], "--lfortran-exec-mode") == 0 && i + 1 < argc) {
             cfg.lfortran_exec_mode = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
-            cfg.runtime_bc = argv[++i];
-        } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
-            cfg.runtime_lib = argv[++i];
+        } else if (strcmp(argv[i], "--runtime-archive") == 0 && i + 1 < argc) {
+            cfg.runtime_archive = argv[++i];
         } else if (strcmp(argv[i], "--liric-compile-mode") == 0 && i + 1 < argc) {
             cfg.liric_compile_mode = argv[++i];
         } else if (strcmp(argv[i], "--liric-policy") == 0 && i + 1 < argc) {
@@ -1725,8 +1701,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.lfortran_liric = to_abs_path(cfg.lfortran_liric);
     cfg.test_dir = to_abs_path(cfg.test_dir);
     cfg.bench_dir = to_abs_path(cfg.bench_dir);
-    if (cfg.runtime_bc) cfg.runtime_bc = to_abs_path(cfg.runtime_bc);
-    if (cfg.runtime_lib) cfg.runtime_lib = to_abs_path(cfg.runtime_lib);
+    if (cfg.runtime_archive) cfg.runtime_archive = to_abs_path(cfg.runtime_archive);
     if (cfg.compat_list) cfg.compat_list = to_abs_path(cfg.compat_list);
     if (cfg.options_jsonl) cfg.options_jsonl = to_abs_path(cfg.options_jsonl);
     if (cfg.fail_log_dir) cfg.fail_log_dir = to_abs_path(cfg.fail_log_dir);
@@ -1813,10 +1788,8 @@ int main(int argc, char **argv) {
     printf("  lfortran LLVM:  %s\n", cfg.lfortran);
     printf("  lfortran liric: %s\n", cfg.lfortran_liric);
     printf("  lfortran_exec_mode: %s (requested: %s)\n", resolved_exec_mode, cfg.lfortran_exec_mode);
-    if (cfg.runtime_bc)
-        printf("  runtime_bc:    %s\n", cfg.runtime_bc);
-    if (cfg.runtime_lib)
-        printf("  runtime_lib:   %s\n", cfg.runtime_lib);
+    if (cfg.runtime_archive)
+        printf("  runtime_archive: %s\n", cfg.runtime_archive);
     printf("  liric_compile_mode: %s\n", cfg.liric_compile_mode);
     printf("  liric_policy:  %s\n", cfg.liric_policy);
     printf("  test_dir:      %s\n", cfg.test_dir);
@@ -1959,8 +1932,7 @@ int main(int argc, char **argv) {
                                                   extra_retry_opt,
                                                   source_path,
                                                   llvm_obj_path,
-                                                  cfg.runtime_bc,
-                                                  cfg.runtime_lib,
+                                                  cfg.runtime_archive,
                                                   NULL,
                                                   NULL,
                                                   use_jit_flag,
@@ -1979,8 +1951,7 @@ int main(int argc, char **argv) {
                                                    extra_retry_opt,
                                                    source_path,
                                                    liric_obj_path,
-                                                   cfg.runtime_bc,
-                                                   cfg.runtime_lib,
+                                                   cfg.runtime_archive,
                                                    cfg.liric_compile_mode,
                                                    cfg.liric_policy,
                                                    use_jit_flag,

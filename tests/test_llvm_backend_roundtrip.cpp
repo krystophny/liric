@@ -278,13 +278,7 @@ static int test_wrapper_to_api_executable_roundtrip(void) {
     build_main_ret42_module(mod, ctx);
     std::string exe_path = make_temp_path("exe");
 
-    static const char *runtime_ll =
-        "define i32 @__lfortran_rt_dummy() {\n"
-        "entry:\n"
-        "  ret i32 0\n"
-        "}\n";
-    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
-                                       runtime_ll, std::strlen(runtime_ll));
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str());
     TEST_ASSERT_EQ(rc, 0, "compat executable emission");
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -306,13 +300,7 @@ static int test_wrapper_to_api_executable_roundtrip_with_private_global(void) {
     build_main_ret_private_global_module(mod, ctx);
     std::string exe_path = make_temp_path("exe_private_global");
 
-    static const char *runtime_ll =
-        "define i32 @__lfortran_rt_dummy() {\n"
-        "entry:\n"
-        "  ret i32 0\n"
-        "}\n";
-    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
-                                       runtime_ll, std::strlen(runtime_ll));
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str());
     TEST_ASSERT_EQ(rc, 0, "compat executable emission with private global");
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -334,13 +322,7 @@ static int test_wrapper_to_api_executable_roundtrip_with_duplicate_private_globa
     build_main_ret_duplicate_private_global_module(mod, ctx);
     std::string exe_path = make_temp_path("exe_duplicate_private_globals");
 
-    static const char *runtime_ll =
-        "define i32 @__lfortran_rt_dummy() {\n"
-        "entry:\n"
-        "  ret i32 0\n"
-        "}\n";
-    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
-                                       runtime_ll, std::strlen(runtime_ll));
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str());
     TEST_ASSERT_EQ(rc, 0, "compat executable emission with duplicate private globals");
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -362,13 +344,7 @@ static int test_wrapper_to_api_executable_roundtrip_flushes_stdout(void) {
     build_main_puts_module(mod, ctx);
     std::string exe_path = make_temp_path("exe_stdout");
 
-    static const char *runtime_ll =
-        "define i32 @__lfortran_rt_dummy() {\n"
-        "entry:\n"
-        "  ret i32 0\n"
-        "}\n";
-    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str(),
-                                       runtime_ll, std::strlen(runtime_ll));
+    int rc = lc_module_emit_executable(mod.getCompat(), exe_path.c_str());
     TEST_ASSERT_EQ(rc, 0, "compat executable emission with stdout");
 
 #if defined(__unix__) || defined(__APPLE__)

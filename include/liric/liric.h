@@ -55,6 +55,8 @@ int lr_compiler_load_library(lr_compiler_t *c, const char *path,
                              lr_compiler_error_t *err);
 int lr_compiler_set_runtime_bc(lr_compiler_t *c, const uint8_t *bc_data,
                                size_t bc_len, lr_compiler_error_t *err);
+int lr_compiler_set_runtime_archive(lr_compiler_t *c, const uint8_t *data,
+                                    size_t len, lr_compiler_error_t *err);
 
 int lr_compiler_feed_ll(lr_compiler_t *c, const char *src, size_t len,
                         lr_compiler_error_t *err);
@@ -71,9 +73,6 @@ int lr_compiler_emit_object(lr_compiler_t *c, const char *path,
                             lr_compiler_error_t *err);
 int lr_compiler_emit_exe(lr_compiler_t *c, const char *path,
                          lr_compiler_error_t *err);
-int lr_compiler_emit_exe_with_runtime(lr_compiler_t *c, const char *path,
-                                      const char *runtime_ll, size_t runtime_len,
-                                      lr_compiler_error_t *err);
 lr_policy_t lr_compiler_policy(const lr_compiler_t *c);
 lr_backend_t lr_compiler_backend(const lr_compiler_t *c);
 

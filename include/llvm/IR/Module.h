@@ -281,7 +281,7 @@ public:
             throw std::runtime_error(
                 "WITH_LIRIC no-link executable emission failed: empty output path");
         }
-        if (lc_module_emit_executable(compat_, out.c_str(), nullptr, 0) != 0) {
+        if (lc_module_emit_executable(compat_, out.c_str()) != 0) {
             throw std::runtime_error(
                 "WITH_LIRIC no-link executable emission failed.");
         }

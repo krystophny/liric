@@ -97,6 +97,11 @@ typedef struct lc_switch_builder lc_switch_builder_t;
    This is checked before LIRIC_RUNTIME_BC and before auto-build. */
 void lr_compat_set_embedded_runtime_bc(const uint8_t *data, size_t len);
 
+/* ---- Embedded runtime archive ---- */
+/* Register a pre-generated native runtime archive for static executable
+   emission. The data must remain valid for the lifetime of the process. */
+void lr_compat_set_embedded_runtime_archive(const uint8_t *data, size_t len);
+
 /* ---- Context ---- */
 lc_context_t *lc_context_create(void);
 void lc_context_destroy(lc_context_t *ctx);
@@ -514,8 +519,7 @@ int lc_module_jit_exec(lc_module_compat_t *mod, const char *entry_name);
 /* ---- Object file emission ---- */
 int lc_module_emit_object(lc_module_compat_t *mod, const char *filename);
 int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out);
-int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename,
-                              const char *runtime_ll, size_t runtime_len);
+int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename);
 int lc_write_empty_sidecar_files(const char *object_outfile,
                                  char *err, size_t errlen);
 int lc_module_export_sidecar_files(lc_module_compat_t *mod,

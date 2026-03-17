@@ -99,6 +99,12 @@ int lr_session_set_runtime_bc_borrowed(lr_session_t *s,
 void lr_session_set_runtime_bc_preloaded(lr_session_t *s,
                                          const uint8_t *bc_data,
                                          size_t bc_len);
+int lr_session_set_runtime_archive(lr_session_t *s, const uint8_t *data,
+                                   size_t len, lr_error_t *err);
+int lr_session_set_runtime_archive_borrowed(lr_session_t *s,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            lr_error_t *err);
 
 /* ---- Types (session-scoped singletons) --------------------------------- */
 
@@ -186,9 +192,6 @@ int lr_session_compile_auto(lr_session_t *s, const uint8_t *data, size_t len,
 int lr_session_emit_object(lr_session_t *s, const char *path, lr_error_t *err);
 int lr_session_emit_object_stream(lr_session_t *s, FILE *out, lr_error_t *err);
 int lr_session_emit_exe(lr_session_t *s, const char *path, lr_error_t *err);
-int lr_session_emit_exe_with_runtime(lr_session_t *s, const char *path,
-                                      const char *runtime_ll, size_t runtime_len,
-                                      lr_error_t *err);
 
 /* ---- DIRECT blob package I/O ------------------------------------------ */
 

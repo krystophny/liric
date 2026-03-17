@@ -169,7 +169,7 @@ static const char *normalize_external_lookup_name(const char *name) {
     return name;
 }
 
-static void *resolve_external_symbol_addr(const char *name, void *runtime_handle) {
+static void *resolve_external_symbol_addr(const char *name) {
     const char *lookup = normalize_external_lookup_name(name);
     const char *intrinsic_lookup = NULL;
     void *addr = NULL;
@@ -187,11 +187,6 @@ static void *resolve_external_symbol_addr(const char *name, void *runtime_handle
         addr = lr_platform_dlsym_default(intrinsic_lookup);
         if (!addr && intrinsic_lookup[0] == '_')
             addr = lr_platform_dlsym_default(intrinsic_lookup + 1);
-        if (!addr && runtime_handle) {
-            addr = lr_platform_dlsym(runtime_handle, intrinsic_lookup);
-            if (!addr && intrinsic_lookup[0] == '_')
-                addr = lr_platform_dlsym(runtime_handle, intrinsic_lookup + 1);
-        }
         if (verbose && !addr) {
             fprintf(stderr,
                     "macho_exec_payload: intrinsic dlsym miss '%s' (from '%s')\n",
@@ -214,18 +209,6 @@ static void *resolve_external_symbol_addr(const char *name, void *runtime_handle
         addr = lr_platform_dlsym_default(lookup + 1);
     if (verbose && !addr && lookup[0] == '_') {
         fprintf(stderr, "macho_exec_payload: dlsym default miss '%s'\n", lookup + 1);
-    }
-    if (!addr && runtime_handle) {
-        addr = lr_platform_dlsym(runtime_handle, lookup);
-        if (verbose && !addr) {
-            fprintf(stderr, "macho_exec_payload: dlsym runtime miss '%s'\n", lookup);
-        }
-        if (!addr && lookup[0] == '_')
-            addr = lr_platform_dlsym(runtime_handle, lookup + 1);
-        if (verbose && !addr && lookup[0] == '_') {
-            fprintf(stderr, "macho_exec_payload: dlsym runtime miss '%s'\n",
-                    lookup + 1);
-        }
     }
     return addr;
 }
@@ -280,7 +263,6 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
     size_t code_size = 0;
     size_t data_runtime_size = 0;
     size_t got_off = 0;
-    void *runtime_handle = NULL;
     const int verbose = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
     const size_t page = 0x4000u;
     const size_t text_off = lr_macho_executable_text_offset_arm64();
@@ -327,10 +309,6 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
         got_slot_off[i] = UINT32_MAX;
         stub_off[i] = UINT32_MAX;
     }
-
-    const char *runtime_lib = getenv("LIRIC_RUNTIME_LIB");
-    if (runtime_lib && runtime_lib[0])
-        runtime_handle = lr_platform_dlopen(runtime_lib);
 
     for (uint32_t ri = 0; ri < build->ctx.num_relocs; ri++) {
         const lr_obj_reloc_t *rel = &build->ctx.relocs[ri];
@@ -425,7 +403,7 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
         if (!sym_needed[si])
             continue;
 
-        void *addr = resolve_external_symbol_addr(sym->name, runtime_handle);
+        void *addr = resolve_external_symbol_addr(sym->name);
         if (!addr) {
             if (verbose) {
                 fprintf(stderr, "macho_exec_payload: unresolved external symbol=%s\n",
@@ -750,8 +728,6 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
         }
     }
 
-    if (runtime_handle)
-        (void)lr_platform_dlclose(runtime_handle);
     free(sym_addr);
     free(got_slot_off);
     free(stub_off);
@@ -765,8 +741,6 @@ static int build_macho_exec_payload_aarch64(lr_obj_build_result_t *build,
     return 0;
 
 fail:
-    if (runtime_handle)
-        (void)lr_platform_dlclose(runtime_handle);
     free(code_buf);
     free(data_buf);
     free(sym_addr);
@@ -1987,26 +1961,4 @@ done:
 
     obj_build_result_destroy(&build);
     return result;
-}
-
-int lr_emit_executable_with_runtime(lr_module_t *m, const char *runtime_ll,
-                                     size_t runtime_len,
-                                     const lr_target_t *target, FILE *out,
-                                     const char *entry_symbol) {
-    if (!m || !runtime_ll || runtime_len == 0 || !target || !out)
-        return -1;
-
-    char parse_err[256] = {0};
-    lr_module_t *rt = lr_parse_ll(runtime_ll, runtime_len, parse_err,
-                                   sizeof(parse_err));
-    if (!rt)
-        return -1;
-
-    if (lr_module_merge(m, rt) != 0) {
-        lr_module_free(rt);
-        return -1;
-    }
-    lr_module_free(rt);
-
-    return lr_emit_executable(m, target, out, entry_symbol);
 }

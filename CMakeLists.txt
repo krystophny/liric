@@ -253,6 +253,7 @@ set(LIRIC_LIB_SOURCES
     src/llvm_stubs.c
     src/platform/platform_intrinsics.c
     src/platform/platform_os.c
+    src/runtime_archive.c
 )
 set(LIRIC_PLATFORM_ASM_SOURCES "")
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
@@ -367,6 +368,10 @@ if(LIRIC_LFORTRAN_NO_LTO)
     target_compile_options(liric_probe_runner PRIVATE -fno-lto)
     set_property(TARGET liric_probe_runner APPEND_STRING PROPERTY LINK_FLAGS " -fno-lto")
 endif()
+
+add_executable(liric_runtime_archive tools/liric_runtime_archive.c)
+target_link_libraries(liric_runtime_archive PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+target_include_directories(liric_runtime_archive PRIVATE src)
 
 add_executable(bench_compat_check tools/bench_compat_check.c tools/bench_common.c)
 target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
