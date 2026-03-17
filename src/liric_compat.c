@@ -2483,6 +2483,7 @@ static void compat_collect_explicit_vreg_names(lc_module_compat_t *mod,
                 !explicit_names[value->vreg.id]) {
                 explicit_names[value->vreg.id] = (char *)value->name;
             } else if (value->kind == LC_VAL_ARGUMENT &&
+                       f->param_vregs &&
                        value->argument.func == f &&
                        value->argument.param_idx < f->num_params) {
                 uint32_t vreg = f->param_vregs[value->argument.param_idx];
@@ -2620,14 +2621,16 @@ static void compat_assign_display_vreg_names(const lr_func_t *f,
     uint32_t next_unnamed = 0;
     if (!f || !display_names || display_cap == 0)
         return;
-    for (uint32_t i = 0; i < f->num_params; i++) {
-        uint32_t vreg = f->param_vregs[i];
-        if (vreg >= display_cap || display_names[vreg])
-            continue;
-        if (explicit_names && explicit_names[vreg]) {
-            display_names[vreg] = explicit_names[vreg];
-        } else {
-            display_names[vreg] = compat_format_unnamed_vreg(next_unnamed++);
+    if (f->param_vregs) {
+        for (uint32_t i = 0; i < f->num_params; i++) {
+            uint32_t vreg = f->param_vregs[i];
+            if (vreg >= display_cap || display_names[vreg])
+                continue;
+            if (explicit_names && explicit_names[vreg]) {
+                display_names[vreg] = explicit_names[vreg];
+            } else {
+                display_names[vreg] = compat_format_unnamed_vreg(next_unnamed++);
+            }
         }
     }
     for (const lr_block_t *b = f->first_block; b; b = b->next) {

@@ -108,6 +108,12 @@ public:
         SetInsertPoint(BB);
     }
 
+    IRBuilder(BasicBlock *BB, BasicBlock::iterator IP)
+        : mod_(nullptr), block_(nullptr), func_(nullptr),
+          prefer_entry_alloca_dump_(false), ctx_(LLVMContext::getGlobal()) {
+        SetInsertPoint(BB, IP);
+    }
+
     IRBuilder(BasicBlock *BB, LLVMContext &C)
         : mod_(nullptr), block_(nullptr), func_(nullptr),
           prefer_entry_alloca_dump_(false), ctx_(C) {

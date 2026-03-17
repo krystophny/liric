@@ -1,11 +1,15 @@
 #ifndef LLVM_IR_INSTRTYPES_H
 #define LLVM_IR_INSTRTYPES_H
 
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/CallingConv.h"
 
 namespace llvm {
+
+class BasicBlock;
+class Function;
 
 class Instruction : public Value {
 public:
@@ -26,6 +30,11 @@ public:
 
     void eraseFromParent() {}
     BasicBlock *getParent() const { return nullptr; }
+    Function *getFunction() const {
+        lc_value_t *v = impl();
+        if (!v || v->kind != LC_VAL_VREG || !v->vreg.func) return nullptr;
+        return detail::lookup_function_wrapper(v->vreg.func);
+    }
 };
 
 class CmpInst : public Instruction {
