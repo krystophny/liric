@@ -1,6 +1,7 @@
 // Corpus benchmark comparator: liric_probe_runner vs bench_lli_phases on corpus_100.
 // Publishes one canonical JSONL and one summary JSON.
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdbool.h>
@@ -54,6 +55,7 @@ typedef struct {
 typedef struct {
     const char *probe_runner;
     const char *lli_phases;
+    const char *llvm_lib_dir;
     const char *runtime_bc;
     const char *runtime_lib;
     const char *policy;
@@ -112,6 +114,11 @@ static int file_exists(const char *path) {
     return path && stat(path, &st) == 0;
 }
 
+static int dir_exists(const char *path) {
+    struct stat st;
+    return path && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 static int mkdir_p(const char *path) {
     char tmp[PATH_MAX];
     size_t n;
@@ -160,6 +167,19 @@ static cmd_result_t run_cmd(char *const argv[], int timeout_sec, const char *wor
     memset(&opts, 0, sizeof(opts));
     opts.argv = argv;
     opts.timeout_ms = timeout_sec > 0 ? timeout_sec * 1000 : 0;
+    opts.work_dir = work_dir;
+    if (bench_run_cmd(&opts, &r) != 0) die("failed to run command", argv[0]);
+    return r;
+}
+
+static cmd_result_t run_cmd_env(char *const argv[], int timeout_sec,
+                                const char *env_lib_dir, const char *work_dir) {
+    bench_run_cmd_opts_t opts;
+    cmd_result_t r;
+    memset(&opts, 0, sizeof(opts));
+    opts.argv = argv;
+    opts.timeout_ms = timeout_sec > 0 ? timeout_sec * 1000 : 0;
+    opts.env_lib_dir = env_lib_dir;
     opts.work_dir = work_dir;
     if (bench_run_cmd(&opts, &r) != 0) die("failed to run command", argv[0]);
     return r;
@@ -237,6 +257,144 @@ static int json_get_number(const char *json, const char *key, double *out_val) {
 
 static int is_valid_policy(const char *policy) {
     return policy && (strcmp(policy, "direct") == 0 || strcmp(policy, "ir") == 0);
+}
+
+static char *find_llvm_needed_soname(const char *binary_path) {
+    FILE *fp;
+    char cmd[PATH_MAX + 64];
+    char line[4096];
+
+    if (!binary_path || !binary_path[0])
+        return NULL;
+    if (snprintf(cmd, sizeof(cmd), "readelf -d '%s' 2>/dev/null", binary_path) >= (int)sizeof(cmd))
+        return NULL;
+    fp = popen(cmd, "r");
+    if (!fp)
+        return NULL;
+    while (fgets(line, sizeof(line), fp)) {
+        char *p = strstr(line, "Shared library: [libLLVM.so.");
+        char *end;
+        if (!p)
+            continue;
+        p = strchr(p, '[');
+        if (!p)
+            continue;
+        p++;
+        end = strchr(p, ']');
+        if (!end)
+            continue;
+        *end = '\0';
+        pclose(fp);
+        return xstrdup(p);
+    }
+    pclose(fp);
+    return NULL;
+}
+
+static char *scan_envs_for_llvm_soname(const char *root_dir, const char *soname) {
+    DIR *dir;
+    struct dirent *ent;
+    if (!root_dir || !soname)
+        return NULL;
+    dir = opendir(root_dir);
+    if (!dir)
+        return NULL;
+    while ((ent = readdir(dir)) != NULL) {
+        char cand_dir[PATH_MAX];
+        char cand_lib[PATH_MAX];
+        struct stat st;
+        if (ent->d_name[0] == '.')
+            continue;
+        if (snprintf(cand_dir, sizeof(cand_dir), "%s/%s/lib", root_dir, ent->d_name) >= (int)sizeof(cand_dir))
+            continue;
+        if (stat(cand_dir, &st) != 0 || !S_ISDIR(st.st_mode))
+            continue;
+        if (snprintf(cand_lib, sizeof(cand_lib), "%s/%s", cand_dir, soname) >= (int)sizeof(cand_lib))
+            continue;
+        if (file_exists(cand_lib)) {
+            closedir(dir);
+            return xstrdup(cand_dir);
+        }
+    }
+    closedir(dir);
+    return NULL;
+}
+
+static char *match_llvm_lib_dir(const char *dir_path, const char *soname) {
+    char cand_lib[PATH_MAX];
+    if (!dir_path || !soname || !dir_exists(dir_path))
+        return NULL;
+    if (snprintf(cand_lib, sizeof(cand_lib), "%s/%s", dir_path, soname) >= (int)sizeof(cand_lib))
+        return NULL;
+    if (!file_exists(cand_lib))
+        return NULL;
+    return xstrdup(dir_path);
+}
+
+static char *infer_llvm_lib_dir(const char *lli_phases) {
+    const char *override;
+    const char *conda_prefix;
+    const char *home;
+    char cand_dir[PATH_MAX];
+    char *soname;
+    char *scan;
+
+    override = getenv("LIRIC_BENCH_LLVM_LIB_DIR");
+    if (override && override[0] && dir_exists(override))
+        return to_abs_path(override);
+
+    conda_prefix = getenv("CONDA_PREFIX");
+    if (conda_prefix && conda_prefix[0]) {
+        if (snprintf(cand_dir, sizeof(cand_dir), "%s/lib", conda_prefix) < (int)sizeof(cand_dir) &&
+            dir_exists(cand_dir)) {
+            return xstrdup(cand_dir);
+        }
+    }
+
+    soname = find_llvm_needed_soname(lli_phases);
+    if (!soname)
+        return NULL;
+
+    home = getenv("HOME");
+    if (home && home[0]) {
+        if (snprintf(cand_dir, sizeof(cand_dir), "%s/.local/share/mamba/envs/lf-llvm21/lib", home) < (int)sizeof(cand_dir)) {
+            scan = match_llvm_lib_dir(cand_dir, soname);
+            if (scan) {
+                free(soname);
+                return scan;
+            }
+        }
+        if (snprintf(cand_dir, sizeof(cand_dir), "%s/.local/share/mamba/envs/liric-llvm21/lib", home) < (int)sizeof(cand_dir)) {
+            scan = match_llvm_lib_dir(cand_dir, soname);
+            if (scan) {
+                free(soname);
+                return scan;
+            }
+        }
+        if (snprintf(cand_dir, sizeof(cand_dir), "%s/.local/share/mamba/envs", home) < (int)sizeof(cand_dir)) {
+            scan = scan_envs_for_llvm_soname(cand_dir, soname);
+            if (scan) {
+                free(soname);
+                return scan;
+            }
+        }
+        if (snprintf(cand_dir, sizeof(cand_dir), "%s/micromamba/envs", home) < (int)sizeof(cand_dir)) {
+            scan = scan_envs_for_llvm_soname(cand_dir, soname);
+            if (scan) {
+                free(soname);
+                return scan;
+            }
+        }
+    }
+
+    scan = match_llvm_lib_dir("/usr/lib", soname);
+    if (scan) {
+        free(soname);
+        return scan;
+    }
+
+    free(soname);
+    return NULL;
 }
 
 static void testlist_init(testlist_t *l) {
@@ -365,6 +523,7 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = "build/liric_probe_runner";
     cfg.lli_phases = "build/bench_lli_phases";
+    cfg.llvm_lib_dir = getenv("LIRIC_BENCH_LLVM_LIB_DIR");
     cfg.policy = "direct";
     cfg.runtime_bc = file_exists(default_runtime_bc) ? default_runtime_bc : NULL;
     cfg.runtime_lib = file_exists(default_runtime_dylib)
@@ -415,6 +574,13 @@ static cfg_t parse_args(int argc, char **argv) {
 
     cfg.probe_runner = to_abs_path(cfg.probe_runner);
     cfg.lli_phases = to_abs_path(cfg.lli_phases);
+    if (cfg.llvm_lib_dir && cfg.llvm_lib_dir[0]) {
+        if (!dir_exists(cfg.llvm_lib_dir))
+            die("LLVM library dir not found", cfg.llvm_lib_dir);
+        cfg.llvm_lib_dir = to_abs_path(cfg.llvm_lib_dir);
+    } else {
+        cfg.llvm_lib_dir = infer_llvm_lib_dir(cfg.lli_phases);
+    }
     if (cfg.runtime_bc && cfg.runtime_bc[0]) {
         if (!file_exists(cfg.runtime_bc))
             die("runtime bitcode not found", cfg.runtime_bc);
@@ -621,7 +787,7 @@ static int run_suite(const cfg_t *cfg,
                 }
                 llvm_argv[ek++] = (char *)t->ll_path;
                 llvm_argv[ek] = NULL;
-                ri = run_cmd(llvm_argv, cfg->timeout_sec, NULL);
+                ri = run_cmd_env(llvm_argv, cfg->timeout_sec, cfg->llvm_lib_dir, NULL);
             }
 
             if (ri.rc != 0 ||

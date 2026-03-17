@@ -446,6 +446,11 @@ if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES)
         OUTPUT_VARIABLE LLVM_SYSTEM_LIBS
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
+    execute_process(
+        COMMAND ${LLVM_CONFIG_EXE} --libdir
+        OUTPUT_VARIABLE LLVM_LIBDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
     separate_arguments(LLVM_LDFLAGS_LIST NATIVE_COMMAND "${LLVM_LDFLAGS}")
     separate_arguments(LLVM_LIBS_LIST NATIVE_COMMAND "${LLVM_LIBS}")
     separate_arguments(LLVM_SYSTEM_LIBS_LIST NATIVE_COMMAND "${LLVM_SYSTEM_LIBS}")
@@ -461,6 +466,13 @@ if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES)
             ${LIRIC_PLATFORM_LIBS}
             stdc++
         )
+        if(EXISTS "${LLVM_LIBDIR}")
+            set_target_properties(
+                bench_lli_phases PROPERTIES
+                BUILD_RPATH "${LLVM_LIBDIR}"
+                INSTALL_RPATH "${LLVM_LIBDIR}"
+            )
+        endif()
     else()
         message(STATUS "llvm-c/LLJIT.h not found: bench_lli_phases target will not be built")
     endif()
