@@ -99,37 +99,6 @@ static char *to_abs_path(const char *path) {
     return out;
 }
 
-static int copy_file_path(const char *src, const char *dst) {
-    FILE *in = NULL;
-    FILE *out = NULL;
-    char buf[8192];
-    size_t nread;
-    int rc = -1;
-
-    if (!src || !dst)
-        return -1;
-    in = fopen(src, "rb");
-    if (!in)
-        return -1;
-    out = fopen(dst, "wb");
-    if (!out)
-        goto done;
-    while ((nread = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, nread, out) != nread)
-            goto done;
-    }
-    if (ferror(in))
-        goto done;
-    rc = 0;
-
-done:
-    if (out)
-        fclose(out);
-    if (in)
-        fclose(in);
-    return rc;
-}
-
 static void strlist_init(strlist_t *l) {
     l->items = NULL;
     l->n = 0;
@@ -912,25 +881,6 @@ int main(int argc, char **argv) {
         }
         free_cmd_result(&emit_r);
         free(emit_argv);
-
-        {
-            char *bench_ll_path = path_join2(ll_dir, t->name);
-            char *bench_ll_file = NULL;
-            if (!bench_ll_path) die("out of memory");
-            bench_ll_file = (char *)malloc(strlen(bench_ll_path) + 4);
-            if (!bench_ll_file) die("out of memory");
-            sprintf(bench_ll_file, "%s.ll", bench_ll_path);
-            if (copy_file_path(ll_path, bench_ll_file) != 0) {
-                free(bench_ll_path);
-                free(bench_ll_file);
-                free(ll_path);
-                free(bin_path);
-                free(error);
-                continue;
-            }
-            free(bench_ll_path);
-            free(bench_ll_file);
-        }
 
         compile_argv = make_argv(4 + t->extra_args.n + 3);
         compile_argv[0] = (char *)cfg.lfortran;
