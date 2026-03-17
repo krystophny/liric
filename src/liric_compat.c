@@ -2060,7 +2060,9 @@ static lr_session_t *ensure_session(lc_module_compat_t *mod) {
         return NULL;
     }
     /* Reuse process-global singleton JIT to avoid 32MB mmap + hash table
-       init per file.  Only share when the backend matches. */
+       init per file.  Only share when the backend matches.
+       Keep runtime attachment lazy: object emission does not need runtime BC,
+       and eagerly parsing/preloading it on every compiler process is costly. */
     if (!g_shared_jit &&
         mod->deferred_cfg.backend != LR_SESSION_BACKEND_LLVM) {
         /* First session: adopt its JIT as the global singleton.
@@ -2068,35 +2070,10 @@ static lr_session_t *ensure_session(lc_module_compat_t *mod) {
         g_shared_jit = lr_session_jit(mod->session);
         g_shared_jit_backend = mod->deferred_cfg.backend;
         lr_session_replace_jit(mod->session, g_shared_jit, true);
-        {
-            int rt_rc = compat_try_attach_runtime_bc(mod->session);
-            if (rt_rc < 0) {
-                lr_session_destroy(mod->session);
-                mod->session = NULL;
-                mod->session_init_failed = true;
-                return NULL;
-            }
-        }
     } else if (g_shared_jit &&
                mod->deferred_cfg.backend == g_shared_jit_backend) {
-        /* Subsequent sessions with same backend: reuse the shared JIT.
-           Runtime BC is already loaded, so just store the data pointer
-           for merge paths (no re-parse). */
+        /* Subsequent sessions with same backend: reuse the shared JIT. */
         lr_session_replace_jit(mod->session, g_shared_jit, true);
-        if (g_embedded_runtime_bc && g_embedded_runtime_bc_len > 0) {
-            lr_session_set_runtime_bc_preloaded(mod->session,
-                                                g_embedded_runtime_bc,
-                                                g_embedded_runtime_bc_len);
-        }
-    } else {
-        /* Backend mismatch or LLVM mode: use the session's own JIT. */
-        int rt_rc = compat_try_attach_runtime_bc(mod->session);
-        if (rt_rc < 0) {
-            lr_session_destroy(mod->session);
-            mod->session = NULL;
-            mod->session_init_failed = true;
-            return NULL;
-        }
     }
     return mod->session;
 }
@@ -6123,10 +6100,10 @@ int lc_module_add_to_jit(lc_module_compat_t *mod, lr_jit_t *jit) {
         /* Keep session/runtime state aligned with the consumer JIT so module
            materialization and symbol lookup stay in one execution context. */
         lr_session_replace_jit(mod->session, jit, true);
-        rt_rc = compat_try_attach_runtime_bc(mod->session);
-        if (rt_rc < 0)
-            return -1;
     }
+    rt_rc = compat_try_attach_runtime_bc(mod->session);
+    if (rt_rc < 0)
+        return -1;
     compat_maybe_dump_final_ir(mod);
     return lr_jit_add_module(jit, mod->mod);
 }
@@ -6138,9 +6115,13 @@ int lc_module_finalize_for_execution(lc_module_compat_t *mod) {
 }
 
 void *lc_module_lookup_in_session(lc_module_compat_t *mod, const char *name) {
+    int rt_rc;
     if (!mod || !name || !name[0])
         return NULL;
     if (!ensure_session(mod))
+        return NULL;
+    rt_rc = compat_try_attach_runtime_bc(mod->session);
+    if (rt_rc < 0)
         return NULL;
     if (compat_finish_active_func(mod) != 0)
         return NULL;
