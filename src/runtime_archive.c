@@ -47,23 +47,35 @@ static int runtime_archive_r64(const uint8_t **p,
 }
 
 int lr_runtime_archive_write(FILE *out,
+                             const char *target_name,
+                             uint32_t backend,
                              const char *ir_text,
                              size_t ir_len,
                              const uint8_t *blob_pkg,
                              size_t blob_pkg_len) {
-    uint8_t header[8 + 4 + 8 + 8];
+    size_t target_name_len = 0;
+    uint8_t header[8 + 4 + 4 + 4 + 8 + 8];
     uint8_t *p = header;
 
-    if (!out || !ir_text || ir_len == 0 || !blob_pkg || blob_pkg_len == 0)
+    if (!out || !target_name || !target_name[0] || backend == 0 ||
+        !ir_text || ir_len == 0 || !blob_pkg || blob_pkg_len == 0) {
+        return -1;
+    }
+    target_name_len = strlen(target_name);
+    if (target_name_len == 0 || target_name_len > UINT32_MAX)
         return -1;
 
     memcpy(p, k_runtime_archive_magic, sizeof(k_runtime_archive_magic));
     p += sizeof(k_runtime_archive_magic);
-    runtime_archive_w32(&p, 1u);
+    runtime_archive_w32(&p, 2u);
+    runtime_archive_w32(&p, backend);
+    runtime_archive_w32(&p, (uint32_t)target_name_len);
     runtime_archive_w64(&p, (uint64_t)ir_len);
     runtime_archive_w64(&p, (uint64_t)blob_pkg_len);
 
     if (fwrite(header, 1, sizeof(header), out) != sizeof(header))
+        return -1;
+    if (fwrite(target_name, 1, target_name_len, out) != target_name_len)
         return -1;
     if (fwrite(ir_text, 1, ir_len, out) != ir_len)
         return -1;
@@ -74,40 +86,52 @@ int lr_runtime_archive_write(FILE *out,
 
 int lr_runtime_archive_parse(const uint8_t *data,
                              size_t len,
-                             const char **out_ir_text,
-                             size_t *out_ir_len,
-                             const uint8_t **out_blob_pkg,
-                             size_t *out_blob_pkg_len) {
+                             lr_runtime_archive_info_t *out_info) {
     const uint8_t *p = data;
     const uint8_t *end = data + len;
     uint32_t version = 0;
+    uint32_t backend = 0;
+    uint32_t target_name_len_u32 = 0;
     uint64_t ir_len_u64 = 0;
     uint64_t blob_len_u64 = 0;
 
-    if (!data || len < 28 || !out_ir_text || !out_ir_len ||
-        !out_blob_pkg || !out_blob_pkg_len) {
+    if (!data || len < 32 || !out_info) {
         return -1;
     }
+    memset(out_info, 0, sizeof(*out_info));
     if (memcmp(p, k_runtime_archive_magic, sizeof(k_runtime_archive_magic)) != 0)
         return -1;
     p += sizeof(k_runtime_archive_magic);
-    if (runtime_archive_r32(&p, end, &version) != 0 || version != 1u)
+    if (runtime_archive_r32(&p, end, &version) != 0 || version != 2u)
         return -1;
+    if (runtime_archive_r32(&p, end, &backend) != 0 || backend == 0)
+        return -1;
+    if (runtime_archive_r32(&p, end, &target_name_len_u32) != 0 ||
+        target_name_len_u32 == 0) {
+        return -1;
+    }
     if (runtime_archive_r64(&p, end, &ir_len_u64) != 0 ||
         runtime_archive_r64(&p, end, &blob_len_u64) != 0) {
         return -1;
     }
     if (ir_len_u64 == 0 || blob_len_u64 == 0)
         return -1;
+    if ((uint64_t)target_name_len_u32 > (uint64_t)(end - p))
+        return -1;
+    out_info->version = version;
+    out_info->backend = backend;
+    out_info->target_name = (const char *)p;
+    out_info->target_name_len = (size_t)target_name_len_u32;
+    p += (size_t)target_name_len_u32;
     if (ir_len_u64 > (uint64_t)(end - p))
         return -1;
-    *out_ir_text = (const char *)p;
-    *out_ir_len = (size_t)ir_len_u64;
+    out_info->ir_text = (const char *)p;
+    out_info->ir_len = (size_t)ir_len_u64;
     p += (size_t)ir_len_u64;
     if (blob_len_u64 > (uint64_t)(end - p))
         return -1;
-    *out_blob_pkg = p;
-    *out_blob_pkg_len = (size_t)blob_len_u64;
+    out_info->blob_pkg = p;
+    out_info->blob_pkg_len = (size_t)blob_len_u64;
     p += (size_t)blob_len_u64;
     if (p != end)
         return -1;

@@ -3,6 +3,7 @@
 #include "bc_decode.h"
 #include "ir.h"
 #include "runtime_archive.h"
+#include "target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,6 +95,7 @@ int main(int argc, char **argv) {
     size_t ir_len = 0;
     FILE *mem = NULL;
     FILE *out = NULL;
+    const lr_target_t *resolved_target = NULL;
     char parse_err[256] = {0};
     int rc = 1;
 
@@ -120,6 +122,12 @@ int main(int argc, char **argv) {
         usage(stderr);
         return 2;
     }
+    resolved_target = target && target[0] ? lr_target_by_name(target)
+                                          : lr_target_host();
+    if (!resolved_target || !resolved_target->name || !resolved_target->name[0]) {
+        fprintf(stderr, "failed to resolve target\n");
+        goto done;
+    }
 
     if (read_file(input_bc, &bc) != 0) {
         fprintf(stderr, "failed to read bitcode: %s\n", input_bc);
@@ -128,7 +136,7 @@ int main(int argc, char **argv) {
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.mode = LR_MODE_DIRECT;
-    cfg.target = target;
+    cfg.target = resolved_target->name;
     cfg.backend = backend;
     session = lr_session_create(&cfg, &err);
     if (!session) {
@@ -165,7 +173,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "failed to open output: %s\n", output);
         goto done;
     }
-    if (lr_runtime_archive_write(out, ir_buf, ir_len, blob_pkg, blob_pkg_len) != 0) {
+    if (lr_runtime_archive_write(out, resolved_target->name, (uint32_t)backend,
+                                 ir_buf, ir_len, blob_pkg, blob_pkg_len) != 0) {
         fprintf(stderr, "failed to write runtime archive: %s\n", output);
         goto done;
     }

@@ -402,14 +402,15 @@ static const char *session_blob_entry_symbol(const struct lr_session *s,
     return first ? first : (fallback ? fallback : "_start");
 }
 
+static const lr_target_t *session_resolve_target(struct lr_session *s);
+static uint32_t session_runtime_archive_backend(const struct lr_session *s);
+
 static int merge_runtime_archive_into_module(struct lr_session *s,
                                              lr_module_t *m,
                                              bool *merged_flag,
                                              session_error_t *err) {
-    const char *archive_ir = NULL;
-    size_t archive_ir_len = 0;
-    const uint8_t *archive_blob_pkg = NULL;
-    size_t archive_blob_pkg_len = 0;
+    lr_runtime_archive_info_t archive = {0};
+    const lr_target_t *target = NULL;
     char parse_err[256] = {0};
     lr_module_t *rt = NULL;
     if (!s || !m || !s->runtime_archive_data || s->runtime_archive_len == 0)
@@ -418,12 +419,25 @@ static int merge_runtime_archive_into_module(struct lr_session *s,
         return 0;
     if (lr_runtime_archive_parse(s->runtime_archive_data,
                                  s->runtime_archive_len,
-                                 &archive_ir, &archive_ir_len,
-                                 &archive_blob_pkg, &archive_blob_pkg_len) != 0) {
+                                 &archive) != 0) {
         err_set(err, S_ERR_PARSE, "runtime archive parse failed");
         return -1;
     }
-    rt = lr_parse_ll(archive_ir, archive_ir_len, parse_err, sizeof(parse_err));
+    target = session_resolve_target(s);
+    if (!target || !target->name || !target->name[0]) {
+        err_set(err, S_ERR_BACKEND, "runtime archive target resolution failed");
+        return -1;
+    }
+    if (strlen(target->name) != archive.target_name_len ||
+        memcmp(archive.target_name, target->name, archive.target_name_len) != 0) {
+        err_set(err, S_ERR_BACKEND, "runtime archive target mismatch");
+        return -1;
+    }
+    if (archive.backend != session_runtime_archive_backend(s)) {
+        err_set(err, S_ERR_BACKEND, "runtime archive backend mismatch");
+        return -1;
+    }
+    rt = lr_parse_ll(archive.ir_text, archive.ir_len, parse_err, sizeof(parse_err));
     if (!rt) {
         err_set(err, S_ERR_PARSE, "runtime archive IR parse failed: %s",
                 parse_err[0] ? parse_err : "unknown parse error");
@@ -435,8 +449,8 @@ static int merge_runtime_archive_into_module(struct lr_session *s,
         return -1;
     }
     lr_module_free(rt);
-    if (archive_blob_pkg_len > 0 &&
-        lr_session_import_blob_package(s, archive_blob_pkg, archive_blob_pkg_len,
+    if (archive.blob_pkg_len > 0 &&
+        lr_session_import_blob_package(s, archive.blob_pkg, archive.blob_pkg_len,
                                        err) != 0) {
         return -1;
     }
@@ -621,6 +635,22 @@ static int session_backend_to_mode(session_backend_t backend,
         return 0;
     default:
         return -1;
+    }
+}
+
+static uint32_t session_runtime_archive_backend(const struct lr_session *s) {
+    if (!s)
+        return (uint32_t)SESSION_BACKEND_ISEL;
+    switch (s->cfg.backend) {
+    case SESSION_BACKEND_DEFAULT:
+    case SESSION_BACKEND_ISEL:
+        return (uint32_t)SESSION_BACKEND_ISEL;
+    case SESSION_BACKEND_COPY_PATCH:
+        return (uint32_t)SESSION_BACKEND_COPY_PATCH;
+    case SESSION_BACKEND_LLVM:
+        return (uint32_t)SESSION_BACKEND_LLVM;
+    default:
+        return (uint32_t)s->cfg.backend;
     }
 }
 

@@ -3,6 +3,7 @@
 #include "bc_decode.h"
 #include "ir.h"
 #include "llvm_backend.h"
+#include "runtime_archive.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -226,6 +227,42 @@ static void set_compile_mode_env(const char *value) {
         (void)unsetenv("LIRIC_COMPILE_MODE");
     }
 #endif
+}
+
+static int build_runtime_archive_bytes(const char *target_name,
+                                       uint32_t backend,
+                                       const char *ir_text,
+                                       const uint8_t *blob_pkg,
+                                       size_t blob_pkg_len,
+                                       uint8_t **out_data,
+                                       size_t *out_len) {
+    char *buf = NULL;
+    size_t len = 0;
+    FILE *mem = NULL;
+
+    if (!target_name || !target_name[0] || !ir_text || !ir_text[0] ||
+        !blob_pkg || blob_pkg_len == 0 || !out_data || !out_len) {
+        return -1;
+    }
+    *out_data = NULL;
+    *out_len = 0;
+    mem = open_memstream(&buf, &len);
+    if (!mem)
+        return -1;
+    if (lr_runtime_archive_write(mem, target_name, backend,
+                                 ir_text, strlen(ir_text),
+                                 blob_pkg, blob_pkg_len) != 0) {
+        fclose(mem);
+        free(buf);
+        return -1;
+    }
+    if (fclose(mem) != 0) {
+        free(buf);
+        return -1;
+    }
+    *out_data = (uint8_t *)buf;
+    *out_len = len;
+    return 0;
 }
 
 int test_session_direct_ret_42(void) {
@@ -2111,6 +2148,99 @@ int test_session_blob_import_emit_exe_sets_executable_bit(void) {
     free(pkg);
     lr_session_destroy(consumer);
     lr_session_destroy(producer);
+    return 0;
+}
+
+int test_runtime_archive_roundtrip_metadata(void) {
+    static const char ir_text[] =
+        "define i32 @__lfortran_rt_dummy() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+    static const uint8_t blob_pkg[] = {0x41, 0x42, 0x43};
+    uint8_t *archive_data = NULL;
+    size_t archive_len = 0;
+    lr_runtime_archive_info_t info = {0};
+    int rc;
+
+    rc = build_runtime_archive_bytes("x86_64",
+                                     (uint32_t)LR_SESSION_BACKEND_ISEL,
+                                     ir_text, blob_pkg, sizeof(blob_pkg),
+                                     &archive_data, &archive_len);
+    TEST_ASSERT_EQ(rc, 0, "build runtime archive");
+
+    rc = lr_runtime_archive_parse(archive_data, archive_len, &info);
+    TEST_ASSERT_EQ(rc, 0, "parse runtime archive");
+    TEST_ASSERT_EQ(info.version, 2, "runtime archive version");
+    TEST_ASSERT_EQ(info.backend, LR_SESSION_BACKEND_ISEL,
+                   "runtime archive backend");
+    TEST_ASSERT_EQ((int)info.target_name_len, 6, "runtime archive target len");
+    TEST_ASSERT(memcmp(info.target_name, "x86_64", info.target_name_len) == 0,
+                "runtime archive target name");
+    TEST_ASSERT_EQ((int)info.ir_len, (int)strlen(ir_text),
+                   "runtime archive IR length");
+    TEST_ASSERT(memcmp(info.ir_text, ir_text, info.ir_len) == 0,
+                "runtime archive IR payload");
+    TEST_ASSERT_EQ((int)info.blob_pkg_len, (int)sizeof(blob_pkg),
+                   "runtime archive blob length");
+    TEST_ASSERT(memcmp(info.blob_pkg, blob_pkg, info.blob_pkg_len) == 0,
+                "runtime archive blob payload");
+
+    free(archive_data);
+    return 0;
+}
+
+int test_session_runtime_archive_target_mismatch_rejected(void) {
+    static const char ir_text[] =
+        "define i32 @__lfortran_rt_dummy() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+    static const uint8_t blob_pkg[] = {0xAA};
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i32 = NULL;
+    uint8_t *archive_data = NULL;
+    size_t archive_len = 0;
+    const char *path = "/tmp/liric_test_runtime_archive_target_mismatch";
+    int rc;
+
+    cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+    i32 = lr_type_i32_s(s);
+    TEST_ASSERT(i32 != NULL, "i32 type");
+
+    rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    {
+        uint32_t b0 = lr_session_block(s);
+        lr_session_set_block(s, b0, &err);
+        lr_emit_ret(s, LR_IMM(5, i32));
+    }
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    rc = build_runtime_archive_bytes("not-the-host-target",
+                                     (uint32_t)LR_SESSION_BACKEND_ISEL,
+                                     ir_text, blob_pkg, sizeof(blob_pkg),
+                                     &archive_data, &archive_len);
+    TEST_ASSERT_EQ(rc, 0, "build mismatched runtime archive");
+
+    rc = lr_session_set_runtime_archive_borrowed(s, archive_data, archive_len, &err);
+    TEST_ASSERT_EQ(rc, 0, "set runtime archive");
+
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT(rc != 0, "emit exe rejects mismatched runtime archive");
+    TEST_ASSERT_EQ(err.code, LR_ERR_BACKEND, "mismatch error class");
+    TEST_ASSERT(strstr(err.msg, "target mismatch") != NULL,
+                "target mismatch error message");
+
+    remove(path);
+    free(archive_data);
+    lr_session_destroy(s);
     return 0;
 }
 
