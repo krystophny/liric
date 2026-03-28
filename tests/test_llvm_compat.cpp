@@ -2522,6 +2522,51 @@ static int test_jit_stringref_slice_symbol_lookup() {
     return 0;
 }
 
+static int test_first_insertion_call_moves_before_terminator() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("first_insertion_call_moves_before_terminator", ctx);
+
+    llvm::FunctionType *helper_ty =
+        llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx), false);
+    llvm::Function *helper = llvm::Function::Create(
+        helper_ty, llvm::Function::ExternalLinkage, "helper", &mod);
+    TEST_ASSERT(helper != nullptr, "helper function created");
+    {
+        llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", helper);
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateRet(llvm::ConstantInt::get(llvm::Type::getInt64Ty(ctx), 42));
+    }
+
+    llvm::FunctionType *main_ty =
+        llvm::FunctionType::get(llvm::Type::getInt64Ty(ctx), false);
+    llvm::Function *main_fn = llvm::Function::Create(
+        main_ty, llvm::Function::ExternalLinkage, "main", &mod);
+    TEST_ASSERT(main_fn != nullptr, "main function created");
+
+    llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
+    llvm::BasicBlock *body = llvm::BasicBlock::Create(ctx, "body", main_fn);
+    TEST_ASSERT(entry != nullptr, "entry block");
+    TEST_ASSERT(body != nullptr, "body block");
+
+    llvm::IRBuilder<> builder(entry);
+    builder.CreateBr(body);
+
+    llvm::IRBuilder<> entry_builder(entry, entry->getFirstInsertionPt());
+    llvm::Value *hoisted = entry_builder.CreateCall(helper, {}, "hoisted");
+    TEST_ASSERT(hoisted != nullptr, "entry-inserted call created");
+
+    builder.SetInsertPoint(body);
+    builder.CreateRet(hoisted);
+
+    llvm::orc::LLJIT jit;
+    jit.addModule(std::move(mod));
+    typedef int64_t (*fn_t)(void);
+    fn_t fp = (fn_t)jit.lookup("main");
+    TEST_ASSERT(fp != nullptr, "lookup main");
+    TEST_ASSERT_EQ(fp(), 42, "entry-inserted call dominates body return");
+    return 0;
+}
+
 int main() {
     fprintf(stderr, "LLVM C++ compat test suite\n");
     fprintf(stderr, "==========================\n\n");
@@ -2611,6 +2656,7 @@ int main() {
     RUN_TEST(test_jit_smoke_branch_manual_phi_finalize);
     RUN_TEST(test_jit_smoke_indirect_bitcast_external_fp_call);
     RUN_TEST(test_jit_stringref_slice_symbol_lookup);
+    RUN_TEST(test_first_insertion_call_moves_before_terminator);
 
     fprintf(stderr, "\n==========================\n");
     fprintf(stderr, "%d tests: %d passed, %d failed\n",

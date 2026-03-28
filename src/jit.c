@@ -179,8 +179,14 @@ static int64_t lr_builtin_lcompilers_optimization_mod_i64(int64_t a, int64_t b) 
     return a % b;
 }
 
-static void lr_builtin_lcompilers_runtime_error(const char *format, ...) {
+static void lr_builtin_lcompilers_runtime_error(void *allocator,
+                                                void *labels,
+                                                uint32_t n_labels,
+                                                const char *format, ...) {
     va_list args;
+    (void)allocator;
+    (void)labels;
+    (void)n_labels;
     if (format && format[0]) {
         va_start(args, format);
         (void)vfprintf(stderr, format, args);
@@ -192,11 +198,12 @@ static void lr_builtin_lcompilers_runtime_error(const char *format, ...) {
 }
 
 static char *lr_builtin_lcompilers_string_format_fortran(
-    const char *format, int64_t format_len, const char *serialization_string,
-    int64_t *result_size, int32_t array_sizes_cnt, int32_t string_lengths_cnt,
-    ...) {
+    void *allocator, const char *format, int64_t format_len,
+    const char *serialization_string, int64_t *result_size,
+    int32_t array_sizes_cnt, int32_t string_lengths_cnt, ...) {
     size_t n = 0;
     char *out = NULL;
+    (void)allocator;
     (void)serialization_string;
     (void)array_sizes_cnt;
     (void)string_lengths_cnt;
@@ -1151,12 +1158,28 @@ static int register_default_symbol_providers(lr_jit_t *j) {
     return 0;
 }
 
+static bool symbol_should_preserve_host_binding(lr_jit_t *j, const char *name,
+                                                void *existing_addr) {
+    const char *local_tag = ".__liric_local.";
+    void *provider_addr = NULL;
+    if (!j || !name || !name[0] || !existing_addr)
+        return false;
+    if (strstr(name, local_tag) != NULL)
+        return false;
+    provider_addr = resolve_symbol_from_process(j, name);
+    if (!provider_addr)
+        provider_addr = resolve_symbol_from_loaded_libraries(j, name);
+    return provider_addr != NULL && provider_addr == existing_addr;
+}
+
 void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
     if (!j || !name || !name[0])
         return;
     uint32_t hash = symbol_hash(name);
     lr_sym_entry_t *existing = find_symbol_entry(j, name, hash);
     if (existing) {
+        if (symbol_should_preserve_host_binding(j, name, existing->addr))
+            return;
         existing->addr = addr;
         update_last_symbol_lookup(j, existing, hash);
         if (getenv("LIRIC_VERBOSE_JIT_SYMBOLS") != NULL) {
@@ -1569,15 +1592,15 @@ static void *lookup_symbol_materializing_lazy(lr_jit_t *j, const char *name) {
         return NULL;
 
     uint32_t hash = symbol_hash(name);
-    void *addr = lookup_symbol_hashed(j, name, hash);
-    if (addr)
-        return addr;
-
     lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
-    if (!lazy || lazy->state == LR_LAZY_FUNC_READY || lazy->state == LR_LAZY_FUNC_COMPILING)
-        return NULL;
-    if (materialize_lazy_function(j, lazy) != 0)
-        return NULL;
+    if (lazy) {
+        if (lazy->state == LR_LAZY_FUNC_COMPILING)
+            return lazy->pending_addr;
+        if (lazy->state != LR_LAZY_FUNC_READY) {
+            if (materialize_lazy_function(j, lazy) != 0)
+                return NULL;
+        }
+    }
     return lookup_symbol_hashed(j, name, hash);
 }
 
@@ -2956,7 +2979,7 @@ void lr_jit_end_update(lr_jit_t *j) {
     j->update_begin_code_size = j->code_size;
 }
 
-void *lr_jit_get_function(lr_jit_t *j, const char *name) {
+void *lr_jit_get_symbol(lr_jit_t *j, const char *name) {
     if (!j || !name || !name[0])
         return NULL;
     uint32_t hash = symbol_hash(name);
@@ -2964,13 +2987,16 @@ void *lr_jit_get_function(lr_jit_t *j, const char *name) {
     if (addr)
         return addr;
 
-    /* Materialize only when the fast path misses a lazy pending entry. */
     lr_lazy_func_entry_t *lazy = find_lazy_func_entry(j, name, hash);
     if (lazy && lazy->state != LR_LAZY_FUNC_READY) {
         if (materialize_lazy_function(j, lazy) != 0)
             return NULL;
     }
     return lookup_symbol_hashed(j, name, hash);
+}
+
+void *lr_jit_get_function(lr_jit_t *j, const char *name) {
+    return lr_jit_get_symbol(j, name);
 }
 
 void *lr_jit_get_defined_function(lr_jit_t *j, const char *name) {

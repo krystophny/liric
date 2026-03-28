@@ -720,11 +720,15 @@ public:
         for (size_t i = 0; i < Args.size(); i++) {
             args[i] = Args[i] ? Args[i]->impl() : nullptr;
         }
-        return Value::wrap(lc_create_call(
+        lc_value_t *result = lc_create_call(
             M(), B(), F(), FTy ? FTy->impl() : nullptr,
             Callee ? Callee->impl() : nullptr,
             args.empty() ? nullptr : args.data(),
-            static_cast<unsigned>(args.size()), Name.c_str()));
+            static_cast<unsigned>(args.size()), Name.c_str());
+        if (prefer_entry_alloca_dump_ && result) {
+            (void)lc_value_move_before_block_terminator(result);
+        }
+        return Value::wrap(result);
     }
 
     Value *CreateCall(Function *Callee, ArrayRef<Value *> Args = {},

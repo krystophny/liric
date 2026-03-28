@@ -148,6 +148,7 @@ const char *lc_value_get_name(const lc_value_t *val);
 bool lc_value_has_name(const lc_value_t *val);
 void lc_value_set_prefer_entry_dump(lc_value_t *val, bool prefer_entry_dump);
 bool lc_value_get_prefer_entry_dump(const lc_value_t *val);
+int lc_value_move_before_block_terminator(lc_value_t *val);
 int lc_value_const_aggregate_add_reloc(lc_module_compat_t *mod,
                                         lc_value_t *aggregate,
                                         size_t offset,

@@ -2934,6 +2934,86 @@ bool lc_value_get_prefer_entry_dump(const lc_value_t *val) {
     return val ? val->prefer_entry_dump : false;
 }
 
+static bool compat_is_terminator_opcode(lr_opcode_t op) {
+    return op == LR_OP_RET || op == LR_OP_RET_VOID || op == LR_OP_BR ||
+           op == LR_OP_CONDBR || op == LR_OP_UNREACHABLE;
+}
+
+int lc_value_move_before_block_terminator(lc_value_t *val) {
+    lr_block_t *block = NULL;
+    lr_func_t *func = NULL;
+    lr_inst_t *target = NULL;
+    lr_inst_t *target_prev = NULL;
+    lr_inst_t *term = NULL;
+    lr_inst_t *term_prev = NULL;
+    lr_inst_t *prev = NULL;
+    lr_inst_t *it = NULL;
+
+    if (!val || val->kind != LC_VAL_VREG || !val->vreg.func)
+        return -1;
+
+    func = val->vreg.func;
+    for (block = func->first_block; block; block = block->next) {
+        prev = NULL;
+        target = NULL;
+        target_prev = NULL;
+        term = NULL;
+        term_prev = NULL;
+        for (it = block->first; it; it = it->next) {
+            if (!target && compat_inst_has_dest(it) &&
+                it->dest == val->vreg.id) {
+                target = it;
+                target_prev = prev;
+            }
+            if (!term && compat_is_terminator_opcode(it->op)) {
+                term = it;
+                term_prev = prev;
+            }
+            prev = it;
+        }
+        if (!target)
+            continue;
+        if (!term || target == term)
+            return 0;
+
+        for (it = block->first; it && it != term; it = it->next) {
+            if (it == target)
+                return 0;
+        }
+
+        if (target_prev) {
+            target_prev->next = target->next;
+        } else {
+            block->first = target->next;
+        }
+
+        if (target == block->last)
+            block->last = target_prev;
+
+        if (term_prev) {
+            term_prev->next = target;
+        } else {
+            block->first = target;
+        }
+        target->next = term;
+
+        if (!block->last) {
+            block->last = block->first;
+            while (block->last && block->last->next)
+                block->last = block->last->next;
+        }
+
+        block->inst_array = NULL;
+        block->num_insts = 0;
+        func->linear_inst_array = NULL;
+        func->block_inst_offsets = NULL;
+        func->num_linear_insts = 0;
+        return 0;
+    }
+
+    return -1;
+}
+
 int lc_value_const_aggregate_add_reloc(lc_module_compat_t *mod,
                                         lc_value_t *aggregate,
                                         size_t offset,
@@ -6056,7 +6136,7 @@ static void compat_seed_session_externs_from_consumer(lc_module_compat_t *mod,
         void *addr;
         if (!g->name || !g->name[0] || !g->is_external)
             continue;
-        addr = lr_jit_get_function(consumer_jit, g->name);
+        addr = lr_jit_get_symbol(consumer_jit, g->name);
         if (addr)
             lr_session_add_symbol(mod->session, g->name, addr);
     }
@@ -6116,7 +6196,7 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
         if (!g->name || !g->name[0])
             continue;
         if (g->is_external) {
-            addr = lr_jit_get_function(session_jit, g->name);
+            addr = lr_jit_get_symbol(session_jit, g->name);
         } else {
             addr = lr_jit_get_defined_function(session_jit, g->name);
         }
