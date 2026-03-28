@@ -27,7 +27,7 @@ int lr_compile_mode_parse(const char *text, lr_compile_mode_t *out_mode) {
 }
 
 lr_compile_mode_t lr_compile_mode_from_env(void) {
-    lr_compile_mode_t mode = LR_COMPILE_ISEL;
+    lr_compile_mode_t mode = LR_COMPILE_COPY_PATCH;
     const char *env = getenv("LIRIC_COMPILE_MODE");
     if (env)
         (void)lr_compile_mode_parse(env, &mode);

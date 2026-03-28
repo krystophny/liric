@@ -1269,7 +1269,7 @@ if [[ "$resolved_lfortran" != "$lfortran_liric_bin" ]]; then
 fi
 
 if [[ -z "${LIRIC_COMPILE_MODE:-}" ]]; then
-    export LIRIC_COMPILE_MODE="isel"
+    export LIRIC_COMPILE_MODE="copy_patch"
     echo "lfortran_api_compat: applying WITH_LIRIC compile policy: LIRIC_COMPILE_MODE=${LIRIC_COMPILE_MODE}" >&2
 fi
 if [[ "${LIRIC_COMPILE_MODE}" == "llvm" ]]; then

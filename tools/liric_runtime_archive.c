@@ -83,8 +83,8 @@ int main(int argc, char **argv) {
     const char *input_bc = NULL;
     const char *output = NULL;
     const char *target = NULL;
-    const char *backend_s = "isel";
-    lr_session_backend_t backend = LR_SESSION_BACKEND_ISEL;
+    const char *backend_s = "copy_patch";
+    lr_session_backend_t backend = LR_SESSION_BACKEND_COPY_PATCH;
     file_buf_t bc = {0};
     lr_session_config_t cfg;
     lr_error_t err = {0};

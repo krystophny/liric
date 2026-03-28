@@ -155,7 +155,7 @@ public:
             } else if (mode && std::strcmp(mode, "llvm") == 0) {
                 lc_context_set_backend(ctx_, LC_BACKEND_LLVM);
             } else {
-                lc_context_set_backend(ctx_, LC_BACKEND_ISEL);
+                lc_context_set_backend(ctx_, LC_BACKEND_COPY_PATCH);
             }
         }
         default_mod_ = lc_module_create(ctx_, "__liric_ctx__");

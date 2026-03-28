@@ -93,7 +93,7 @@ lr_compiler_t *lr_compiler_create(const lr_compiler_config_t *cfg,
     lr_session_config_t scfg;
     lr_error_t serr = {0};
     lr_policy_t policy = LR_POLICY_DIRECT;
-    lr_backend_t backend = LR_BACKEND_ISEL;
+    lr_backend_t backend = LR_BACKEND_COPY_PATCH;
     const char *target = NULL;
 
     compiler_err_clear(err);

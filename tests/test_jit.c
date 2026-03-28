@@ -122,7 +122,8 @@ static int set_compile_mode_env(const char *value, char **old_value, int *had_ol
 
 static void restore_compile_mode_env(char *old_value, int had_old_value) {
     if (had_old_value) {
-        (void)setenv("LIRIC_COMPILE_MODE", old_value ? old_value : "isel", 1);
+        (void)setenv("LIRIC_COMPILE_MODE",
+                     old_value ? old_value : "copy_patch", 1);
     } else {
         (void)unsetenv("LIRIC_COMPILE_MODE");
     }

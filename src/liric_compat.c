@@ -840,7 +840,7 @@ static size_t g_embedded_runtime_archive_len = 0;
 /* Singleton JIT reused across lc_module_create() calls to avoid
    repeated 32MB mmap + hash table init per file. */
 static lr_jit_t *g_shared_jit = NULL;
-static lr_session_backend_t g_shared_jit_backend = LR_SESSION_BACKEND_DEFAULT;
+static lr_session_backend_t g_shared_jit_backend = LR_SESSION_BACKEND_COPY_PATCH;
 
 static int compat_path_exists(const char *path) {
     FILE *f = NULL;
@@ -2322,7 +2322,7 @@ lc_context_t *lc_context_create(void) {
     ctx->type_x86_fp80->kind = LR_TYPE_X86_FP80;
     ctx->type_ptr    = lr_arena_new(ctx->type_arena, lr_type_t);
     ctx->type_ptr->kind = LR_TYPE_PTR;
-    ctx->backend = LR_SESSION_BACKEND_ISEL;
+    ctx->backend = LR_SESSION_BACKEND_COPY_PATCH;
     return ctx;
 }
 
@@ -2343,14 +2343,14 @@ void lc_context_set_backend(lc_context_t *ctx, int backend) {
         ctx->backend = backend;
         break;
     default:
-        ctx->backend = LC_BACKEND_ISEL;
+        ctx->backend = LC_BACKEND_COPY_PATCH;
         break;
     }
 }
 
 int lc_context_get_backend(const lc_context_t *ctx) {
     if (!ctx)
-        return LC_BACKEND_ISEL;
+        return LC_BACKEND_COPY_PATCH;
     return ctx->backend;
 }
 
@@ -2375,7 +2375,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
         free(cm);
         return NULL;
     }
-    switch (ctx ? ctx->backend : LC_BACKEND_ISEL) {
+    switch (ctx ? ctx->backend : LC_BACKEND_COPY_PATCH) {
     case LC_BACKEND_COPY_PATCH:
         cm->deferred_cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
         break;

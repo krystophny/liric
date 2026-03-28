@@ -622,7 +622,7 @@ static int session_backend_to_mode(session_backend_t backend,
         return -1;
     switch (backend) {
     case SESSION_BACKEND_DEFAULT:
-        *out_mode = LR_COMPILE_ISEL;
+        *out_mode = LR_COMPILE_COPY_PATCH;
         return 0;
     case SESSION_BACKEND_ISEL:
         *out_mode = LR_COMPILE_ISEL;
@@ -640,9 +640,10 @@ static int session_backend_to_mode(session_backend_t backend,
 
 static uint32_t session_runtime_archive_backend(const struct lr_session *s) {
     if (!s)
-        return (uint32_t)SESSION_BACKEND_ISEL;
+        return (uint32_t)SESSION_BACKEND_COPY_PATCH;
     switch (s->cfg.backend) {
     case SESSION_BACKEND_DEFAULT:
+        return (uint32_t)SESSION_BACKEND_COPY_PATCH;
     case SESSION_BACKEND_ISEL:
         return (uint32_t)SESSION_BACKEND_ISEL;
     case SESSION_BACKEND_COPY_PATCH:
@@ -2211,7 +2212,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
     const session_config_t *cfg = (const session_config_t *)cfg_ptr;
     struct lr_session *s = NULL;
     lr_arena_t *arena = NULL;
-    lr_compile_mode_t mode = LR_COMPILE_ISEL;
+    lr_compile_mode_t mode = LR_COMPILE_COPY_PATCH;
     err_clear(err);
 
     if (cfg) {
@@ -2225,7 +2226,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
             return NULL;
         }
     } else {
-        mode = LR_COMPILE_ISEL;
+        mode = LR_COMPILE_COPY_PATCH;
     }
 
     s = (struct lr_session *)calloc(1, sizeof(*s));
@@ -3324,7 +3325,7 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
     }
 
     if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
-                                        s->jit ? s->jit->mode : LR_COMPILE_ISEL,
+                                        s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
                                         path, backend_err,
                                         sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
@@ -3354,7 +3355,7 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
     }
 
     /* IR mode: compile from IR using session's compile mode */
-    lr_compile_mode_t mode = s->jit ? s->jit->mode : LR_COMPILE_ISEL;
+    lr_compile_mode_t mode = s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH;
     char backend_err[256] = {0};
     const lr_target_t *target = session_resolve_target(s);
     if (!target) {
@@ -3454,7 +3455,7 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     entry = session_entry_symbol(s->module);
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
-            s->jit ? s->jit->mode : LR_COMPILE_ISEL,
+            s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
             path, entry,
             backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",

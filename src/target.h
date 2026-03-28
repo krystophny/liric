@@ -8,7 +8,7 @@
 
 /* Compilation mode: how IR becomes machine code */
 typedef enum lr_compile_mode {
-    LR_COMPILE_ISEL       = 0,  /* Mode B: ISel + encoding (current, default) */
+    LR_COMPILE_ISEL       = 0,  /* Mode B: ISel + encoding */
     LR_COMPILE_COPY_PATCH = 1,  /* Mode A: copy-and-patch templates */
     LR_COMPILE_LLVM       = 2,  /* Mode C: translate to real LLVM (optional) */
 } lr_compile_mode_t;
