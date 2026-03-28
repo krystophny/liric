@@ -2909,6 +2909,30 @@ static void compat_dump_module(lc_module_compat_t *mod, FILE *out,
     }
 }
 
+static void compat_dump_module_raw(const lc_module_compat_t *mod, FILE *out,
+                                   unsigned dump_flags) {
+    lr_module_t *m;
+    if (!mod || !out)
+        return;
+    m = mod->mod;
+    if (!m)
+        return;
+    if (mod->name && mod->name[0]) {
+        fprintf(out, "; ModuleID = '%s'\n", mod->name);
+        fprintf(out, "source_filename = \"%s\"\n\n", mod->name);
+    }
+    lr_dump_named_types(m, out);
+    for (lr_global_t *g = m->first_global; g; g = g->next)
+        lr_dump_global_opts(m, g, out, dump_flags);
+    if (m->first_global && m->first_func)
+        fprintf(out, "\n");
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        compat_dump_function((lc_module_compat_t *)mod, f, out, dump_flags);
+        if (f->next)
+            fprintf(out, "\n");
+    }
+}
+
 void lc_module_dump(lc_module_compat_t *mod) {
     compat_dump_module(mod, stderr, 0);
 }
@@ -6690,7 +6714,7 @@ int lc_module_export_sidecar_files(lc_module_compat_t *mod,
             compat_set_err(err, errlen, "sidecar LLVM IR export failed");
             goto done;
         }
-        compat_dump_module(mod, mem, LR_DUMP_PRESERVE_SCOPED_LOCALS);
+        compat_dump_module_raw(mod, mem, LR_DUMP_PRESERVE_SCOPED_LOCALS);
         fclose(mem);
     }
     if (write_file_bytes(ll_path, (const uint8_t *)ll_text, ll_len) != 0) {
