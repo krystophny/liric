@@ -596,7 +596,6 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
                                                  char *out_name,
                                                  size_t out_name_cap) {
     lr_module_t *m = NULL;
-    const lr_global_t *g = NULL;
     const char *local_tag = ".__liric_local.";
     char unique_base[4096];
     char suffix[32];
@@ -618,47 +617,9 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
     }
     if (m) {
         do {
-            size_t candidate_len = strlen(unique_base);
             collision = false;
-            for (g = m->first_global; g; g = g->next) {
-                const char *tag;
-                size_t base_len;
-                const char *dot;
-                if (!g->name)
-                    continue;
-                tag = strstr(g->name, local_tag);
-                if (!tag)
-                    continue;
-                base_len = (size_t)(tag - g->name);
-                if (base_len == candidate_len &&
-                    strncmp(g->name, unique_base, candidate_len) == 0) {
-                    collision = true;
-                    break;
-                }
-                dot = strrchr(unique_base, '.');
-                if (dot && dot != unique_base && isdigit((unsigned char)dot[1])) {
-                    size_t root_len = (size_t)(dot - unique_base);
-                    static const char data_suffix[] = "_data";
-                    if (base_len == root_len + (sizeof(data_suffix) - 1) + strlen(dot) &&
-                        strncmp(g->name, unique_base, root_len) == 0 &&
-                        strncmp(g->name + root_len, data_suffix,
-                                sizeof(data_suffix) - 1) == 0 &&
-                        strcmp(g->name + root_len + (sizeof(data_suffix) - 1), dot) == 0) {
-                        collision = true;
-                        break;
-                    }
-                    if (root_len >= sizeof(data_suffix) - 1 &&
-                        base_len == root_len - (sizeof(data_suffix) - 1) + strlen(dot) &&
-                        memcmp(unique_base + root_len - (sizeof(data_suffix) - 1),
-                               data_suffix, sizeof(data_suffix) - 1) == 0 &&
-                        strncmp(g->name, unique_base,
-                                root_len - (sizeof(data_suffix) - 1)) == 0 &&
-                        strcmp(g->name + root_len - (sizeof(data_suffix) - 1), dot) == 0) {
-                        collision = true;
-                        break;
-                    }
-                }
-            }
+            collision = lc_module_name_reserved((lc_module_compat_t *)compat,
+                                                unique_base) != 0;
             if (!collision)
                 break;
             ordinal++;

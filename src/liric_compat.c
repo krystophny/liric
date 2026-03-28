@@ -1429,6 +1429,7 @@ typedef struct lc_module_compat {
     lr_module_t *cache_owner_mod;
     lr_func_t **func_by_sym;
     lr_global_t **global_by_sym;
+    uint8_t *reserved_name_by_sym;
     uint32_t sym_cache_cap;
     compat_func_local_name_cache_t *local_name_caches;
     uint32_t local_name_cache_count;
@@ -1561,16 +1562,50 @@ static void clear_symbol_caches(lc_module_compat_t *mod) {
     if (!mod) return;
     free(mod->func_by_sym);
     free(mod->global_by_sym);
+    free(mod->reserved_name_by_sym);
     mod->func_by_sym = NULL;
     mod->global_by_sym = NULL;
+    mod->reserved_name_by_sym = NULL;
     mod->sym_cache_cap = 0;
     mod->cache_owner_mod = mod->mod;
 }
 
+static int ensure_symbol_cache_cap(lc_module_compat_t *mod, uint32_t min_cap);
+static void reserve_symbol_name_variants(lc_module_compat_t *mod,
+                                         const char *name);
+
+static void rebuild_symbol_caches(lc_module_compat_t *mod) {
+    lr_func_t *f = NULL;
+    lr_global_t *g = NULL;
+    uint32_t sym_id = UINT32_MAX;
+    if (!mod || !mod->mod)
+        return;
+    for (f = mod->mod->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0])
+            continue;
+        sym_id = lr_module_intern_symbol(mod->mod, f->name);
+        if (sym_id == UINT32_MAX || ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
+            continue;
+        mod->func_by_sym[sym_id] = f;
+        reserve_symbol_name_variants(mod, f->name);
+    }
+    for (g = mod->mod->first_global; g; g = g->next) {
+        if (!g->name || !g->name[0])
+            continue;
+        sym_id = lr_module_intern_symbol(mod->mod, g->name);
+        if (sym_id == UINT32_MAX || ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
+            continue;
+        mod->global_by_sym[sym_id] = g;
+        reserve_symbol_name_variants(mod, g->name);
+    }
+}
+
 static void ensure_cache_owner(lc_module_compat_t *mod) {
     if (!mod) return;
-    if (mod->cache_owner_mod != mod->mod)
+    if (mod->cache_owner_mod != mod->mod) {
         clear_symbol_caches(mod);
+        rebuild_symbol_caches(mod);
+    }
 }
 
 static int ensure_symbol_cache_cap(lc_module_compat_t *mod, uint32_t min_cap) {
@@ -1585,9 +1620,11 @@ static int ensure_symbol_cache_cap(lc_module_compat_t *mod, uint32_t min_cap) {
 
     lr_func_t **new_func = (lr_func_t **)calloc(new_cap, sizeof(*new_func));
     lr_global_t **new_global = (lr_global_t **)calloc(new_cap, sizeof(*new_global));
-    if (!new_func || !new_global) {
+    uint8_t *new_reserved = (uint8_t *)calloc(new_cap, sizeof(*new_reserved));
+    if (!new_func || !new_global || !new_reserved) {
         free(new_func);
         free(new_global);
+        free(new_reserved);
         return -1;
     }
     if (mod->sym_cache_cap > 0) {
@@ -1595,11 +1632,15 @@ static int ensure_symbol_cache_cap(lc_module_compat_t *mod, uint32_t min_cap) {
                sizeof(*new_func) * mod->sym_cache_cap);
         memcpy(new_global, mod->global_by_sym,
                sizeof(*new_global) * mod->sym_cache_cap);
+        memcpy(new_reserved, mod->reserved_name_by_sym,
+               sizeof(*new_reserved) * mod->sym_cache_cap);
     }
     free(mod->func_by_sym);
     free(mod->global_by_sym);
+    free(mod->reserved_name_by_sym);
     mod->func_by_sym = new_func;
     mod->global_by_sym = new_global;
+    mod->reserved_name_by_sym = new_reserved;
     mod->sym_cache_cap = new_cap;
     return 0;
 }
@@ -1668,73 +1709,88 @@ static char *dup_cstr(const char *s) {
     return out;
 }
 
-static int sibling_data_suffix_in_use(lc_module_compat_t *mod, const char *name) {
+static void reserve_symbol_name_exact(lc_module_compat_t *mod,
+                                      const char *name) {
+    uint32_t sym_id = UINT32_MAX;
+    if (!mod || !mod->mod || !name || !name[0])
+        return;
+    sym_id = lr_module_intern_symbol(mod->mod, name);
+    if (sym_id == UINT32_MAX || ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
+        return;
+    mod->reserved_name_by_sym[sym_id] = 1u;
+}
+
+static void reserve_sibling_data_name(lc_module_compat_t *mod,
+                                      const char *name) {
     static const char data_suffix[] = "_data";
-    static const char local_tag[] = ".__liric_local.";
     const char *dot;
-    const char *expected;
     size_t base_len;
     size_t suffix_len;
     char candidate[4096];
-    char expected_buf[4096];
 
     if (!mod || !mod->mod || !name || !name[0])
-        return 0;
+        return;
     dot = strrchr(name, '.');
     if (!dot || dot == name || !isdigit((unsigned char)dot[1]))
-        return 0;
+        return;
     base_len = (size_t)(dot - name);
     suffix_len = strlen(dot);
 
     if (base_len >= sizeof(candidate))
-        return 0;
+        return;
     if (base_len >= sizeof(data_suffix) - 1 &&
         memcmp(name + base_len - (sizeof(data_suffix) - 1),
                data_suffix, sizeof(data_suffix) - 1) == 0) {
         size_t root_len = base_len - (sizeof(data_suffix) - 1);
         if (root_len + suffix_len >= sizeof(candidate))
-            return 0;
+            return;
         memcpy(candidate, name, root_len);
         memcpy(candidate + root_len, dot, suffix_len + 1);
     } else {
         if (base_len + (sizeof(data_suffix) - 1) + suffix_len >= sizeof(candidate))
-            return 0;
+            return;
         memcpy(candidate, name, base_len);
         memcpy(candidate + base_len, data_suffix, sizeof(data_suffix) - 1);
         memcpy(candidate + base_len + (sizeof(data_suffix) - 1), dot, suffix_len + 1);
     }
+    reserve_symbol_name_exact(mod, candidate);
+}
 
-    expected = candidate;
-    if (strlen(expected) >= sizeof(expected_buf))
-        return 0;
-    memcpy(expected_buf, expected, strlen(expected) + 1);
-
-    if (find_func_linear(mod->mod, expected) != NULL ||
-        find_global_linear(mod->mod, expected) != NULL) {
-        return 1;
-    }
-
-    for (const lr_global_t *g = mod->mod->first_global; g; g = g->next) {
-        const char *tag;
-        size_t visible_len;
-        if (!g->name)
-            continue;
-        tag = strstr(g->name, local_tag);
-        visible_len = tag ? (size_t)(tag - g->name) : strlen(g->name);
-        if (visible_len == strlen(expected_buf) &&
-            strncmp(g->name, expected_buf, visible_len) == 0) {
-            return 1;
+static void reserve_symbol_name_variants(lc_module_compat_t *mod,
+                                         const char *name) {
+    static const char local_tag[] = ".__liric_local.";
+    const char *tag = NULL;
+    if (!mod || !name || !name[0])
+        return;
+    reserve_symbol_name_exact(mod, name);
+    tag = strstr(name, local_tag);
+    if (tag) {
+        size_t visible_len = (size_t)(tag - name);
+        char visible_name[4096];
+        if (visible_len > 0 && visible_len < sizeof(visible_name)) {
+            memcpy(visible_name, name, visible_len);
+            visible_name[visible_len] = '\0';
+            reserve_symbol_name_exact(mod, visible_name);
+            reserve_sibling_data_name(mod, visible_name);
         }
+        return;
     }
-    return 0;
+    reserve_sibling_data_name(mod, name);
+}
+
+int lc_module_name_reserved(lc_module_compat_t *mod, const char *name) {
+    uint32_t sym_id = UINT32_MAX;
+    if (!mod || !name || !name[0])
+        return 0;
+    ensure_cache_owner(mod);
+    sym_id = compat_symbol_id(mod, name);
+    if (sym_id == UINT32_MAX)
+        return 0;
+    return mod->reserved_name_by_sym[sym_id] != 0;
 }
 
 static int symbol_name_in_use(lc_module_compat_t *mod, const char *name) {
-    if (!mod || !mod->mod || !name || !name[0])
-        return 0;
-    return find_func_linear(mod->mod, name) != NULL ||
-           find_global_linear(mod->mod, name) != NULL ||
-           sibling_data_suffix_in_use(mod, name);
+    return lc_module_name_reserved(mod, name);
 }
 
 static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
@@ -1980,6 +2036,7 @@ static void cache_func_by_symbol(lc_module_compat_t *mod, uint32_t sym_id,
     if (ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
         return;
     mod->func_by_sym[sym_id] = func;
+    reserve_symbol_name_variants(mod, func->name);
 }
 
 static void cache_global_by_symbol(lc_module_compat_t *mod, uint32_t sym_id,
@@ -1989,6 +2046,7 @@ static void cache_global_by_symbol(lc_module_compat_t *mod, uint32_t sym_id,
     if (ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
         return;
     mod->global_by_sym[sym_id] = global;
+    reserve_symbol_name_variants(mod, global->name);
 }
 
 static lr_func_t *lookup_func_cached(lc_module_compat_t *mod, const char *name,

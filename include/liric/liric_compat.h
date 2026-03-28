@@ -206,6 +206,7 @@ int lc_const_gep_compute_offset(lr_type_t *base_type,
                                  lc_value_t **indices,
                                  uint32_t num_indices,
                                  int64_t *out_offset);
+int lc_module_name_reserved(lc_module_compat_t *mod, const char *name);
 
 /* ---- Function ---- */
 lc_value_t *lc_func_create(lc_module_compat_t *mod, const char *name,
