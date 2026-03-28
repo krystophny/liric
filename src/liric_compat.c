@@ -256,21 +256,20 @@ static void compat_collect_module_scoped_locals(const lr_module_t *m,
                                                 compat_scoped_local_name_map_t *map,
                                                 const char *const *exclude,
                                                 size_t exclude_count) {
-    static const char local_tag[] = ".__liric_local.";
     const lr_global_t *g = NULL;
     const lr_func_t *f = NULL;
 
     if (!m || !map)
         return;
     for (g = m->first_global; g; g = g->next) {
-        if (!g->name || !strstr(g->name, local_tag))
+        if (!g->name || !g->name[0])
             continue;
         if (compat_name_in_list(g->name, exclude, exclude_count))
             continue;
         (void)compat_scoped_local_name_push(map, g->name);
     }
     for (f = m->first_func; f; f = f->next) {
-        if (!f->name || !strstr(f->name, local_tag))
+        if (!f->name || !f->name[0])
             continue;
         if (compat_name_in_list(f->name, exclude, exclude_count))
             continue;
@@ -308,9 +307,7 @@ static const char *compat_remap_scoped_local_name(
         if (!exact)
             continue;
         exact_tag = strstr(exact, local_tag);
-        if (!exact_tag)
-            continue;
-        exact_base_len = (size_t)(exact_tag - exact);
+        exact_base_len = exact_tag ? (size_t)(exact_tag - exact) : strlen(exact);
         if (exact_base_len != base_len)
             continue;
         if (strncmp(exact, name, base_len) != 0)
@@ -728,15 +725,62 @@ static int compat_resolve_c_source_for_object(const char *obj_path, char *out_sr
 #endif
 }
 
+static int compat_guess_lfortran_iso_include_dir(const char *src_path, char *out_dir,
+                                                 size_t out_dir_cap) {
+    const char *env_src_dir = getenv("LIRIC_LFORTRAN_SRC_DIR");
+    char walk[PATH_MAX];
+    char candidate[PATH_MAX];
+    int depth = 0;
+
+    if (!src_path || !src_path[0] || !out_dir || out_dir_cap == 0)
+        return -1;
+
+    if (env_src_dir && env_src_dir[0]) {
+        if (snprintf(candidate, sizeof(candidate), "%s/libasr/runtime/ISO_Fortran_binding.h",
+                     env_src_dir) >= (int)sizeof(candidate))
+            return -1;
+        if (compat_path_exists(candidate)) {
+            if (snprintf(out_dir, out_dir_cap, "%s/libasr/runtime", env_src_dir) >=
+                (int)out_dir_cap)
+                return -1;
+            return 0;
+        }
+    }
+
+    if (snprintf(walk, sizeof(walk), "%s", src_path) >= (int)sizeof(walk))
+        return -1;
+    if (compat_parent_dir(walk) != 0)
+        return -1;
+
+    for (depth = 0; depth < 12; depth++) {
+        if (snprintf(candidate, sizeof(candidate), "%s/src/libasr/runtime/ISO_Fortran_binding.h",
+                     walk) >= (int)sizeof(candidate))
+            return -1;
+        if (compat_path_exists(candidate)) {
+            if (snprintf(out_dir, out_dir_cap, "%s/src/libasr/runtime", walk) >=
+                (int)out_dir_cap)
+                return -1;
+            return 0;
+        }
+        if (compat_parent_dir(walk) != 0)
+            break;
+    }
+    return -1;
+}
+
 static int compat_generate_sidecars_for_c_object(const char *obj_path,
                                                  char *err, size_t errlen) {
     char src_path[PATH_MAX];
+    char src_dir[PATH_MAX];
+    char iso_include_dir[PATH_MAX];
     const char *clang_bin = NULL;
     char *ll_path = NULL;
     char *blob_path = NULL;
     char *q_src = NULL;
     char *q_ll = NULL;
     char *q_clang = NULL;
+    char *q_src_dir = NULL;
+    char *q_iso_include_dir = NULL;
     char *cmd = NULL;
     size_t cmd_len = 0;
     int rc = -1;
@@ -764,7 +808,30 @@ static int compat_generate_sidecars_for_c_object(const char *obj_path,
         goto done;
     }
 
-    cmd_len = strlen(q_clang) + strlen(q_src) + strlen(q_ll) + 192;
+    if (snprintf(src_dir, sizeof(src_dir), "%s", src_path) >= (int)sizeof(src_dir) ||
+        compat_parent_dir(src_dir) != 0) {
+        compat_set_err(err, errlen, "failed to resolve C source directory: %s", src_path);
+        goto done;
+    }
+    q_src_dir = compat_shell_quote(src_dir);
+    if (!q_src_dir) {
+        compat_set_err(err, errlen, "shell quoting failed for C source directory");
+        goto done;
+    }
+    iso_include_dir[0] = '\0';
+    if (compat_guess_lfortran_iso_include_dir(src_path, iso_include_dir,
+                                              sizeof(iso_include_dir)) == 0) {
+        q_iso_include_dir = compat_shell_quote(iso_include_dir);
+        if (!q_iso_include_dir) {
+            compat_set_err(err, errlen,
+                           "shell quoting failed for LFortran runtime include directory");
+            goto done;
+        }
+    }
+
+    cmd_len = strlen(q_clang) + strlen(q_src) + strlen(q_ll) + strlen(q_src_dir) + 256;
+    if (q_iso_include_dir)
+        cmd_len += strlen(q_iso_include_dir) + 16;
     cmd = (char *)malloc(cmd_len);
     if (!cmd) {
         compat_set_err(err, errlen, "command allocation failed");
@@ -772,8 +839,9 @@ static int compat_generate_sidecars_for_c_object(const char *obj_path,
     }
     snprintf(cmd, cmd_len,
              "%s -S -emit-llvm -O0 -fno-discard-value-names "
-             "-Xclang -opaque-pointers=0 -o %s %s",
-             q_clang, q_ll, q_src);
+             "-Xclang -opaque-pointers=0 -I %s%s%s -o %s %s",
+             q_clang, q_src_dir, q_iso_include_dir ? " -I " : "",
+             q_iso_include_dir ? q_iso_include_dir : "", q_ll, q_src);
     if (system(cmd) != 0 || !compat_path_exists(ll_path)) {
         compat_set_err(err, errlen,
                        "WITH_LIRIC AOT no-link mode failed to generate LLVM sidecar from C source: %s",
@@ -800,6 +868,10 @@ done:
         free(q_ll);
     if (q_clang)
         free(q_clang);
+    if (q_src_dir)
+        free(q_src_dir);
+    if (q_iso_include_dir)
+        free(q_iso_include_dir);
     if (cmd)
         free(cmd);
     return rc;

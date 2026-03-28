@@ -567,6 +567,29 @@ int lr_llvm_compat_is_local_global_linkage(int linkage) {
     return linkage == LR_LLVM_LINKAGE_INTERNAL || linkage == LR_LLVM_LINKAGE_PRIVATE;
 }
 
+static bool lr_llvm_compat_should_preserve_local_name(const char *name) {
+    static const char *const k_shared_prefixes[] = {
+        "__lfortran_module_init_",
+        "_copy_",
+        "_deepcopy_",
+        "_allocate_struct_",
+        "_deallocate_struct_",
+        "_Type_Info_",
+        "_VTable_",
+        "__module_file_common_block_",
+    };
+    size_t i = 0;
+
+    if (!name || !name[0])
+        return false;
+    for (i = 0; i < sizeof(k_shared_prefixes) / sizeof(k_shared_prefixes[0]); i++) {
+        size_t prefix_len = strlen(k_shared_prefixes[i]);
+        if (strncmp(name, k_shared_prefixes[i], prefix_len) == 0)
+            return true;
+    }
+    return false;
+}
+
 size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compat,
                                                  const char *name,
                                                  int linkage,
@@ -583,6 +606,7 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
     if (!name)
         name = "";
     if (!compat || !name[0] || !lr_llvm_compat_is_local_global_linkage(linkage) ||
+        lr_llvm_compat_should_preserve_local_name(name) ||
         strstr(name, local_tag) != NULL) {
         lr_copy_out_string(name, out_name, out_name_cap, &n);
         return n;

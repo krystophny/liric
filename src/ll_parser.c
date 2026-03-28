@@ -2962,11 +2962,27 @@ static void parse_aggregate_initializer(lr_parser_t *p, lr_global_t *g,
 
 static const char *scoped_local_global_name(lr_parser_t *p, const char *name) {
     const char *local_tag = ".__liric_local.";
+    static const char *const k_shared_prefixes[] = {
+        "__lfortran_module_init_",
+        "_copy_",
+        "_deepcopy_",
+        "_allocate_struct_",
+        "_deallocate_struct_",
+        "_Type_Info_",
+        "_VTable_",
+        "__module_file_common_block_",
+    };
     char suffix[32];
     size_t n;
+    size_t i;
     char *scoped;
     if (!p || !p->module || !name || !name[0] || strstr(name, local_tag) != NULL)
         return name;
+    for (i = 0; i < sizeof(k_shared_prefixes) / sizeof(k_shared_prefixes[0]); i++) {
+        size_t prefix_len = strlen(k_shared_prefixes[i]);
+        if (strncmp(name, k_shared_prefixes[i], prefix_len) == 0)
+            return name;
+    }
     snprintf(suffix, sizeof(suffix), "%p", (void *)p->module);
     n = strlen(name) + strlen(local_tag) + strlen(suffix) + 1u;
     scoped = lr_arena_array(p->arena, char, n);

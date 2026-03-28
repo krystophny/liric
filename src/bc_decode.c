@@ -607,12 +607,28 @@ static bool bc_linkage_is_local(uint32_t linkage) {
 
 static const char *bc_scoped_local_name(bc_decoder_t *d, const char *name) {
     static const char local_tag[] = ".__liric_local.";
+    static const char *const k_shared_prefixes[] = {
+        "__lfortran_module_init_",
+        "_copy_",
+        "_deepcopy_",
+        "_allocate_struct_",
+        "_deallocate_struct_",
+        "_Type_Info_",
+        "_VTable_",
+        "__module_file_common_block_",
+    };
     char suffix[32];
     size_t n;
+    size_t i;
     char *scoped;
 
     if (!d || !d->module || !name || !name[0] || strstr(name, local_tag) != NULL)
         return name;
+    for (i = 0; i < sizeof(k_shared_prefixes) / sizeof(k_shared_prefixes[0]); i++) {
+        size_t prefix_len = strlen(k_shared_prefixes[i]);
+        if (strncmp(name, k_shared_prefixes[i], prefix_len) == 0)
+            return name;
+    }
     snprintf(suffix, sizeof(suffix), "%p", (void *)d->module);
     n = strlen(name) + strlen(local_tag) + strlen(suffix) + 1u;
     scoped = lr_arena_array(d->arena, char, n);
