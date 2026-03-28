@@ -805,6 +805,48 @@ static built_module_t build_puts_hello_module(void) {
     return result;
 }
 
+static built_module_t build_large_bss_module(void) {
+    enum { kLargeGlobalBytes = (1024 * 1024) + 64 };
+    built_module_t result = {0};
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = NULL;
+    lr_type_t *i8 = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *arr = NULL;
+    uint32_t b0 = 0;
+
+    cfg.mode = LR_MODE_IR;
+    s = lr_session_create(&cfg, &err);
+    if (!s)
+        return result;
+
+    i8 = lr_type_i8_s(s);
+    i32 = lr_type_i32_s(s);
+    arr = lr_type_array_s(s, i8, kLargeGlobalBytes);
+    if (!i8 || !i32 || !arr) {
+        lr_session_destroy(s);
+        return result;
+    }
+    lr_session_global(s, "large_bss_blob", arr, false, NULL, 0);
+
+    if (lr_session_func_begin(s, "main", i32, NULL, 0, false, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+    b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    lr_emit_ret(s, LR_IMM(0, i32));
+    if (lr_session_func_end(s, NULL, &err) != 0) {
+        lr_session_destroy(s);
+        return result;
+    }
+
+    result.session = s;
+    result.module = lr_session_module(s);
+    return result;
+}
+
 static built_module_t build_muldc3_import_module(void) {
     built_module_t result = {0};
     lr_session_config_t cfg = {0};
@@ -955,6 +997,32 @@ int test_dynelf_puts_hello(void) {
 
     remove(path);
     remove("/tmp/liric_test_dynelf_out.txt");
+    lr_session_destroy(bm.session);
+    return 0;
+}
+
+int test_objfile_large_bss_exe_runs(void) {
+    built_module_t bm = build_large_bss_module();
+    TEST_ASSERT(bm.module != NULL, "module create");
+
+    const lr_target_t *target = lr_target_host();
+    TEST_ASSERT(target != NULL, "host target");
+
+    const char *path = "/tmp/liric_test_large_bss_exe";
+    FILE *fp = fopen(path, "wb");
+    TEST_ASSERT(fp != NULL, "fopen");
+
+    int rc = lr_emit_executable(bm.module, target, fp, "main");
+    fclose(fp);
+    TEST_ASSERT_EQ(rc, 0, "emit executable");
+
+    chmod(path, 0755);
+
+    int status = system(path);
+    TEST_ASSERT(WIFEXITED(status), "exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 0, "exit code 0");
+
+    remove(path);
     lr_session_destroy(bm.session);
     return 0;
 }

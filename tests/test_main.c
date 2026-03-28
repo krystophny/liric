@@ -282,6 +282,7 @@ int test_objfile_elf_readelf_validates(void);
 int test_objfile_elf_executable_aarch64_header(void);
 int test_objfile_session_emit_object_stream_direct(void);
 int test_objfile_session_emit_object_stream_ir(void);
+int test_objfile_large_bss_exe_runs(void);
 #if defined(__linux__)
 int test_objfile_elf_exe_runs(void);
 int test_objfile_link_and_run(void);
@@ -638,6 +639,7 @@ int main(void) {
     RUN_TEST(test_objfile_elf_exe_runs);
     RUN_TEST(test_objfile_link_and_run);
     RUN_TEST(test_objfile_link_and_run_direct);
+    RUN_TEST(test_objfile_large_bss_exe_runs);
     RUN_TEST(test_dynelf_puts_hello);
     RUN_TEST(test_dynelf_readelf_dynamic);
     RUN_TEST(test_dynelf_ldd_check);

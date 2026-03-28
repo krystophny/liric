@@ -12,19 +12,119 @@
 #include <unistd.h>
 #endif
 
-#define OBJ_CODE_BUF_SIZE (4 * 1024 * 1024)
-#define OBJ_DATA_BUF_SIZE (1 * 1024 * 1024)
+#define OBJ_INITIAL_CODE_BUF_CAP (4 * 1024 * 1024)
+#define OBJ_INITIAL_DATA_BUF_CAP (1 * 1024 * 1024)
 #define OBJ_INITIAL_RELOC_CAP 256
 #define OBJ_INITIAL_SYMBOL_CAP 128
 
 typedef struct lr_obj_build_result {
     uint8_t *code_buf;
     uint8_t *data_buf;
+    size_t code_cap;
+    size_t data_cap;
     size_t code_pos;
     size_t data_pos;
     bool has_data;
     lr_objfile_ctx_t ctx;
 } lr_obj_build_result_t;
+
+static int obj_grow_buffer(uint8_t **buf, size_t *cap, size_t need) {
+    uint8_t *grown = NULL;
+    size_t new_cap = 0;
+
+    if (!buf || !cap)
+        return -1;
+    if (need <= *cap)
+        return 0;
+    if (need > (size_t)UINT32_MAX)
+        return -1;
+
+    new_cap = (*cap > 0) ? *cap : 4096;
+    while (new_cap < need) {
+        if (new_cap > SIZE_MAX / 2) {
+            new_cap = need;
+            break;
+        }
+        new_cap *= 2;
+    }
+
+    grown = (uint8_t *)realloc(*buf, new_cap);
+    if (!grown)
+        return -1;
+    if (new_cap > *cap)
+        memset(grown + *cap, 0, new_cap - *cap);
+
+    *buf = grown;
+    *cap = new_cap;
+    return 0;
+}
+
+static int obj_ensure_code_capacity(lr_obj_build_result_t *out, size_t need) {
+    if (!out)
+        return -1;
+    return obj_grow_buffer(&out->code_buf, &out->code_cap, need);
+}
+
+static int obj_ensure_data_capacity(lr_obj_build_result_t *out, size_t need) {
+    if (!out)
+        return -1;
+    return obj_grow_buffer(&out->data_buf, &out->data_cap, need);
+}
+
+static int obj_build_result_init(lr_obj_build_result_t *out) {
+    if (!out)
+        return -1;
+
+    memset(out, 0, sizeof(*out));
+    if (obj_ensure_code_capacity(out, OBJ_INITIAL_CODE_BUF_CAP) != 0 ||
+        obj_ensure_data_capacity(out, OBJ_INITIAL_DATA_BUF_CAP) != 0) {
+        free(out->code_buf);
+        free(out->data_buf);
+        memset(out, 0, sizeof(*out));
+        return -1;
+    }
+    return 0;
+}
+
+static int obj_compile_function(lr_obj_build_result_t *out,
+                                const lr_target_t *target,
+                                lr_compile_mode_t mode,
+                                lr_func_t *func,
+                                lr_module_t *mod,
+                                size_t code_off,
+                                size_t *out_len,
+                                lr_arena_t *arena) {
+    lr_objfile_ctx_t *ctx = NULL;
+    size_t need = 0;
+    size_t buflen = 0;
+    uint32_t saved_relocs = 0;
+    int rc = 0;
+
+    if (!out || !target || !func || !mod || !out_len || !arena)
+        return -1;
+
+    ctx = (lr_objfile_ctx_t *)mod->obj_ctx;
+    saved_relocs = ctx ? ctx->num_relocs : 0;
+    for (;;) {
+        if (obj_ensure_code_capacity(out, code_off + 1) != 0)
+            return -1;
+
+        buflen = out->code_cap - code_off;
+        need = 0;
+        rc = lr_target_compile(target, mode, func, mod,
+                               out->code_buf + code_off,
+                               buflen, &need, arena);
+        if (rc == 0) {
+            *out_len = need;
+            return 0;
+        }
+        if (!ctx || need <= buflen)
+            return -1;
+        ctx->num_relocs = saved_relocs;
+        if (obj_ensure_code_capacity(out, code_off + need) != 0)
+            return -1;
+    }
+}
 
 #if !defined(__linux__) && !defined(_WIN32)
 #define MACHO_ARM64_EXEC_IMAGE_BASE 0x100000000ULL
@@ -1233,7 +1333,7 @@ static int obj_define_intrinsic_stubs(lr_obj_build_result_t *out,
 
         out->code_pos = obj_align_up(out->code_pos, 16);
         size_t blob_n = (size_t)(blob_end - blob_begin);
-        if (out->code_pos + blob_n > OBJ_CODE_BUF_SIZE)
+        if (obj_ensure_code_capacity(out, out->code_pos + blob_n) != 0)
             return -1;
 
         memcpy(out->code_buf + out->code_pos, blob_begin, blob_n);
@@ -1305,10 +1405,7 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
     if (!m || !target || !out)
         return -1;
 
-    memset(out, 0, sizeof(*out));
-    out->code_buf = (uint8_t *)calloc(1, OBJ_CODE_BUF_SIZE);
-    out->data_buf = (uint8_t *)calloc(1, OBJ_DATA_BUF_SIZE);
-    if (!out->code_buf || !out->data_buf) {
+    if (obj_build_result_init(out) != 0) {
         obj_build_result_destroy(out);
         return -1;
     }
@@ -1344,11 +1441,8 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
         uint32_t reloc_base = out->ctx.num_relocs;
 
         size_t func_len = 0;
-        int rc = lr_target_compile(target, LR_COMPILE_ISEL, f, m,
-                                   out->code_buf + out->code_pos,
-                                   OBJ_CODE_BUF_SIZE - out->code_pos,
-                                   &func_len, arena);
-        if (rc != 0) {
+        if (obj_compile_function(out, target, LR_COMPILE_ISEL, f, m,
+                                 out->code_pos, &func_len, arena) != 0) {
             m->obj_ctx = NULL;
             lr_arena_destroy(arena);
             obj_build_result_destroy(out);
@@ -1403,8 +1497,7 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
             galign = 8;
 
         out->data_pos = obj_align_up(out->data_pos, galign);
-
-        if (out->data_pos + gsize > OBJ_DATA_BUF_SIZE) {
+        if (obj_ensure_data_capacity(out, out->data_pos + gsize) != 0) {
             m->obj_ctx = NULL;
             lr_arena_destroy(arena);
             obj_build_result_destroy(out);
@@ -1468,10 +1561,7 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
     if (!blobs || num_blobs == 0 || !m || !target || !out)
         return -1;
 
-    memset(out, 0, sizeof(*out));
-    out->code_buf = (uint8_t *)calloc(1, OBJ_CODE_BUF_SIZE);
-    out->data_buf = (uint8_t *)calloc(1, OBJ_DATA_BUF_SIZE);
-    if (!out->code_buf || !out->data_buf) {
+    if (obj_build_result_init(out) != 0) {
         obj_build_result_destroy(out);
         return -1;
     }
@@ -1495,7 +1585,7 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
             continue;
 
         out->code_pos = obj_align_up(out->code_pos, 16);
-        if (out->code_pos + blob->code_len > OBJ_CODE_BUF_SIZE) {
+        if (obj_ensure_code_capacity(out, out->code_pos + blob->code_len) != 0) {
             obj_build_result_destroy(out);
             return -1;
         }
@@ -1590,10 +1680,9 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         }
 
         reloc_base = out->ctx.num_relocs;
-        if (lr_target_compile(target, extra_mode, f, m,
-                              out->code_buf + out->code_pos,
-                              OBJ_CODE_BUF_SIZE - out->code_pos,
-                              &func_len, compile_arena) != 0) {
+        if (obj_compile_function(out, target, extra_mode, f, m,
+                                 out->code_pos, &func_len,
+                                 compile_arena) != 0) {
             m->obj_ctx = NULL;
             lr_arena_destroy(compile_arena);
             obj_build_result_destroy(out);
@@ -1661,7 +1750,7 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         if (g->relocs && galign < 8)
             galign = 8;
         out->data_pos = obj_align_up(out->data_pos, galign);
-        if (out->data_pos + gsize > OBJ_DATA_BUF_SIZE) {
+        if (obj_ensure_data_capacity(out, out->data_pos + gsize) != 0) {
             m->obj_ctx = NULL;
             if (compile_arena) lr_arena_destroy(compile_arena);
             obj_build_result_destroy(out);
