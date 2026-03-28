@@ -53,6 +53,8 @@ static _Thread_local lr_ptr_lc_value_node_t *g_value_wrappers;
 static _Thread_local lr_ptr_void_node_t *g_function_wrappers;
 static _Thread_local lr_ptr_void_node_t *g_block_parents;
 static _Thread_local lr_type_context_node_t *g_type_contexts;
+static _Thread_local const lr_type_t *g_last_type_context_type;
+static _Thread_local const void *g_last_type_context;
 static _Thread_local lr_vector_type_node_t *g_vector_types;
 static _Thread_local lr_global_alias_node_t *g_global_aliases;
 static _Thread_local lr_global_value_state_node_t *g_global_value_states;
@@ -299,10 +301,15 @@ void lr_llvm_compat_register_type_context(const lr_type_t *ty,
     lr_type_context_node_t *node;
     if (!ty || !ctx)
         return;
+    if (g_last_type_context_type == ty) {
+        g_last_type_context = ctx;
+    }
     it = g_type_contexts;
     while (it) {
         if (it->type == ty) {
             it->context = ctx;
+            g_last_type_context_type = ty;
+            g_last_type_context = ctx;
             return;
         }
         it = it->next;
@@ -314,15 +321,22 @@ void lr_llvm_compat_register_type_context(const lr_type_t *ty,
     node->context = ctx;
     node->next = g_type_contexts;
     g_type_contexts = node;
+    g_last_type_context_type = ty;
+    g_last_type_context = ctx;
 }
 
 const void *lr_llvm_compat_lookup_type_context(const lr_type_t *ty) {
     lr_type_context_node_t *it = g_type_contexts;
     if (!ty)
         return NULL;
+    if (g_last_type_context_type == ty)
+        return g_last_type_context;
     while (it) {
-        if (it->type == ty)
+        if (it->type == ty) {
+            g_last_type_context_type = ty;
+            g_last_type_context = it->context;
             return it->context;
+        }
         it = it->next;
     }
     return NULL;
