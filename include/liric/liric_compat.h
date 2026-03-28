@@ -22,9 +22,12 @@ typedef enum lc_value_kind {
     LC_VAL_CONST_AGGREGATE,
 } lc_value_kind_t;
 
+struct lc_module_compat;
+
 /* Unified value handle wrapping all LLVM value types */
 typedef struct lc_value {
     lc_value_kind_t kind;
+    struct lc_module_compat *owner;
     lr_type_t *type;
     const char *name;
     bool prefer_entry_dump;

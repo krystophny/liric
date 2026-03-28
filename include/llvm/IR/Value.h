@@ -23,7 +23,8 @@ public:
     static Value *wrap(lc_value_t *v) {
         if (!v) {
             static lr_type_t poison_ty = { LR_TYPE_PTR, {} };
-            static lc_value_t poison_val = { LC_VAL_CONST_UNDEF, &poison_ty, {} };
+            static lc_value_t poison_val = { LC_VAL_CONST_UNDEF, nullptr,
+                                             &poison_ty, nullptr, false, {} };
             return reinterpret_cast<Value *>(&poison_val);
         }
         return reinterpret_cast<Value *>(v);

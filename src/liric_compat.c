@@ -220,6 +220,13 @@ typedef struct compat_scoped_local_name_map {
     size_t cap;
 } compat_scoped_local_name_map_t;
 
+typedef struct compat_func_local_name_cache {
+    lr_func_t *func;
+    compat_scoped_local_name_map_t names;
+    uint32_t next_suffix;
+    bool next_suffix_valid;
+} compat_func_local_name_cache_t;
+
 static int compat_scoped_local_name_push(compat_scoped_local_name_map_t *map,
                                          const char *exact_name) {
     const char **new_names = NULL;
@@ -1368,6 +1375,7 @@ enum {
 
 typedef struct lc_value {
     lc_value_kind_t kind;
+    struct lc_module_compat *owner;
     lr_type_t *type;
     const char *name;
     bool prefer_entry_dump;
@@ -1422,6 +1430,9 @@ typedef struct lc_module_compat {
     lr_func_t **func_by_sym;
     lr_global_t **global_by_sym;
     uint32_t sym_cache_cap;
+    compat_func_local_name_cache_t *local_name_caches;
+    uint32_t local_name_cache_count;
+    uint32_t local_name_cache_cap;
     lc_const_value_meta_t *const_value_meta;
 } lc_module_compat_t;
 
@@ -1728,10 +1739,20 @@ static int symbol_name_in_use(lc_module_compat_t *mod, const char *name) {
 
 static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
                              const char *name) {
+    compat_func_local_name_cache_t *cache = NULL;
     uint32_t remaining;
     lc_value_slab_t *slab;
     if (!mod || !func || !name || !name[0])
         return 0;
+    for (uint32_t i = 0; i < mod->local_name_cache_count; i++) {
+        if (mod->local_name_caches[i].func == func) {
+            cache = &mod->local_name_caches[i];
+            break;
+        }
+    }
+    if (cache)
+        return compat_name_in_list(name, cache->names.exact_names,
+                                   cache->names.count);
     for (const lr_block_t *b = func->first_block; b; b = b->next) {
         if (b->name && strcmp(b->name, name) == 0)
             return 1;
@@ -1762,15 +1783,112 @@ static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
     return 0;
 }
 
-static uint32_t local_name_next_suffix(lc_module_compat_t *mod,
-                                       const lr_func_t *func) {
+static int ensure_local_name_cache_cap(lc_module_compat_t *mod,
+                                       uint32_t min_cap) {
+    compat_func_local_name_cache_t *new_caches = NULL;
+    uint32_t new_cap;
+    if (!mod)
+        return -1;
+    if (mod->local_name_cache_cap >= min_cap)
+        return 0;
+    new_cap = mod->local_name_cache_cap ? mod->local_name_cache_cap : 16u;
+    while (new_cap < min_cap)
+        new_cap *= 2u;
+    new_caches = (compat_func_local_name_cache_t *)realloc(
+        mod->local_name_caches, sizeof(*new_caches) * new_cap);
+    if (!new_caches)
+        return -1;
+    memset(new_caches + mod->local_name_cache_cap, 0,
+           sizeof(*new_caches) * (new_cap - mod->local_name_cache_cap));
+    mod->local_name_caches = new_caches;
+    mod->local_name_cache_cap = new_cap;
+    return 0;
+}
+
+static compat_func_local_name_cache_t *local_name_cache_slot(
+    lc_module_compat_t *mod, const lr_func_t *func, bool create) {
+    uint32_t idx;
+    if (!mod || !func)
+        return NULL;
+    for (idx = 0; idx < mod->local_name_cache_count; idx++) {
+        if (mod->local_name_caches[idx].func == func)
+            return &mod->local_name_caches[idx];
+    }
+    if (!create)
+        return NULL;
+    if (ensure_local_name_cache_cap(mod, mod->local_name_cache_count + 1u) != 0)
+        return NULL;
+    idx = mod->local_name_cache_count++;
+    mod->local_name_caches[idx].func = (lr_func_t *)func;
+    return &mod->local_name_caches[idx];
+}
+
+static void seed_local_name_cache(lc_module_compat_t *mod,
+                                  compat_func_local_name_cache_t *cache,
+                                  const lr_func_t *func) {
     uint32_t remaining;
-    uint32_t max_suffix = 0;
     lc_value_slab_t *slab;
+    if (!mod || !cache || !func)
+        return;
+    if (cache->names.count > 0)
+        return;
+    for (const lr_block_t *b = func->first_block; b; b = b->next) {
+        if (b->name && b->name[0])
+            (void)compat_scoped_local_name_push(&cache->names, b->name);
+    }
+    for (uint32_t i = 0; i < mod->detached_count; i++) {
+        const lr_block_t *b = mod->detached_blocks[i];
+        if (b && b->func == func && b->name && b->name[0])
+            (void)compat_scoped_local_name_push(&cache->names, b->name);
+    }
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            if (!value->name || !value->name[0])
+                continue;
+            if (!((value->kind == LC_VAL_VREG && value->vreg.func == func) ||
+                  (value->kind == LC_VAL_ARGUMENT &&
+                   value->argument.func == func))) {
+                continue;
+            }
+            (void)compat_scoped_local_name_push(&cache->names, value->name);
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+}
+
+static void register_local_name(lc_module_compat_t *mod, const lr_func_t *func,
+                                const char *name) {
+    compat_func_local_name_cache_t *cache = NULL;
+    if (!mod || !func || !name || !name[0])
+        return;
+    cache = local_name_cache_slot(mod, func, true);
+    if (!cache)
+        return;
+    seed_local_name_cache(mod, cache, func);
+    if (compat_name_in_list(name, cache->names.exact_names, cache->names.count))
+        return;
+    (void)compat_scoped_local_name_push(&cache->names, name);
+}
+
+static uint32_t compute_local_name_next_suffix(lc_module_compat_t *mod,
+                                               const lr_func_t *func) {
+    compat_func_local_name_cache_t *cache = NULL;
+    uint32_t max_suffix = 0;
     if (!mod || !func)
         return 1;
-    for (const lr_block_t *b = func->first_block; b; b = b->next) {
-        const char *name = b->name;
+    cache = local_name_cache_slot(mod, func, true);
+    if (!cache)
+        return 1;
+    seed_local_name_cache(mod, cache, func);
+    for (size_t i = 0; i < cache->names.count; i++) {
+        const char *name = cache->names.exact_names[i];
         char *endptr = NULL;
         unsigned long suffix;
         if (!name || !name[0])
@@ -1785,56 +1903,6 @@ static uint32_t local_name_next_suffix(lc_module_compat_t *mod,
             max_suffix = (uint32_t)suffix;
         }
     }
-    for (uint32_t i = 0; i < mod->detached_count; i++) {
-        const lr_block_t *b = mod->detached_blocks[i];
-        const char *name;
-        char *endptr = NULL;
-        unsigned long suffix;
-        if (!b || b->func != func || !b->name || !b->name[0])
-            continue;
-        name = b->name;
-        while (*name && !isdigit((unsigned char)*name))
-            name++;
-        if (!*name)
-            continue;
-        suffix = strtoul(name, &endptr, 10);
-        if (endptr && *endptr == '\0' && suffix <= UINT32_MAX &&
-            suffix > max_suffix) {
-            max_suffix = (uint32_t)suffix;
-        }
-    }
-    remaining = mod->value_count;
-    slab = (lc_value_slab_t *)mod->value_pool;
-    while (slab && remaining > 0) {
-        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
-        if (used == 0)
-            used = LC_VALUE_SLAB_SIZE;
-        for (uint32_t i = 0; i < used; i++) {
-            lc_value_t *value = &slab->values[i];
-            const char *name;
-            char *endptr = NULL;
-            unsigned long suffix;
-            if (!value->name || !value->name[0])
-                continue;
-            if (!((value->kind == LC_VAL_VREG && value->vreg.func == func) ||
-                  (value->kind == LC_VAL_ARGUMENT &&
-                   value->argument.func == func))) {
-                continue;
-            }
-            name = value->name;
-            while (*name && !isdigit((unsigned char)*name))
-                name++;
-            if (!*name)
-                continue;
-            suffix = strtoul(name, &endptr, 10);
-            if (endptr && *endptr == '\0' && suffix <= UINT32_MAX &&
-                suffix > max_suffix) {
-                max_suffix = (uint32_t)suffix;
-            }
-        }
-        remaining -= used;
-        slab = slab->next;
-    }
     return max_suffix + 1u;
 }
 
@@ -1843,12 +1911,20 @@ static char *make_unique_local_name(lc_module_compat_t *mod,
                                     const char *name) {
     size_t base_len;
     uint32_t suffix;
+    compat_func_local_name_cache_t *cache = NULL;
     if (!mod || !func || !name || !name[0])
         return NULL;
     if (!local_name_in_use(mod, func, name))
         return dup_cstr(name);
     base_len = strlen(name);
-    for (suffix = local_name_next_suffix(mod, func);
+    cache = local_name_cache_slot(mod, func, true);
+    if (!cache)
+        return NULL;
+    if (!cache->next_suffix_valid) {
+        cache->next_suffix = compute_local_name_next_suffix(mod, func);
+        cache->next_suffix_valid = true;
+    }
+    for (suffix = cache->next_suffix;
          suffix < UINT32_MAX;
          suffix++) {
         char suffix_buf[32];
@@ -1861,8 +1937,10 @@ static char *make_unique_local_name(lc_module_compat_t *mod,
             return NULL;
         memcpy(candidate, name, base_len);
         memcpy(candidate + base_len, suffix_buf, (size_t)ns + 1);
-        if (!local_name_in_use(mod, func, candidate))
+        if (!local_name_in_use(mod, func, candidate)) {
+            cache->next_suffix = suffix + 1u;
             return candidate;
+        }
         free(candidate);
     }
     return NULL;
@@ -2497,6 +2575,11 @@ void lc_module_destroy(lc_module_compat_t *mod) {
     free(mod->detached_blocks);
     free(mod->func_by_sym);
     free(mod->global_by_sym);
+    if (mod->local_name_caches) {
+        for (uint32_t i = 0; i < mod->local_name_cache_count; i++)
+            compat_free_scoped_local_name_map(&mod->local_name_caches[i].names);
+    }
+    free(mod->local_name_caches);
     free((void *)mod->name);
     free(mod);
 }
@@ -2848,7 +2931,10 @@ char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
 /* ---- Value allocation ---- */
 
 lc_value_t *lc_value_alloc(lc_module_compat_t *mod) {
-    return value_pool_alloc(mod);
+    lc_value_t *v = value_pool_alloc(mod);
+    if (v)
+        v->owner = mod;
+    return v;
 }
 
 lc_value_t *lc_value_vreg(lc_module_compat_t *mod, uint32_t id,
@@ -2856,6 +2942,7 @@ lc_value_t *lc_value_vreg(lc_module_compat_t *mod, uint32_t id,
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_VREG;
+    v->owner = mod;
     v->type = type;
     v->name = NULL;
     v->vreg.id = id;
@@ -2869,6 +2956,7 @@ lc_value_t *lc_value_const_int(lc_module_compat_t *mod, lr_type_t *type,
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_CONST_INT;
+    v->owner = mod;
     v->type = type;
     v->const_int.val = val;
     v->const_int.width = width;
@@ -2880,6 +2968,7 @@ lc_value_t *lc_value_const_fp(lc_module_compat_t *mod, lr_type_t *type,
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_CONST_FP;
+    v->owner = mod;
     v->type = type;
     v->const_fp.val = val;
     v->const_fp.is_double = is_double;
@@ -2890,6 +2979,7 @@ lc_value_t *lc_value_const_null(lc_module_compat_t *mod, lr_type_t *type) {
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_CONST_NULL;
+    v->owner = mod;
     v->type = type;
     return v;
 }
@@ -2898,6 +2988,7 @@ lc_value_t *lc_value_undef(lc_module_compat_t *mod, lr_type_t *type) {
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_CONST_UNDEF;
+    v->owner = mod;
     v->type = type;
     return v;
 }
@@ -2907,6 +2998,7 @@ lc_value_t *lc_value_global(lc_module_compat_t *mod, uint32_t id,
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_GLOBAL;
+    v->owner = mod;
     v->type = type;
     v->name = NULL;
     v->global.id = id;
@@ -2940,6 +3032,7 @@ lc_value_t *lc_value_argument(lc_module_compat_t *mod, uint32_t param_idx,
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_ARGUMENT;
+    v->owner = mod;
     v->type = type;
     v->name = NULL;
     v->argument.param_idx = param_idx;
@@ -2951,6 +3044,7 @@ lc_value_t *lc_value_block_ref(lc_module_compat_t *mod, lr_block_t *block) {
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_BLOCK;
+    v->owner = mod;
     v->type = NULL;
     v->name = NULL;
     v->block.block = block;
@@ -2963,6 +3057,7 @@ lc_value_t *lc_value_const_aggregate(lc_module_compat_t *mod, lr_type_t *type,
     lc_value_t *v = value_pool_alloc(mod);
     if (!v) return NULL;
     v->kind = LC_VAL_CONST_AGGREGATE;
+    v->owner = mod;
     v->type = type;
     if (data && size > 0 && mod && mod->mod && mod->mod->arena) {
         void *copy = lr_arena_alloc_uninit(mod->mod->arena, size, 1);
@@ -2978,12 +3073,28 @@ lc_value_t *lc_value_const_aggregate(lc_module_compat_t *mod, lr_type_t *type,
 }
 
 void lc_value_set_name(lc_value_t *val, const char *name) {
+    const lr_func_t *func = NULL;
     if (!val) return;
     if (!name || !name[0]) {
         val->name = NULL;
         return;
     }
     val->name = dup_cstr(name);
+    switch (val->kind) {
+    case LC_VAL_VREG:
+        func = val->vreg.func;
+        break;
+    case LC_VAL_ARGUMENT:
+        func = val->argument.func;
+        break;
+    case LC_VAL_BLOCK:
+        func = val->block.func;
+        break;
+    default:
+        break;
+    }
+    if (val->owner && func)
+        register_local_name(val->owner, func, val->name);
 }
 
 const char *lc_value_get_name(const lc_value_t *val) {
@@ -4107,6 +4218,8 @@ lc_value_t *lc_block_create(lc_module_compat_t *mod, lr_func_t *func,
     }
     lr_block_t *b = lr_block_create(func, mod->mod->arena,
                                     actual_name ? actual_name : "");
+    if (b && b->name && b->name[0])
+        register_local_name(mod, func, b->name);
     free(unique_name);
     lc_value_t *v = lc_value_block_ref(mod, b);
     if (v) v->block.func = func;
@@ -4203,6 +4316,8 @@ lc_value_t *lc_block_create_detached(lc_module_compat_t *mod, lr_func_t *func,
     if (func) {
         b->id = func->num_blocks++;
         b->func = func;
+        if (b->name && b->name[0])
+            register_local_name(mod, func, b->name);
     } else {
         b->id = UINT32_MAX;
         b->func = NULL;
