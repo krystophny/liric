@@ -51,7 +51,7 @@ public:
 
     Twine(const std::string_view &Str) : storage_(Str) {}
 
-    Twine(const StringRef &Str) : storage_(Str.str()) {}
+    Twine(const StringRef &Str) : storage_(Str.data(), Str.size()) {}
 
     explicit Twine(char Val) : storage_(1, Val) {}
     explicit Twine(signed char Val) : storage_(1, static_cast<char>(Val)) {}
@@ -66,11 +66,11 @@ public:
 
     Twine(const char *lhs, const StringRef &rhs)
         : storage_(lhs ? lhs : "") {
-        storage_ += rhs.str();
+        storage_.append(rhs.data(), rhs.size());
     }
 
     Twine(const StringRef &lhs, const char *rhs)
-        : storage_(lhs.str()) {
+        : storage_(lhs.data(), lhs.size()) {
         if (rhs)
             storage_ += rhs;
     }
@@ -104,9 +104,9 @@ public:
     }
 
     const char *c_str() const {
-        thread_local std::string thread_storage;
-        thread_storage = str();
-        return thread_storage.c_str();
+        if (is_null_)
+            return "";
+        return storage_.c_str();
     }
 };
 

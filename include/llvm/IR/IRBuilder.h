@@ -1003,10 +1003,10 @@ public:
                                               data.size());
         std::string generated_name;
         std::string actual_name;
-        std::string explicit_name = Name.str();
         std::string requested_name;
+        StringRef explicit_name = Name.getSingleStringRef();
         if (!explicit_name.empty()) {
-            requested_name = explicit_name;
+            requested_name.assign(explicit_name.data(), explicit_name.size());
         } else {
             static thread_local unsigned long long str_id = 0;
             generated_name = std::to_string(str_id++);
