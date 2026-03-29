@@ -655,7 +655,7 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
                                                       op->global_id);
         void *addr = NULL;
         if (sym_name)
-            addr = lr_jit_get_function(ctx->jit, sym_name);
+            addr = lr_jit_get_symbol(ctx->jit, sym_name);
         int64_t val = (int64_t)(uintptr_t)addr;
         if (op->global_offset != 0)
             val += op->global_offset;

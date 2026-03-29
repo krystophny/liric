@@ -494,6 +494,62 @@ static int test_global_lookup_set_initializer_and_jit() {
     return 0;
 }
 
+static int test_internal_global_address_via_helper_call_jit() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("internal_global_helper_call", ctx);
+    llvm::Type *i8 = llvm::Type::getInt8Ty(ctx);
+    llvm::Type *i64 = llvm::Type::getInt64Ty(ctx);
+    llvm::ArrayType *buf_ty = llvm::ArrayType::get(i8, 8);
+    const uint8_t init[8] = {0};
+
+    llvm::GlobalVariable *buf = mod.createGlobalVariable(
+        "buf", buf_ty, false, llvm::GlobalValue::InternalLinkage,
+        init, sizeof(init));
+    TEST_ASSERT(buf != nullptr, "internal global created");
+
+    llvm::FunctionType *get_ty = llvm::FunctionType::get(
+        llvm::Type::getInt8PtrTy(ctx), false);
+    llvm::Function *get_fn = llvm::Function::Create(
+        get_ty, llvm::GlobalValue::ExternalLinkage, "get_buf", mod);
+    TEST_ASSERT(get_fn != nullptr, "get_buf created");
+    llvm::BasicBlock *get_entry = llvm::BasicBlock::Create(ctx, "entry", get_fn);
+    TEST_ASSERT(get_entry != nullptr, "get_buf entry");
+    {
+        llvm::IRBuilder<> builder(get_entry);
+        builder.CreateRet(buf);
+    }
+
+    llvm::FunctionType *call_ty = llvm::FunctionType::get(i64, false);
+    llvm::Function *call_fn = llvm::Function::Create(
+        call_ty, llvm::GlobalValue::ExternalLinkage, "call_get_buf", mod);
+    TEST_ASSERT(call_fn != nullptr, "call_get_buf created");
+    llvm::BasicBlock *call_entry = llvm::BasicBlock::Create(ctx, "entry", call_fn);
+    TEST_ASSERT(call_entry != nullptr, "call_get_buf entry");
+    {
+        llvm::IRBuilder<> builder(call_entry);
+        llvm::Value *ptr = builder.CreateCall(get_fn);
+        TEST_ASSERT(ptr != nullptr, "call get_buf");
+        llvm::Value *addr = builder.CreatePtrToInt(ptr, i64);
+        TEST_ASSERT(addr != nullptr, "ptrtoint internal global");
+        builder.CreateRet(addr);
+    }
+
+    llvm::orc::LLJIT jit;
+    int rc = jit.addModule(mod);
+    TEST_ASSERT_EQ(rc, 0, "addModule");
+    typedef void *(*get_fn_t)(void);
+    typedef uint64_t (*call_fn_t)(void);
+    get_fn_t get_fp = (get_fn_t)jit.lookup("get_buf");
+    call_fn_t call_fp = (call_fn_t)jit.lookup("call_get_buf");
+    TEST_ASSERT(get_fp != nullptr, "lookup get_buf");
+    TEST_ASSERT(call_fp != nullptr, "lookup call_get_buf");
+    void *buf_addr = get_fp();
+    TEST_ASSERT(buf_addr != nullptr, "get_buf returns internal global");
+    TEST_ASSERT_EQ((uintptr_t)call_fp(), (uintptr_t)buf_addr,
+                   "helper-call path preserves internal global address");
+    return 0;
+}
+
 static int test_create_global_without_initializer_is_declaration() {
     llvm::LLVMContext ctx;
     llvm::Module mod("global_decl", ctx);
@@ -2600,6 +2656,7 @@ int main() {
     RUN_TEST(test_constant_struct_and_array_bytes);
     RUN_TEST(test_constant_array_single_aggregate_payload_preserved);
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
+    RUN_TEST(test_internal_global_address_via_helper_call_jit);
     RUN_TEST(test_create_global_without_initializer_is_declaration);
     RUN_TEST(test_duplicate_global_names_are_uniquified);
     RUN_TEST(test_private_global_strings_are_module_scoped);

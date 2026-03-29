@@ -3273,6 +3273,8 @@ int lc_value_move_before_block_terminator(lc_value_t *val) {
         func->linear_inst_array = NULL;
         func->block_inst_offsets = NULL;
         func->num_linear_insts = 0;
+        if (func->module)
+            func->module->local_function_collision_scan_dirty = true;
         return 0;
     }
 

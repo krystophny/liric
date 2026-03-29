@@ -111,6 +111,7 @@ typedef struct lr_block {
 
 typedef struct lr_func {
     char *name;
+    uint32_t symbol_id;
     lr_type_t *type;
     lr_type_t *ret_type;
     lr_type_t **param_types;
@@ -127,6 +128,7 @@ typedef struct lr_func {
     uint32_t num_linear_insts;
     uint32_t num_blocks;
     uint32_t next_vreg;
+    struct lr_module *module;
     struct lr_func *next;
 } lr_func_t;
 
@@ -174,6 +176,7 @@ typedef struct lr_module {
     lr_type_t *type_x86_fp80;
     lr_type_t *type_ptr;
     void *obj_ctx;
+    bool local_function_collision_scan_dirty;
 } lr_module_t;
 
 lr_module_t *lr_module_create(lr_arena_t *arena);
@@ -206,6 +209,7 @@ lr_operand_t lr_op_global(uint32_t id, lr_type_t *type);
 lr_operand_t lr_op_null(lr_type_t *type);
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
 const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
+lr_func_t *lr_module_lookup_function(const lr_module_t *m, const char *name);
 void lr_module_disambiguate_local_function_collisions(lr_module_t *m);
 
 size_t lr_type_size(const lr_type_t *t);

@@ -41,6 +41,7 @@ static int symbol_index_rebuild(lr_module_t *m, uint32_t min_symbols) {
 
 lr_module_t *lr_module_create(lr_arena_t *arena) {
     lr_module_t *m = lr_arena_new(arena, lr_module_t);
+    memset(m, 0, sizeof(*m));
     m->arena = arena;
 
     m->type_void = lr_arena_new(arena, lr_type_t);
@@ -133,10 +134,12 @@ lr_func_t *lr_func_create(lr_module_t *m, const char *name, lr_type_t *ret,
     lr_arena_t *a = m->arena;
     lr_func_t *f = lr_arena_new(a, lr_func_t);
     f->name = lr_arena_strdup(a, name, strlen(name));
+    f->symbol_id = lr_module_intern_symbol(m, name);
     f->ret_type = ret;
     f->type = lr_type_func(a, ret, params, num_params, vararg);
     f->num_params = num_params;
     f->vararg = vararg;
+    f->module = m;
     if (num_params > 0) {
         f->param_types = lr_arena_array(a, lr_type_t *, num_params);
         memcpy(f->param_types, params, sizeof(lr_type_t *) * num_params);
@@ -147,6 +150,7 @@ lr_func_t *lr_func_create(lr_module_t *m, const char *name, lr_type_t *ret,
     if (!m->first_func) m->first_func = f;
     else m->last_func->next = f;
     m->last_func = f;
+    m->local_function_collision_scan_dirty = true;
     return f;
 }
 
@@ -171,6 +175,8 @@ lr_block_t *lr_block_create(lr_func_t *f, lr_arena_t *a, const char *name) {
         f->is_decl = false;
     } else f->last_block->next = b;
     f->last_block = b;
+    if (f->module)
+        f->module->local_function_collision_scan_dirty = true;
     return b;
 }
 
@@ -223,6 +229,8 @@ void lr_block_append(lr_block_t *b, lr_inst_t *inst) {
         f->linear_inst_array = NULL;
         f->block_inst_offsets = NULL;
         f->num_linear_insts = 0;
+        if (f->module)
+            f->module->local_function_collision_scan_dirty = true;
     }
 }
 
@@ -887,6 +895,7 @@ lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
     if (!m->first_global) m->first_global = g;
     else m->last_global->next = g;
     m->last_global = g;
+    m->local_function_collision_scan_dirty = true;
     return g;
 }
 
@@ -987,6 +996,43 @@ const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id) {
     return m->symbol_names[id];
 }
 
+static uint32_t lr_module_find_symbol_id(const lr_module_t *m, const char *name) {
+    uint32_t hash;
+    uint32_t slot;
+
+    if (!m || !name || !name[0] || m->symbol_index_cap == 0)
+        return UINT32_MAX;
+
+    hash = symbol_hash(name);
+    slot = hash & (m->symbol_index_cap - 1u);
+    for (;;) {
+        uint32_t idx = m->symbol_index[slot];
+        if (idx == 0)
+            return UINT32_MAX;
+        idx -= 1u;
+        if (m->symbol_hashes[idx] == hash &&
+            strcmp(m->symbol_names[idx], name) == 0) {
+            return idx;
+        }
+        slot = (slot + 1u) & (m->symbol_index_cap - 1u);
+    }
+}
+
+lr_func_t *lr_module_lookup_function(const lr_module_t *m, const char *name) {
+    uint32_t symbol_id;
+
+    if (!m || !name || !name[0])
+        return NULL;
+    symbol_id = lr_module_find_symbol_id(m, name);
+    if (symbol_id == UINT32_MAX)
+        return NULL;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->symbol_id == symbol_id)
+            return f;
+    }
+    return NULL;
+}
+
 static bool ir_func_signatures_match(const lr_func_t *a, const lr_func_t *b) {
     if (!a || !b)
         return false;
@@ -1054,7 +1100,7 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
     uint32_t rename_cap = 0;
     lr_func_rename_entry_t *renames = NULL;
 
-    if (!m || !m->arena)
+    if (!m || !m->arena || !m->local_function_collision_scan_dirty)
         return;
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
@@ -1136,15 +1182,18 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
         if (new_sym_id == UINT32_MAX)
             return;
         renames[rename_count].old_name = f->name;
-        renames[rename_count].old_sym_id = lr_module_intern_symbol(m, f->name);
+        renames[rename_count].old_sym_id = f->symbol_id;
         renames[rename_count].new_sym_id = new_sym_id;
         renames[rename_count].func = f;
         f->name = new_name;
+        f->symbol_id = new_sym_id;
         rename_count++;
     }
 
-    if (rename_count == 0 || !renames)
+    if (rename_count == 0 || !renames) {
+        m->local_function_collision_scan_dirty = false;
         return;
+    }
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         for (lr_block_t *b = f->first_block; b; b = b->next) {
@@ -1166,6 +1215,7 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
             }
         }
     }
+    m->local_function_collision_scan_dirty = false;
 }
 
 size_t lr_type_size(const lr_type_t *t) {

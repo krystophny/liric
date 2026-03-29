@@ -114,26 +114,25 @@ public:
 
     Function *getFunction(StringRef Name) const {
         lr_module_t *m = lc_module_get_ir(compat_);
-        for (lr_func_t *f = m->first_func; f; f = f->next) {
-            if (Name.equals(f->name)) {
-                for (auto &of : owned_functions_) {
-                    lr_func_t *irf = of->getIRFunc();
-                    if (irf == f) return of.get();
-                }
-                lc_value_t *fv = lc_func_declare(compat_, f->name, f->type);
-                if (!fv)
-                    return nullptr;
-                auto fn = std::make_unique<Function>();
-                fn->setFuncVal(fv);
-                fn->setCompatMod(compat_);
-                Function *ptr = fn.get();
-                detail::register_value_wrapper(ptr, fv);
-                const_cast<Module *>(this)->owned_functions_.push_back(std::move(fn));
-                detail::register_function_wrapper(ptr->getIRFunc(), ptr);
-                return ptr;
-            }
+        std::string name = Name.str();
+        lr_func_t *f = lr_module_lookup_function(m, name.c_str());
+        if (!f)
+            return nullptr;
+        for (auto &of : owned_functions_) {
+            lr_func_t *irf = of->getIRFunc();
+            if (irf == f) return of.get();
         }
-        return nullptr;
+        lc_value_t *fv = lc_func_declare(compat_, name.c_str(), f->type);
+        if (!fv)
+            return nullptr;
+        auto fn = std::make_unique<Function>();
+        fn->setFuncVal(fv);
+        fn->setCompatMod(compat_);
+        Function *ptr = fn.get();
+        detail::register_value_wrapper(ptr, fv);
+        const_cast<Module *>(this)->owned_functions_.push_back(std::move(fn));
+        detail::register_function_wrapper(ptr->getIRFunc(), ptr);
+        return ptr;
     }
 
     GlobalVariable *getGlobalVariable(StringRef Name, bool AllowInternal = false) const {
@@ -178,7 +177,8 @@ public:
     Function *getOrInsertFunction(StringRef Name, FunctionType *Ty) {
         if (Function *fn = getFunction(Name))
             return fn;
-        return createFunction(Name.str().c_str(), Ty, true);
+        std::string name = Name.str();
+        return createFunction(name.c_str(), Ty, true);
     }
 
     void print(raw_ostream &OS, void * = nullptr) const {

@@ -66,6 +66,7 @@ struct lr_block {
 
 struct lr_func {
     char *name;
+    uint32_t symbol_id;
     lr_type_t *type;
     lr_type_t *ret_type;
     lr_type_t **param_types;
@@ -154,11 +155,13 @@ struct lr_module {
     lr_type_t *type_x86_fp80;
     lr_type_t *type_ptr;
     void *obj_ctx;
+    bool local_function_collision_scan_dirty;
 };
 
 lr_func_t *lr_func_declare(lr_module_t *m, const char *name, lr_type_t *ret,
                             lr_type_t **params, uint32_t num_params, bool vararg);
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
+lr_func_t *lr_module_lookup_function(const lr_module_t *m, const char *name);
 
 #ifdef __cplusplus
 }

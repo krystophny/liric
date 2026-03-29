@@ -34,6 +34,36 @@ static lr_module_t *parse(const char *src, lr_arena_t *arena) {
     return m;
 }
 
+static char g_vararg_capture_a0;
+static char g_vararg_capture_a3;
+static char g_vararg_capture_a4;
+static char g_vararg_capture_v0;
+static char g_vararg_capture_v1;
+static char g_vararg_capture_v2;
+static int64_t g_vararg_capture_result_size;
+
+static uintptr_t lr_test_capture_complex_vararg(
+    const void *a0, const void *a1, int64_t a2,
+    const void *a3, const void *a4, int32_t a5, int32_t a6, ...) {
+    va_list ap;
+    const void *v0;
+    const void *v1;
+    const void *v2;
+
+    va_start(ap, a6);
+    v0 = va_arg(ap, const void *);
+    v1 = va_arg(ap, const void *);
+    v2 = va_arg(ap, const void *);
+    va_end(ap);
+
+    if (a0 != &g_vararg_capture_a0 || a1 != NULL || a2 != 11 ||
+        a3 != &g_vararg_capture_a3 || a4 != &g_vararg_capture_a4 ||
+        a5 != 22 || a6 != 33 || v0 != &g_vararg_capture_v0 ||
+        v1 != &g_vararg_capture_v1 || v2 != &g_vararg_capture_v2)
+        return 0;
+    return (uintptr_t)a0;
+}
+
 static int require_intrinsic_blob(const char *name) {
     if (lr_platform_intrinsic_supported(name))
         return 1;
@@ -184,6 +214,35 @@ static int check_vararg_stack_after_named7(void *a, void *b, void *c,
     if (!s || len != 3)
         return -1;
     return (s[0] == 'H' && s[1] == 'H' && s[2] == 'H') ? 777 : -1;
+}
+
+static int64_t check_vararg_formatter_shape(const void *a0, const void *a1,
+                                            int64_t a2, const void *a3,
+                                            int64_t *a4, int32_t a5,
+                                            int32_t a6, ...) {
+    va_list ap;
+    int64_t sum = 0;
+    int expected = 1;
+
+    if (a0 != &g_vararg_capture_a0 || a1 != NULL || a2 != 0 ||
+        a3 != &g_vararg_capture_a3 || a4 == NULL ||
+        a5 != 0 || a6 != 0) {
+        return -1;
+    }
+
+    va_start(ap, a6);
+    for (expected = 1; expected <= 10; expected++) {
+        const int32_t *p = va_arg(ap, const int32_t *);
+        if (!p || *p != expected) {
+            va_end(ap);
+            return -1;
+        }
+        sum += *p;
+    }
+    va_end(ap);
+
+    *a4 = 123;
+    return sum;
 }
 
 int test_jit_add_symbol_updates_cached_lookup(void) {
@@ -1861,6 +1920,97 @@ int test_jit_internal_global_address_relocation(void) {
     return 0;
 }
 
+int test_jit_internal_global_address_via_helper_call(void) {
+    const char *src =
+        "@buf = internal global [8 x i8] zeroinitializer\n"
+        "define ptr @get_buf() {\n"
+        "entry:\n"
+        "  ret ptr @buf\n"
+        "}\n"
+        "define i64 @call_get_buf() {\n"
+        "entry:\n"
+        "  %p = call ptr @get_buf()\n"
+        "  %i = ptrtoint ptr %p to i64\n"
+        "  ret i64 %i\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*call_fn_t)(void);
+    typedef void *(*get_fn_t)(void);
+    call_fn_t call_fn;
+    get_fn_t get_fn;
+    void *buf_addr;
+    LR_JIT_GET_FN(get_fn, jit, "get_buf");
+    LR_JIT_GET_FN(call_fn, jit, "call_get_buf");
+    TEST_ASSERT(get_fn != NULL, "get_buf lookup");
+    TEST_ASSERT(call_fn != NULL, "call_get_buf lookup");
+    buf_addr = get_fn();
+    TEST_ASSERT(buf_addr != NULL, "get_buf returns global");
+    TEST_ASSERT_EQ((uintptr_t)call_fn(), (uintptr_t)buf_addr,
+                   "helper-call path preserves internal global address");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_internal_global_struct_helper_dispatch(void) {
+    const char *src =
+        "define i64 @alloc_fn(ptr %ctx, i64 %n) {\n"
+        "entry:\n"
+        "  %r = add i64 %n, 122\n"
+        "  ret i64 %r\n"
+        "}\n"
+        "@alloc = internal global { ptr, ptr, ptr, ptr } "
+        "{ ptr @alloc_fn, ptr null, ptr null, ptr null }\n"
+        "define ptr @get_alloc() {\n"
+        "entry:\n"
+        "  ret ptr @alloc\n"
+        "}\n"
+        "define i64 @call_alloc() {\n"
+        "entry:\n"
+        "  %a = call ptr @get_alloc()\n"
+        "  %fp.slot = getelementptr { ptr, ptr, ptr, ptr }, ptr %a, i32 0, i32 0\n"
+        "  %fp = load ptr, ptr %fp.slot\n"
+        "  %r = call i64 %fp(ptr null, i64 1)\n"
+        "  ret i64 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    typedef void *(*get_fn_t)(void);
+    fn_t call_fn = NULL;
+    get_fn_t get_fn = NULL;
+    void *alloc_addr = NULL;
+    LR_JIT_GET_FN(get_fn, jit, "get_alloc");
+    LR_JIT_GET_FN(call_fn, jit, "call_alloc");
+    TEST_ASSERT(get_fn != NULL, "get_alloc lookup");
+    TEST_ASSERT(call_fn != NULL, "call_alloc lookup");
+    alloc_addr = get_fn();
+    TEST_ASSERT(alloc_addr != NULL, "getter returns internal global address");
+    TEST_ASSERT_EQ(call_fn(), 123,
+                   "helper-dispatch through internal global struct works");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_patch_relocs_from_skips_prior_entries(void) {
 #if !defined(__x86_64__) && !defined(_M_X64) && !defined(__aarch64__)
     return 0;
@@ -2030,6 +2180,50 @@ int test_jit_varargs_printf_call(void) {
     return 0;
 }
 
+int test_jit_varargs_external_gp_stack_mix(void) {
+    const char *src =
+        "declare i64 @capture(ptr, ptr, i64, ptr, ptr, i32, i32, ...)\n"
+        "define i64 @call_capture_mix() {\n"
+        "entry:\n"
+        "  %r = call i64 (ptr, ptr, i64, ptr, ptr, i32, i32, ...) @capture("
+        "ptr @cap_a0, ptr null, i64 11, ptr @cap_a3, ptr @cap_a4, i32 22, i32 33, "
+        "ptr @cap_v0, ptr @cap_v1, ptr @cap_v2)\n"
+        "  ret i64 %r\n"
+        "}\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    void *capture_addr = NULL;
+    memcpy(&capture_addr, &(uintptr_t){(uintptr_t)lr_test_capture_complex_vararg},
+           sizeof(capture_addr));
+    lr_jit_add_symbol(jit, "capture", capture_addr);
+    lr_jit_add_symbol(jit, "cap_a0", &g_vararg_capture_a0);
+    lr_jit_add_symbol(jit, "cap_a3", &g_vararg_capture_a3);
+    lr_jit_add_symbol(jit, "cap_a4", &g_vararg_capture_a4);
+    lr_jit_add_symbol(jit, "cap_v0", &g_vararg_capture_v0);
+    lr_jit_add_symbol(jit, "cap_v1", &g_vararg_capture_v1);
+    lr_jit_add_symbol(jit, "cap_v2", &g_vararg_capture_v2);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef uint64_t (*fn_t)(void);
+    fn_t fn;
+    LR_JIT_GET_FN(fn, jit, "call_capture_mix");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ((uintptr_t)fn(), (uintptr_t)&g_vararg_capture_a0,
+                   "mixed gp/stack varargs preserve argument order");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_varargs_printf_double_call(void) {
     const char *src =
         "declare i32 @printf(ptr, ...)\n"
@@ -2165,6 +2359,68 @@ int test_jit_varargs_overflow_stack_call(void) {
     fn_t fn; LR_JIT_GET_FN(fn, jit, "call_vararg_stack_overflow");
     TEST_ASSERT(fn != NULL, "function lookup");
     TEST_ASSERT_EQ(fn(), 777, "stack-backed varargs after 7 named args survive");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_jit_varargs_formatter_shape_call(void) {
+    const char *src =
+        "declare i64 @capture_many(ptr, ptr, i64, ptr, ptr, i32, i32, ...)\n"
+        "define i64 @call_capture_many() {\n"
+        "entry:\n"
+        "  %rs = alloca i64\n"
+        "  %v1 = alloca i32\n"
+        "  %v2 = alloca i32\n"
+        "  %v3 = alloca i32\n"
+        "  %v4 = alloca i32\n"
+        "  %v5 = alloca i32\n"
+        "  %v6 = alloca i32\n"
+        "  %v7 = alloca i32\n"
+        "  %v8 = alloca i32\n"
+        "  %v9 = alloca i32\n"
+        "  %v10 = alloca i32\n"
+        "  store i32 1, ptr %v1\n"
+        "  store i32 2, ptr %v2\n"
+        "  store i32 3, ptr %v3\n"
+        "  store i32 4, ptr %v4\n"
+        "  store i32 5, ptr %v5\n"
+        "  store i32 6, ptr %v6\n"
+        "  store i32 7, ptr %v7\n"
+        "  store i32 8, ptr %v8\n"
+        "  store i32 9, ptr %v9\n"
+        "  store i32 10, ptr %v10\n"
+        "  %r = call i64 (ptr, ptr, i64, ptr, ptr, i32, i32, ...) @capture_many("
+        "ptr @cap_a0, ptr null, i64 0, ptr @cap_a3, ptr %rs, i32 0, i32 0, "
+        "ptr %v1, ptr %v2, ptr %v3, ptr %v4, ptr %v5, ptr %v6, ptr %v7, ptr %v8, ptr %v9, ptr %v10)\n"
+        "  ret i64 %r\n"
+        "}\n";
+
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int64_t (*capture_fn)(const void *, const void *, int64_t, const void *,
+                          int64_t *, int32_t, int32_t, ...) =
+        check_vararg_formatter_shape;
+    void *capture_addr = NULL;
+    memcpy(&capture_addr, &capture_fn, sizeof(capture_addr));
+    lr_jit_add_symbol(jit, "capture_many", capture_addr);
+    lr_jit_add_symbol(jit, "cap_a0", &g_vararg_capture_a0);
+    lr_jit_add_symbol(jit, "cap_a3", &g_vararg_capture_a3);
+    lr_jit_add_symbol(jit, "cap_result_size", &g_vararg_capture_result_size);
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int64_t (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "call_capture_many");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 55, "formatter-shaped varargs call preserves fixed and stack args");
 
     lr_jit_destroy(jit);
     lr_arena_destroy(arena);

@@ -815,6 +815,62 @@ int test_session_direct_forward_global_lookup_contract(void) {
     return 0;
 }
 
+int test_session_direct_forward_global_lookup_contract_copy_patch(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i64 = NULL;
+    lr_type_t *ptr = NULL;
+    uint32_t global_sym;
+    uint32_t addr_vreg;
+    uint32_t global_id;
+    int64_t init_value = 123;
+    int rc = -1;
+    void *user_addr = NULL;
+    void *global_addr = NULL;
+    typedef uint64_t (*fn_t)(void);
+    fn_t fn = NULL;
+
+    cfg.mode = LR_MODE_DIRECT;
+    cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i64 = lr_type_i64_s(s);
+    ptr = lr_type_ptr_s(s);
+    TEST_ASSERT(i64 != NULL, "i64 type");
+    TEST_ASSERT(ptr != NULL, "ptr type");
+
+    rc = lr_session_func_begin(s, "session_direct_forward_global_user_copy_patch",
+                               i64, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "user func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "user set block");
+    global_sym = lr_session_intern(s, "session_direct_forward_global_anchor_copy_patch");
+    addr_vreg = lr_emit_ptrtoint(s, i64, LR_GLOBAL(global_sym, ptr));
+    lr_emit_ret(s, LR_VREG(addr_vreg, i64));
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "user func end");
+    TEST_ASSERT(lr_session_lookup(s, "session_direct_forward_global_user_copy_patch") == NULL,
+                "user lookup deferred while forward global unresolved");
+
+    global_id = lr_session_global(s, "session_direct_forward_global_anchor_copy_patch", i64,
+                                  false, &init_value, sizeof(init_value));
+    TEST_ASSERT(global_id != UINT32_MAX, "global definition succeeds");
+
+    user_addr = lr_session_lookup(s, "session_direct_forward_global_user_copy_patch");
+    TEST_ASSERT(user_addr != NULL, "user lookup after global definition");
+    global_addr = lr_session_lookup(s, "session_direct_forward_global_anchor_copy_patch");
+    TEST_ASSERT(global_addr != NULL, "global symbol lookup after definition");
+    fn_ptr_cast(&fn, user_addr);
+    TEST_ASSERT(fn != NULL, "cast user");
+    TEST_ASSERT_EQ(fn(), (uint64_t)(uintptr_t)global_addr,
+                   "user returns resolved global address");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_explicit_backend_overrides_env(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err = {0};

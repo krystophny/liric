@@ -324,3 +324,177 @@ int test_llvm_c_shim_cross_module_i1_call(void) {
     lc_context_destroy(ctx);
     return 0;
 }
+
+int test_llvm_c_shim_cross_module_internal_global_ptr_call(void) {
+    const char *src1 =
+        "@buf = internal global [8 x i8] zeroinitializer\n"
+        "define ptr @get_buf() {\n"
+        "entry:\n"
+        "  ret ptr @buf\n"
+        "}\n";
+    const char *src2 =
+        "declare ptr @get_buf()\n"
+        "define i64 @call_get_buf() {\n"
+        "entry:\n"
+        "  %p = call ptr @get_buf()\n"
+        "  %i = ptrtoint ptr %p to i64\n"
+        "  ret i64 %i\n"
+        "}\n";
+    char err[256] = {0};
+    lr_module_t *parsed = NULL;
+    lr_module_t *old_ir = NULL;
+    lc_context_t *ctx = lc_context_create();
+    lc_module_compat_t *mod = NULL;
+    LLVMLiricSessionStateRef state = NULL;
+    int rc = 0;
+    void *addr = NULL;
+    typedef void *(*get_fn_t)(void);
+    typedef uint64_t (*call_fn_t)(void);
+    get_fn_t get_fn = NULL;
+    call_fn_t call_fn = NULL;
+    void *buf_addr = NULL;
+
+    TEST_ASSERT(ctx != NULL, "context create");
+    mod = lc_module_create(ctx, "llvm_c_shim_cross_ptr_1");
+    TEST_ASSERT(mod != NULL, "module create #1");
+
+    parsed = lr_parse_ll(src1, strlen(src1), err, sizeof(err));
+    TEST_ASSERT(parsed != NULL, "parse module #1");
+    old_ir = lc_module_get_ir(mod);
+    TEST_ASSERT(old_ir != NULL, "module #1 ir");
+    mod->mod = parsed;
+    if (mod->ctx)
+        mod->ctx->mod = parsed;
+    lr_module_free(old_ir);
+
+    state = LLVMLiricSessionCreate();
+    TEST_ASSERT(state != NULL, "shim state create");
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    TEST_ASSERT_EQ(rc, 0, "add module #1");
+    lc_module_destroy(mod);
+    mod = NULL;
+
+    mod = lc_module_create(ctx, "llvm_c_shim_cross_ptr_2");
+    TEST_ASSERT(mod != NULL, "module create #2");
+    parsed = lr_parse_ll(src2, strlen(src2), err, sizeof(err));
+    TEST_ASSERT(parsed != NULL, "parse module #2");
+    old_ir = lc_module_get_ir(mod);
+    TEST_ASSERT(old_ir != NULL, "module #2 ir");
+    mod->mod = parsed;
+    if (mod->ctx)
+        mod->ctx->mod = parsed;
+    lr_module_free(old_ir);
+
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    TEST_ASSERT_EQ(rc, 0, "add module #2");
+
+    addr = LLVMLiricSessionLookup(state, "get_buf");
+    TEST_ASSERT(addr != NULL, "lookup get_buf");
+    memcpy(&get_fn, &addr, sizeof(addr));
+    TEST_ASSERT(get_fn != NULL, "cast get_buf");
+    buf_addr = get_fn();
+    TEST_ASSERT(buf_addr != NULL, "get_buf returns internal global");
+
+    addr = LLVMLiricSessionLookup(state, "call_get_buf");
+    TEST_ASSERT(addr != NULL, "lookup call_get_buf");
+    memcpy(&call_fn, &addr, sizeof(addr));
+    TEST_ASSERT(call_fn != NULL, "cast call_get_buf");
+    TEST_ASSERT_EQ((uintptr_t)call_fn(), (uintptr_t)buf_addr,
+                   "cross-module call preserves internal global address");
+
+    LLVMLiricSessionDispose(state);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
+
+int test_llvm_c_shim_cross_module_internal_global_struct_dispatch(void) {
+    const char *src1 =
+        "define i64 @alloc_fn(ptr %ctx, i64 %n) {\n"
+        "entry:\n"
+        "  %r = add i64 %n, 122\n"
+        "  ret i64 %r\n"
+        "}\n"
+        "@alloc = internal global { ptr, ptr, ptr, ptr } "
+        "{ ptr @alloc_fn, ptr null, ptr null, ptr null }\n"
+        "define ptr @get_alloc() {\n"
+        "entry:\n"
+        "  ret ptr @alloc\n"
+        "}\n";
+    const char *src2 =
+        "declare ptr @get_alloc()\n"
+        "define i64 @call_alloc() {\n"
+        "entry:\n"
+        "  %a = call ptr @get_alloc()\n"
+        "  %fp.slot = getelementptr { ptr, ptr, ptr, ptr }, ptr %a, i32 0, i32 0\n"
+        "  %fp = load ptr, ptr %fp.slot\n"
+        "  %r = call i64 %fp(ptr null, i64 1)\n"
+        "  ret i64 %r\n"
+        "}\n";
+    char err[256] = {0};
+    lr_module_t *parsed = NULL;
+    lr_module_t *old_ir = NULL;
+    lc_context_t *ctx = lc_context_create();
+    lc_module_compat_t *mod = NULL;
+    LLVMLiricSessionStateRef state = NULL;
+    int rc = 0;
+    void *addr = NULL;
+    typedef void *(*get_fn_t)(void);
+    typedef int64_t (*call_fn_t)(void);
+    get_fn_t get_fn = NULL;
+    call_fn_t call_fn = NULL;
+    void *alloc_addr = NULL;
+
+    TEST_ASSERT(ctx != NULL, "context create");
+    mod = lc_module_create(ctx, "llvm_c_shim_cross_struct_1");
+    TEST_ASSERT(mod != NULL, "module create #1");
+
+    parsed = lr_parse_ll(src1, strlen(src1), err, sizeof(err));
+    TEST_ASSERT(parsed != NULL, "parse module #1");
+    old_ir = lc_module_get_ir(mod);
+    TEST_ASSERT(old_ir != NULL, "module #1 ir");
+    mod->mod = parsed;
+    if (mod->ctx)
+        mod->ctx->mod = parsed;
+    lr_module_free(old_ir);
+
+    state = LLVMLiricSessionCreate();
+    TEST_ASSERT(state != NULL, "shim state create");
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    TEST_ASSERT_EQ(rc, 0, "add module #1");
+    lc_module_destroy(mod);
+    mod = NULL;
+
+    mod = lc_module_create(ctx, "llvm_c_shim_cross_struct_2");
+    TEST_ASSERT(mod != NULL, "module create #2");
+    parsed = lr_parse_ll(src2, strlen(src2), err, sizeof(err));
+    TEST_ASSERT(parsed != NULL, "parse module #2");
+    old_ir = lc_module_get_ir(mod);
+    TEST_ASSERT(old_ir != NULL, "module #2 ir");
+    mod->mod = parsed;
+    if (mod->ctx)
+        mod->ctx->mod = parsed;
+    lr_module_free(old_ir);
+
+    rc = LLVMLiricSessionAddCompatModule(state, mod);
+    TEST_ASSERT_EQ(rc, 0, "add module #2");
+
+    addr = LLVMLiricSessionLookup(state, "get_alloc");
+    TEST_ASSERT(addr != NULL, "lookup get_alloc");
+    memcpy(&get_fn, &addr, sizeof(addr));
+    TEST_ASSERT(get_fn != NULL, "cast get_alloc");
+    alloc_addr = get_fn();
+    TEST_ASSERT(alloc_addr != NULL, "get_alloc returns internal global");
+
+    addr = LLVMLiricSessionLookup(state, "call_alloc");
+    TEST_ASSERT(addr != NULL, "lookup call_alloc");
+    memcpy(&call_fn, &addr, sizeof(addr));
+    TEST_ASSERT(call_fn != NULL, "cast call_alloc");
+    TEST_ASSERT_EQ(call_fn(), 123,
+                   "cross-module helper dispatch through internal global struct works");
+
+    LLVMLiricSessionDispose(state);
+    lc_module_destroy(mod);
+    lc_context_destroy(ctx);
+    return 0;
+}
