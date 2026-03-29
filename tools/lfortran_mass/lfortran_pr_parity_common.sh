@@ -119,6 +119,8 @@ prepare_integration_build_tree() {
         cd "${LFORTRAN_DIR}/integration_tests"
         FC="${LFORTRAN_BUILD_DIR}/src/bin/lfortran" \
             cmake -DLFORTRAN_BACKEND=llvm -DCURRENT_BINARY_DIR=. \
+            -DCMAKE_Fortran_COMPILER_WORKS=1 \
+            -DCMAKE_Fortran_COMPILER_FORCED=1 \
             -S . -B build-lfortran-llvm
         cmake --build build-lfortran-llvm -j"${NPROC}"
     )
