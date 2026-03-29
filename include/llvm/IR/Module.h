@@ -721,6 +721,7 @@ inline BasicBlock *BasicBlock::Create(LLVMContext &Context, const Twine &Name,
 }
 
 inline bool legacy::PassManager::run(Module &M) {
+    char err[512] = {0};
     if (!detail::obj_emit_state.out)
         return false;
     if (detail::obj_emit_state.file_type != CodeGenFileType::ObjectFile) {
@@ -735,6 +736,7 @@ inline bool legacy::PassManager::run(Module &M) {
     }
 
     FILE *f = detail::obj_emit_state.out->getFileOrNull();
+    const char *path = detail::obj_emit_state.out->getPathOrNull();
     if (!f) {
         detail::obj_emit_state.out = nullptr;
         return false;
@@ -745,6 +747,14 @@ inline bool legacy::PassManager::run(Module &M) {
     if (rc != 0) {
         throw std::runtime_error(
             "liric llvm-compat object emission failed");
+    }
+    if (path && path[0] &&
+        lc_module_export_sidecar_files(compat, path, err, sizeof(err)) != 0) {
+        if (err[0]) {
+            throw std::runtime_error(err);
+        }
+        throw std::runtime_error(
+            "liric llvm-compat companion emission failed");
     }
     return false;
 }

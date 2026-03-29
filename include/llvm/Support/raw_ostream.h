@@ -86,6 +86,7 @@ public:
     virtual uint64_t tell() const { return 0; }
 
     virtual FILE *getFileOrNull() const { return nullptr; }
+    virtual const char *getPathOrNull() const { return nullptr; }
 
     raw_ostream &indent(unsigned NumSpaces) {
         for (unsigned i = 0; i < NumSpaces; ++i) write(" ", 1);
@@ -103,6 +104,7 @@ public:
 class LIRIC_LLVM_HIDDEN raw_fd_ostream : public raw_pwrite_stream {
     FILE *f_;
     bool owns_;
+    std::string path_;
 
 public:
     raw_fd_ostream(int fd, bool shouldClose, bool unbuffered = false)
@@ -118,11 +120,13 @@ public:
                    unsigned flags = 0)
         : owns_(true) {
         (void)flags;
+        path_ = std::string(filename);
         f_ = fopen(std::string(filename).c_str(), "wb");
         if (!f_) {
             EC = std::make_error_code(std::errc::no_such_file_or_directory);
             f_ = stderr;
             owns_ = false;
+            path_.clear();
         }
     }
 
@@ -138,6 +142,9 @@ public:
     void flush() override { fflush(f_); }
     FILE *getFile() const { return f_; }
     FILE *getFileOrNull() const override { return f_; }
+    const char *getPathOrNull() const override {
+        return path_.empty() ? nullptr : path_.c_str();
+    }
 };
 
 class LIRIC_LLVM_HIDDEN raw_string_ostream : public raw_pwrite_stream {
