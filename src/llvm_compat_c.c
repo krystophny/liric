@@ -685,6 +685,7 @@ void lr_llvm_compat_apply_global_linkage(lc_module_compat_t *compat,
             scoped_len = lr_llvm_compat_linkage_scoped_global_name(
                 compat, g->name, linkage, scoped_name, sizeof(scoped_name));
             if (scoped_len > 0 && strcmp(scoped_name, g->name) != 0) {
+                uint32_t old_sym_id = global_value->global.id;
                 uint32_t scoped_sym_id = UINT32_MAX;
                 char *owned_name = lr_arena_strdup(m->arena, scoped_name, scoped_len);
                 if (!owned_name)
@@ -692,8 +693,13 @@ void lr_llvm_compat_apply_global_linkage(lc_module_compat_t *compat,
                 g->name = owned_name;
                 global_value->global.name = owned_name;
                 scoped_sym_id = lr_module_intern_symbol(m, owned_name);
-                if (scoped_sym_id != UINT32_MAX)
+                if (scoped_sym_id != UINT32_MAX) {
                     global_value->global.id = scoped_sym_id;
+                    lc_module_rewrite_global_symbol_refs(compat, old_sym_id,
+                                                         old_name,
+                                                         scoped_sym_id,
+                                                         owned_name);
+                }
                 lr_llvm_compat_register_global_alias(compat, old_name, owned_name);
                 if (global_value->name && strcmp(global_value->name, old_name) == 0)
                     global_value->name = owned_name;

@@ -258,6 +258,11 @@ lc_value_t *lc_global_lookup(lc_module_compat_t *mod, const char *name);
 int lc_global_set_initializer(lc_module_compat_t *mod, lc_value_t *global_val,
                                lc_value_t *init_val);
 bool lc_global_has_initializer(lc_module_compat_t *mod, lc_value_t *global_val);
+void lc_module_rewrite_global_symbol_refs(lc_module_compat_t *mod,
+                                          uint32_t old_sym_id,
+                                          const char *old_name,
+                                          uint32_t new_sym_id,
+                                          const char *new_name);
 
 /* ---- IRBuilder operations ---- */
 

@@ -1406,6 +1406,85 @@ typedef struct lc_context {
     int backend;
 } lc_context_t;
 
+typedef struct compat_ptr_type_cache_node {
+    const lc_context_t *ctx;
+    const lr_type_t *elem;
+    lr_type_t *ptr;
+    struct compat_ptr_type_cache_node *next;
+} compat_ptr_type_cache_node_t;
+
+static compat_ptr_type_cache_node_t *g_ptr_type_cache = NULL;
+static _Thread_local const lc_context_t *g_last_ptr_type_ctx = NULL;
+static _Thread_local const lr_type_t *g_last_ptr_type_elem = NULL;
+static _Thread_local lr_type_t *g_last_ptr_type = NULL;
+
+static lr_type_t *compat_lookup_ptr_type(const lc_context_t *ctx,
+                                         const lr_type_t *elem) {
+    compat_ptr_type_cache_node_t *it;
+    if (!ctx || !elem)
+        return NULL;
+    if (g_last_ptr_type_ctx == ctx && g_last_ptr_type_elem == elem)
+        return g_last_ptr_type;
+    for (it = g_ptr_type_cache; it; it = it->next) {
+        if (it->ctx == ctx && it->elem == elem) {
+            g_last_ptr_type_ctx = ctx;
+            g_last_ptr_type_elem = elem;
+            g_last_ptr_type = it->ptr;
+            return it->ptr;
+        }
+    }
+    return NULL;
+}
+
+static lr_type_t *compat_get_or_create_ptr_type(lc_context_t *ctx,
+                                                lr_type_t *elem) {
+    compat_ptr_type_cache_node_t *node;
+    lr_type_t *ptr;
+    if (!ctx || !elem)
+        return NULL;
+    ptr = compat_lookup_ptr_type(ctx, elem);
+    if (ptr)
+        return ptr;
+    ptr = lr_type_ptr(ctx->type_arena, elem);
+    if (!ptr)
+        return NULL;
+    node = (compat_ptr_type_cache_node_t *)malloc(sizeof(*node));
+    if (!node)
+        return ptr;
+    node->ctx = ctx;
+    node->elem = elem;
+    node->ptr = ptr;
+    node->next = g_ptr_type_cache;
+    g_ptr_type_cache = node;
+    g_last_ptr_type_ctx = ctx;
+    g_last_ptr_type_elem = elem;
+    g_last_ptr_type = ptr;
+    return ptr;
+}
+
+static void compat_drop_ptr_type_cache(const lc_context_t *ctx) {
+    compat_ptr_type_cache_node_t *it = g_ptr_type_cache;
+    compat_ptr_type_cache_node_t *prev = NULL;
+    while (it) {
+        compat_ptr_type_cache_node_t *next = it->next;
+        if (it->ctx == ctx) {
+            if (prev)
+                prev->next = next;
+            else
+                g_ptr_type_cache = next;
+            free(it);
+        } else {
+            prev = it;
+        }
+        it = next;
+    }
+    if (g_last_ptr_type_ctx == ctx) {
+        g_last_ptr_type_ctx = NULL;
+        g_last_ptr_type_elem = NULL;
+        g_last_ptr_type = NULL;
+    }
+}
+
 typedef struct lc_phi_node lc_phi_node_t;
 typedef struct lc_const_reloc_meta lc_const_reloc_meta_t;
 typedef struct lc_const_value_meta lc_const_value_meta_t;
@@ -2081,6 +2160,84 @@ static lr_global_t *lookup_global_cached(lc_module_compat_t *mod, const char *na
     return g;
 }
 
+static uint32_t canonical_global_sym_id(lc_module_compat_t *mod,
+                                        lr_global_t *g,
+                                        uint32_t sym_id) {
+    uint32_t current_sym_id = UINT32_MAX;
+    if (!mod || !g || !g->name || !g->name[0])
+        return sym_id;
+    current_sym_id = compat_symbol_id(mod, g->name);
+    if (current_sym_id == UINT32_MAX)
+        return sym_id;
+    if (g->name && current_sym_id < mod->sym_cache_cap)
+        mod->global_by_sym[current_sym_id] = g;
+    return current_sym_id;
+}
+
+void lc_module_rewrite_global_symbol_refs(lc_module_compat_t *mod,
+                                          uint32_t old_sym_id,
+                                          const char *old_name,
+                                          uint32_t new_sym_id,
+                                          const char *new_name) {
+    uint32_t remaining;
+    lc_value_slab_t *slab;
+    if (!mod || !mod->mod || old_sym_id == UINT32_MAX ||
+        new_sym_id == UINT32_MAX || old_sym_id == new_sym_id ||
+        !old_name || !old_name[0] || !new_name || !new_name[0]) {
+        return;
+    }
+
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            if (value->kind != LC_VAL_GLOBAL)
+                continue;
+            if (value->global.id == old_sym_id ||
+                (value->global.name &&
+                 strcmp(value->global.name, old_name) == 0)) {
+                value->global.id = new_sym_id;
+                value->global.name = new_name;
+                if (value->name && strcmp(value->name, old_name) == 0)
+                    value->name = new_name;
+            }
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+
+    for (lc_const_value_meta_t *meta = mod->const_value_meta; meta; meta = meta->next) {
+        for (lc_const_reloc_meta_t *rel = meta->relocs; rel; rel = rel->next) {
+            if (rel->symbol_name && strcmp(rel->symbol_name, old_name) == 0)
+                rel->symbol_name = new_name;
+        }
+    }
+
+    for (lr_global_t *g = mod->mod->first_global; g; g = g->next) {
+        for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
+            if (rel->symbol_name && strcmp(rel->symbol_name, old_name) == 0)
+                rel->symbol_name = (char *)new_name;
+        }
+    }
+
+    for (lr_func_t *f = mod->mod->first_func; f; f = f->next) {
+        for (lr_block_t *b = f->first_block; b; b = b->next) {
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                for (uint32_t i = 0; i < inst->num_operands; i++) {
+                    if (inst->operands[i].kind == LR_VAL_GLOBAL &&
+                        inst->operands[i].global_id == old_sym_id) {
+                        inst->operands[i].global_id = new_sym_id;
+                    }
+                }
+            }
+        }
+    }
+}
+
 static lc_const_value_meta_t *lookup_const_value_meta(lc_module_compat_t *mod,
                                                       lc_value_t *value) {
     if (!mod || !value)
@@ -2536,6 +2693,7 @@ lc_context_t *lc_context_create(void) {
 
 void lc_context_destroy(lc_context_t *ctx) {
     if (!ctx) return;
+    compat_drop_ptr_type_cache(ctx);
     if (ctx->type_arena) lr_arena_destroy(ctx->type_arena);
     free(ctx);
 }
@@ -2625,7 +2783,7 @@ lc_module_compat_t *lc_module_create(lc_context_t *ctx, const char *name) {
 
 void lc_module_destroy(lc_module_compat_t *mod) {
     if (!mod) return;
-    lr_arena_destroy(mod->mod->arena);
+    lr_module_free(mod->mod);
     if (mod->session)
         lr_session_destroy(mod->session);
     value_pool_free(mod);
@@ -3344,14 +3502,9 @@ lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod) {
 lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem) {
     if (!mod || !mod->mod)
         return NULL;
-    (void)elem;
-    /* Modern LLVM API clients such as current LFortran operate in opaque
-       pointer mode. Materializing typed pointers in the compat layer
-       changes both the printed IR and the lowered semantics for stack
-       temporaries, class wrappers, and recursive pointer structures. Keep
-       API-created pointers opaque and let loads/GEPs carry the element
-       type explicitly, matching upstream LLVM. */
-    return mod->mod->type_ptr;
+    if (!elem)
+        return mod->mod->type_ptr;
+    return compat_get_or_create_ptr_type(mod->ctx, elem);
 }
 
 bool lc_type_is_integer(lr_type_t *ty) {
@@ -3486,6 +3639,7 @@ lc_value_t *lc_global_lookup_or_create(lc_module_compat_t *mod,
         g->is_external = true;
         cache_global_by_symbol(mod, sym_id, g);
     }
+    sym_id = canonical_global_sym_id(mod, g, sym_id);
     return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
@@ -4692,6 +4846,7 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
         if (sym_id == UINT32_MAX)
             return safe_undef(mod);
         cache_global_by_symbol(mod, sym_id, g);
+        sym_id = canonical_global_sym_id(mod, g, sym_id);
         return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
     }
     unique_name = make_unique_symbol_name(mod, actual_name);
@@ -4708,6 +4863,7 @@ lc_value_t *lc_global_create(lc_module_compat_t *mod, const char *name,
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
+    sym_id = canonical_global_sym_id(mod, g, sym_id);
     return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
@@ -4727,6 +4883,7 @@ lc_value_t *lc_global_declare(lc_module_compat_t *mod, const char *name,
     if (sym_id == UINT32_MAX)
         return safe_undef(mod);
     cache_global_by_symbol(mod, sym_id, g);
+    sym_id = canonical_global_sym_id(mod, g, sym_id);
     return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 
@@ -4738,6 +4895,7 @@ lc_value_t *lc_global_lookup(lc_module_compat_t *mod, const char *name) {
     g = lookup_global_cached(mod, name, &sym_id);
     if (!g || sym_id == UINT32_MAX)
         return NULL;
+    sym_id = canonical_global_sym_id(mod, g, sym_id);
     return lc_value_global(mod, sym_id, lc_get_ptr_type_to(mod, g->type), g->name);
 }
 

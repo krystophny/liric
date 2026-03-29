@@ -2,7 +2,69 @@
 #include "frontend_registry.h"
 #include "ir.h"
 #include "ll_parser.h"
+#include <stdlib.h>
 #include <stdio.h>
+
+typedef struct lr_array_type_cache_node {
+    const lr_module_t *module;
+    const lr_type_t *elem;
+    uint64_t count;
+    lr_type_t *array;
+    struct lr_array_type_cache_node *next;
+} lr_array_type_cache_node_t;
+
+static lr_array_type_cache_node_t *g_array_type_cache = NULL;
+static _Thread_local const lr_module_t *g_last_array_type_module = NULL;
+static _Thread_local const lr_type_t *g_last_array_type_elem = NULL;
+static _Thread_local uint64_t g_last_array_type_count = 0;
+static _Thread_local lr_type_t *g_last_array_type = NULL;
+
+static lr_type_t *lookup_cached_array_type(const lr_module_t *m,
+                                           const lr_type_t *elem,
+                                           uint64_t count) {
+    lr_array_type_cache_node_t *it;
+    if (!m || !elem)
+        return NULL;
+    if (g_last_array_type_module == m &&
+        g_last_array_type_elem == elem &&
+        g_last_array_type_count == count) {
+        return g_last_array_type;
+    }
+    for (it = g_array_type_cache; it; it = it->next) {
+        if (it->module == m && it->elem == elem && it->count == count) {
+            g_last_array_type_module = m;
+            g_last_array_type_elem = elem;
+            g_last_array_type_count = count;
+            g_last_array_type = it->array;
+            return it->array;
+        }
+    }
+    return NULL;
+}
+
+static void drop_cached_array_types(const lr_module_t *m) {
+    lr_array_type_cache_node_t *it = g_array_type_cache;
+    lr_array_type_cache_node_t *prev = NULL;
+    while (it) {
+        lr_array_type_cache_node_t *next = it->next;
+        if (it->module == m) {
+            if (prev)
+                prev->next = next;
+            else
+                g_array_type_cache = next;
+            free(it);
+        } else {
+            prev = it;
+        }
+        it = next;
+    }
+    if (g_last_array_type_module == m) {
+        g_last_array_type_module = NULL;
+        g_last_array_type_elem = NULL;
+        g_last_array_type_count = 0;
+        g_last_array_type = NULL;
+    }
+}
 
 static void set_err(char *err, size_t errlen, const char *msg) {
     if (!err || errlen == 0)
@@ -90,13 +152,37 @@ lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t er
 
 void lr_module_free(lr_module_t *m) {
     if (!m) return;
+    drop_cached_array_types(m);
     lr_arena_destroy(m->arena);
 }
 
 /* ---- Composite type constructors --------------------------------------- */
 
 lr_type_t *lr_type_array_new(lr_module_t *m, lr_type_t *elem, uint64_t count) {
-    return lr_type_array(m->arena, elem, count);
+    lr_array_type_cache_node_t *node;
+    lr_type_t *cached;
+    if (!m || !elem)
+        return NULL;
+    cached = lookup_cached_array_type(m, elem, count);
+    if (cached)
+        return cached;
+    cached = lr_type_array(m->arena, elem, count);
+    if (!cached)
+        return NULL;
+    node = (lr_array_type_cache_node_t *)malloc(sizeof(*node));
+    if (!node)
+        return cached;
+    node->module = m;
+    node->elem = elem;
+    node->count = count;
+    node->array = cached;
+    node->next = g_array_type_cache;
+    g_array_type_cache = node;
+    g_last_array_type_module = m;
+    g_last_array_type_elem = elem;
+    g_last_array_type_count = count;
+    g_last_array_type = cached;
+    return cached;
 }
 
 lr_type_t *lr_type_vector_new(lr_module_t *m, lr_type_t *elem, uint64_t count) {
