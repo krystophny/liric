@@ -517,7 +517,8 @@ static inline void lr_emit_call_void(lr_session_t *s,
     if (nops > 32) return;
     ops[0] = callee;
     for (uint32_t i = 0; i < num_args; i++) ops[1 + i] = args[i];
-    d.op = LR_OP_CALL; d.operands = ops; d.num_operands = nops;
+    d.op = LR_OP_CALL; d.type = lr_type_void_s(s);
+    d.operands = ops; d.num_operands = nops;
     lr_session_emit(s, &d, NULL);
 }
 
