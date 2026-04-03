@@ -743,12 +743,15 @@ static inline void lr_emit_memset(lr_session_t *s, uint32_t callee_id,
    of the global's address. */
 static inline uint32_t lr_emit_globalstringptr(lr_session_t *s,
                                                const char *str) {
+    static unsigned str_counter = 0;
+    char name_buf[64];
+    snprintf(name_buf, sizeof(name_buf), ".str.%u", str_counter++);
     size_t len = 0;
     while (str[len]) len++;
     lr_type_t *i8 = lr_type_i8_s(s);
     lr_type_t *arr_ty = lr_type_array_s(s, i8, len + 1);
     lr_type_t *ptr = lr_type_ptr_s(s);
-    uint32_t gid = lr_session_global(s, NULL, arr_ty, true, str, len + 1);
+    uint32_t gid = lr_session_global(s, name_buf, arr_ty, true, str, len + 1);
     /* Return the global's address directly as a pointer operand.
        Use a bitcast-like identity load to materialize the address. */
     uint32_t vreg = lr_session_vreg(s);
