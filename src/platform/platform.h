@@ -8,7 +8,10 @@
 typedef enum lr_platform_intrinsic_strategy {
     LR_PLATFORM_INTRINSIC_UNSUPPORTED = 0,
     LR_PLATFORM_INTRINSIC_BLOB = 1,
-    LR_PLATFORM_INTRINSIC_LIBC = 2,
+    /* LR_PLATFORM_INTRINSIC_LIBC removed: no libc fallback permitted.
+       Known intrinsics without blobs use EXTERN_SYMBOL strategy instead
+       (resolved at link time, not via dlsym). */
+    LR_PLATFORM_INTRINSIC_EXTERN_SYMBOL = 2,
     LR_PLATFORM_INTRINSIC_BUILTIN = 3,
     LR_PLATFORM_INTRINSIC_TARGET_LOWER = 4,
 } lr_platform_intrinsic_strategy_t;

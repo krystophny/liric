@@ -780,7 +780,7 @@ int lr_platform_intrinsic_lookup(const char *name,
         preferred = LR_PLATFORM_INTRINSIC_BLOB;
     } else if (libc_name) {
         known = true;
-        preferred = LR_PLATFORM_INTRINSIC_LIBC;
+        preferred = LR_PLATFORM_INTRINSIC_EXTERN_SYMBOL;
     } else if (builtin_addr) {
         known = true;
         preferred = LR_PLATFORM_INTRINSIC_BUILTIN;
@@ -828,19 +828,19 @@ static void *resolve_symbol_handle(void *handle, const char *name) {
 
 void *lr_platform_intrinsic_resolve_addr(const char *name, void *runtime_handle) {
     const char *canonical = normalize_intrinsic_name(name);
-    const char *libc_name;
     void *addr;
 
     if (!canonical || !canonical[0])
         return NULL;
 
-    libc_name = intrinsic_libc_name_impl(canonical);
-    if (libc_name) {
-        addr = resolve_symbol_handle(NULL, libc_name);
-        if (!addr && runtime_handle)
-            addr = resolve_symbol_handle(runtime_handle, libc_name);
-        if (addr)
-            return addr;
+    /* No libc fallback. Resolve only from runtime handle or builtins. */
+    if (runtime_handle) {
+        const char *sym = intrinsic_libc_name_impl(canonical);
+        if (sym) {
+            addr = resolve_symbol_handle(runtime_handle, sym);
+            if (addr)
+                return addr;
+        }
     }
 
     addr = resolve_builtin_intrinsic_addr(canonical);
