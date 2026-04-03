@@ -665,6 +665,108 @@ static inline uint32_t lr_emit_insertvalue(lr_session_t *s, lr_type_t *ty,
     return lr_session_emit(s, &d, NULL);
 }
 
+/* ---- Compound convenience wrappers ------------------------------------- */
+
+static inline unsigned lr_type_width(lr_session_t *s, lr_type_t *ty) {
+    if (!ty) return 0;
+    if (ty == lr_type_i1_s(s))  return 1;
+    if (ty == lr_type_i8_s(s))  return 8;
+    if (ty == lr_type_i16_s(s)) return 16;
+    if (ty == lr_type_i32_s(s)) return 32;
+    if (ty == lr_type_i64_s(s)) return 64;
+    return 0;
+}
+
+static inline uint32_t lr_emit_neg(lr_session_t *s, lr_type_t *ty,
+                                   lr_operand_desc_t val) {
+    return lr_emit_sub(s, ty, LR_IMM(0, ty), val);
+}
+
+static inline uint32_t lr_emit_not(lr_session_t *s, lr_type_t *ty,
+                                   lr_operand_desc_t val) {
+    return lr_emit_xor(s, ty, val, LR_IMM(-1, ty));
+}
+
+static inline uint32_t lr_emit_sextortrunc(lr_session_t *s, lr_type_t *to,
+                                           lr_operand_desc_t val) {
+    unsigned src_w = lr_type_width(s, val.type);
+    unsigned dst_w = lr_type_width(s, to);
+    if (dst_w > src_w) return lr_emit_sext(s, to, val);
+    if (dst_w < src_w) return lr_emit_trunc(s, to, val);
+    return val.vreg;
+}
+
+static inline uint32_t lr_emit_zextortrunc(lr_session_t *s, lr_type_t *to,
+                                           lr_operand_desc_t val) {
+    unsigned src_w = lr_type_width(s, val.type);
+    unsigned dst_w = lr_type_width(s, to);
+    if (dst_w > src_w) return lr_emit_zext(s, to, val);
+    if (dst_w < src_w) return lr_emit_trunc(s, to, val);
+    return val.vreg;
+}
+
+static inline uint32_t lr_emit_structgep(lr_session_t *s, lr_type_t *sty,
+                                         lr_operand_desc_t ptr,
+                                         uint32_t field_idx) {
+    lr_operand_desc_t ops[3] = {ptr, LR_IMM(0, NULL), LR_IMM(field_idx, NULL)};
+    lr_inst_desc_t d = {0};
+    d.op = LR_OP_GEP; d.type = sty; d.operands = ops; d.num_operands = 3;
+    return lr_session_emit(s, &d, NULL);
+}
+
+/*
+ * lr_emit_memcpy / lr_emit_memset: the caller must first declare memcpy/memset
+ * via lr_session_declare() and pass the interned symbol as callee_id.
+ */
+static inline void lr_emit_memcpy(lr_session_t *s, uint32_t callee_id,
+                                  lr_operand_desc_t dst,
+                                  lr_operand_desc_t src,
+                                  lr_operand_desc_t len) {
+    lr_type_t *ptr = lr_type_ptr_s(s);
+    lr_operand_desc_t args[3] = {dst, src, len};
+    lr_emit_call_void(s, LR_GLOBAL(callee_id, ptr), args, 3);
+}
+
+static inline void lr_emit_memset(lr_session_t *s, uint32_t callee_id,
+                                  lr_operand_desc_t dst,
+                                  lr_operand_desc_t val,
+                                  lr_operand_desc_t len) {
+    lr_type_t *ptr = lr_type_ptr_s(s);
+    lr_operand_desc_t args[3] = {dst, val, len};
+    lr_emit_call_void(s, LR_GLOBAL(callee_id, ptr), args, 3);
+}
+
+static inline uint32_t lr_emit_globalstringptr(lr_session_t *s,
+                                               const char *str) {
+    size_t len = 0;
+    while (str[len]) len++;
+    lr_type_t *i8 = lr_type_i8_s(s);
+    lr_type_t *arr_ty = lr_type_array_s(s, i8, len + 1);
+    uint32_t gid = lr_session_global(s, NULL, arr_ty, true, str, len + 1);
+    lr_operand_desc_t ops[2] = {LR_GLOBAL(gid, arr_ty), LR_IMM(0, NULL)};
+    lr_inst_desc_t d = {0};
+    d.op = LR_OP_GEP; d.type = arr_ty; d.operands = ops; d.num_operands = 2;
+    return lr_session_emit(s, &d, NULL);
+}
+
+static inline void lr_emit_switch(lr_session_t *s,
+                                  lr_operand_desc_t val,
+                                  uint32_t default_block,
+                                  const int64_t *case_vals,
+                                  const uint32_t *case_blocks,
+                                  uint32_t num_cases) {
+    uint32_t i;
+    for (i = 0; i < num_cases; i++) {
+        uint32_t cmp = lr_emit_icmp(s, LR_CMP_EQ, val,
+                                    LR_IMM(case_vals[i], val.type));
+        uint32_t next = lr_session_block(s);
+        lr_emit_condbr(s, LR_VREG(cmp, lr_type_i1_s(s)),
+                       case_blocks[i], next);
+        lr_session_set_block(s, next, NULL);
+    }
+    lr_emit_br(s, default_block);
+}
+
 #ifdef __cplusplus
 }
 #endif
