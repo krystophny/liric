@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -232,7 +233,7 @@ int lr_session_find_suspended(lr_session_t *s, lr_func_t *func);
 static inline uint32_t lr_emit_add(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_ADD; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -241,7 +242,7 @@ static inline uint32_t lr_emit_add(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_sub(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_SUB; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -250,7 +251,7 @@ static inline uint32_t lr_emit_sub(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_mul(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_MUL; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -259,7 +260,7 @@ static inline uint32_t lr_emit_mul(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_sdiv(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_SDIV; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -268,7 +269,7 @@ static inline uint32_t lr_emit_sdiv(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_srem(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_SREM; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -277,7 +278,7 @@ static inline uint32_t lr_emit_srem(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_udiv(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_UDIV; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -286,7 +287,7 @@ static inline uint32_t lr_emit_udiv(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_urem(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_UREM; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -295,7 +296,7 @@ static inline uint32_t lr_emit_urem(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_frem(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_FREM; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -304,7 +305,7 @@ static inline uint32_t lr_emit_frem(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_and(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_AND; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -313,7 +314,7 @@ static inline uint32_t lr_emit_and(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_or(lr_session_t *s, lr_type_t *ty,
                                   lr_operand_desc_t lhs,
                                   lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_OR; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -322,7 +323,7 @@ static inline uint32_t lr_emit_or(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_xor(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_XOR; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -331,7 +332,7 @@ static inline uint32_t lr_emit_xor(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_shl(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t lhs,
                                    lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_SHL; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -340,7 +341,7 @@ static inline uint32_t lr_emit_shl(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_lshr(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_LSHR; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -349,7 +350,7 @@ static inline uint32_t lr_emit_lshr(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_ashr(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_ASHR; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -358,7 +359,7 @@ static inline uint32_t lr_emit_ashr(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_fadd(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_FADD; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -367,7 +368,7 @@ static inline uint32_t lr_emit_fadd(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_fsub(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_FSUB; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -376,7 +377,7 @@ static inline uint32_t lr_emit_fsub(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_fmul(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_FMUL; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -385,7 +386,7 @@ static inline uint32_t lr_emit_fmul(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_fdiv(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_FDIV; d.type = ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
@@ -393,7 +394,7 @@ static inline uint32_t lr_emit_fdiv(lr_session_t *s, lr_type_t *ty,
 
 static inline uint32_t lr_emit_fneg(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_FNEG; d.type = ty; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -402,7 +403,7 @@ static inline uint32_t lr_emit_fneg(lr_session_t *s, lr_type_t *ty,
 static inline uint32_t lr_emit_icmp(lr_session_t *s, int pred,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_ICMP; d.operands = ops; d.num_operands = 2;
     d.icmp_pred = pred;
@@ -412,7 +413,7 @@ static inline uint32_t lr_emit_icmp(lr_session_t *s, int pred,
 static inline uint32_t lr_emit_fcmp(lr_session_t *s, int pred,
                                     lr_operand_desc_t lhs,
                                     lr_operand_desc_t rhs) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {lhs, rhs};
     d.op = LR_OP_FCMP; d.operands = ops; d.num_operands = 2;
     d.fcmp_pred = pred;
@@ -420,14 +421,14 @@ static inline uint32_t lr_emit_fcmp(lr_session_t *s, int pred,
 }
 
 static inline uint32_t lr_emit_alloca(lr_session_t *s, lr_type_t *elem_type) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     d.op = LR_OP_ALLOCA; d.type = elem_type;
     return lr_session_emit(s, &d, NULL);
 }
 
 static inline uint32_t lr_emit_load(lr_session_t *s, lr_type_t *ty,
                                     lr_operand_desc_t addr) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {addr};
     d.op = LR_OP_LOAD; d.type = ty; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -435,7 +436,7 @@ static inline uint32_t lr_emit_load(lr_session_t *s, lr_type_t *ty,
 
 static inline void lr_emit_store(lr_session_t *s, lr_operand_desc_t val,
                                  lr_operand_desc_t addr) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {val, addr};
     d.op = LR_OP_STORE; d.operands = ops; d.num_operands = 2;
     lr_session_emit(s, &d, NULL);
@@ -445,7 +446,7 @@ static inline uint32_t lr_emit_gep(lr_session_t *s, lr_type_t *base_type,
                                    lr_operand_desc_t base_ptr,
                                    lr_operand_desc_t *indices,
                                    uint32_t num_indices) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     uint32_t nops = 1 + num_indices;
     lr_operand_desc_t ops[16];
     if (nops > 16) return 0;
@@ -457,7 +458,7 @@ static inline uint32_t lr_emit_gep(lr_session_t *s, lr_type_t *base_type,
 }
 
 static inline void lr_emit_ret(lr_session_t *s, lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_RET; d.type = val.type; d.operands = ops;
     d.num_operands = 1;
@@ -465,13 +466,13 @@ static inline void lr_emit_ret(lr_session_t *s, lr_operand_desc_t val) {
 }
 
 static inline void lr_emit_ret_void(lr_session_t *s) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     d.op = LR_OP_RET_VOID;
     lr_session_emit(s, &d, NULL);
 }
 
 static inline void lr_emit_br(lr_session_t *s, uint32_t target) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {LR_BLOCK(target)};
     d.op = LR_OP_BR; d.operands = ops; d.num_operands = 1;
     lr_session_emit(s, &d, NULL);
@@ -479,14 +480,14 @@ static inline void lr_emit_br(lr_session_t *s, uint32_t target) {
 
 static inline void lr_emit_condbr(lr_session_t *s, lr_operand_desc_t cond,
                                   uint32_t true_id, uint32_t false_id) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[3] = {cond, LR_BLOCK(true_id), LR_BLOCK(false_id)};
     d.op = LR_OP_CONDBR; d.operands = ops; d.num_operands = 3;
     lr_session_emit(s, &d, NULL);
 }
 
 static inline void lr_emit_unreachable(lr_session_t *s) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     d.op = LR_OP_UNREACHABLE;
     lr_session_emit(s, &d, NULL);
 }
@@ -495,7 +496,7 @@ static inline uint32_t lr_emit_call(lr_session_t *s, lr_type_t *ret_type,
                                     lr_operand_desc_t callee,
                                     lr_operand_desc_t *args,
                                     uint32_t num_args) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     uint32_t nops = 1 + num_args;
     lr_operand_desc_t ops[32];
     if (nops > 32) return 0;
@@ -510,7 +511,7 @@ static inline void lr_emit_call_void(lr_session_t *s,
                                      lr_operand_desc_t callee,
                                      lr_operand_desc_t *args,
                                      uint32_t num_args) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     uint32_t nops = 1 + num_args;
     lr_operand_desc_t ops[32];
     if (nops > 32) return;
@@ -524,7 +525,7 @@ static inline uint32_t lr_emit_phi(lr_session_t *s, lr_type_t *ty,
                                    lr_operand_desc_t *vals,
                                    uint32_t *block_ids,
                                    uint32_t num_incoming) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[32];
     uint32_t nops = num_incoming * 2;
     if (nops > 32) return 0;
@@ -540,7 +541,7 @@ static inline uint32_t lr_emit_select(lr_session_t *s, lr_type_t *ty,
                                       lr_operand_desc_t cond,
                                       lr_operand_desc_t true_val,
                                       lr_operand_desc_t false_val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[3] = {cond, true_val, false_val};
     d.op = LR_OP_SELECT; d.type = ty; d.operands = ops; d.num_operands = 3;
     return lr_session_emit(s, &d, NULL);
@@ -548,7 +549,7 @@ static inline uint32_t lr_emit_select(lr_session_t *s, lr_type_t *ty,
 
 static inline uint32_t lr_emit_sext(lr_session_t *s, lr_type_t *to,
                                     lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_SEXT; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -556,7 +557,7 @@ static inline uint32_t lr_emit_sext(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_zext(lr_session_t *s, lr_type_t *to,
                                     lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_ZEXT; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -564,7 +565,7 @@ static inline uint32_t lr_emit_zext(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_trunc(lr_session_t *s, lr_type_t *to,
                                      lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_TRUNC; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -572,7 +573,7 @@ static inline uint32_t lr_emit_trunc(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_bitcast(lr_session_t *s, lr_type_t *to,
                                        lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_BITCAST; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -580,7 +581,7 @@ static inline uint32_t lr_emit_bitcast(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_ptrtoint(lr_session_t *s, lr_type_t *to,
                                         lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_PTRTOINT; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -588,7 +589,7 @@ static inline uint32_t lr_emit_ptrtoint(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_inttoptr(lr_session_t *s, lr_type_t *to,
                                         lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_INTTOPTR; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -596,7 +597,7 @@ static inline uint32_t lr_emit_inttoptr(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_sitofp(lr_session_t *s, lr_type_t *to,
                                       lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_SITOFP; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -604,7 +605,7 @@ static inline uint32_t lr_emit_sitofp(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_uitofp(lr_session_t *s, lr_type_t *to,
                                       lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_UITOFP; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -612,7 +613,7 @@ static inline uint32_t lr_emit_uitofp(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_fptosi(lr_session_t *s, lr_type_t *to,
                                       lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_FPTOSI; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -620,7 +621,7 @@ static inline uint32_t lr_emit_fptosi(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_fptoui(lr_session_t *s, lr_type_t *to,
                                       lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_FPTOUI; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -628,7 +629,7 @@ static inline uint32_t lr_emit_fptoui(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_fpext(lr_session_t *s, lr_type_t *to,
                                      lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_FPEXT; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -636,7 +637,7 @@ static inline uint32_t lr_emit_fpext(lr_session_t *s, lr_type_t *to,
 
 static inline uint32_t lr_emit_fptrunc(lr_session_t *s, lr_type_t *to,
                                        lr_operand_desc_t val) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {val};
     d.op = LR_OP_FPTRUNC; d.type = to; d.operands = ops; d.num_operands = 1;
     return lr_session_emit(s, &d, NULL);
@@ -646,7 +647,7 @@ static inline uint32_t lr_emit_extractvalue(lr_session_t *s, lr_type_t *ty,
                                             lr_operand_desc_t agg,
                                             uint32_t *indices,
                                             uint32_t num_indices) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[1] = {agg};
     d.op = LR_OP_EXTRACTVALUE; d.type = ty; d.operands = ops;
     d.num_operands = 1; d.indices = indices; d.num_indices = num_indices;
@@ -658,7 +659,7 @@ static inline uint32_t lr_emit_insertvalue(lr_session_t *s, lr_type_t *ty,
                                            lr_operand_desc_t val,
                                            uint32_t *indices,
                                            uint32_t num_indices) {
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     lr_operand_desc_t ops[2] = {agg, val};
     d.op = LR_OP_INSERTVALUE; d.type = ty; d.operands = ops;
     d.num_operands = 2; d.indices = indices; d.num_indices = num_indices;
@@ -709,7 +710,7 @@ static inline uint32_t lr_emit_structgep(lr_session_t *s, lr_type_t *sty,
                                          lr_operand_desc_t ptr,
                                          uint32_t field_idx) {
     lr_operand_desc_t ops[3] = {ptr, LR_IMM(0, NULL), LR_IMM(field_idx, NULL)};
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     d.op = LR_OP_GEP; d.type = sty; d.operands = ops; d.num_operands = 3;
     return lr_session_emit(s, &d, NULL);
 }
@@ -744,7 +745,7 @@ static inline uint32_t lr_emit_globalstringptr(lr_session_t *s,
     lr_type_t *arr_ty = lr_type_array_s(s, i8, len + 1);
     uint32_t gid = lr_session_global(s, NULL, arr_ty, true, str, len + 1);
     lr_operand_desc_t ops[2] = {LR_GLOBAL(gid, arr_ty), LR_IMM(0, NULL)};
-    lr_inst_desc_t d = {0};
+    lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     d.op = LR_OP_GEP; d.type = arr_ty; d.operands = ops; d.num_operands = 2;
     return lr_session_emit(s, &d, NULL);
 }
