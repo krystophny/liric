@@ -738,16 +738,24 @@ static inline void lr_emit_memset(lr_session_t *s, uint32_t callee_id,
     lr_emit_call_void(s, LR_GLOBAL(callee_id, ptr), args, 3);
 }
 
+/* Returns a vreg holding a pointer to a null-terminated string constant.
+   The string is placed in a global constant and referenced via a load
+   of the global's address. */
 static inline uint32_t lr_emit_globalstringptr(lr_session_t *s,
                                                const char *str) {
     size_t len = 0;
     while (str[len]) len++;
     lr_type_t *i8 = lr_type_i8_s(s);
     lr_type_t *arr_ty = lr_type_array_s(s, i8, len + 1);
+    lr_type_t *ptr = lr_type_ptr_s(s);
     uint32_t gid = lr_session_global(s, NULL, arr_ty, true, str, len + 1);
-    lr_operand_desc_t ops[2] = {LR_GLOBAL(gid, arr_ty), LR_IMM(0, NULL)};
+    /* Return the global's address directly as a pointer operand.
+       Use a bitcast-like identity load to materialize the address. */
+    uint32_t vreg = lr_session_vreg(s);
     lr_inst_desc_t d; memset(&d, 0, sizeof(d));
-    d.op = LR_OP_GEP; d.type = arr_ty; d.operands = ops; d.num_operands = 2;
+    lr_operand_desc_t ops[1] = {LR_GLOBAL(gid, ptr)};
+    d.op = LR_OP_BITCAST; d.type = ptr; d.operands = ops; d.num_operands = 1;
+    d.dest = vreg;
     return lr_session_emit(s, &d, NULL);
 }
 
