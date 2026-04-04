@@ -321,10 +321,13 @@ if(OPENLIBM_LD_INCLUDE_DIR)
 endif()
 
 set(OPENLIBM_COMPILE_FLAGS
-    -std=c99 -fno-builtin -fno-strict-aliasing -fno-pic -fno-pie
-    -fno-stack-protector -O3 -w
+    -std=c99 -fno-builtin -fno-strict-aliasing -O3 -w
     -D__BSD_VISIBLE -DASSEMBLER
 )
+# Position-independent code: required on macOS, optional on Linux
+if(NOT APPLE)
+    list(APPEND OPENLIBM_COMPILE_FLAGS -fno-pic -fno-pie -fno-stack-protector)
+endif()
 # --- end OpenLibm setup ---
 
 # --- SLEEF: SIMD-vectorized math (AVX2, NEON) ---
