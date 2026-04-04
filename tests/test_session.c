@@ -229,6 +229,7 @@ static void set_compile_mode_env(const char *value) {
 #endif
 }
 
+#if defined(__linux__)
 static int build_runtime_archive_bytes(const char *target_name,
                                        uint32_t backend,
                                        const char *ir_text,
@@ -264,6 +265,7 @@ static int build_runtime_archive_bytes(const char *target_name,
     *out_len = len;
     return 0;
 }
+#endif /* __linux__ */
 
 int test_session_direct_ret_42(void) {
     lr_session_config_t cfg = {0};
