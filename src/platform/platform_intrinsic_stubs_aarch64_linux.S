@@ -1389,3 +1389,193 @@ lr_stub_llvm_umin_i64_begin:
     csel x0, x0, x1, ls
     ret
 lr_stub_llvm_umin_i64_end:
+
+// --- ctpop (population count) ---
+
+.globl lr_stub_llvm_ctpop_i8_begin
+.globl lr_stub_llvm_ctpop_i8_end
+lr_stub_llvm_ctpop_i8_begin:
+    and w0, w0, #0xff
+    fmov s0, w0
+    cnt v0.8b, v0.8b
+    addv b0, v0.8b
+    fmov w0, s0
+    ret
+lr_stub_llvm_ctpop_i8_end:
+
+.globl lr_stub_llvm_ctpop_i16_begin
+.globl lr_stub_llvm_ctpop_i16_end
+lr_stub_llvm_ctpop_i16_begin:
+    and w0, w0, #0xffff
+    fmov s0, w0
+    cnt v0.8b, v0.8b
+    addv b0, v0.8b
+    fmov w0, s0
+    ret
+lr_stub_llvm_ctpop_i16_end:
+
+.globl lr_stub_llvm_ctpop_i32_begin
+.globl lr_stub_llvm_ctpop_i32_end
+lr_stub_llvm_ctpop_i32_begin:
+    fmov s0, w0
+    cnt v0.8b, v0.8b
+    addv b0, v0.8b
+    fmov w0, s0
+    ret
+lr_stub_llvm_ctpop_i32_end:
+
+.globl lr_stub_llvm_ctpop_i64_begin
+.globl lr_stub_llvm_ctpop_i64_end
+lr_stub_llvm_ctpop_i64_begin:
+    fmov d0, x0
+    cnt v0.8b, v0.8b
+    addv b0, v0.8b
+    fmov w0, s0
+    ret
+lr_stub_llvm_ctpop_i64_end:
+
+// --- cttz (count trailing zeros) ---
+
+.globl lr_stub_llvm_cttz_i8_begin
+.globl lr_stub_llvm_cttz_i8_end
+lr_stub_llvm_cttz_i8_begin:
+    and w0, w0, #0xff
+    orr w0, w0, #0x100
+    rbit w0, w0
+    clz w0, w0
+    ret
+lr_stub_llvm_cttz_i8_end:
+
+.globl lr_stub_llvm_cttz_i16_begin
+.globl lr_stub_llvm_cttz_i16_end
+lr_stub_llvm_cttz_i16_begin:
+    and w0, w0, #0xffff
+    orr w0, w0, #0x10000
+    rbit w0, w0
+    clz w0, w0
+    ret
+lr_stub_llvm_cttz_i16_end:
+
+.globl lr_stub_llvm_cttz_i32_begin
+.globl lr_stub_llvm_cttz_i32_end
+lr_stub_llvm_cttz_i32_begin:
+    rbit w0, w0
+    clz w0, w0
+    ret
+lr_stub_llvm_cttz_i32_end:
+
+.globl lr_stub_llvm_cttz_i64_begin
+.globl lr_stub_llvm_cttz_i64_end
+lr_stub_llvm_cttz_i64_begin:
+    rbit x0, x0
+    clz x0, x0
+    ret
+lr_stub_llvm_cttz_i64_end:
+
+// --- fshl (funnel shift left) ---
+
+.globl lr_stub_llvm_fshl_i8_begin
+.globl lr_stub_llvm_fshl_i8_end
+lr_stub_llvm_fshl_i8_begin:
+    and w2, w2, #7
+    lsl w0, w0, w2
+    mov w3, #8
+    sub w3, w3, w2
+    and w1, w1, #0xff
+    lsr w1, w1, w3
+    orr w0, w0, w1
+    and w0, w0, #0xff
+    ret
+lr_stub_llvm_fshl_i8_end:
+
+.globl lr_stub_llvm_fshl_i16_begin
+.globl lr_stub_llvm_fshl_i16_end
+lr_stub_llvm_fshl_i16_begin:
+    and w2, w2, #15
+    lsl w0, w0, w2
+    mov w3, #16
+    sub w3, w3, w2
+    and w1, w1, #0xffff
+    lsr w1, w1, w3
+    orr w0, w0, w1
+    and w0, w0, #0xffff
+    ret
+lr_stub_llvm_fshl_i16_end:
+
+.globl lr_stub_llvm_fshl_i32_begin
+.globl lr_stub_llvm_fshl_i32_end
+lr_stub_llvm_fshl_i32_begin:
+    and w2, w2, #31
+    lsl w0, w0, w2
+    mov w3, #32
+    sub w3, w3, w2
+    lsr w1, w1, w3
+    orr w0, w0, w1
+    ret
+lr_stub_llvm_fshl_i32_end:
+
+.globl lr_stub_llvm_fshl_i64_begin
+.globl lr_stub_llvm_fshl_i64_end
+lr_stub_llvm_fshl_i64_begin:
+    and x2, x2, #63
+    lsl x0, x0, x2
+    mov x3, #64
+    sub x3, x3, x2
+    lsr x1, x1, x3
+    orr x0, x0, x1
+    ret
+lr_stub_llvm_fshl_i64_end:
+
+// --- fshr (funnel shift right) ---
+
+.globl lr_stub_llvm_fshr_i8_begin
+.globl lr_stub_llvm_fshr_i8_end
+lr_stub_llvm_fshr_i8_begin:
+    and w2, w2, #7
+    and w1, w1, #0xff
+    lsr w1, w1, w2
+    mov w3, #8
+    sub w3, w3, w2
+    lsl w0, w0, w3
+    orr w0, w0, w1
+    and w0, w0, #0xff
+    ret
+lr_stub_llvm_fshr_i8_end:
+
+.globl lr_stub_llvm_fshr_i16_begin
+.globl lr_stub_llvm_fshr_i16_end
+lr_stub_llvm_fshr_i16_begin:
+    and w2, w2, #15
+    and w1, w1, #0xffff
+    lsr w1, w1, w2
+    mov w3, #16
+    sub w3, w3, w2
+    lsl w0, w0, w3
+    orr w0, w0, w1
+    and w0, w0, #0xffff
+    ret
+lr_stub_llvm_fshr_i16_end:
+
+.globl lr_stub_llvm_fshr_i32_begin
+.globl lr_stub_llvm_fshr_i32_end
+lr_stub_llvm_fshr_i32_begin:
+    and w2, w2, #31
+    lsr w1, w1, w2
+    mov w3, #32
+    sub w3, w3, w2
+    lsl w0, w0, w3
+    orr w0, w0, w1
+    ret
+lr_stub_llvm_fshr_i32_end:
+
+.globl lr_stub_llvm_fshr_i64_begin
+.globl lr_stub_llvm_fshr_i64_end
+lr_stub_llvm_fshr_i64_begin:
+    and x2, x2, #63
+    lsr x1, x1, x2
+    mov x3, #64
+    sub x3, x3, x2
+    lsl x0, x0, x3
+    orr x0, x0, x1
+    ret
+lr_stub_llvm_fshr_i64_end:
