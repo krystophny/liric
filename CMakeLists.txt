@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.11)
 project(liric VERSION 0.1.0 LANGUAGES C ASM)
 
 set(CMAKE_C_STANDARD 11)
@@ -218,6 +218,119 @@ if(UNIX AND NOT APPLE)
     add_link_options("$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-rdynamic>")
 endif()
 
+# --- OpenLibm: standalone math library (sin, cos, exp, log, sqrt, pow, ...) ---
+include(FetchContent)
+FetchContent_Declare(openlibm
+    GIT_REPOSITORY https://github.com/JuliaMath/openlibm.git
+    GIT_TAG        v0.8.5
+    GIT_SHALLOW    TRUE
+)
+# OpenLibm uses Make, not CMake; populate without configuring.
+cmake_policy(SET CMP0169 OLD)
+FetchContent_Populate(openlibm)
+cmake_policy(SET CMP0169 NEW)
+
+file(GLOB OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/*.c")
+
+set(OPENLIBM_ARCH_C "")
+set(OPENLIBM_ARCH_ASM "")
+set(OPENLIBM_ARCH_INCLUDE_DIR "")
+set(OPENLIBM_LD_INCLUDE_DIR "")
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    set(OPENLIBM_ARCH_INCLUDE_DIR "${openlibm_SOURCE_DIR}/amd64")
+    set(OPENLIBM_LD_INCLUDE_DIR "${openlibm_SOURCE_DIR}/ld80")
+    file(GLOB OPENLIBM_ARCH_C "${openlibm_SOURCE_DIR}/amd64/*.c")
+    file(GLOB OPENLIBM_ARCH_ASM "${openlibm_SOURCE_DIR}/amd64/*.S")
+    # ld80/Make.files: only these files are part of the build
+    set(OPENLIBM_LD_C
+        "${openlibm_SOURCE_DIR}/ld80/invtrig.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_acoshl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_atanhl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_coshl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_expl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_lgammal_r.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_log10l.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_log2l.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_logl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_powl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_sinhl.c"
+        "${openlibm_SOURCE_DIR}/ld80/e_tgammal.c"
+        "${openlibm_SOURCE_DIR}/ld80/k_cosl.c"
+        "${openlibm_SOURCE_DIR}/ld80/k_sinl.c"
+        "${openlibm_SOURCE_DIR}/ld80/k_tanl.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_asinhl.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_erfl.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_exp2l.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_expm1l.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_log1pl.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_nanl.c"
+        "${openlibm_SOURCE_DIR}/ld80/s_tanhl.c"
+    )
+    list(APPEND OPENLIBM_ARCH_C ${OPENLIBM_LD_C})
+    # Remove src/ C files that have amd64 asm replacements
+    foreach(_asm_file ${OPENLIBM_ARCH_ASM})
+        get_filename_component(_stem "${_asm_file}" NAME_WE)
+        list(REMOVE_ITEM OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/${_stem}.c")
+    endforeach()
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(OPENLIBM_ARCH_INCLUDE_DIR "${openlibm_SOURCE_DIR}/aarch64")
+    set(OPENLIBM_LD_INCLUDE_DIR "${openlibm_SOURCE_DIR}/ld128")
+    file(GLOB OPENLIBM_ARCH_C "${openlibm_SOURCE_DIR}/aarch64/*.c")
+    file(GLOB OPENLIBM_LD_C "${openlibm_SOURCE_DIR}/ld128/*.c")
+    list(APPEND OPENLIBM_ARCH_C ${OPENLIBM_LD_C})
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    set(OPENLIBM_ARCH_INCLUDE_DIR "${openlibm_SOURCE_DIR}/riscv64")
+    set(OPENLIBM_LD_INCLUDE_DIR "${openlibm_SOURCE_DIR}/ld128")
+    file(GLOB OPENLIBM_ARCH_C "${openlibm_SOURCE_DIR}/riscv64/*.c")
+    file(GLOB OPENLIBM_LD_C "${openlibm_SOURCE_DIR}/ld128/*.c")
+    list(APPEND OPENLIBM_ARCH_C ${OPENLIBM_LD_C})
+endif()
+
+set(OPENLIBM_ALL_SOURCES ${OPENLIBM_SRC_C} ${OPENLIBM_ARCH_C} ${OPENLIBM_ARCH_ASM})
+
+set(OPENLIBM_INCLUDE_DIRS
+    "${openlibm_SOURCE_DIR}/include"
+    "${openlibm_SOURCE_DIR}/src"
+    "${openlibm_SOURCE_DIR}"
+)
+if(OPENLIBM_ARCH_INCLUDE_DIR)
+    list(APPEND OPENLIBM_INCLUDE_DIRS "${OPENLIBM_ARCH_INCLUDE_DIR}")
+endif()
+if(OPENLIBM_LD_INCLUDE_DIR)
+    list(APPEND OPENLIBM_INCLUDE_DIRS "${OPENLIBM_LD_INCLUDE_DIR}")
+endif()
+
+set(OPENLIBM_COMPILE_FLAGS
+    -std=c99 -fno-builtin -fno-strict-aliasing -fno-pic -fno-pie
+    -fno-stack-protector -O3 -w
+    -D__BSD_VISIBLE -DASSEMBLER
+)
+# --- end OpenLibm setup ---
+
+# --- SLEEF: SIMD-vectorized math (AVX2, NEON) ---
+option(WITH_SLEEF "Build with SLEEF SIMD math library" ON)
+if(WITH_SLEEF)
+    FetchContent_Declare(sleef
+        GIT_REPOSITORY https://github.com/shibatch/sleef.git
+        GIT_TAG        3.7
+        GIT_SHALLOW    TRUE
+    )
+    set(SLEEF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SLEEF_BUILD_DFT OFF CACHE BOOL "" FORCE)
+    set(SLEEF_BUILD_SCALAR_LIB OFF CACHE BOOL "" FORCE)
+    set(SLEEF_BUILD_GNUABI_LIBS OFF CACHE BOOL "" FORCE)
+    set(BUILD_SHARED_LIBS_SAVED "${BUILD_SHARED_LIBS}")
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    # SLEEF does not compile cleanly with -Werror; temporarily remove it.
+    get_directory_property(_saved_compile_opts COMPILE_OPTIONS)
+    set_directory_properties(PROPERTIES COMPILE_OPTIONS "")
+    FetchContent_MakeAvailable(sleef)
+    set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_saved_compile_opts}")
+    set(BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS_SAVED}" CACHE BOOL "" FORCE)
+endif()
+# --- end SLEEF setup ---
+
 set(LIRIC_LIB_SOURCES
     src/arena.c
     src/ir.c
@@ -276,6 +389,15 @@ endif()
 add_library(liric STATIC ${LIRIC_LIB_SOURCES} ${LIRIC_PLATFORM_ASM_SOURCES})
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
+# Embed OpenLibm objects into libliric.a
+target_sources(liric PRIVATE ${OPENLIBM_ALL_SOURCES})
+set_source_files_properties(${OPENLIBM_ALL_SOURCES} TARGET_DIRECTORY liric
+    PROPERTIES COMPILE_OPTIONS "${OPENLIBM_COMPILE_FLAGS}"
+              INCLUDE_DIRECTORIES "${OPENLIBM_INCLUDE_DIRS}"
+)
+if(WITH_SLEEF)
+    target_link_libraries(liric PRIVATE sleef)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
     add_executable(stencil_gen tools/stencil_gen.c)
     target_include_directories(stencil_gen PRIVATE src)
@@ -327,6 +449,14 @@ if(WITH_REAL_LLVM_BACKEND)
     add_library(liric_nollvm STATIC ${LIRIC_LIB_SOURCES} ${LIRIC_PLATFORM_ASM_SOURCES})
     target_include_directories(liric_nollvm PUBLIC include)
     target_include_directories(liric_nollvm PRIVATE src)
+    target_sources(liric_nollvm PRIVATE ${OPENLIBM_ALL_SOURCES})
+    set_source_files_properties(${OPENLIBM_ALL_SOURCES} TARGET_DIRECTORY liric_nollvm
+        PROPERTIES COMPILE_OPTIONS "${OPENLIBM_COMPILE_FLAGS}"
+                  INCLUDE_DIRECTORIES "${OPENLIBM_INCLUDE_DIRS}"
+    )
+    if(WITH_SLEEF)
+        target_link_libraries(liric_nollvm PRIVATE sleef)
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
         add_dependencies(liric_nollvm liric_stencil_data)
         target_include_directories(liric_nollvm PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
