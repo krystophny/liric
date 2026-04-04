@@ -231,15 +231,21 @@ FetchContent_Populate(openlibm)
 cmake_policy(SET CMP0169 NEW)
 
 file(GLOB OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/*.c")
-# On macOS arm64, long double == double (LDBL_MANT_DIG == 53).
-# OpenLibm's long-double functions assume 80-bit or 128-bit extended precision
-# and fail with "Unsupported long double format". Exclude ALL *l.c files there.
+# OpenLibm long-double files that use #error "Unsupported long double format"
+# when LDBL_MANT_DIG is not 64 (ld80) or 113 (ld128). On macOS arm64,
+# long double == double (LDBL_MANT_DIG == 53), so these must be excluded.
+# Also exclude complex long-double functions that use MACHEPL.
+set(_openlibm_ld_exclude
+    s_cbrtl s_cosl s_frexpl s_nextafterl s_nexttoward s_rintl
+    s_scalbnl s_sincosl s_sinl s_tanl
+    s_casinl s_ctanl s_csinl s_ccosl s_cexpl s_clogl s_catanl
+    s_cpowl s_csqrtl s_catanhl s_ceill s_floorl s_truncl
+    s_modfl s_fmal s_nanl
+)
 if(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    list(FILTER OPENLIBM_SRC_C EXCLUDE REGEX "[a-z]l\\.c$")
-else()
-    # Exclude only the complex long-double functions that reference MACHEPL
-    # (requires LDBL_MANT_DIG == 64 or 113, not available on all platforms)
-    list(FILTER OPENLIBM_SRC_C EXCLUDE REGEX "s_casinl\\.c|s_ctanl\\.c|s_csinl\\.c|s_ccosl\\.c|s_cexpl\\.c|s_clogl\\.c|s_catanl\\.c|s_cpowl\\.c|s_csqrtl\\.c|s_catanhl\\.c")
+    foreach(_f ${_openlibm_ld_exclude})
+        list(REMOVE_ITEM OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/${_f}.c")
+    endforeach()
 endif()
 
 set(OPENLIBM_ARCH_C "")
