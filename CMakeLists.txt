@@ -232,9 +232,13 @@ FetchContent_Declare(openlibm
     GIT_SHALLOW    TRUE
 )
 # OpenLibm uses Make, not CMake; populate without configuring.
-cmake_policy(SET CMP0169 OLD)
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+endif()
 FetchContent_Populate(openlibm)
-cmake_policy(SET CMP0169 NEW)
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 NEW)
+endif()
 
 file(GLOB OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/*.c")
 # OpenLibm long-double files that use #error "Unsupported long double format"
