@@ -628,6 +628,13 @@ public:
             Idx, Name.c_str()));
     }
 
+    Value *CreateConstGEP1_32(Type *Ty, Value *Ptr,
+                              unsigned Idx0,
+                              const Twine &Name = "") {
+        Value *i0 = ConstantInt::get(getInt32Ty(), Idx0);
+        return CreateGEP(Ty, Ptr, ArrayRef<Value *>(&i0, 1), Name);
+    }
+
     Value *CreateConstGEP2_32(Type *Ty, Value *Ptr,
                               unsigned Idx0, unsigned Idx1,
                               const Twine &Name = "") {
