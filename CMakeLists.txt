@@ -4,6 +4,11 @@ project(liric VERSION 0.1.0 LANGUAGES C ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# openlibm hand-written asm contains R_X86_64_32S relocations incompatible
+# with PIE executables; disable PIE globally for all executables.
+if(UNIX AND NOT APPLE)
+    add_link_options($<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:-no-pie>)
+endif()
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -1412,6 +1417,7 @@ if(WITH_LLVM_COMPAT)
     set(CMAKE_CXX_STANDARD 17)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     add_executable(test_llvm_compat tests/test_llvm_compat.cpp)
+    target_include_directories(test_llvm_compat PRIVATE include/liric src)
     target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
     target_compile_options(test_llvm_compat PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter

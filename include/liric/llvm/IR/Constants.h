@@ -1,0 +1,401 @@
+#ifndef LLVM_IR_CONSTANTS_H
+#define LLVM_IR_CONSTANTS_H
+
+#include "llvm/IR/Value.h"
+#include "llvm/IR/Type.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/ADT/APInt.h"
+#include "llvm/ADT/APFloat.h"
+#include "llvm/ADT/ArrayRef.h"
+#include <liric/liric_compat.h>
+#include <string>
+#include <vector>
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
+namespace liric_llvm {
+
+class Module;
+class Function;
+class BasicBlock;
+class Constant;
+
+lc_module_compat_t *liric_get_current_module();
+
+class Constant : public Value {
+public:
+    static Constant *getNullValue(Type *Ty) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
+        return static_cast<Constant *>(Value::wrap(
+            lc_value_const_null(mod, Ty->impl())));
+    }
+
+    static Constant *getAllOnesValue(Type *Ty) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
+        if (Ty->isIntegerTy()) {
+            return static_cast<Constant *>(Value::wrap(
+                lc_value_const_int(mod, Ty->impl(), -1,
+                                   lc_type_int_width(Ty->impl()))));
+        }
+        return getNullValue(Ty);
+    }
+
+    bool isNullValue() const {
+        return impl()->kind == LC_VAL_CONST_NULL;
+    }
+
+    bool isZeroValue() const {
+        if (impl()->kind == LC_VAL_CONST_NULL) return true;
+        if (impl()->kind == LC_VAL_CONST_INT) return impl()->const_int.val == 0;
+        if (impl()->kind == LC_VAL_CONST_FP) return impl()->const_fp.val == 0.0;
+        return false;
+    }
+
+    Constant *getAggregateElement(unsigned Elt) const {
+        (void)Elt;
+        return nullptr;
+    }
+
+    static bool classof(const Value *V) {
+        if (!V) return false;
+        lc_value_kind_t k = V->impl()->kind;
+        return k == LC_VAL_CONST_INT || k == LC_VAL_CONST_FP ||
+               k == LC_VAL_CONST_NULL || k == LC_VAL_CONST_UNDEF ||
+               k == LC_VAL_CONST_AGGREGATE || k == LC_VAL_GLOBAL;
+    }
+};
+
+class ConstantInt : public Constant {
+public:
+    static ConstantInt *get(Type *Ty, uint64_t V, bool isSigned = false) {
+        (void)isSigned;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
+        return static_cast<ConstantInt *>(Value::wrap(
+            lc_value_const_int(mod, Ty->impl(),
+                               static_cast<int64_t>(V),
+                               lc_type_int_width(Ty->impl()))));
+    }
+
+    static ConstantInt *get(IntegerType *Ty, uint64_t V, bool isSigned = false) {
+        return get(static_cast<Type *>(Ty), V, isSigned);
+    }
+
+    static ConstantInt *get(LLVMContext &C, const APInt &V) {
+        (void)C;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        unsigned width = V.getBitWidth();
+        lr_type_t *ty = lc_get_int_type(mod, width);
+        return static_cast<ConstantInt *>(Value::wrap(
+            lc_value_const_int(mod, ty,
+                               static_cast<int64_t>(V.getZExtValue()),
+                               width)));
+    }
+
+    static ConstantInt *get(Type *Ty, const APInt &V) {
+        return get(Ty, V.getZExtValue(), false);
+    }
+
+    static ConstantInt *getSigned(Type *Ty, int64_t V) {
+        if (!Ty || !Ty->impl()) return nullptr;
+        return get(Ty, static_cast<uint64_t>(V), true);
+    }
+
+    static ConstantInt *getTrue(LLVMContext &C) {
+        (void)C;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        return static_cast<ConstantInt *>(Value::wrap(
+            lc_value_const_int(mod, lc_get_int_type(mod, 1), 1, 1)));
+    }
+
+    static ConstantInt *getFalse(LLVMContext &C) {
+        (void)C;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        return static_cast<ConstantInt *>(Value::wrap(
+            lc_value_const_int(mod, lc_get_int_type(mod, 1), 0, 1)));
+    }
+
+    int64_t getSExtValue() const { return impl()->const_int.val; }
+    uint64_t getZExtValue() const {
+        return static_cast<uint64_t>(impl()->const_int.val);
+    }
+
+    const APInt &getValue() const {
+        static thread_local APInt cached;
+        cached = APInt(impl()->const_int.width,
+                       static_cast<uint64_t>(impl()->const_int.val));
+        return cached;
+    }
+
+    unsigned getBitWidth() const { return impl()->const_int.width; }
+
+    bool isZero() const { return impl()->const_int.val == 0; }
+    bool isOne() const { return impl()->const_int.val == 1; }
+    bool isNegative() const { return impl()->const_int.val < 0; }
+
+    static bool classof(const Value *V) {
+        return V && V->impl()->kind == LC_VAL_CONST_INT;
+    }
+};
+
+class ConstantFP : public Constant {
+public:
+    static ConstantFP *get(Type *Ty, double V) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
+        bool is_double = Ty->isDoubleTy();
+        return static_cast<ConstantFP *>(Value::wrap(
+            lc_value_const_fp(mod, Ty->impl(), V, is_double)));
+    }
+
+    static ConstantFP *get(Type *Ty, const APFloat &V) {
+        if (!Ty || !Ty->impl()) return nullptr;
+        return get(Ty, V.convertToDouble());
+    }
+
+    static ConstantFP *get(Type *Ty, StringRef Str) {
+        if (!Ty || !Ty->impl()) return nullptr;
+        double v = 0.0;
+        try { v = std::stod(Str.str()); } catch (...) {}
+        return get(Ty, v);
+    }
+
+    static ConstantFP *get(LLVMContext &C, const APFloat &V) {
+        (void)C;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        bool is_double = !V.isSinglePrecision();
+        lr_type_t *ty = is_double ? lc_get_double_type(mod)
+                                  : lc_get_float_type(mod);
+        return static_cast<ConstantFP *>(Value::wrap(
+            lc_value_const_fp(mod, ty, V.convertToDouble(), is_double)));
+    }
+
+    double getValueAPF_double() const { return impl()->const_fp.val; }
+
+    const APFloat &getValueAPF() const {
+        static thread_local APFloat cached(0.0);
+        cached = APFloat(impl()->const_fp.val);
+        return cached;
+    }
+
+    bool isZero() const { return impl()->const_fp.val == 0.0; }
+
+    static bool classof(const Value *V) {
+        return V && V->impl()->kind == LC_VAL_CONST_FP;
+    }
+};
+
+class ConstantPointerNull : public Constant {
+public:
+    static ConstantPointerNull *get(PointerType *T) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !T || !T->impl()) return nullptr;
+        return static_cast<ConstantPointerNull *>(Value::wrap(
+            lc_value_const_null(mod, T->impl())));
+    }
+};
+
+class UndefValue : public Constant {
+public:
+    static UndefValue *get(Type *Ty) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
+        return static_cast<UndefValue *>(Value::wrap(
+            lc_value_undef(mod, Ty->impl())));
+    }
+};
+
+class PoisonValue : public Constant {
+public:
+    static PoisonValue *get(Type *Ty) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !Ty || !Ty->impl()) return nullptr;
+        return static_cast<PoisonValue *>(Value::wrap(
+            lc_value_undef(mod, Ty->impl())));
+    }
+};
+
+class ConstantStruct : public Constant {
+public:
+    static Constant *get(StructType *T, ArrayRef<Constant *> V) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !T || !T->impl()) return nullptr;
+        std::vector<lc_value_t *> values(V.size(), nullptr);
+        for (size_t i = 0; i < V.size(); i++)
+            values[i] = V[i] ? V[i]->impl() : nullptr;
+        lc_value_t *agg = lc_const_struct_from_values(
+            mod, T->impl(), values.empty() ? nullptr : values.data(),
+            static_cast<uint32_t>(values.size()));
+        return static_cast<Constant *>(Value::wrap(agg));
+    }
+};
+
+class ConstantArray : public Constant {
+public:
+    static Constant *get(ArrayType *T, ArrayRef<Constant *> V) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod || !T || !T->impl()) return nullptr;
+        std::vector<lc_value_t *> values(V.size(), nullptr);
+        for (size_t i = 0; i < V.size(); i++)
+            values[i] = V[i] ? V[i]->impl() : nullptr;
+        lc_value_t *agg = lc_const_array_from_values(
+            mod, T->impl(), values.empty() ? nullptr : values.data(),
+            static_cast<uint32_t>(values.size()));
+        return static_cast<Constant *>(Value::wrap(agg));
+    }
+};
+
+class ConstantDataArray : public Constant {
+public:
+    static Constant *getString(LLVMContext &C, StringRef Str,
+                               bool AddNull = true) {
+        (void)C;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        std::string bytes(Str.data(), Str.size());
+        if (AddNull)
+            bytes.push_back('\0');
+        lr_type_t *elem = lc_get_int_type(mod, 8);
+        lr_type_t *arr = lr_type_array_new(lc_module_get_ir(mod),
+                                           elem, bytes.size());
+        return static_cast<Constant *>(Value::wrap(
+            lc_value_const_aggregate(mod, arr,
+                                     bytes.empty() ? nullptr : bytes.data(),
+                                     bytes.size())));
+    }
+
+    static Constant *get(LLVMContext &C, ArrayRef<uint8_t> Elts) {
+        (void)C;
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        lr_type_t *elem = lc_get_int_type(mod, 8);
+        lr_type_t *arr = lr_type_array_new(lc_module_get_ir(mod),
+                                            elem, Elts.size());
+        return static_cast<Constant *>(Value::wrap(
+            lc_value_const_aggregate(mod, arr,
+                                     Elts.empty() ? nullptr : Elts.data(),
+                                     Elts.size())));
+    }
+};
+
+class ConstantAggregateZero : public Constant {
+public:
+    static ConstantAggregateZero *get(Type *Ty) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        if (!mod) return nullptr;
+        return static_cast<ConstantAggregateZero *>(Value::wrap(
+            lc_value_const_null(mod, Ty->impl())));
+    }
+};
+
+class ConstantExpr : public Constant {
+public:
+    static Constant *getBitCast(Constant *C, Type *Ty) {
+        (void)Ty;
+        return C;
+    }
+    static Constant *getPointerCast(Constant *C, Type *Ty) {
+        (void)Ty;
+        return C;
+    }
+    static Constant *getIntToPtr(Constant *C, Type *Ty) {
+        (void)Ty;
+        return C;
+    }
+    static Constant *getPtrToInt(Constant *C, Type *Ty) {
+        (void)Ty;
+        return C;
+    }
+    static Constant *getGetElementPtr(Type *Ty, Constant *C,
+                                      ArrayRef<Constant *> IdxList,
+                                      bool InBounds = false) {
+        (void)InBounds;
+        return gepFromConstantIndices(Ty, C, IdxList);
+    }
+    static Constant *getGetElementPtr(Type *Ty, Constant *C,
+                                      Constant *Idx,
+                                      bool InBounds = false) {
+        (void)InBounds;
+        Constant *arr[1] = { Idx };
+        return gepFromConstantIndices(Ty, C, ArrayRef<Constant *>(arr, 1));
+    }
+
+    static Constant *getCast(unsigned Op, Constant *C, Type *Ty) {
+        (void)Op; (void)Ty;
+        return C;
+    }
+
+    static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
+                                              ArrayRef<Constant *> IdxList) {
+        return gepFromConstantIndices(Ty, C, IdxList);
+    }
+
+    static Constant *getInBoundsGetElementPtr(Type *Ty, Constant *C,
+                                              ArrayRef<Value *> IdxList) {
+        std::vector<Constant *> const_idx;
+        const_idx.reserve(IdxList.size());
+        for (Value *v : IdxList) {
+            if (!v || !v->impl() || v->impl()->kind != LC_VAL_CONST_INT)
+                return C;
+            const_idx.push_back(static_cast<Constant *>(v));
+        }
+        return gepFromConstantIndices(Ty, C,
+                                      ArrayRef<Constant *>(const_idx.data(),
+                                                           const_idx.size()));
+    }
+
+private:
+    static Constant *gepFromConstantIndices(Type *Ty, Constant *C,
+                                            ArrayRef<Constant *> IdxList) {
+        lc_module_compat_t *mod = liric_get_current_module();
+        lc_value_t *base;
+        std::vector<lc_value_t *> idx_vals;
+        int64_t addend = 0;
+
+        if (!Ty || !Ty->impl() || !C || !mod || !C->impl())
+            return C;
+        base = C->impl();
+        if (base->kind != LC_VAL_GLOBAL)
+            return C;
+
+        idx_vals.reserve(IdxList.size());
+        for (Constant *idx : IdxList) {
+            if (!idx || !idx->impl() || idx->impl()->kind != LC_VAL_CONST_INT)
+                return C;
+            idx_vals.push_back(idx->impl());
+        }
+
+        if (lc_const_gep_compute_offset(Ty->impl(),
+                idx_vals.empty() ? nullptr : idx_vals.data(),
+                static_cast<uint32_t>(idx_vals.size()),
+                &addend) != 0) {
+            return C;
+        }
+        return static_cast<Constant *>(Value::wrap(
+            lc_value_global_with_addend(mod, base, addend)));
+    }
+};
+
+class BlockAddress : public Constant {
+public:
+    static BlockAddress *get(Function *F, BasicBlock *BB) {
+        (void)F; (void)BB;
+        return nullptr;
+    }
+};
+
+} // namespace liric_llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
+
+#endif
