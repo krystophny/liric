@@ -314,6 +314,8 @@ int test_session_ir_exe_loop(void);
 int test_session_direct_exe_ret_42(void);
 int test_session_direct_exe_branch(void);
 int test_session_direct_exe_call(void);
+int test_session_direct_exe_loop_phi(void);
+int test_session_direct_exe_counted_loop_phi(void);
 int test_session_direct_jit_and_exe(void);
 int test_session_blob_import_emit_exe_sets_executable_bit(void);
 int test_runtime_archive_roundtrip_metadata(void);
@@ -600,6 +602,8 @@ int main(void) {
     RUN_TEST(test_session_direct_exe_ret_42);
     RUN_TEST(test_session_direct_exe_branch);
     RUN_TEST(test_session_direct_exe_call);
+    RUN_TEST(test_session_direct_exe_loop_phi);
+    RUN_TEST(test_session_direct_exe_counted_loop_phi);
     RUN_TEST(test_session_direct_jit_and_exe);
     RUN_TEST(test_session_blob_import_emit_exe_sets_executable_bit);
     RUN_TEST(test_runtime_archive_roundtrip_metadata);

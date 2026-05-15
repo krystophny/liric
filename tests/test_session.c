@@ -2113,6 +2113,118 @@ int test_session_direct_exe_call(void) {
     return 0;
 }
 
+int test_session_direct_exe_loop_phi(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t loop_id = lr_session_block(s);
+    uint32_t exit_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    lr_emit_br(s, loop_id);
+
+    lr_session_set_block(s, loop_id, &err);
+    lr_operand_desc_t phi_i_v[] = {LR_IMM(0, i32), LR_VREG(2, i32)};
+    uint32_t phi_i_b[] = {entry_id, loop_id};
+    uint32_t vi = lr_emit_phi(s, i32, phi_i_v, phi_i_b, 2);
+
+    lr_operand_desc_t phi_s_v[] = {LR_IMM(0, i32), LR_VREG(3, i32)};
+    uint32_t phi_s_b[] = {entry_id, loop_id};
+    uint32_t vs = lr_emit_phi(s, i32, phi_s_v, phi_s_b, 2);
+
+    uint32_t vnext = lr_emit_add(s, i32, LR_VREG(vi, i32), LR_IMM(1, i32));
+    uint32_t vsum_next = lr_emit_add(s, i32, LR_VREG(vs, i32), LR_VREG(vnext, i32));
+
+    uint32_t vdone = lr_emit_icmp(s, LR_CMP_EQ, LR_VREG(vnext, i32), LR_IMM(10, i32));
+    lr_emit_condbr(s, LR_VREG(vdone, i1), exit_id, loop_id);
+
+    lr_session_set_block(s, exit_id, &err);
+    lr_emit_ret(s, LR_VREG(vsum_next, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_direct_loop_phi";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 55);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 55");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
+int test_session_direct_exe_counted_loop_phi(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.mode = LR_MODE_DIRECT;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+
+    int rc = lr_session_func_begin(s, "_start", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    uint32_t entry_id = lr_session_block(s);
+    uint32_t header_id = lr_session_block(s);
+    uint32_t body_id = lr_session_block(s);
+    uint32_t exit_id = lr_session_block(s);
+
+    lr_session_set_block(s, entry_id, &err);
+    lr_emit_br(s, header_id);
+
+    lr_session_set_block(s, header_id, &err);
+    lr_operand_desc_t phi_i_v[] = {LR_IMM(1, i32), LR_VREG(4, i32)};
+    uint32_t phi_i_b[] = {entry_id, body_id};
+    uint32_t vi = lr_emit_phi(s, i32, phi_i_v, phi_i_b, 2);
+
+    lr_operand_desc_t phi_total_v[] = {LR_IMM(0, i32), LR_VREG(3, i32)};
+    uint32_t phi_total_b[] = {entry_id, body_id};
+    uint32_t vtotal = lr_emit_phi(s, i32, phi_total_v, phi_total_b, 2);
+
+    uint32_t vcond = lr_emit_icmp(s, LR_CMP_SLE, LR_VREG(vi, i32), LR_IMM(3, i32));
+    lr_emit_condbr(s, LR_VREG(vcond, i1), body_id, exit_id);
+
+    lr_session_set_block(s, body_id, &err);
+    uint32_t vtotal_next = lr_emit_add(s, i32, LR_VREG(vtotal, i32), LR_VREG(vi, i32));
+    uint32_t vi_next = lr_emit_add(s, i32, LR_VREG(vi, i32), LR_IMM(1, i32));
+    lr_emit_br(s, header_id);
+
+    lr_session_set_block(s, exit_id, &err);
+    lr_emit_ret(s, LR_VREG(vtotal, i32));
+
+    TEST_ASSERT_EQ(vtotal_next, 3, "total_next vreg matches PHI input");
+    TEST_ASSERT_EQ(vi_next, 4, "i_next vreg matches PHI input");
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    const char *path = "/tmp/liric_test_direct_counted_loop_phi";
+    rc = lr_session_emit_exe(s, path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit exe");
+
+    rc = run_exe_expect(path, 6);
+    TEST_ASSERT_EQ(rc, 0, "exe exit code 6");
+
+    remove(path);
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_direct_jit_and_exe(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;

@@ -708,9 +708,9 @@ int main(int argc, char **argv) {
     {
         double ratio = (ip_lr_total > 0.0) ? ip_tcc_total / ip_lr_total : 0.0;
         printf("%-32s %10s %10s %7s\n", "----", "-------", "--------", "-----");
-        printf("%-32s %10.1f %10.1f %6.1fx  (%d/%zu passed)\n",
+        printf("%-32s %10.1f %10.1f %6.1fx  (%d/%zu passed, %d skipped)\n",
                "TOTAL", ip_tcc_total, ip_lr_total, ratio,
-               inproc_passed, corpus.count);
+               inproc_passed, corpus.count, inproc_skipped);
     }
 
     printf("\nAll times in microseconds (us). ratio > 1 = liric faster.\n");
