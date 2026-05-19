@@ -241,6 +241,9 @@ if(POLICY CMP0169)
 endif()
 
 file(GLOB OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/*.c")
+foreach(_f s_ccos s_ccosf s_csin s_csinf s_ctan s_ctanf)
+    list(REMOVE_ITEM OPENLIBM_SRC_C "${openlibm_SOURCE_DIR}/src/${_f}.c")
+endforeach()
 # OpenLibm long-double files that use #error "Unsupported long double format"
 # when LDBL_MANT_DIG is not 64 (ld80) or 113 (ld128). On macOS arm64,
 # long double == double (LDBL_MANT_DIG == 53), so these must be excluded.

@@ -134,6 +134,11 @@ public:
             return reinterpret_cast<Argument *>(av);
         }
 
+        Argument &operator[](int offset) const {
+            lc_value_t *av = lc_func_get_arg(mod_, func_val_, idx_ + offset);
+            return *reinterpret_cast<Argument *>(av);
+        }
+
         arg_iterator &operator++() { ++idx_; return *this; }
         bool operator!=(const arg_iterator &o) const { return idx_ != o.idx_; }
         bool operator==(const arg_iterator &o) const { return idx_ == o.idx_; }

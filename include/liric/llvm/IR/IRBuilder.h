@@ -33,6 +33,11 @@ public:
     Value *CreateAdd(Value *, Value *, const Twine & = "") { return nullptr; }
 };
 
+class FastMathFlags {
+public:
+    void setFast() {}
+};
+
 template <typename FolderTy = NoFolder, typename InserterTy = void>
 class IRBuilder {
     lc_module_compat_t *mod_;
@@ -121,6 +126,7 @@ public:
     }
 
     LLVMContext &getContext() const { return ctx_; }
+    void setFastMathFlags(const FastMathFlags &) {}
 
     void SetModule(lc_module_compat_t *mod) { mod_ = mod; }
     void SetModule(Module *mod) { mod_ = mod ? mod->getCompat() : nullptr; }

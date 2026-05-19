@@ -6,6 +6,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include <liric/llvm_compat_c.h>
+#include <iterator>
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC visibility push(hidden)
@@ -26,6 +27,12 @@ class BasicBlock : public Value {
 public:
     class iterator {
     public:
+        using iterator_category = std::forward_iterator_tag;
+        using difference_type = std::ptrdiff_t;
+        using value_type = Instruction *;
+        using pointer = Instruction **;
+        using reference = Instruction *&;
+
         enum kind_t {
             at_end,
             first_insertion,
@@ -34,6 +41,14 @@ public:
         explicit iterator(kind_t kind = at_end) : kind_(kind) {}
 
         kind_t kind() const { return kind_; }
+        iterator &operator++() { return *this; }
+        iterator operator++(int) { return *this; }
+        bool operator==(const iterator &other) const {
+            return kind_ == other.kind_;
+        }
+        bool operator!=(const iterator &other) const {
+            return !(*this == other);
+        }
 
     private:
         kind_t kind_;

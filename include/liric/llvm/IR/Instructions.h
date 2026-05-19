@@ -4,6 +4,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/Support/Alignment.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC visibility push(hidden)
@@ -31,6 +32,10 @@ public:
 
     void setAlignment(unsigned A) { (void)A; }
     void setAlignment(uint64_t A) { (void)A; }
+    Align getAlign() const { return Align(1); }
+    BasicBlock::iterator getIterator() {
+        return BasicBlock::iterator(BasicBlock::iterator::first_insertion);
+    }
 };
 
 class PHINode : public Instruction {
