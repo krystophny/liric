@@ -24,6 +24,7 @@ typedef struct lr_type_context_node {
     const lr_type_t *type;
     const void *context;
     struct lr_type_context_node *next;
+    struct lr_type_context_node *bucket_next;
 } lr_type_context_node_t;
 
 typedef struct lr_vector_type_node {
@@ -57,6 +58,9 @@ static _Thread_local lr_ptr_lc_value_node_t
 static _Thread_local lr_ptr_void_node_t *g_function_wrappers;
 static _Thread_local lr_ptr_void_node_t *g_block_parents;
 static _Thread_local lr_type_context_node_t *g_type_contexts;
+#define LR_TYPE_CONTEXT_BUCKETS 16384u
+static _Thread_local lr_type_context_node_t
+    *g_type_context_buckets[LR_TYPE_CONTEXT_BUCKETS];
 static _Thread_local const lr_type_t *g_last_type_context_type;
 static _Thread_local const void *g_last_type_context;
 static _Thread_local lr_vector_type_node_t *g_vector_types;
@@ -111,6 +115,47 @@ static lr_ptr_lc_value_node_t *lr_find_lc_value_node(const void *key) {
         it = it->bucket_next;
     }
     return NULL;
+}
+
+static unsigned lr_type_context_bucket(const lr_type_t *ty) {
+    uintptr_t x = (uintptr_t)ty;
+    x >>= 4;
+    x *= (uintptr_t)11400714819323198485ull;
+    return (unsigned)(x & (LR_TYPE_CONTEXT_BUCKETS - 1u));
+}
+
+static lr_type_context_node_t *lr_find_type_context_node(const lr_type_t *ty) {
+    lr_type_context_node_t *it;
+    if (!ty)
+        return NULL;
+    it = g_type_context_buckets[lr_type_context_bucket(ty)];
+    while (it) {
+        if (it->type == ty)
+            return it;
+        it = it->bucket_next;
+    }
+    return NULL;
+}
+
+static void lr_unlink_type_context_bucket(lr_type_context_node_t *node) {
+    lr_type_context_node_t *it;
+    lr_type_context_node_t *prev = NULL;
+    unsigned bucket;
+    if (!node || !node->type)
+        return;
+    bucket = lr_type_context_bucket(node->type);
+    it = g_type_context_buckets[bucket];
+    while (it) {
+        if (it == node) {
+            if (prev)
+                prev->bucket_next = it->bucket_next;
+            else
+                g_type_context_buckets[bucket] = it->bucket_next;
+            return;
+        }
+        prev = it;
+        it = it->bucket_next;
+    }
 }
 
 static lr_ptr_void_node_t *lr_find_void_node(lr_ptr_void_node_t *head,
@@ -330,22 +375,19 @@ void lr_llvm_compat_unregister_blocks_for_function(void *fn_wrapper) {
 
 void lr_llvm_compat_register_type_context(const lr_type_t *ty,
                                           const void *ctx) {
-    lr_type_context_node_t *it;
     lr_type_context_node_t *node;
+    unsigned bucket;
     if (!ty || !ctx)
         return;
     if (g_last_type_context_type == ty) {
         g_last_type_context = ctx;
     }
-    it = g_type_contexts;
-    while (it) {
-        if (it->type == ty) {
-            it->context = ctx;
-            g_last_type_context_type = ty;
-            g_last_type_context = ctx;
-            return;
-        }
-        it = it->next;
+    node = lr_find_type_context_node(ty);
+    if (node) {
+        node->context = ctx;
+        g_last_type_context_type = ty;
+        g_last_type_context = ctx;
+        return;
     }
     node = (lr_type_context_node_t *)calloc(1, sizeof(*node));
     if (!node)
@@ -354,23 +396,24 @@ void lr_llvm_compat_register_type_context(const lr_type_t *ty,
     node->context = ctx;
     node->next = g_type_contexts;
     g_type_contexts = node;
+    bucket = lr_type_context_bucket(ty);
+    node->bucket_next = g_type_context_buckets[bucket];
+    g_type_context_buckets[bucket] = node;
     g_last_type_context_type = ty;
     g_last_type_context = ctx;
 }
 
 const void *lr_llvm_compat_lookup_type_context(const lr_type_t *ty) {
-    lr_type_context_node_t *it = g_type_contexts;
+    lr_type_context_node_t *node;
     if (!ty)
         return NULL;
     if (g_last_type_context_type == ty)
         return g_last_type_context;
-    while (it) {
-        if (it->type == ty) {
-            g_last_type_context_type = ty;
-            g_last_type_context = it->context;
-            return it->context;
-        }
-        it = it->next;
+    node = lr_find_type_context_node(ty);
+    if (node) {
+        g_last_type_context_type = ty;
+        g_last_type_context = node->context;
+        return node->context;
     }
     return NULL;
 }
@@ -448,6 +491,11 @@ void lr_llvm_compat_unregister_type_contexts(const void *ctx) {
                 prev->next = it->next;
             else
                 g_type_contexts = it->next;
+            lr_unlink_type_context_bucket(dead);
+            if (g_last_type_context_type == dead_type) {
+                g_last_type_context_type = NULL;
+                g_last_type_context = NULL;
+            }
             it = it->next;
             free(dead);
             continue;
