@@ -177,6 +177,9 @@ typedef struct lr_module {
     lr_type_t *type_ptr;
     void *obj_ctx;
     bool local_function_collision_scan_dirty;
+    void *sym_to_global;  /* lr_global_t** */
+    void *sym_to_func;    /* lr_func_t** */
+    uint32_t sym_to_cap;
 } lr_module_t;
 
 lr_module_t *lr_module_create(lr_arena_t *arena);

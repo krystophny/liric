@@ -183,6 +183,11 @@ lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t er
 void lr_module_free(lr_module_t *m) {
     if (!m) return;
     drop_cached_array_types(m);
+    free(m->sym_to_global);
+    free(m->sym_to_func);
+    m->sym_to_global = NULL;
+    m->sym_to_func = NULL;
+    m->sym_to_cap = 0;
     lr_arena_destroy(m->arena);
 }
 

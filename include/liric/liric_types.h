@@ -156,6 +156,14 @@ struct lr_module {
     lr_type_t *type_ptr;
     void *obj_ctx;
     bool local_function_collision_scan_dirty;
+    /* Lazy sym_id -> lr_global_t* / lr_func_t* indexes built on demand
+       by objfile.c's link path.  Both arrays are sized to num_symbols
+       and indexed by sym_id; NULL entries mean "not a global/func".
+       Invalidated (set to NULL) whenever a new symbol id can shift the
+       mapping; obj_build_from_blobs rebuilds them. */
+    void *sym_to_global;  /* lr_global_t** */
+    void *sym_to_func;    /* lr_func_t** */
+    uint32_t sym_to_cap;
 };
 
 lr_func_t *lr_func_declare(lr_module_t *m, const char *name, lr_type_t *ret,

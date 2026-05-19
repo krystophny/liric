@@ -1073,43 +1073,119 @@ uint32_t lr_obj_ensure_symbol(lr_objfile_ctx_t *oc, const char *name,
     return idx;
 }
 
-static const char *obj_lookup_module_symbol_name(const lr_module_t *m,
-                                                 const char *name) {
-    const lr_global_t *g;
-    const lr_func_t *f;
+/* Build a lazy sym_id -> {global, func} index on the module, used by the
+ * obj_lookup_module_* helpers below so each lookup is O(1) instead of an
+ * O(funcs + globals) linear walk.  Rebuilt when num_symbols outgrows the
+ * cache cap.  Callers may pass nullable `name` for the helper signature,
+ * but the index itself only depends on the module. */
+static void obj_ensure_sym_to_caches(const lr_module_t *m_const) {
+    lr_module_t *m = (lr_module_t *)m_const;
+    if (!m)
+        return;
+    if (m->sym_to_global && m->sym_to_func &&
+        m->sym_to_cap >= m->num_symbols && m->num_symbols > 0)
+        return;
+    if (m->num_symbols == 0)
+        return;
+    lr_global_t **gs = (lr_global_t **)calloc(m->num_symbols, sizeof(*gs));
+    lr_func_t **fs = (lr_func_t **)calloc(m->num_symbols, sizeof(*fs));
+    if (!gs || !fs) {
+        free(gs);
+        free(fs);
+        return;
+    }
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        /* g->id is a global ordinal, NOT a sym_id; we have to re-intern
+           g->name to get the real sym_id space.  intern is O(1) average
+           and hits the existing entry once g already exists in the
+           symbol table (which it does since global creation adds it). */
+        uint32_t sym_id;
+        if (!g->name || !g->name[0])
+            continue;
+        sym_id = lr_module_intern_symbol(m, g->name);
+        if (sym_id != UINT32_MAX && sym_id < m->num_symbols)
+            gs[sym_id] = g;
+    }
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (!f->name || !f->name[0])
+            continue;
+        if (f->symbol_id < m->num_symbols)
+            fs[f->symbol_id] = f;
+    }
+    free(m->sym_to_global);
+    free(m->sym_to_func);
+    m->sym_to_global = gs;
+    m->sym_to_func = fs;
+    m->sym_to_cap = m->num_symbols;
+}
 
+static lr_global_t *obj_module_global_by_name(const lr_module_t *m,
+                                              const char *name,
+                                              uint32_t *sym_id_out) {
     if (!m || !name || !name[0])
         return NULL;
-    for (g = m->first_global; g; g = g->next) {
+    /* lr_module_intern_symbol's signature takes a non-const module; in
+       practice it only reads symbol state when the name is already
+       interned, which is the common case here. */
+    uint32_t sym_id = lr_module_intern_symbol((lr_module_t *)m, name);
+    if (sym_id_out)
+        *sym_id_out = sym_id;
+    if (sym_id == UINT32_MAX)
+        return NULL;
+    obj_ensure_sym_to_caches(m);
+    lr_global_t **gs = (lr_global_t **)m->sym_to_global;
+    if (gs && sym_id < m->sym_to_cap)
+        return gs[sym_id];
+    /* Cache build failed; fall back to linear walk. */
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
         if (g->name && strcmp(g->name, name) == 0)
-            return g->name;
-    }
-    for (f = m->first_func; f; f = f->next) {
-        if (f->name && strcmp(f->name, name) == 0)
-            return f->name;
+            return g;
     }
     return NULL;
 }
 
-static const char *obj_lookup_module_defined_symbol_name(const lr_module_t *m,
-                                                         const char *name) {
-    const lr_global_t *g;
-    const lr_func_t *f;
-
+static lr_func_t *obj_module_func_by_name(const lr_module_t *m,
+                                          const char *name,
+                                          uint32_t *sym_id_out) {
     if (!m || !name || !name[0])
         return NULL;
-    for (g = m->first_global; g; g = g->next) {
-        if (!g->name || strcmp(g->name, name) != 0)
-            continue;
-        if (!g->is_external)
-            return g->name;
+    uint32_t sym_id = lr_module_intern_symbol((lr_module_t *)m, name);
+    if (sym_id_out)
+        *sym_id_out = sym_id;
+    if (sym_id == UINT32_MAX)
+        return NULL;
+    obj_ensure_sym_to_caches(m);
+    lr_func_t **fs = (lr_func_t **)m->sym_to_func;
+    if (fs && sym_id < m->sym_to_cap)
+        return fs[sym_id];
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
     }
-    for (f = m->first_func; f; f = f->next) {
-        if (!f->name || strcmp(f->name, name) != 0)
-            continue;
-        if (f->first_block)
-            return f->name;
-    }
+    return NULL;
+}
+
+static const char *obj_lookup_module_symbol_name(const lr_module_t *m,
+                                                 const char *name) {
+    if (!m || !name || !name[0])
+        return NULL;
+    lr_global_t *g = obj_module_global_by_name(m, name, NULL);
+    if (g)
+        return g->name;
+    lr_func_t *f = obj_module_func_by_name(m, name, NULL);
+    return f ? f->name : NULL;
+}
+
+static const char *obj_lookup_module_defined_symbol_name(const lr_module_t *m,
+                                                         const char *name) {
+    if (!m || !name || !name[0])
+        return NULL;
+    lr_global_t *g = obj_module_global_by_name(m, name, NULL);
+    if (g && !g->is_external)
+        return g->name;
+    lr_func_t *f = obj_module_func_by_name(m, name, NULL);
+    if (f && f->first_block)
+        return f->name;
     return NULL;
 }
 

@@ -1332,11 +1332,21 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
             global_buckets[i] = LR_CALL_SIG_NONE;
         uint32_t idx = 0;
         for (lr_global_t *g = m->first_global; g; g = g->next) {
+            /* g->id is a global ordinal, not a symbol_id; intern the
+               name to get the real sym_id so we can compare against
+               f->symbol_id when checking for func-vs-global name
+               conflicts below. */
             uint32_t bucket;
+            uint32_t g_sym_id;
             if (!g->type || g->type->kind != LR_TYPE_FUNC)
                 continue;
-            bucket = ir_call_sig_bucket(g->id, global_bucket_cap);
-            global_entries[idx].sym_id = g->id;
+            if (!g->name || !g->name[0])
+                continue;
+            g_sym_id = lr_module_intern_symbol(m, g->name);
+            if (g_sym_id == UINT32_MAX)
+                continue;
+            bucket = ir_call_sig_bucket(g_sym_id, global_bucket_cap);
+            global_entries[idx].sym_id = g_sym_id;
             global_entries[idx].global = g;
             global_entries[idx].next = global_buckets[bucket];
             global_buckets[bucket] = idx;

@@ -1600,6 +1600,14 @@ typedef struct lc_module_compat {
     compat_func_local_name_cache_t *local_name_caches;
     uint32_t local_name_cache_count;
     uint32_t local_name_cache_cap;
+    /* O(1) hash from lr_func_t* to its slot in local_name_caches.
+       Allocated lazily, sized as power-of-two; chained linked-list
+       per bucket stored in `local_name_cache_bucket_chain`.  Each
+       entry holds the cache slot index. */
+    uint32_t *local_name_cache_buckets;
+    uint32_t local_name_cache_bucket_cap;
+    uint32_t *local_name_cache_bucket_chain;
+    uint32_t local_name_cache_bucket_chain_cap;
     lc_const_value_meta_t *const_value_meta;
 } lc_module_compat_t;
 
@@ -2026,14 +2034,76 @@ static int ensure_local_name_cache_cap(lc_module_compat_t *mod,
     return 0;
 }
 
+static uint32_t local_name_cache_bucket_for(const lr_func_t *func,
+                                            uint32_t bucket_cap) {
+    uintptr_t x = (uintptr_t)func;
+    x >>= 4;
+    x *= 11400714819323198485ull;
+    return (uint32_t)(x & (bucket_cap - 1u));
+}
+
+#define LR_NAME_CACHE_BUCKET_END UINT32_MAX
+
+static int local_name_cache_rebuild_buckets(lc_module_compat_t *mod) {
+    /* Pick a power-of-two bucket count sized for at least 2x the
+       current entries to keep chains short. */
+    uint32_t target = mod->local_name_cache_count == 0
+        ? 16u
+        : mod->local_name_cache_count * 2u;
+    uint32_t cap = 16u;
+    while (cap < target && cap < (UINT32_MAX >> 1))
+        cap <<= 1u;
+    if (cap != mod->local_name_cache_bucket_cap || !mod->local_name_cache_buckets) {
+        uint32_t *bb = (uint32_t *)realloc(mod->local_name_cache_buckets,
+                                           sizeof(uint32_t) * cap);
+        if (!bb)
+            return -1;
+        mod->local_name_cache_buckets = bb;
+        mod->local_name_cache_bucket_cap = cap;
+    }
+    if (mod->local_name_cache_count > mod->local_name_cache_bucket_chain_cap) {
+        uint32_t new_chain_cap = mod->local_name_cache_bucket_chain_cap
+            ? mod->local_name_cache_bucket_chain_cap : 16u;
+        while (new_chain_cap < mod->local_name_cache_count)
+            new_chain_cap *= 2u;
+        uint32_t *nc = (uint32_t *)realloc(mod->local_name_cache_bucket_chain,
+                                           sizeof(uint32_t) * new_chain_cap);
+        if (!nc)
+            return -1;
+        mod->local_name_cache_bucket_chain = nc;
+        mod->local_name_cache_bucket_chain_cap = new_chain_cap;
+    }
+    for (uint32_t i = 0; i < mod->local_name_cache_bucket_cap; i++)
+        mod->local_name_cache_buckets[i] = LR_NAME_CACHE_BUCKET_END;
+    for (uint32_t i = 0; i < mod->local_name_cache_count; i++) {
+        uint32_t b = local_name_cache_bucket_for(
+            mod->local_name_caches[i].func,
+            mod->local_name_cache_bucket_cap);
+        mod->local_name_cache_bucket_chain[i] = mod->local_name_cache_buckets[b];
+        mod->local_name_cache_buckets[b] = i;
+    }
+    return 0;
+}
+
 static compat_func_local_name_cache_t *local_name_cache_slot(
     lc_module_compat_t *mod, const lr_func_t *func, bool create) {
     uint32_t idx;
     if (!mod || !func)
         return NULL;
-    for (idx = 0; idx < mod->local_name_cache_count; idx++) {
-        if (mod->local_name_caches[idx].func == func)
-            return &mod->local_name_caches[idx];
+    if (mod->local_name_cache_buckets && mod->local_name_cache_bucket_cap > 0) {
+        uint32_t b = local_name_cache_bucket_for(
+            func, mod->local_name_cache_bucket_cap);
+        for (idx = mod->local_name_cache_buckets[b];
+             idx != LR_NAME_CACHE_BUCKET_END;
+             idx = mod->local_name_cache_bucket_chain[idx]) {
+            if (mod->local_name_caches[idx].func == func)
+                return &mod->local_name_caches[idx];
+        }
+    } else {
+        for (idx = 0; idx < mod->local_name_cache_count; idx++) {
+            if (mod->local_name_caches[idx].func == func)
+                return &mod->local_name_caches[idx];
+        }
     }
     if (!create)
         return NULL;
@@ -2041,6 +2111,22 @@ static compat_func_local_name_cache_t *local_name_cache_slot(
         return NULL;
     idx = mod->local_name_cache_count++;
     mod->local_name_caches[idx].func = (lr_func_t *)func;
+    /* (Re)build the bucket index when the load factor crosses a power
+       of two.  Cheap: O(num_caches), happens at amortized O(1) per
+       insertion. */
+    if (!mod->local_name_cache_buckets ||
+        mod->local_name_cache_count * 2u > mod->local_name_cache_bucket_cap) {
+        if (local_name_cache_rebuild_buckets(mod) != 0) {
+            /* Buckets failed but the linear path still works. */
+            return &mod->local_name_caches[idx];
+        }
+    } else {
+        /* Just append to the existing bucket chain. */
+        uint32_t b = local_name_cache_bucket_for(
+            func, mod->local_name_cache_bucket_cap);
+        mod->local_name_cache_bucket_chain[idx] = mod->local_name_cache_buckets[b];
+        mod->local_name_cache_buckets[b] = idx;
+    }
     return &mod->local_name_caches[idx];
 }
 
@@ -2886,6 +2972,8 @@ void lc_module_destroy(lc_module_compat_t *mod) {
             compat_free_scoped_local_name_map(&mod->local_name_caches[i].names);
     }
     free(mod->local_name_caches);
+    free(mod->local_name_cache_buckets);
+    free(mod->local_name_cache_bucket_chain);
     free((void *)mod->name);
     free(mod);
 }
