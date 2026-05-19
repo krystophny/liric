@@ -3139,10 +3139,165 @@ static void compat_write_vreg_named_ir(FILE *out,
     }
 }
 
+typedef struct compat_func_dump_entry {
+    const lr_func_t *func;
+    char **explicit_names;     /* [vreg_id] -> name, may be NULL */
+    bool *entry_dump_vregs;     /* [vreg_id] */
+    uint32_t cap;
+    struct compat_func_dump_entry *bucket_next;
+} compat_func_dump_entry_t;
+
+typedef struct compat_func_dump_index {
+    compat_func_dump_entry_t *entries;
+    uint32_t entry_count;
+    compat_func_dump_entry_t **buckets;
+    uint32_t bucket_cap;
+} compat_func_dump_index_t;
+
+static unsigned compat_func_dump_bucket(const lr_func_t *f, uint32_t cap) {
+    uintptr_t x = (uintptr_t)f;
+    x >>= 4;
+    x *= 11400714819323198485ull;
+    return (unsigned)(x & (cap - 1u));
+}
+
+static compat_func_dump_entry_t *compat_func_dump_lookup(
+    const compat_func_dump_index_t *idx, const lr_func_t *f) {
+    compat_func_dump_entry_t *it;
+    if (!idx || !idx->buckets || !f)
+        return NULL;
+    it = idx->buckets[compat_func_dump_bucket(f, idx->bucket_cap)];
+    while (it) {
+        if (it->func == f)
+            return it;
+        it = it->bucket_next;
+    }
+    return NULL;
+}
+
+/* Build a per-function index of explicit vreg names and entry-dump vregs in
+ * a single walk through the module's value pool.  Without this, every call
+ * to compat_dump_function re-walked the whole pool twice (collect explicit
+ * names + collect entry-dump vregs) for each function, making the .ll
+ * sidecar emission O(funcs * values). */
+static int compat_build_func_dump_index(const lc_module_compat_t *mod,
+                                        compat_func_dump_index_t *out) {
+    uint32_t func_count = 0;
+    uint32_t cap = 0;
+    uint32_t remaining;
+    lc_value_slab_t *slab;
+    if (!mod || !out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    if (!mod->mod)
+        return 0;
+    for (lr_func_t *f = mod->mod->first_func; f; f = f->next)
+        func_count++;
+    if (func_count == 0)
+        return 0;
+    cap = 1u;
+    while (cap < func_count * 2u && cap < (UINT32_MAX >> 1))
+        cap <<= 1u;
+    out->bucket_cap = cap;
+    out->buckets = (compat_func_dump_entry_t **)calloc(
+        cap, sizeof(*out->buckets));
+    out->entries = (compat_func_dump_entry_t *)calloc(
+        func_count, sizeof(*out->entries));
+    if (!out->buckets || !out->entries)
+        goto fail;
+    for (lr_func_t *f = mod->mod->first_func; f; f = f->next) {
+        uint32_t bucket;
+        compat_func_dump_entry_t *entry = &out->entries[out->entry_count++];
+        uint32_t vcap = f->next_vreg > 0 ? f->next_vreg : 1u;
+        entry->func = f;
+        entry->cap = vcap;
+        entry->explicit_names = (char **)calloc(vcap, sizeof(char *));
+        entry->entry_dump_vregs = (bool *)calloc(vcap, sizeof(bool));
+        if (!entry->explicit_names || !entry->entry_dump_vregs)
+            goto fail;
+        bucket = compat_func_dump_bucket(f, out->bucket_cap);
+        entry->bucket_next = out->buckets[bucket];
+        out->buckets[bucket] = entry;
+    }
+    remaining = mod->value_count;
+    slab = (lc_value_slab_t *)mod->value_pool;
+    while (slab && remaining > 0) {
+        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
+        if (used == 0)
+            used = LC_VALUE_SLAB_SIZE;
+        for (uint32_t i = 0; i < used; i++) {
+            lc_value_t *value = &slab->values[i];
+            const lr_func_t *vfunc = NULL;
+            if (value->kind == LC_VAL_VREG)
+                vfunc = value->vreg.func;
+            else if (value->kind == LC_VAL_ARGUMENT)
+                vfunc = value->argument.func;
+            if (!vfunc)
+                continue;
+            compat_func_dump_entry_t *entry =
+                compat_func_dump_lookup(out, vfunc);
+            if (!entry)
+                continue;
+            if (value->kind == LC_VAL_VREG) {
+                uint32_t vid = value->vreg.id;
+                if (vid >= entry->cap)
+                    continue;
+                if (value->name && value->name[0] &&
+                    !entry->explicit_names[vid])
+                    entry->explicit_names[vid] = (char *)value->name;
+                if (value->prefer_entry_dump)
+                    entry->entry_dump_vregs[vid] = true;
+            } else {
+                /* LC_VAL_ARGUMENT */
+                if (!entry->func->param_vregs ||
+                    value->argument.param_idx >= entry->func->num_params)
+                    continue;
+                uint32_t vreg = entry->func->param_vregs[
+                    value->argument.param_idx];
+                if (vreg < entry->cap && value->name && value->name[0] &&
+                    !entry->explicit_names[vreg])
+                    entry->explicit_names[vreg] = (char *)value->name;
+            }
+        }
+        remaining -= used;
+        slab = slab->next;
+    }
+    return 0;
+fail:
+    if (out->entries) {
+        for (uint32_t i = 0; i < out->entry_count; i++) {
+            free(out->entries[i].explicit_names);
+            free(out->entries[i].entry_dump_vregs);
+        }
+        free(out->entries);
+        out->entries = NULL;
+    }
+    free(out->buckets);
+    out->buckets = NULL;
+    out->entry_count = 0;
+    out->bucket_cap = 0;
+    return -1;
+}
+
+static void compat_free_func_dump_index(compat_func_dump_index_t *idx) {
+    if (!idx)
+        return;
+    if (idx->entries) {
+        for (uint32_t i = 0; i < idx->entry_count; i++) {
+            free(idx->entries[i].explicit_names);
+            free(idx->entries[i].entry_dump_vregs);
+        }
+        free(idx->entries);
+    }
+    free(idx->buckets);
+    memset(idx, 0, sizeof(*idx));
+}
+
 static void compat_dump_function(lc_module_compat_t *mod,
                                  const lr_func_t *f,
                                  FILE *out,
-                                 unsigned dump_flags) {
+                                 unsigned dump_flags,
+                                 const compat_func_dump_index_t *idx) {
     char *raw = NULL;
     size_t raw_len = 0;
     FILE *mem = NULL;
@@ -3150,6 +3305,8 @@ static void compat_dump_function(lc_module_compat_t *mod,
     char **display_names = NULL;
     bool *entry_dump_vregs = NULL;
     uint32_t cap = 0;
+    bool index_provided = false;
+    const compat_func_dump_entry_t *entry = NULL;
     if (!mod || !f || !out)
         return;
     mem = open_memstream(&raw, &raw_len);
@@ -3158,13 +3315,25 @@ static void compat_dump_function(lc_module_compat_t *mod,
     lr_dump_func_opts(f, mod->mod, mem, dump_flags);
     fclose(mem);
     cap = f->next_vreg > 0 ? f->next_vreg : 1u;
-    explicit_names = (char **)calloc(cap, sizeof(char *));
+    if (idx)
+        entry = compat_func_dump_lookup(idx, f);
+    if (entry) {
+        /* Reuse pre-built arrays; do not free them, the index owns them. */
+        explicit_names = entry->explicit_names;
+        entry_dump_vregs = entry->entry_dump_vregs;
+        cap = entry->cap;
+        index_provided = true;
+    } else {
+        explicit_names = (char **)calloc(cap, sizeof(char *));
+        entry_dump_vregs = (bool *)calloc(cap, sizeof(bool));
+        if (explicit_names && entry_dump_vregs) {
+            compat_collect_explicit_vreg_names(mod, f, explicit_names, cap);
+            compat_collect_entry_dump_vregs(mod, f, entry_dump_vregs, cap);
+        }
+    }
     display_names = (char **)calloc(cap, sizeof(char *));
-    entry_dump_vregs = (bool *)calloc(cap, sizeof(bool));
     if (explicit_names && display_names && entry_dump_vregs) {
         char *reordered = NULL;
-        compat_collect_explicit_vreg_names(mod, f, explicit_names, cap);
-        compat_collect_entry_dump_vregs(mod, f, entry_dump_vregs, cap);
         reordered = compat_reorder_entry_allocas(raw, entry_dump_vregs, cap);
         if (reordered) {
             free(raw);
@@ -3184,14 +3353,17 @@ static void compat_dump_function(lc_module_compat_t *mod,
         }
     }
     free(display_names);
-    free(explicit_names);
-    free(entry_dump_vregs);
+    if (!index_provided) {
+        free(explicit_names);
+        free(entry_dump_vregs);
+    }
     free(raw);
 }
 
 static void compat_dump_module(lc_module_compat_t *mod, FILE *out,
                                unsigned dump_flags) {
     lr_module_t *m;
+    compat_func_dump_index_t idx;
     if (!mod || !out)
         return;
     if (compat_finish_active_func_for_dump(mod) != 0)
@@ -3208,16 +3380,19 @@ static void compat_dump_module(lc_module_compat_t *mod, FILE *out,
         lr_dump_global_opts(m, g, out, dump_flags);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
+    (void)compat_build_func_dump_index(mod, &idx);
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        compat_dump_function(mod, f, out, dump_flags);
+        compat_dump_function(mod, f, out, dump_flags, &idx);
         if (f->next)
             fprintf(out, "\n");
     }
+    compat_free_func_dump_index(&idx);
 }
 
 static void compat_dump_module_raw(const lc_module_compat_t *mod, FILE *out,
                                    unsigned dump_flags) {
     lr_module_t *m;
+    compat_func_dump_index_t idx;
     if (!mod || !out)
         return;
     m = mod->mod;
@@ -3232,11 +3407,14 @@ static void compat_dump_module_raw(const lc_module_compat_t *mod, FILE *out,
         lr_dump_global_opts(m, g, out, dump_flags);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
+    (void)compat_build_func_dump_index(mod, &idx);
     for (lr_func_t *f = m->first_func; f; f = f->next) {
-        compat_dump_function((lc_module_compat_t *)mod, f, out, dump_flags);
+        compat_dump_function((lc_module_compat_t *)mod, f, out, dump_flags,
+                             &idx);
         if (f->next)
             fprintf(out, "\n");
     }
+    compat_free_func_dump_index(&idx);
 }
 
 void lc_module_dump(lc_module_compat_t *mod) {
