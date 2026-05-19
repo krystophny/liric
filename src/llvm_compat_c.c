@@ -11,6 +11,7 @@ typedef struct lr_ptr_lc_value_node {
     const void *key;
     lc_value_t *value;
     struct lr_ptr_lc_value_node *next;
+    struct lr_ptr_lc_value_node *bucket_next;
 } lr_ptr_lc_value_node_t;
 
 typedef struct lr_ptr_void_node {
@@ -50,6 +51,9 @@ typedef struct lr_global_value_state_node {
 } lr_global_value_state_node_t;
 
 static _Thread_local lr_ptr_lc_value_node_t *g_value_wrappers;
+#define LR_VALUE_WRAPPER_BUCKETS 16384u
+static _Thread_local lr_ptr_lc_value_node_t
+    *g_value_wrapper_buckets[LR_VALUE_WRAPPER_BUCKETS];
 static _Thread_local lr_ptr_void_node_t *g_function_wrappers;
 static _Thread_local lr_ptr_void_node_t *g_block_parents;
 static _Thread_local lr_type_context_node_t *g_type_contexts;
@@ -89,13 +93,22 @@ static char *lr_strdup_safe(const char *s) {
     return dup;
 }
 
-static lr_ptr_lc_value_node_t *lr_find_lc_value_node(lr_ptr_lc_value_node_t *head,
-                                                      const void *key) {
-    lr_ptr_lc_value_node_t *it = head;
+static unsigned lr_value_wrapper_bucket(const void *key) {
+    uintptr_t x = (uintptr_t)key;
+    x >>= 4;
+    x *= (uintptr_t)11400714819323198485ull;
+    return (unsigned)(x & (LR_VALUE_WRAPPER_BUCKETS - 1u));
+}
+
+static lr_ptr_lc_value_node_t *lr_find_lc_value_node(const void *key) {
+    lr_ptr_lc_value_node_t *it;
+    if (!key)
+        return NULL;
+    it = g_value_wrapper_buckets[lr_value_wrapper_bucket(key)];
     while (it) {
         if (it->key == key)
             return it;
-        it = it->next;
+        it = it->bucket_next;
     }
     return NULL;
 }
@@ -139,9 +152,10 @@ static lr_global_value_state_node_t *lr_ensure_global_value_state_node(const voi
 
 void lr_llvm_compat_register_value_wrapper(const void *obj, lc_value_t *value) {
     lr_ptr_lc_value_node_t *node;
+    unsigned bucket;
     if (!obj || !value)
         return;
-    node = lr_find_lc_value_node(g_value_wrappers, obj);
+    node = lr_find_lc_value_node(obj);
     if (node) {
         node->value = value;
         return;
@@ -153,21 +167,40 @@ void lr_llvm_compat_register_value_wrapper(const void *obj, lc_value_t *value) {
     node->value = value;
     node->next = g_value_wrappers;
     g_value_wrappers = node;
+    bucket = lr_value_wrapper_bucket(obj);
+    node->bucket_next = g_value_wrapper_buckets[bucket];
+    g_value_wrapper_buckets[bucket] = node;
 }
 
 lc_value_t *lr_llvm_compat_lookup_value_wrapper(const void *obj) {
     lr_ptr_lc_value_node_t *node;
     if (!obj)
         return NULL;
-    node = lr_find_lc_value_node(g_value_wrappers, obj);
+    node = lr_find_lc_value_node(obj);
     return node ? node->value : NULL;
 }
 
 void lr_llvm_compat_unregister_value_wrapper(const void *obj) {
     lr_ptr_lc_value_node_t *it = g_value_wrappers;
     lr_ptr_lc_value_node_t *prev = NULL;
+    lr_ptr_lc_value_node_t *bucket_it;
+    lr_ptr_lc_value_node_t *bucket_prev = NULL;
+    unsigned bucket;
     if (!obj)
         return;
+    bucket = lr_value_wrapper_bucket(obj);
+    bucket_it = g_value_wrapper_buckets[bucket];
+    while (bucket_it) {
+        if (bucket_it->key == obj) {
+            if (bucket_prev)
+                bucket_prev->bucket_next = bucket_it->bucket_next;
+            else
+                g_value_wrapper_buckets[bucket] = bucket_it->bucket_next;
+            break;
+        }
+        bucket_prev = bucket_it;
+        bucket_it = bucket_it->bucket_next;
+    }
     while (it) {
         if (it->key == obj) {
             if (prev)
