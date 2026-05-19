@@ -1411,12 +1411,24 @@ typedef struct compat_ptr_type_cache_node {
     const lr_type_t *elem;
     lr_type_t *ptr;
     struct compat_ptr_type_cache_node *next;
+    struct compat_ptr_type_cache_node *bucket_next;
 } compat_ptr_type_cache_node_t;
 
 static compat_ptr_type_cache_node_t *g_ptr_type_cache = NULL;
+#define COMPAT_PTR_TYPE_BUCKETS 16384u
+static compat_ptr_type_cache_node_t
+    *g_ptr_type_cache_buckets[COMPAT_PTR_TYPE_BUCKETS];
 static _Thread_local const lc_context_t *g_last_ptr_type_ctx = NULL;
 static _Thread_local const lr_type_t *g_last_ptr_type_elem = NULL;
 static _Thread_local lr_type_t *g_last_ptr_type = NULL;
+
+static unsigned compat_ptr_type_bucket(const lc_context_t *ctx,
+                                       const lr_type_t *elem) {
+    uintptr_t x = (uintptr_t)ctx;
+    x ^= ((uintptr_t)elem >> 4);
+    x *= (uintptr_t)11400714819323198485ull;
+    return (unsigned)(x & (COMPAT_PTR_TYPE_BUCKETS - 1u));
+}
 
 static lr_type_t *compat_lookup_ptr_type(const lc_context_t *ctx,
                                          const lr_type_t *elem) {
@@ -1425,7 +1437,8 @@ static lr_type_t *compat_lookup_ptr_type(const lc_context_t *ctx,
         return NULL;
     if (g_last_ptr_type_ctx == ctx && g_last_ptr_type_elem == elem)
         return g_last_ptr_type;
-    for (it = g_ptr_type_cache; it; it = it->next) {
+    for (it = g_ptr_type_cache_buckets[compat_ptr_type_bucket(ctx, elem)];
+         it; it = it->bucket_next) {
         if (it->ctx == ctx && it->elem == elem) {
             g_last_ptr_type_ctx = ctx;
             g_last_ptr_type_elem = elem;
@@ -1440,6 +1453,7 @@ static lr_type_t *compat_get_or_create_ptr_type(lc_context_t *ctx,
                                                 lr_type_t *elem) {
     compat_ptr_type_cache_node_t *node;
     lr_type_t *ptr;
+    unsigned bucket;
     if (!ctx || !elem)
         return NULL;
     ptr = compat_lookup_ptr_type(ctx, elem);
@@ -1456,6 +1470,9 @@ static lr_type_t *compat_get_or_create_ptr_type(lc_context_t *ctx,
     node->ptr = ptr;
     node->next = g_ptr_type_cache;
     g_ptr_type_cache = node;
+    bucket = compat_ptr_type_bucket(ctx, elem);
+    node->bucket_next = g_ptr_type_cache_buckets[bucket];
+    g_ptr_type_cache_buckets[bucket] = node;
     g_last_ptr_type_ctx = ctx;
     g_last_ptr_type_elem = elem;
     g_last_ptr_type = ptr;
@@ -1468,6 +1485,22 @@ static void compat_drop_ptr_type_cache(const lc_context_t *ctx) {
     while (it) {
         compat_ptr_type_cache_node_t *next = it->next;
         if (it->ctx == ctx) {
+            compat_ptr_type_cache_node_t *bucket_it;
+            compat_ptr_type_cache_node_t *bucket_prev = NULL;
+            unsigned bucket = compat_ptr_type_bucket(it->ctx, it->elem);
+            bucket_it = g_ptr_type_cache_buckets[bucket];
+            while (bucket_it) {
+                if (bucket_it == it) {
+                    if (bucket_prev)
+                        bucket_prev->bucket_next = bucket_it->bucket_next;
+                    else
+                        g_ptr_type_cache_buckets[bucket] =
+                            bucket_it->bucket_next;
+                    break;
+                }
+                bucket_prev = bucket_it;
+                bucket_it = bucket_it->bucket_next;
+            }
             if (prev)
                 prev->next = next;
             else
