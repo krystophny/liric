@@ -3699,8 +3699,11 @@ int lc_value_move_before_block_terminator(lc_value_t *val) {
         func->linear_inst_array = NULL;
         func->block_inst_offsets = NULL;
         func->num_linear_insts = 0;
-        if (func->module)
-            func->module->local_function_collision_scan_dirty = true;
+        /* Reordering an already-existing instruction within a block does
+           not create a new function/call-signature conflict, so we no
+           longer mark the module dirty here.  The dirty flag is set
+           when a global call instruction is first appended via
+           lr_block_append. */
         return 0;
     }
 

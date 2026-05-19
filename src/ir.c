@@ -175,8 +175,10 @@ lr_block_t *lr_block_create(lr_func_t *f, lr_arena_t *a, const char *name) {
         f->is_decl = false;
     } else f->last_block->next = b;
     f->last_block = b;
-    if (f->module)
-        f->module->local_function_collision_scan_dirty = true;
+    /* Creating an empty block adds no call instructions and therefore
+       cannot introduce a function/call-signature conflict.  Dirty only
+       gets set when a global call instruction is actually appended; see
+       lr_block_append. */
     return b;
 }
 
@@ -218,6 +220,8 @@ lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
     return inst;
 }
 
+static bool ir_inst_is_global_call(const lr_inst_t *inst);
+
 void lr_block_append(lr_block_t *b, lr_inst_t *inst) {
     lr_func_t *f = b ? b->func : NULL;
     if (!b->first) b->first = inst;
@@ -229,7 +233,14 @@ void lr_block_append(lr_block_t *b, lr_inst_t *inst) {
         f->linear_inst_array = NULL;
         f->block_inst_offsets = NULL;
         f->num_linear_insts = 0;
-        if (f->module)
+        /* Only a new *global call* instruction can introduce a new
+           call-signature-vs-function-definition conflict.  Other
+           instructions (load/store/arithmetic/branch/return/...) cannot
+           affect the disambiguate scan, so do not mark the module dirty
+           for them -- otherwise every instruction emit triggers a full
+           per-function re-scan in the codegen path, which dominated
+           fpm-sized compiles. */
+        if (f->module && ir_inst_is_global_call(inst))
             f->module->local_function_collision_scan_dirty = true;
     }
 }
