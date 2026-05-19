@@ -1095,13 +1095,123 @@ typedef struct lr_func_rename_entry {
     lr_func_t *func;
 } lr_func_rename_entry_t;
 
+typedef struct lr_call_sig_entry {
+    uint32_t sym_id;
+    const lr_inst_t *inst;
+    uint32_t next;
+} lr_call_sig_entry_t;
+
+enum { LR_CALL_SIG_NONE = UINT32_MAX };
+
+static uint32_t ir_call_sig_bucket(uint32_t sym_id, uint32_t bucket_cap) {
+    uint32_t x = sym_id;
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    return x & (bucket_cap - 1u);
+}
+
+static uint32_t ir_next_pow2_u32(uint32_t value) {
+    uint32_t cap = 1u;
+    while (cap < value && cap < (UINT32_MAX >> 1))
+        cap <<= 1u;
+    return cap;
+}
+
+static bool ir_inst_is_global_call(const lr_inst_t *inst) {
+    return inst && inst->op == LR_OP_CALL && inst->num_operands > 0 &&
+           inst->operands[0].kind == LR_VAL_GLOBAL;
+}
+
+static uint32_t ir_count_global_calls(const lr_module_t *m) {
+    uint32_t count = 0;
+    if (!m)
+        return 0;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        for (lr_block_t *b = f->first_block; b; b = b->next) {
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                if (ir_inst_is_global_call(inst))
+                    count++;
+            }
+        }
+    }
+    return count;
+}
+
+static int ir_build_call_sig_index(const lr_module_t *m,
+                                   lr_call_sig_entry_t *entries,
+                                   uint32_t *buckets,
+                                   uint32_t bucket_cap) {
+    uint32_t count = 0;
+    if (!m || !entries || !buckets || bucket_cap == 0)
+        return 0;
+    for (uint32_t i = 0; i < bucket_cap; i++)
+        buckets[i] = LR_CALL_SIG_NONE;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        for (lr_block_t *b = f->first_block; b; b = b->next) {
+            for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                uint32_t bucket;
+                uint32_t sym_id;
+                if (!ir_inst_is_global_call(inst))
+                    continue;
+                sym_id = inst->operands[0].global_id;
+                bucket = ir_call_sig_bucket(sym_id, bucket_cap);
+                entries[count].sym_id = sym_id;
+                entries[count].inst = inst;
+                entries[count].next = buckets[bucket];
+                buckets[bucket] = count;
+                count++;
+            }
+        }
+    }
+    return 0;
+}
+
+static bool ir_call_index_has_signature_conflict(
+    const lr_call_sig_entry_t *entries,
+    const uint32_t *buckets,
+    uint32_t bucket_cap,
+    const lr_func_t *func) {
+    uint32_t idx;
+    if (!entries || !buckets || bucket_cap == 0 || !func)
+        return false;
+    idx = buckets[ir_call_sig_bucket(func->symbol_id, bucket_cap)];
+    while (idx != LR_CALL_SIG_NONE) {
+        const lr_call_sig_entry_t *entry = &entries[idx];
+        if (entry->sym_id == func->symbol_id &&
+            !ir_call_signature_matches_func(entry->inst, func)) {
+            return true;
+        }
+        idx = entry->next;
+    }
+    return false;
+}
+
 void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
     uint32_t rename_count = 0;
     uint32_t rename_cap = 0;
     lr_func_rename_entry_t *renames = NULL;
+    uint32_t global_call_count = 0;
+    uint32_t call_bucket_cap = 0;
+    uint32_t *call_buckets = NULL;
+    lr_call_sig_entry_t *call_entries = NULL;
 
     if (!m || !m->arena || !m->local_function_collision_scan_dirty)
         return;
+
+    global_call_count = ir_count_global_calls(m);
+    if (global_call_count > 0) {
+        call_bucket_cap = ir_next_pow2_u32(global_call_count * 2u);
+        call_entries = (lr_call_sig_entry_t *)malloc(
+            sizeof(*call_entries) * global_call_count);
+        call_buckets = (uint32_t *)malloc(sizeof(*call_buckets) * call_bucket_cap);
+        if (!call_entries || !call_buckets)
+            goto cleanup;
+        if (ir_build_call_sig_index(m, call_entries, call_buckets,
+                                    call_bucket_cap) != 0) {
+            goto cleanup;
+        }
+    }
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         bool has_conflict = false;
@@ -1132,25 +1242,8 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
             }
         }
         if (!has_conflict) {
-            uint32_t old_sym_id = lr_module_intern_symbol(m, f->name);
-            for (lr_func_t *owner = m->first_func; owner && !has_conflict;
-                 owner = owner->next) {
-                for (lr_block_t *b = owner->first_block; b && !has_conflict;
-                     b = b->next) {
-                    for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
-                        if (inst->op != LR_OP_CALL || inst->num_operands == 0 ||
-                            inst->operands[0].kind != LR_VAL_GLOBAL) {
-                            continue;
-                        }
-                        if (inst->operands[0].global_id != old_sym_id)
-                            continue;
-                        if (!ir_call_signature_matches_func(inst, f)) {
-                            has_conflict = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            has_conflict = ir_call_index_has_signature_conflict(
+                call_entries, call_buckets, call_bucket_cap, f);
         }
         if (!has_conflict)
             continue;
@@ -1160,7 +1253,7 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
                 lr_arena_array_uninit(m->arena, lr_func_rename_entry_t,
                                       new_cap);
             if (!tmp)
-                return;
+                goto cleanup;
             if (renames && rename_count > 0) {
                 memcpy(tmp, renames,
                        rename_count * sizeof(lr_func_rename_entry_t));
@@ -1171,16 +1264,16 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
         needed = snprintf(NULL, 0, "%s.__liric_local.%u", f->name,
                           rename_count);
         if (needed < 0)
-            return;
+            goto cleanup;
         new_name = (char *)lr_arena_alloc_uninit(m->arena,
                                                  (size_t)needed + 1u, 1u);
         if (!new_name)
-            return;
+            goto cleanup;
         snprintf(new_name, (size_t)needed + 1u, "%s.__liric_local.%u",
                  f->name, rename_count);
         new_sym_id = lr_module_intern_symbol(m, new_name);
         if (new_sym_id == UINT32_MAX)
-            return;
+            goto cleanup;
         renames[rename_count].old_name = f->name;
         renames[rename_count].old_sym_id = f->symbol_id;
         renames[rename_count].new_sym_id = new_sym_id;
@@ -1192,7 +1285,7 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
 
     if (rename_count == 0 || !renames) {
         m->local_function_collision_scan_dirty = false;
-        return;
+        goto cleanup;
     }
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
@@ -1216,6 +1309,10 @@ void lr_module_disambiguate_local_function_collisions(lr_module_t *m) {
         }
     }
     m->local_function_collision_scan_dirty = false;
+
+cleanup:
+    free(call_entries);
+    free(call_buckets);
 }
 
 size_t lr_type_size(const lr_type_t *t) {
