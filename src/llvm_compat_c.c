@@ -41,6 +41,13 @@ typedef struct lr_global_alias_node {
     struct lr_global_alias_node *next;
 } lr_global_alias_node_t;
 
+typedef struct lr_local_global_name_node {
+    const lc_module_compat_t *module;
+    char *base_name;
+    unsigned next_ordinal;
+    struct lr_local_global_name_node *next;
+} lr_local_global_name_node_t;
+
 typedef struct lr_global_value_state_node {
     const void *obj;
     int linkage;
@@ -71,6 +78,9 @@ static _Thread_local const lr_type_t *g_last_type_context_type;
 static _Thread_local const void *g_last_type_context;
 static _Thread_local lr_vector_type_node_t *g_vector_types;
 static _Thread_local lr_global_alias_node_t *g_global_aliases;
+#define LR_LOCAL_GLOBAL_NAME_BUCKETS 4096u
+static _Thread_local lr_local_global_name_node_t
+    *g_local_global_name_buckets[LR_LOCAL_GLOBAL_NAME_BUCKETS];
 static _Thread_local lr_global_value_state_node_t *g_global_value_states;
 
 static void lr_copy_out_string(const char *src,
@@ -215,6 +225,71 @@ static lr_global_value_state_node_t *lr_find_global_value_state_node(const void 
         it = it->next;
     }
     return NULL;
+}
+
+static unsigned lr_local_global_name_bucket(const lc_module_compat_t *mod,
+                                            const char *name) {
+    uintptr_t h = (uintptr_t)mod;
+    h >>= 4;
+    h *= (uintptr_t)11400714819323198485ull;
+    while (name && *name) {
+        h ^= (unsigned char)*name++;
+        h *= (uintptr_t)1099511628211ull;
+    }
+    return (unsigned)(h & (LR_LOCAL_GLOBAL_NAME_BUCKETS - 1u));
+}
+
+static lr_local_global_name_node_t *lr_find_local_global_name_node(
+    const lc_module_compat_t *mod, const char *name, int create) {
+    lr_local_global_name_node_t *it;
+    unsigned bucket;
+    if (!mod || !name || !name[0])
+        return NULL;
+    bucket = lr_local_global_name_bucket(mod, name);
+    it = g_local_global_name_buckets[bucket];
+    while (it) {
+        if (it->module == mod && strcmp(it->base_name, name) == 0)
+            return it;
+        it = it->next;
+    }
+    if (!create)
+        return NULL;
+    it = (lr_local_global_name_node_t *)calloc(1, sizeof(*it));
+    if (!it)
+        return NULL;
+    it->base_name = lr_strdup_safe(name);
+    if (!it->base_name) {
+        free(it);
+        return NULL;
+    }
+    it->module = mod;
+    it->next = g_local_global_name_buckets[bucket];
+    g_local_global_name_buckets[bucket] = it;
+    return it;
+}
+
+static void lr_clear_local_global_name_ordinals(const lc_module_compat_t *mod) {
+    if (!mod)
+        return;
+    for (unsigned bucket = 0; bucket < LR_LOCAL_GLOBAL_NAME_BUCKETS; bucket++) {
+        lr_local_global_name_node_t *it = g_local_global_name_buckets[bucket];
+        lr_local_global_name_node_t *prev = NULL;
+        while (it) {
+            if (it->module == mod) {
+                lr_local_global_name_node_t *dead = it;
+                if (prev)
+                    prev->next = it->next;
+                else
+                    g_local_global_name_buckets[bucket] = it->next;
+                it = it->next;
+                free(dead->base_name);
+                free(dead);
+                continue;
+            }
+            prev = it;
+            it = it->next;
+        }
+    }
 }
 
 static lr_global_value_state_node_t *lr_ensure_global_value_state_node(const void *obj) {
@@ -632,6 +707,7 @@ void lr_llvm_compat_clear_global_aliases(const lc_module_compat_t *mod) {
         prev = it;
         it = it->next;
     }
+    lr_clear_local_global_name_ordinals(mod);
 }
 
 void lr_llvm_compat_global_value_set_linkage(const void *obj, int linkage) {
@@ -739,11 +815,10 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
                                                  int linkage,
                                                  char *out_name,
                                                  size_t out_name_cap) {
-    lr_module_t *m = NULL;
+    lr_local_global_name_node_t *ordinal_node = NULL;
     const char *local_tag = ".__liric_local.";
     char unique_base[4096];
     char suffix[32];
-    bool collision = false;
     unsigned ordinal = 0;
     size_t n;
     if (!name)
@@ -754,25 +829,28 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
         lr_copy_out_string(name, out_name, out_name_cap, &n);
         return n;
     }
-    m = lc_module_get_ir((lc_module_compat_t *)compat);
-    if (snprintf(unique_base, sizeof(unique_base), "%s", name) >= (int)sizeof(unique_base)) {
-        lr_copy_out_string(name, out_name, out_name_cap, &n);
-        return n;
-    }
-    if (m) {
-        do {
-            collision = false;
-            collision = lc_module_name_reserved((lc_module_compat_t *)compat,
-                                                unique_base) != 0;
-            if (!collision)
-                break;
-            ordinal++;
+    ordinal_node = lr_find_local_global_name_node(compat, name, 1);
+    if (ordinal_node)
+        ordinal = ordinal_node->next_ordinal;
+    do {
+        if (ordinal == 0) {
+            if (snprintf(unique_base, sizeof(unique_base), "%s", name) >=
+                (int)sizeof(unique_base)) {
+                lr_copy_out_string(name, out_name, out_name_cap, &n);
+                return n;
+            }
+        } else {
             if (snprintf(unique_base, sizeof(unique_base), "%s.%u",
                          name, ordinal) >= (int)sizeof(unique_base)) {
                 break;
             }
-        } while (1);
-    }
+        }
+        if (!lc_module_name_reserved((lc_module_compat_t *)compat, unique_base))
+            break;
+        ordinal++;
+    } while (1);
+    if (ordinal_node && ordinal < UINT_MAX)
+        ordinal_node->next_ordinal = ordinal + 1u;
     snprintf(suffix, sizeof(suffix), "%" PRIxPTR, (uintptr_t)compat);
     n = strlen(unique_base) + strlen(local_tag) + strlen(suffix);
     if (out_name && out_name_cap > 0) {
