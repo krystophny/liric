@@ -1967,21 +1967,26 @@ static int symbol_name_in_use(lc_module_compat_t *mod, const char *name) {
     return lc_module_name_reserved(mod, name);
 }
 
+static compat_func_local_name_cache_t *local_name_cache_slot(
+    lc_module_compat_t *mod, const lr_func_t *func, bool create);
+
 static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
                              const char *name) {
     compat_func_local_name_cache_t *cache = NULL;
-    uint32_t remaining;
-    lc_value_slab_t *slab;
     if (!mod || !func || !name || !name[0])
         return 0;
-    for (uint32_t i = 0; i < mod->local_name_cache_count; i++) {
-        if (mod->local_name_caches[i].func == func) {
-            cache = &mod->local_name_caches[i];
-            break;
-        }
-    }
+    /* O(1) cache slot lookup via the func* hash. */
+    cache = local_name_cache_slot(mod, func, false);
     if (cache)
         return compat_name_in_map(&cache->names, name);
+    /* No cache yet: that means no name has been registered for this
+       func, which in turn means lc_value_set_name has not been called
+       on any of its values.  Block names are still set at creation, so
+       walk only the per-func block lists.  The previous fallback also
+       walked the whole module value pool to check for matching value
+       names, but value names are inserted via the same register path
+       that creates the cache; if the cache doesn't exist then no value
+       has been registered.  Bounded O(blocks_in_func + detached_count). */
     for (const lr_block_t *b = func->first_block; b; b = b->next) {
         if (b->name && strcmp(b->name, name) == 0)
             return 1;
@@ -1990,24 +1995,6 @@ static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
         const lr_block_t *b = mod->detached_blocks[i];
         if (b && b->func == func && b->name && strcmp(b->name, name) == 0)
             return 1;
-    }
-    remaining = mod->value_count;
-    slab = (lc_value_slab_t *)mod->value_pool;
-    while (slab && remaining > 0) {
-        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
-        if (used == 0)
-            used = LC_VALUE_SLAB_SIZE;
-        for (uint32_t i = 0; i < used; i++) {
-            lc_value_t *value = &slab->values[i];
-            if (!value->name || strcmp(value->name, name) != 0)
-                continue;
-            if (value->kind == LC_VAL_VREG && value->vreg.func == func)
-                return 1;
-            if (value->kind == LC_VAL_ARGUMENT && value->argument.func == func)
-                return 1;
-        }
-        remaining -= used;
-        slab = slab->next;
     }
     return 0;
 }
@@ -2133,12 +2120,15 @@ static compat_func_local_name_cache_t *local_name_cache_slot(
 static void seed_local_name_cache(lc_module_compat_t *mod,
                                   compat_func_local_name_cache_t *cache,
                                   const lr_func_t *func) {
-    uint32_t remaining;
-    lc_value_slab_t *slab;
     if (!mod || !cache || !func)
         return;
     if (cache->names.count > 0)
         return;
+    /* Block names are otherwise added by register_local_name when the
+       block is created, but blocks reach this code path before their
+       first name registration (e.g. when a value tries to dedup against
+       block names already in func->first_block).  Walk only the block
+       lists, which is O(blocks_in_func) -- bounded per function. */
     for (const lr_block_t *b = func->first_block; b; b = b->next) {
         if (b->name && b->name[0])
             (void)compat_scoped_local_name_push(&cache->names, b->name);
@@ -2148,26 +2138,13 @@ static void seed_local_name_cache(lc_module_compat_t *mod,
         if (b && b->func == func && b->name && b->name[0])
             (void)compat_scoped_local_name_push(&cache->names, b->name);
     }
-    remaining = mod->value_count;
-    slab = (lc_value_slab_t *)mod->value_pool;
-    while (slab && remaining > 0) {
-        uint32_t used = remaining % LC_VALUE_SLAB_SIZE;
-        if (used == 0)
-            used = LC_VALUE_SLAB_SIZE;
-        for (uint32_t i = 0; i < used; i++) {
-            lc_value_t *value = &slab->values[i];
-            if (!value->name || !value->name[0])
-                continue;
-            if (!((value->kind == LC_VAL_VREG && value->vreg.func == func) ||
-                  (value->kind == LC_VAL_ARGUMENT &&
-                   value->argument.func == func))) {
-                continue;
-            }
-            (void)compat_scoped_local_name_push(&cache->names, value->name);
-        }
-        remaining -= used;
-        slab = slab->next;
-    }
+    /* The previous code also walked the module-wide value pool to
+       collect VREG/ARGUMENT names for `func`.  Every such name is
+       already inserted via lc_value_set_name -> register_local_name
+       at the time it is assigned, so the slab walk would re-add
+       names that the cache already has -- at O(F * V) total cost
+       (most expensive on fpm's main.f90 at ~10% of compile time).
+       Skip it; the cache is populated incrementally. */
 }
 
 static void register_local_name(lc_module_compat_t *mod, const lr_func_t *func,
