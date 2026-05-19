@@ -18,6 +18,7 @@ typedef struct lr_ptr_void_node {
     const void *key;
     void *value;
     struct lr_ptr_void_node *next;
+    struct lr_ptr_void_node *bucket_next;
 } lr_ptr_void_node_t;
 
 typedef struct lr_type_context_node {
@@ -56,7 +57,12 @@ static _Thread_local lr_ptr_lc_value_node_t *g_value_wrappers;
 static _Thread_local lr_ptr_lc_value_node_t
     *g_value_wrapper_buckets[LR_VALUE_WRAPPER_BUCKETS];
 static _Thread_local lr_ptr_void_node_t *g_function_wrappers;
+#define LR_PTR_VOID_BUCKETS 16384u
+static _Thread_local lr_ptr_void_node_t
+    *g_function_wrapper_buckets[LR_PTR_VOID_BUCKETS];
 static _Thread_local lr_ptr_void_node_t *g_block_parents;
+static _Thread_local lr_ptr_void_node_t
+    *g_block_parent_buckets[LR_PTR_VOID_BUCKETS];
 static _Thread_local lr_type_context_node_t *g_type_contexts;
 #define LR_TYPE_CONTEXT_BUCKETS 16384u
 static _Thread_local lr_type_context_node_t
@@ -158,15 +164,47 @@ static void lr_unlink_type_context_bucket(lr_type_context_node_t *node) {
     }
 }
 
-static lr_ptr_void_node_t *lr_find_void_node(lr_ptr_void_node_t *head,
-                                             const void *key) {
-    lr_ptr_void_node_t *it = head;
+static unsigned lr_ptr_void_bucket(const void *key) {
+    uintptr_t x = (uintptr_t)key;
+    x >>= 4;
+    x *= (uintptr_t)11400714819323198485ull;
+    return (unsigned)(x & (LR_PTR_VOID_BUCKETS - 1u));
+}
+
+static lr_ptr_void_node_t
+*lr_find_void_bucket_node(lr_ptr_void_node_t **buckets, const void *key) {
+    lr_ptr_void_node_t *it;
+    if (!key)
+        return NULL;
+    it = buckets[lr_ptr_void_bucket(key)];
     while (it) {
         if (it->key == key)
             return it;
-        it = it->next;
+        it = it->bucket_next;
     }
     return NULL;
+}
+
+static void lr_unlink_void_bucket(lr_ptr_void_node_t **buckets,
+                                  lr_ptr_void_node_t *node) {
+    lr_ptr_void_node_t *it;
+    lr_ptr_void_node_t *prev = NULL;
+    unsigned bucket;
+    if (!node || !node->key)
+        return;
+    bucket = lr_ptr_void_bucket(node->key);
+    it = buckets[bucket];
+    while (it) {
+        if (it == node) {
+            if (prev)
+                prev->bucket_next = it->bucket_next;
+            else
+                buckets[bucket] = it->bucket_next;
+            return;
+        }
+        prev = it;
+        it = it->bucket_next;
+    }
 }
 
 static lr_global_value_state_node_t *lr_find_global_value_state_node(const void *obj) {
@@ -263,9 +301,10 @@ void lr_llvm_compat_unregister_value_wrapper(const void *obj) {
 void lr_llvm_compat_register_function_wrapper(const lr_func_t *func,
                                               void *fn_wrapper) {
     lr_ptr_void_node_t *node;
+    unsigned bucket;
     if (!func || !fn_wrapper)
         return;
-    node = lr_find_void_node(g_function_wrappers, func);
+    node = lr_find_void_bucket_node(g_function_wrapper_buckets, func);
     if (node) {
         node->value = fn_wrapper;
         return;
@@ -277,13 +316,16 @@ void lr_llvm_compat_register_function_wrapper(const lr_func_t *func,
     node->value = fn_wrapper;
     node->next = g_function_wrappers;
     g_function_wrappers = node;
+    bucket = lr_ptr_void_bucket(func);
+    node->bucket_next = g_function_wrapper_buckets[bucket];
+    g_function_wrapper_buckets[bucket] = node;
 }
 
 void *lr_llvm_compat_lookup_function_wrapper(const lr_func_t *func) {
     lr_ptr_void_node_t *node;
     if (!func)
         return NULL;
-    node = lr_find_void_node(g_function_wrappers, func);
+    node = lr_find_void_bucket_node(g_function_wrapper_buckets, func);
     return node ? node->value : NULL;
 }
 
@@ -298,6 +340,7 @@ void lr_llvm_compat_unregister_function_wrapper(const lr_func_t *func) {
                 prev->next = it->next;
             else
                 g_function_wrappers = it->next;
+            lr_unlink_void_bucket(g_function_wrapper_buckets, it);
             free(it);
             return;
         }
@@ -309,9 +352,10 @@ void lr_llvm_compat_unregister_function_wrapper(const lr_func_t *func) {
 void lr_llvm_compat_register_block_parent(const lr_block_t *block,
                                           void *fn_wrapper) {
     lr_ptr_void_node_t *node;
+    unsigned bucket;
     if (!block || !fn_wrapper)
         return;
-    node = lr_find_void_node(g_block_parents, block);
+    node = lr_find_void_bucket_node(g_block_parent_buckets, block);
     if (node) {
         node->value = fn_wrapper;
         return;
@@ -323,13 +367,16 @@ void lr_llvm_compat_register_block_parent(const lr_block_t *block,
     node->value = fn_wrapper;
     node->next = g_block_parents;
     g_block_parents = node;
+    bucket = lr_ptr_void_bucket(block);
+    node->bucket_next = g_block_parent_buckets[bucket];
+    g_block_parent_buckets[bucket] = node;
 }
 
 void *lr_llvm_compat_lookup_block_parent(const lr_block_t *block) {
     lr_ptr_void_node_t *node;
     if (!block)
         return NULL;
-    node = lr_find_void_node(g_block_parents, block);
+    node = lr_find_void_bucket_node(g_block_parent_buckets, block);
     return node ? node->value : NULL;
 }
 
@@ -344,6 +391,7 @@ void lr_llvm_compat_unregister_block_parent(const lr_block_t *block) {
                 prev->next = it->next;
             else
                 g_block_parents = it->next;
+            lr_unlink_void_bucket(g_block_parent_buckets, it);
             free(it);
             return;
         }
@@ -364,6 +412,7 @@ void lr_llvm_compat_unregister_blocks_for_function(void *fn_wrapper) {
                 prev->next = it->next;
             else
                 g_block_parents = it->next;
+            lr_unlink_void_bucket(g_block_parent_buckets, dead);
             it = it->next;
             free(dead);
             continue;
