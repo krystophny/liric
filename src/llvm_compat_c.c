@@ -39,6 +39,7 @@ typedef struct lr_global_alias_node {
     char *logical_name;
     char *actual_name;
     struct lr_global_alias_node *next;
+    struct lr_global_alias_node *bucket_next;
 } lr_global_alias_node_t;
 
 typedef struct lr_local_global_name_node {
@@ -78,6 +79,9 @@ static _Thread_local const lr_type_t *g_last_type_context_type;
 static _Thread_local const void *g_last_type_context;
 static _Thread_local lr_vector_type_node_t *g_vector_types;
 static _Thread_local lr_global_alias_node_t *g_global_aliases;
+#define LR_GLOBAL_ALIAS_BUCKETS 16384u
+static _Thread_local lr_global_alias_node_t
+    *g_global_alias_buckets[LR_GLOBAL_ALIAS_BUCKETS];
 #define LR_LOCAL_GLOBAL_NAME_BUCKETS 4096u
 static _Thread_local lr_local_global_name_node_t
     *g_local_global_name_buckets[LR_LOCAL_GLOBAL_NAME_BUCKETS];
@@ -629,24 +633,48 @@ void lr_llvm_compat_unregister_type_contexts(const void *ctx) {
     }
 }
 
+static unsigned lr_global_alias_bucket(const lc_module_compat_t *mod,
+                                       const char *name) {
+    /* FNV-1a 64-bit then fold module pointer for stability. */
+    uint64_t h = 1469598103934665603ull;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        h ^= (uint64_t)*p;
+        h *= 1099511628211ull;
+    }
+    h ^= ((uintptr_t)mod >> 4);
+    return (unsigned)(h & (LR_GLOBAL_ALIAS_BUCKETS - 1u));
+}
+
+static lr_global_alias_node_t *lr_find_global_alias_node(
+    const lc_module_compat_t *mod, const char *logical_name) {
+    lr_global_alias_node_t *it;
+    if (!mod || !logical_name || !logical_name[0])
+        return NULL;
+    it = g_global_alias_buckets[lr_global_alias_bucket(mod, logical_name)];
+    while (it) {
+        if (it->module == mod && strcmp(it->logical_name, logical_name) == 0)
+            return it;
+        it = it->bucket_next;
+    }
+    return NULL;
+}
+
 void lr_llvm_compat_register_global_alias(const lc_module_compat_t *mod,
                                           const char *logical_name,
                                           const char *actual_name) {
-    lr_global_alias_node_t *it;
+    lr_global_alias_node_t *existing;
     lr_global_alias_node_t *node;
+    unsigned bucket;
     if (!mod || !logical_name || !logical_name[0] || !actual_name || !actual_name[0])
         return;
-    it = g_global_aliases;
-    while (it) {
-        if (it->module == mod && strcmp(it->logical_name, logical_name) == 0) {
-            char *dup = lr_strdup_safe(actual_name);
-            if (!dup)
-                return;
-            free(it->actual_name);
-            it->actual_name = dup;
+    existing = lr_find_global_alias_node(mod, logical_name);
+    if (existing) {
+        char *dup = lr_strdup_safe(actual_name);
+        if (!dup)
             return;
-        }
-        it = it->next;
+        free(existing->actual_name);
+        existing->actual_name = dup;
+        return;
     }
     node = (lr_global_alias_node_t *)calloc(1, sizeof(*node));
     if (!node)
@@ -662,6 +690,9 @@ void lr_llvm_compat_register_global_alias(const lc_module_compat_t *mod,
     }
     node->next = g_global_aliases;
     g_global_aliases = node;
+    bucket = lr_global_alias_bucket(mod, logical_name);
+    node->bucket_next = g_global_alias_buckets[bucket];
+    g_global_alias_buckets[bucket] = node;
 }
 
 int lr_llvm_compat_lookup_global_alias(const lc_module_compat_t *mod,
@@ -669,21 +700,40 @@ int lr_llvm_compat_lookup_global_alias(const lc_module_compat_t *mod,
                                        char *out_name,
                                        size_t out_name_cap,
                                        size_t *out_name_len) {
-    lr_global_alias_node_t *it = g_global_aliases;
+    lr_global_alias_node_t *node;
     if (!mod || !logical_name || !logical_name[0])
         return 0;
-    while (it) {
-        if (it->module == mod && strcmp(it->logical_name, logical_name) == 0) {
-            lr_copy_out_string(it->actual_name, out_name, out_name_cap, out_name_len);
-            return 1;
-        }
-        it = it->next;
+    node = lr_find_global_alias_node(mod, logical_name);
+    if (node) {
+        lr_copy_out_string(node->actual_name, out_name, out_name_cap, out_name_len);
+        return 1;
     }
     if (out_name_len)
         *out_name_len = 0;
     if (out_name && out_name_cap)
         out_name[0] = '\0';
     return 0;
+}
+
+static void lr_unlink_global_alias_bucket(lr_global_alias_node_t *dead) {
+    unsigned bucket;
+    lr_global_alias_node_t *bit;
+    lr_global_alias_node_t *bprev = NULL;
+    if (!dead || !dead->logical_name)
+        return;
+    bucket = lr_global_alias_bucket(dead->module, dead->logical_name);
+    bit = g_global_alias_buckets[bucket];
+    while (bit) {
+        if (bit == dead) {
+            if (bprev)
+                bprev->bucket_next = bit->bucket_next;
+            else
+                g_global_alias_buckets[bucket] = bit->bucket_next;
+            return;
+        }
+        bprev = bit;
+        bit = bit->bucket_next;
+    }
 }
 
 void lr_llvm_compat_clear_global_aliases(const lc_module_compat_t *mod) {
@@ -699,6 +749,7 @@ void lr_llvm_compat_clear_global_aliases(const lc_module_compat_t *mod) {
             else
                 g_global_aliases = it->next;
             it = it->next;
+            lr_unlink_global_alias_bucket(dead);
             free(dead->logical_name);
             free(dead->actual_name);
             free(dead);
@@ -882,41 +933,41 @@ void lr_llvm_compat_apply_global_linkage(lc_module_compat_t *compat,
     if (!m)
         return;
     old_name = global_value->global.name;
-    for (g = m->first_global; g; g = g->next) {
-        if (!g->name || strcmp(g->name, global_value->global.name) != 0)
-            continue;
-        g->is_local = lr_llvm_compat_is_local_global_linkage(linkage) ? true : false;
-        if (g->is_local) {
-            char scoped_name[4096];
-            size_t scoped_len = 0;
-            g->is_external = false;
-            scoped_len = lr_llvm_compat_linkage_scoped_global_name(
-                compat, g->name, linkage, scoped_name, sizeof(scoped_name));
-            if (scoped_len > 0 && strcmp(scoped_name, g->name) != 0) {
-                uint32_t old_sym_id = global_value->global.id;
-                uint32_t scoped_sym_id = UINT32_MAX;
-                char *owned_name = lr_arena_strdup(m->arena, scoped_name, scoped_len);
-                if (!owned_name)
-                    return;
-                g->name = owned_name;
-                global_value->global.name = owned_name;
-                scoped_sym_id = lr_module_intern_symbol(m, owned_name);
-                if (scoped_sym_id != UINT32_MAX) {
-                    global_value->global.id = scoped_sym_id;
-                    lc_module_rewrite_global_symbol_refs(compat, old_sym_id,
-                                                         old_name,
-                                                         scoped_sym_id,
-                                                         owned_name);
-                }
-                lr_llvm_compat_register_global_alias(compat, old_name, owned_name);
-                if (global_value->name && strcmp(global_value->name, old_name) == 0)
-                    global_value->name = owned_name;
+    /* O(1) lookup via the per-module symbol-id cache.  The previous
+       linear walk over m->first_global made this O(N^2) when applying
+       linkage to every global, which dominates fpm-sized compiles. */
+    g = lc_module_lookup_global(compat, old_name);
+    if (!g) return;
+    g->is_local = lr_llvm_compat_is_local_global_linkage(linkage) ? true : false;
+    if (g->is_local) {
+        char scoped_name[4096];
+        size_t scoped_len = 0;
+        g->is_external = false;
+        scoped_len = lr_llvm_compat_linkage_scoped_global_name(
+            compat, g->name, linkage, scoped_name, sizeof(scoped_name));
+        if (scoped_len > 0 && strcmp(scoped_name, g->name) != 0) {
+            uint32_t old_sym_id = global_value->global.id;
+            uint32_t scoped_sym_id = UINT32_MAX;
+            char *owned_name = lr_arena_strdup(m->arena, scoped_name, scoped_len);
+            if (!owned_name)
+                return;
+            g->name = owned_name;
+            global_value->global.name = owned_name;
+            scoped_sym_id = lr_module_intern_symbol(m, owned_name);
+            if (scoped_sym_id != UINT32_MAX) {
+                global_value->global.id = scoped_sym_id;
+                lc_module_rewrite_global_symbol_refs(compat, old_sym_id,
+                                                     old_name,
+                                                     scoped_sym_id,
+                                                     owned_name);
             }
+            lr_llvm_compat_register_global_alias(compat, old_name, owned_name);
+            if (global_value->name && strcmp(global_value->name, old_name) == 0)
+                global_value->name = owned_name;
         }
-        if (linkage == LR_LLVM_LINKAGE_AVAILABLE_EXTERNALLY)
-            g->is_external = true;
-        return;
     }
+    if (linkage == LR_LLVM_LINKAGE_AVAILABLE_EXTERNALLY)
+        g->is_external = true;
 }
 
 const char *lr_llvm_compat_type_kind_name(unsigned type_kind) {
@@ -1239,7 +1290,6 @@ int lr_llvm_compat_function_insert_block(lc_module_compat_t *mod,
                                          lr_func_t *func,
                                          lr_block_t *block,
                                          lr_block_t *insert_before) {
-    lr_block_t *it;
     int attached = 0;
     if (!mod || !func || !block)
         return 0;
@@ -1250,12 +1300,12 @@ int lr_llvm_compat_function_insert_block(lc_module_compat_t *mod,
     if (block->func != func)
         return 0;
 
-    for (it = func->first_block; it; it = it->next) {
-        if (it == block) {
-            attached = 1;
-            break;
-        }
-    }
+    /* O(1) check whether block is already in func's iplist.  A block is in
+       the list iff it is bound to func and either tails the list
+       (func->last_block == block) or has a successor (block->next != NULL).
+       Replaces an O(N) linear scan that, combined with the per-block
+       attach call from CreateBr/CreateCondBr, made block insertion O(N^2). */
+    attached = (func->last_block == block) || (block->next != NULL);
     if (!attached && lc_block_attach(mod, block) != 0)
         return 0;
 

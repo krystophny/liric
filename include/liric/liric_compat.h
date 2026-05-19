@@ -264,6 +264,10 @@ void lc_module_rewrite_global_symbol_refs(lc_module_compat_t *mod,
                                           uint32_t new_sym_id,
                                           const char *new_name);
 
+/* O(1) global lookup by name via the per-module symbol-id cache; falls back
+ * to a linear scan only on the first lookup of any given symbol. */
+lr_global_t *lc_module_lookup_global(lc_module_compat_t *mod, const char *name);
+
 /* ---- IRBuilder operations ---- */
 
 /* Arithmetic */

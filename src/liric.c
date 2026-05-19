@@ -11,13 +11,27 @@ typedef struct lr_array_type_cache_node {
     uint64_t count;
     lr_type_t *array;
     struct lr_array_type_cache_node *next;
+    struct lr_array_type_cache_node *bucket_next;
 } lr_array_type_cache_node_t;
 
 static lr_array_type_cache_node_t *g_array_type_cache = NULL;
+#define LR_ARRAY_TYPE_CACHE_BUCKETS 16384u
+static lr_array_type_cache_node_t
+    *g_array_type_cache_buckets[LR_ARRAY_TYPE_CACHE_BUCKETS];
 static _Thread_local const lr_module_t *g_last_array_type_module = NULL;
 static _Thread_local const lr_type_t *g_last_array_type_elem = NULL;
 static _Thread_local uint64_t g_last_array_type_count = 0;
 static _Thread_local lr_type_t *g_last_array_type = NULL;
+
+static unsigned lr_array_type_cache_bucket(const lr_module_t *m,
+                                           const lr_type_t *elem,
+                                           uint64_t count) {
+    uintptr_t a = (uintptr_t)m;
+    uintptr_t b = (uintptr_t)elem;
+    uint64_t h = (uint64_t)(a ^ (a >> 32) ^ b ^ (b << 13) ^ count);
+    h *= 11400714819323198485ull;
+    return (unsigned)(h & (LR_ARRAY_TYPE_CACHE_BUCKETS - 1u));
+}
 
 static lr_type_t *lookup_cached_array_type(const lr_module_t *m,
                                            const lr_type_t *elem,
@@ -30,7 +44,8 @@ static lr_type_t *lookup_cached_array_type(const lr_module_t *m,
         g_last_array_type_count == count) {
         return g_last_array_type;
     }
-    for (it = g_array_type_cache; it; it = it->next) {
+    it = g_array_type_cache_buckets[lr_array_type_cache_bucket(m, elem, count)];
+    while (it) {
         if (it->module == m && it->elem == elem && it->count == count) {
             g_last_array_type_module = m;
             g_last_array_type_elem = elem;
@@ -38,6 +53,7 @@ static lr_type_t *lookup_cached_array_type(const lr_module_t *m,
             g_last_array_type = it->array;
             return it->array;
         }
+        it = it->bucket_next;
     }
     return NULL;
 }
@@ -48,10 +64,24 @@ static void drop_cached_array_types(const lr_module_t *m) {
     while (it) {
         lr_array_type_cache_node_t *next = it->next;
         if (it->module == m) {
+            unsigned bucket;
+            lr_array_type_cache_node_t *bit;
+            lr_array_type_cache_node_t *bprev = NULL;
             if (prev)
                 prev->next = next;
             else
                 g_array_type_cache = next;
+            bucket = lr_array_type_cache_bucket(it->module, it->elem, it->count);
+            for (bit = g_array_type_cache_buckets[bucket]; bit;
+                 bprev = bit, bit = bit->bucket_next) {
+                if (bit == it) {
+                    if (bprev)
+                        bprev->bucket_next = bit->bucket_next;
+                    else
+                        g_array_type_cache_buckets[bucket] = bit->bucket_next;
+                    break;
+                }
+            }
             free(it);
         } else {
             prev = it;
@@ -178,6 +208,11 @@ lr_type_t *lr_type_array_new(lr_module_t *m, lr_type_t *elem, uint64_t count) {
     node->array = cached;
     node->next = g_array_type_cache;
     g_array_type_cache = node;
+    {
+        unsigned bucket = lr_array_type_cache_bucket(m, elem, count);
+        node->bucket_next = g_array_type_cache_buckets[bucket];
+        g_array_type_cache_buckets[bucket] = node;
+    }
     g_last_array_type_module = m;
     g_last_array_type_elem = elem;
     g_last_array_type_count = count;

@@ -214,10 +214,18 @@ static int compat_write_empty_lines_sidecar(const char *path) {
     return rc;
 }
 
+typedef struct compat_scoped_local_name_bucket_node {
+    const char *name;
+    struct compat_scoped_local_name_bucket_node *next;
+} compat_scoped_local_name_bucket_node_t;
+
+#define COMPAT_LOCAL_NAME_BUCKETS 256u
+
 typedef struct compat_scoped_local_name_map {
     const char **exact_names;
     size_t count;
     size_t cap;
+    compat_scoped_local_name_bucket_node_t *buckets[COMPAT_LOCAL_NAME_BUCKETS];
 } compat_scoped_local_name_map_t;
 
 typedef struct compat_func_local_name_cache {
@@ -227,10 +235,36 @@ typedef struct compat_func_local_name_cache {
     bool next_suffix_valid;
 } compat_func_local_name_cache_t;
 
+static unsigned compat_local_name_bucket(const char *name) {
+    /* FNV-1a 64-bit. */
+    uint64_t h = 1469598103934665603ull;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        h ^= (uint64_t)*p;
+        h *= 1099511628211ull;
+    }
+    return (unsigned)(h & (COMPAT_LOCAL_NAME_BUCKETS - 1u));
+}
+
+static int compat_name_in_map(const compat_scoped_local_name_map_t *map,
+                              const char *name) {
+    const compat_scoped_local_name_bucket_node_t *it;
+    if (!map || !name || !name[0])
+        return 0;
+    it = map->buckets[compat_local_name_bucket(name)];
+    while (it) {
+        if (it->name && strcmp(it->name, name) == 0)
+            return 1;
+        it = it->next;
+    }
+    return 0;
+}
+
 static int compat_scoped_local_name_push(compat_scoped_local_name_map_t *map,
                                          const char *exact_name) {
     const char **new_names = NULL;
     size_t new_cap = 0;
+    compat_scoped_local_name_bucket_node_t *node = NULL;
+    unsigned bucket;
     if (!map || !exact_name || !exact_name[0])
         return -1;
     if (map->count == map->cap) {
@@ -243,6 +277,16 @@ static int compat_scoped_local_name_push(compat_scoped_local_name_map_t *map,
         map->cap = new_cap;
     }
     map->exact_names[map->count++] = exact_name;
+    /* Insert into the hash bucket so future existence checks are O(1).
+       Allow duplicate keys -- the array semantics tolerate them and the
+       bucket walk still terminates on first match. */
+    node = (compat_scoped_local_name_bucket_node_t *)malloc(sizeof(*node));
+    if (node) {
+        node->name = exact_name;
+        bucket = compat_local_name_bucket(exact_name);
+        node->next = map->buckets[bucket];
+        map->buckets[bucket] = node;
+    }
     return 0;
 }
 
@@ -285,8 +329,18 @@ static void compat_collect_module_scoped_locals(const lr_module_t *m,
 }
 
 static void compat_free_scoped_local_name_map(compat_scoped_local_name_map_t *map) {
+    unsigned b;
     if (!map)
         return;
+    for (b = 0; b < COMPAT_LOCAL_NAME_BUCKETS; b++) {
+        compat_scoped_local_name_bucket_node_t *it = map->buckets[b];
+        while (it) {
+            compat_scoped_local_name_bucket_node_t *dead = it;
+            it = it->next;
+            free(dead);
+        }
+        map->buckets[b] = NULL;
+    }
     free(map->exact_names);
     map->exact_names = NULL;
     map->count = 0;
@@ -1919,8 +1973,7 @@ static int local_name_in_use(lc_module_compat_t *mod, const lr_func_t *func,
         }
     }
     if (cache)
-        return compat_name_in_list(name, cache->names.exact_names,
-                                   cache->names.count);
+        return compat_name_in_map(&cache->names, name);
     for (const lr_block_t *b = func->first_block; b; b = b->next) {
         if (b->name && strcmp(b->name, name) == 0)
             return 1;
@@ -2040,7 +2093,7 @@ static void register_local_name(lc_module_compat_t *mod, const lr_func_t *func,
     if (!cache)
         return;
     seed_local_name_cache(mod, cache, func);
-    if (compat_name_in_list(name, cache->names.exact_names, cache->names.count))
+    if (compat_name_in_map(&cache->names, name))
         return;
     (void)compat_scoped_local_name_push(&cache->names, name);
 }
@@ -2191,6 +2244,10 @@ static lr_global_t *lookup_global_cached(lc_module_compat_t *mod, const char *na
     if (g)
         mod->global_by_sym[sym_id] = g;
     return g;
+}
+
+lr_global_t *lc_module_lookup_global(lc_module_compat_t *mod, const char *name) {
+    return lookup_global_cached(mod, name, NULL);
 }
 
 static uint32_t canonical_global_sym_id(lc_module_compat_t *mod,
@@ -4532,14 +4589,18 @@ static void detached_block_remove_idx(lc_module_compat_t *mod, uint32_t idx) {
 }
 
 static int block_linked_in_func(const lr_func_t *func, const lr_block_t *block) {
-    const lr_block_t *it;
+    /* A block is in func's iplist iff it is bound to func and has either a
+       successor in the list (block->next != NULL) or is the tail of the list
+       (func->last_block == block).  Detached blocks have block->next == NULL
+       and are not pointed at by func->last_block, so this O(1) predicate is
+       equivalent to the previous linear scan. */
     if (!func || !block)
         return 0;
-    for (it = func->first_block; it; it = it->next) {
-        if (it == block)
-            return 1;
-    }
-    return 0;
+    if (block->func != func)
+        return 0;
+    if (func->last_block == block)
+        return 1;
+    return block->next != NULL;
 }
 
 static int block_bind_func_internal(lc_module_compat_t *mod,
