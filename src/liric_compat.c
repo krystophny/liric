@@ -1789,6 +1789,208 @@ static int compat_guess_lfortran_iso_include_dir(const char *src_path, char *out
     return -1;
 }
 
+typedef struct compat_ll_rename {
+    const char *from;
+    const char *to;
+} compat_ll_rename_t;
+
+/* Rewrite a clang-emitted .ll in place to drop constructs liric's LL
+ * parser does not yet accept and to rename LLVM intrinsics that liric
+ * does not lower (x86_fp80 long-double math) to their libm equivalents,
+ * which the system dynamic loader can resolve against libm.so.
+ *   - drop opaque-pointer attribute payloads: elementtype(T), sret(T),
+ *     byval(T), inalloca(T), preallocated(T), nocapture(T)
+ *   - replace inline asm calls with a comment line
+ *   - rename llvm.<op>.f80 -> <op>l for floor/ceil/round/trunc/rint */
+static int compat_normalize_clang_ll(const char *ll_path) {
+    static const char *const drop_attrs[] = {
+        "elementtype", "sret", "byval", "inalloca", "preallocated",
+        "nocapture", NULL
+    };
+    static const compat_ll_rename_t renames[] = {
+        {"@llvm.floor.f80",   "@floorl"},
+        {"@llvm.ceil.f80",    "@ceill"},
+        {"@llvm.round.f80",   "@roundl"},
+        {"@llvm.trunc.f80",   "@truncl"},
+        {"@llvm.rint.f80",    "@rintl"},
+        {"@llvm.nearbyint.f80", "@nearbyintl"},
+        {"@llvm.sqrt.f80",    "@sqrtl"},
+        {"@llvm.fabs.f80",    "@fabsl"},
+        {NULL, NULL},
+    };
+    uint8_t *data = NULL;
+    size_t len = 0;
+    char *src = NULL;
+    char *out = NULL;
+    size_t out_len = 0;
+    size_t out_cap = 0;
+    size_t i = 0;
+    int rc = -1;
+
+    if (read_file_bytes_allow_empty(ll_path, &data, &len) != 0)
+        return -1;
+    src = (char *)data;
+    if (len == 0) {
+        rc = 0;
+        goto done;
+    }
+    out_cap = len + 64;
+    out = (char *)malloc(out_cap);
+    if (!out)
+        goto done;
+
+    while (i < len) {
+        size_t line_start = i;
+        size_t line_end = i;
+        while (line_end < len && src[line_end] != '\n')
+            line_end++;
+        size_t line_len = line_end - line_start;
+        const char *line = src + line_start;
+
+        /* Replace inline-asm calls with a comment. */
+        int is_inline_asm_call = 0;
+        if (line_len > 0) {
+            const char *p = line;
+            const char *eol = line + line_len;
+            while (p < eol && (*p == ' ' || *p == '\t'))
+                p++;
+            if ((size_t)(eol - p) >= 5 && memcmp(p, "call ", 5) == 0) {
+                if (memmem(p, eol - p, " asm ", 5) ||
+                    memmem(p, eol - p, "\tasm ", 5))
+                    is_inline_asm_call = 1;
+            }
+            if ((size_t)(eol - p) >= 13 && !is_inline_asm_call &&
+                memcmp(p, "tail call ", 10) == 0) {
+                if (memmem(p, eol - p, " asm ", 5) ||
+                    memmem(p, eol - p, "\tasm ", 5))
+                    is_inline_asm_call = 1;
+            }
+        }
+
+        if (is_inline_asm_call) {
+            static const char marker[] = "  ; <inline asm elided>";
+            size_t need = sizeof(marker) - 1 + 1;
+            if (out_len + need + 1 > out_cap) {
+                size_t new_cap = (out_cap * 2 > out_len + need + 1)
+                                     ? out_cap * 2
+                                     : out_len + need + 1;
+                char *grow = (char *)realloc(out, new_cap);
+                if (!grow)
+                    goto done;
+                out = grow;
+                out_cap = new_cap;
+            }
+            memcpy(out + out_len, marker, sizeof(marker) - 1);
+            out_len += sizeof(marker) - 1;
+            out[out_len++] = '\n';
+        } else {
+            /* Copy line while stripping drop_attrs("...") occurrences and
+             * applying intrinsic renames. */
+            size_t j = line_start;
+            while (j < line_end) {
+                int matched = 0;
+                int k;
+                for (k = 0; renames[k].from; k++) {
+                    size_t flen = strlen(renames[k].from);
+                    if (j + flen > line_end)
+                        continue;
+                    if (memcmp(src + j, renames[k].from, flen) != 0)
+                        continue;
+                    const char *to = renames[k].to;
+                    size_t tlen = strlen(to);
+                    if (out_len + tlen + 1 > out_cap) {
+                        size_t new_cap = out_cap * 2;
+                        while (new_cap < out_len + tlen + 1)
+                            new_cap *= 2;
+                        char *grow = (char *)realloc(out, new_cap);
+                        if (!grow)
+                            goto done;
+                        out = grow;
+                        out_cap = new_cap;
+                    }
+                    memcpy(out + out_len, to, tlen);
+                    out_len += tlen;
+                    j += flen;
+                    matched = 1;
+                    break;
+                }
+                if (matched)
+                    continue;
+                for (k = 0; drop_attrs[k]; k++) {
+                    size_t alen = strlen(drop_attrs[k]);
+                    if (j + alen + 1 > line_end)
+                        continue;
+                    if (memcmp(src + j, drop_attrs[k], alen) != 0)
+                        continue;
+                    if (src[j + alen] != '(')
+                        continue;
+                    /* Confirm the preceding char is whitespace/start so we
+                     * don't match a partial identifier like "anocapture". */
+                    if (j > line_start) {
+                        char prev = src[j - 1];
+                        if (prev != ' ' && prev != '\t' && prev != ',' &&
+                            prev != '(')
+                            continue;
+                    }
+                    /* Skip balanced parens of the attribute payload. */
+                    size_t scan = j + alen + 1;
+                    int depth = 1;
+                    while (scan < line_end && depth > 0) {
+                        if (src[scan] == '(')
+                            depth++;
+                        else if (src[scan] == ')')
+                            depth--;
+                        scan++;
+                    }
+                    if (depth != 0)
+                        break;
+                    /* Also swallow one trailing space, if any, so spacing
+                     * stays clean. */
+                    if (scan < line_end && src[scan] == ' ')
+                        scan++;
+                    j = scan;
+                    matched = 1;
+                    break;
+                }
+                if (!matched) {
+                    if (out_len + 1 + 1 > out_cap) {
+                        size_t new_cap = out_cap * 2;
+                        char *grow = (char *)realloc(out, new_cap);
+                        if (!grow)
+                            goto done;
+                        out = grow;
+                        out_cap = new_cap;
+                    }
+                    out[out_len++] = src[j];
+                    j++;
+                }
+            }
+            if (out_len + 1 + 1 > out_cap) {
+                size_t new_cap = out_cap * 2;
+                char *grow = (char *)realloc(out, new_cap);
+                if (!grow)
+                    goto done;
+                out = grow;
+                out_cap = new_cap;
+            }
+            out[out_len++] = '\n';
+        }
+
+        i = line_end;
+        if (i < len && src[i] == '\n')
+            i++;
+    }
+
+    if (write_file_bytes(ll_path, (const uint8_t *)out, out_len) != 0)
+        goto done;
+    rc = 0;
+
+done:
+    free(data);
+    free(out);
+    return rc;
+}
+
 static int compat_generate_sidecars_for_c_object(const char *obj_path,
                                                  char *err, size_t errlen) {
     char src_path[PATH_MAX];
@@ -1893,6 +2095,12 @@ static int compat_generate_sidecars_for_c_object(const char *obj_path,
         compat_set_err(err, errlen,
                        "WITH_LIRIC AOT no-link mode failed to generate LLVM sidecar from C source: %s",
                        src_path);
+        goto done;
+    }
+    if (compat_normalize_clang_ll(ll_path) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC AOT no-link mode failed to normalize sidecar IR: %s",
+                       ll_path);
         goto done;
     }
 
