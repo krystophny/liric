@@ -28,9 +28,9 @@ function(read_def_names def_path macro_name out_var)
     set(${out_var} "${_names}" PARENT_SCOPE)
 endfunction()
 
-read_def_names("${SOURCE_DIR}/include/llvm/Config/Targets.def" "LLVM_TARGET" target_names)
-read_def_names("${SOURCE_DIR}/include/llvm/Config/AsmPrinters.def" "LLVM_ASM_PRINTER" printer_names)
-read_def_names("${SOURCE_DIR}/include/llvm/Config/AsmParsers.def" "LLVM_ASM_PARSER" parser_names)
+read_def_names("${SOURCE_DIR}/include/liric/llvm/Config/Targets.def" "LLVM_TARGET" target_names)
+read_def_names("${SOURCE_DIR}/include/liric/llvm/Config/AsmPrinters.def" "LLVM_ASM_PRINTER" printer_names)
+read_def_names("${SOURCE_DIR}/include/liric/llvm/Config/AsmParsers.def" "LLVM_ASM_PARSER" parser_names)
 
 set(expected_symbols "")
 foreach(_target IN LISTS target_names)
