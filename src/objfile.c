@@ -1660,6 +1660,28 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         if (!blob->name || !blob->code || blob->code_len == 0)
             continue;
 
+        /* If the module also has freshly-parseable IR for this function
+           (e.g. merged from a sidecar `.liric_ll`), prefer compiling that
+           IR with the current backend rather than reusing a pre-compiled
+           blob that may have been emitted by an older buggy backend (for
+           example liric's variadic-prolog miscompile of
+           `_lcompilers_string_format_fortran`, where the pre-compiled
+           runtime-archive blob sets `va_list.overflow_arg_area = RBP+16`
+           instead of `RBP + 16 + named_stack_count*8`). */
+        {
+            lr_func_t *ir_def = NULL;
+            for (lr_func_t *cand = m->first_func; cand; cand = cand->next) {
+                if (!cand->name || strcmp(cand->name, blob->name) != 0)
+                    continue;
+                if (cand->is_decl || !cand->first_block)
+                    continue;
+                ir_def = cand;
+                break;
+            }
+            if (ir_def)
+                continue;
+        }
+
         out->code_pos = obj_align_up(out->code_pos, 16);
         if (obj_ensure_code_capacity(out, out->code_pos + blob->code_len) != 0) {
             obj_build_result_destroy(out);
