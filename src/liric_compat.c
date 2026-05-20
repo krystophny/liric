@@ -1616,7 +1616,7 @@ static char *compat_shell_quote(const char *s) {
 #endif
 }
 
-static int compat_resolve_c_source_for_object(const char *obj_path, char *out_src,
+static int compat_resolve_c_source_for_object(const char *__restrict__ obj_path, char *out_src,
                                                size_t out_src_cap) {
     char direct[PATH_MAX];
     char stem[PATH_MAX];
@@ -1680,8 +1680,8 @@ static int compat_resolve_c_source_for_object(const char *obj_path, char *out_sr
             root_n++;
         if (root_n > 0 && root_n < 12) {
             size_t len = strlen(roots[root_n - 1]);
-            if (len < sizeof(roots[root_n])) {
-                strcpy(roots[root_n], roots[root_n - 1]);
+            if (len + 1 <= sizeof(roots[root_n])) {
+                memcpy(roots[root_n], roots[root_n - 1], len + 1);
                 if (compat_parent_dir(roots[root_n]) == 0) {
                     root_n++;
                 }
