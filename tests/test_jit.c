@@ -2944,6 +2944,42 @@ int test_jit_global_struct_integer_init(void) {
     return 0;
 }
 
+int test_jit_large_global_array(void) {
+    const char *src =
+        "@big = global [20971520 x i8] zeroinitializer\n"
+        "define i32 @read_big() {\n"
+        "entry:\n"
+        "  %p0 = getelementptr [20971520 x i8], ptr @big, i32 0, i32 0\n"
+        "  store i8 42, ptr %p0, align 1\n"
+        "  %p1 = getelementptr [20971520 x i8], ptr @big, i32 0, i32 20971519\n"
+        "  store i8 7, ptr %p1, align 1\n"
+        "  %a = load i8, ptr %p0, align 1\n"
+        "  %b = load i8, ptr %p1, align 1\n"
+        "  %az = zext i8 %a to i32\n"
+        "  %bz = zext i8 %b to i32\n"
+        "  %r = add i32 %az, %bz\n"
+        "  ret i32 %r\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m = parse(src, arena);
+    TEST_ASSERT(m != NULL, "parse");
+
+    lr_jit_t *jit = lr_jit_create();
+    TEST_ASSERT(jit != NULL, "jit create");
+
+    int rc = lr_jit_add_module(jit, m);
+    TEST_ASSERT_EQ(rc, 0, "jit add module");
+
+    typedef int (*fn_t)(void);
+    fn_t fn; LR_JIT_GET_FN(fn, jit, "read_big");
+    TEST_ASSERT(fn != NULL, "function lookup");
+    TEST_ASSERT_EQ(fn(), 49, "large global array survives materialization");
+
+    lr_jit_destroy(jit);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_jit_global_struct_inttoptr_immediate_init(void) {
     /*
      * Regression: aggregate global initializers must preserve inttoptr

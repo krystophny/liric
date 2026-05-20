@@ -31,7 +31,7 @@ static double lr_jit_now_us(void) {
 #endif
 
 #define CODE_PAGE_SIZE (16 * 1024 * 1024)
-#define DATA_PAGE_SIZE (16 * 1024 * 1024)
+#define DATA_PAGE_SIZE (64 * 1024 * 1024)
 #define SYM_BUCKET_COUNT 8192u
 #define MISS_BUCKET_COUNT 4096u
 #define LAZY_FUNC_BUCKET_COUNT 8192u

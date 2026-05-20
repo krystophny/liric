@@ -176,6 +176,7 @@ int test_jit_sext_i8_to_i64(void);
 int test_jit_global_string_constant(void);
 int test_jit_global_struct_ptr_relocation(void);
 int test_jit_global_struct_integer_init(void);
+int test_jit_large_global_array(void);
 int test_jit_global_struct_inttoptr_immediate_init(void);
 int test_jit_aggregate_load_store_copy(void);
 int test_jit_call_stack_args(void);
@@ -500,6 +501,7 @@ int main(void) {
     RUN_TEST(test_jit_global_string_constant);
     RUN_TEST(test_jit_global_struct_ptr_relocation);
     RUN_TEST(test_jit_global_struct_integer_init);
+    RUN_TEST(test_jit_large_global_array);
     RUN_TEST(test_jit_global_struct_inttoptr_immediate_init);
     RUN_TEST(test_jit_aggregate_load_store_copy);
     RUN_TEST(test_jit_call_stack_args);
