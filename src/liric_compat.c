@@ -1616,8 +1616,8 @@ static char *compat_shell_quote(const char *s) {
 #endif
 }
 
-static int compat_resolve_c_source_for_object(const char *obj_path, char *out_src,
-                                              size_t out_src_cap) {
+static int compat_resolve_c_source_for_object(const char *__restrict__ obj_path, char *out_src,
+                                               size_t out_src_cap) {
     char direct[PATH_MAX];
     char stem[PATH_MAX];
     const char *src_name = NULL;
