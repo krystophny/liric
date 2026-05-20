@@ -225,6 +225,7 @@ int test_bc_streaming_callback_abort_propagates_error(void);
 int test_bc_streaming_callback_dump_text_shape(void);
 int test_session_direct_ret_42(void);
 int test_session_add_args(void);
+int test_session_llvm_abi_float_value_arg(void);
 int test_session_arithmetic_chain(void);
 int test_session_stream_stencil_fast_path(void);
 int test_session_stream_isel_fast_path(void);
@@ -564,6 +565,7 @@ int main(void) {
     fprintf(stderr, "\nSession API tests:\n");
     RUN_TEST(test_session_direct_ret_42);
     RUN_TEST(test_session_add_args);
+    RUN_TEST(test_session_llvm_abi_float_value_arg);
     RUN_TEST(test_session_arithmetic_chain);
     RUN_TEST(test_session_stream_stencil_fast_path);
     RUN_TEST(test_session_stream_isel_fast_path);

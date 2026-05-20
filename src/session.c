@@ -2692,6 +2692,17 @@ int lr_session_func_begin(struct lr_session *s, const char *name,
     return 0;
 }
 
+int lr_session_func_set_llvm_abi(struct lr_session *s, bool enabled,
+                                  session_error_t *err) {
+    err_clear(err);
+    if (!s || !s->cur_func) {
+        err_set(err, S_ERR_STATE, "no active function");
+        return -1;
+    }
+    s->cur_func->uses_llvm_abi = enabled;
+    return 0;
+}
+
 int lr_session_func_begin_existing(struct lr_session *s, lr_module_t *module,
                                     lr_func_t *func, session_error_t *err) {
     err_clear(err);

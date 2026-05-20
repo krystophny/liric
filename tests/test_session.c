@@ -335,6 +335,42 @@ int test_session_add_args(void) {
     return 0;
 }
 
+int test_session_llvm_abi_float_value_arg(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    lr_type_t *f32 = lr_type_f32_s(s);
+    lr_type_t *params[] = {f32};
+
+    int rc = lr_session_func_begin(s, "session_f32_value", f32, params, 1,
+                                   false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    rc = lr_session_func_set_llvm_abi(s, true, &err);
+    TEST_ASSERT_EQ(rc, 0, "set llvm abi");
+
+    uint32_t vx = lr_session_param(s, 0);
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    uint32_t vr = lr_emit_fadd(s, f32, LR_VREG(vx, f32), LR_IMM_F(2.5, f32));
+    lr_emit_ret(s, LR_VREG(vr, f32));
+
+    void *addr = NULL;
+    rc = lr_session_func_end(s, &addr, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    typedef float (*fn_t)(float);
+    fn_t fn;
+    fn_ptr_cast(&fn, addr);
+    TEST_ASSERT(fn(1.25f) == 3.75f, "float value arg uses xmm register");
+
+    lr_session_destroy(s);
+    return 0;
+}
+
 int test_session_arithmetic_chain(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;

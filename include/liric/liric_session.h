@@ -144,6 +144,8 @@ int lr_session_declare(lr_session_t *s, const char *name, lr_type_t *ret,
 int lr_session_func_begin(lr_session_t *s, const char *name, lr_type_t *ret,
                           lr_type_t **params, uint32_t n, bool vararg,
                           lr_error_t *err);
+int lr_session_func_set_llvm_abi(lr_session_t *s, bool enabled,
+                                 lr_error_t *err);
 int lr_session_func_begin_existing(lr_session_t *s, lr_module_t *module,
                                     lr_func_t *func, lr_error_t *err);
 uint32_t lr_session_param(lr_session_t *s, uint32_t idx);
