@@ -14,6 +14,8 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <math.h>
+#include <dirent.h>
+#include <sys/stat.h>
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -637,6 +639,935 @@ done:
     return ok;
 }
 
+static char *compat_string_dup(const char *s) {
+    size_t n = 0;
+    char *out = NULL;
+    if (!s)
+        return NULL;
+    n = strlen(s);
+    out = (char *)malloc(n + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+static char *compat_dirname_dup(const char *path) {
+    const char *slash = NULL;
+    size_t len = 0;
+    char *out = NULL;
+    if (!path || !path[0])
+        return NULL;
+    slash = strrchr(path, '/');
+    if (!slash)
+        return compat_string_dup(".");
+    len = (size_t)(slash - path);
+    if (len == 0)
+        len = 1;
+    out = (char *)malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, path, len);
+    out[len] = '\0';
+    return out;
+}
+
+static char *compat_find_archive_member_object(const char *archive_path,
+                                               const char *member_name);
+
+static char *compat_archive_member_object_path(const char *archive_path,
+                                               const char *member_name) {
+    char *dir = NULL;
+    char *out = NULL;
+    const char *base = NULL;
+    size_t dir_len = 0;
+    size_t base_len = 0;
+    if (!archive_path || !member_name || !member_name[0])
+        return NULL;
+    dir = compat_dirname_dup(archive_path);
+    if (!dir)
+        return NULL;
+    base = compat_basename_ptr(member_name);
+    dir_len = strlen(dir);
+    base_len = strlen(base);
+    out = (char *)malloc(dir_len + 1 + base_len + 1);
+    if (!out) {
+        free(dir);
+        return NULL;
+    }
+    memcpy(out, dir, dir_len);
+    out[dir_len] = '/';
+    memcpy(out + dir_len + 1, base, base_len);
+    out[dir_len + 1 + base_len] = '\0';
+    free(dir);
+    if (!compat_object_has_sidecars(out) && !compat_path_exists(out)) {
+        char *found = compat_find_archive_member_object(archive_path, base);
+        if (found) {
+            free(out);
+            return found;
+        }
+    }
+    return out;
+}
+
+static int compat_path_list_append(char ***paths, size_t *count, size_t *cap,
+                                   char *path) {
+    char **next = NULL;
+    size_t next_cap = 0;
+    if (!paths || !count || !cap || !path)
+        return -1;
+    if (*count == *cap) {
+        next_cap = *cap ? (*cap * 2) : 16;
+        next = (char **)realloc(*paths, next_cap * sizeof(char *));
+        if (!next)
+            return -1;
+        *paths = next;
+        *cap = next_cap;
+    }
+    (*paths)[(*count)++] = path;
+    return 0;
+}
+
+typedef struct compat_string_list {
+    char **items;
+    size_t count;
+    size_t cap;
+} compat_string_list_t;
+
+typedef struct compat_archive_member {
+    char *path;
+    int selected;
+    compat_string_list_t defs;
+    compat_string_list_t undefs;
+} compat_archive_member_t;
+
+typedef struct compat_archive_members {
+    compat_archive_member_t *items;
+    size_t count;
+    size_t cap;
+} compat_archive_members_t;
+
+static void compat_string_list_free(compat_string_list_t *list) {
+    size_t i = 0;
+    if (!list)
+        return;
+    for (i = 0; i < list->count; i++)
+        free(list->items[i]);
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->cap = 0;
+}
+
+static int compat_string_list_contains(const compat_string_list_t *list,
+                                       const char *s) {
+    size_t i = 0;
+    if (!list || !s)
+        return 0;
+    for (i = 0; i < list->count; i++) {
+        if (strcmp(list->items[i], s) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int compat_string_list_add(compat_string_list_t *list, const char *s) {
+    char **next = NULL;
+    size_t next_cap = 0;
+    char *copy = NULL;
+    if (!list || !s || !s[0])
+        return -1;
+    if (compat_string_list_contains(list, s))
+        return 0;
+    if (list->count == list->cap) {
+        next_cap = list->cap ? list->cap * 2 : 32;
+        next = (char **)realloc(list->items, next_cap * sizeof(char *));
+        if (!next)
+            return -1;
+        list->items = next;
+        list->cap = next_cap;
+    }
+    copy = compat_string_dup(s);
+    if (!copy)
+        return -1;
+    list->items[list->count++] = copy;
+    return 0;
+}
+
+static int compat_string_list_append_raw(compat_string_list_t *list,
+                                         const char *s) {
+    char **next = NULL;
+    size_t next_cap = 0;
+    char *copy = NULL;
+    if (!list || !s || !s[0])
+        return -1;
+    if (list->count == list->cap) {
+        next_cap = list->cap ? list->cap * 2 : 32;
+        next = (char **)realloc(list->items, next_cap * sizeof(char *));
+        if (!next)
+            return -1;
+        list->items = next;
+        list->cap = next_cap;
+    }
+    copy = compat_string_dup(s);
+    if (!copy)
+        return -1;
+    list->items[list->count++] = copy;
+    return 0;
+}
+
+static void compat_string_list_remove(compat_string_list_t *list,
+                                      const char *s) {
+    size_t i = 0;
+    if (!list || !s)
+        return;
+    for (i = 0; i < list->count; i++) {
+        if (strcmp(list->items[i], s) == 0) {
+            free(list->items[i]);
+            list->items[i] = list->items[list->count - 1];
+            list->count--;
+            return;
+        }
+    }
+}
+
+static int compat_string_list_add_missing(compat_string_list_t *dst,
+                                          const compat_string_list_t *src,
+                                          const compat_string_list_t *known) {
+    size_t i = 0;
+    if (!dst || !src)
+        return -1;
+    for (i = 0; i < src->count; i++) {
+        if (known && compat_string_list_contains(known, src->items[i]))
+            continue;
+        if (compat_string_list_add(dst, src->items[i]) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int compat_string_list_add_all(compat_string_list_t *dst,
+                                      const compat_string_list_t *src) {
+    size_t i = 0;
+    if (!dst || !src)
+        return -1;
+    for (i = 0; i < src->count; i++) {
+        if (compat_string_list_add(dst, src->items[i]) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int compat_symbol_drives_archive_selection(const char *s) {
+    if (!s || !s[0])
+        return 0;
+    if (strncmp(s, "_lcompilers_", 12) == 0)
+        return 0;
+    if (strncmp(s, "_lfortran_", 10) == 0)
+        return 0;
+    if (strstr(s, ".__liric_local.") != NULL)
+        return 0;
+    return 1;
+}
+
+static void compat_string_list_remove_all(compat_string_list_t *dst,
+                                          const compat_string_list_t *src) {
+    size_t i = 0;
+    if (!dst || !src)
+        return;
+    for (i = 0; i < src->count; i++)
+        compat_string_list_remove(dst, src->items[i]);
+}
+
+static void compat_archive_members_free(compat_archive_members_t *members) {
+    size_t i = 0;
+    if (!members)
+        return;
+    for (i = 0; i < members->count; i++) {
+        free(members->items[i].path);
+        compat_string_list_free(&members->items[i].defs);
+        compat_string_list_free(&members->items[i].undefs);
+    }
+    free(members->items);
+    members->items = NULL;
+    members->count = 0;
+    members->cap = 0;
+}
+
+static int compat_archive_members_append(compat_archive_members_t *members,
+                                         char *path) {
+    compat_archive_member_t *next = NULL;
+    size_t next_cap = 0;
+    if (!members || !path)
+        return -1;
+    if (members->count == members->cap) {
+        next_cap = members->cap ? members->cap * 2 : 32;
+        next = (compat_archive_member_t *)realloc(
+            members->items, next_cap * sizeof(compat_archive_member_t));
+        if (!next)
+            return -1;
+        memset(next + members->cap, 0,
+               (next_cap - members->cap) * sizeof(compat_archive_member_t));
+        members->items = next;
+        members->cap = next_cap;
+    }
+    members->items[members->count].path = path;
+    members->count++;
+    return 0;
+}
+
+static char *compat_path_join2(const char *dir, const char *name) {
+    size_t dir_len = 0;
+    size_t name_len = 0;
+    size_t slash = 0;
+    char *out = NULL;
+    if (!dir || !name)
+        return NULL;
+    dir_len = strlen(dir);
+    name_len = strlen(name);
+    slash = (dir_len > 0 && dir[dir_len - 1] == '/') ? 0 : 1;
+    out = (char *)malloc(dir_len + slash + name_len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, dir, dir_len);
+    if (slash)
+        out[dir_len] = '/';
+    memcpy(out + dir_len + slash, name, name_len);
+    out[dir_len + slash + name_len] = '\0';
+    return out;
+}
+
+static int compat_search_object_by_basename(const char *dir,
+                                            const char *base,
+                                            unsigned depth,
+                                            char **out_path) {
+    DIR *d = NULL;
+    struct dirent *ent = NULL;
+    if (!dir || !base || !out_path || *out_path)
+        return -1;
+    d = opendir(dir);
+    if (!d)
+        return -1;
+    while ((ent = readdir(d)) != NULL) {
+        char *path = NULL;
+        struct stat st;
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        path = compat_path_join2(dir, ent->d_name);
+        if (!path)
+            continue;
+        if (stat(path, &st) != 0) {
+            free(path);
+            continue;
+        }
+        if (S_ISREG(st.st_mode) && strcmp(ent->d_name, base) == 0) {
+            if (compat_object_has_sidecars(path) || compat_path_exists(path)) {
+                *out_path = path;
+                closedir(d);
+                return 0;
+            }
+        }
+        if (depth > 0 && S_ISDIR(st.st_mode)) {
+            if (compat_search_object_by_basename(path, base, depth - 1,
+                                                 out_path) == 0 &&
+                *out_path) {
+                free(path);
+                closedir(d);
+                return 0;
+            }
+        }
+        free(path);
+    }
+    closedir(d);
+    return -1;
+}
+
+static int compat_c_source_name_matches(const char *wanted,
+                                        const char *candidate) {
+    size_t wanted_len = 0;
+    size_t candidate_len = 0;
+    if (!wanted || !candidate)
+        return 0;
+    wanted_len = strlen(wanted);
+    candidate_len = strlen(candidate);
+    if (candidate_len == 0 || wanted_len < candidate_len)
+        return 0;
+    if (strcmp(wanted, candidate) == 0)
+        return 1;
+    if (memcmp(wanted + wanted_len - candidate_len, candidate,
+               candidate_len) != 0)
+        return 0;
+    if (wanted_len == candidate_len)
+        return 1;
+    return wanted[wanted_len - candidate_len - 1] == '_';
+}
+
+static int compat_search_c_source_by_suffix(const char *dir,
+                                            const char *wanted,
+                                            unsigned depth,
+                                            char **out_path,
+                                            size_t *out_name_len) {
+    DIR *d = NULL;
+    struct dirent *ent = NULL;
+    if (!dir || !wanted || !out_path || !out_name_len)
+        return -1;
+    d = opendir(dir);
+    if (!d)
+        return -1;
+    while ((ent = readdir(d)) != NULL) {
+        char *path = NULL;
+        struct stat st;
+        size_t name_len = 0;
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+            continue;
+        path = compat_path_join2(dir, ent->d_name);
+        if (!path)
+            continue;
+        if (stat(path, &st) != 0) {
+            free(path);
+            continue;
+        }
+        if (S_ISREG(st.st_mode) && compat_ends_with(ent->d_name, ".c") &&
+            compat_c_source_name_matches(wanted, ent->d_name)) {
+            name_len = strlen(ent->d_name);
+            if (name_len > *out_name_len) {
+                free(*out_path);
+                *out_path = path;
+                *out_name_len = name_len;
+                path = NULL;
+            }
+        }
+        if (depth > 0 && S_ISDIR(st.st_mode)) {
+            (void)compat_search_c_source_by_suffix(path, wanted, depth - 1,
+                                                   out_path, out_name_len);
+        }
+        free(path);
+    }
+    closedir(d);
+    return *out_path ? 0 : -1;
+}
+
+static char *compat_archive_search_root(const char *archive_path) {
+    char *root = compat_dirname_dup(archive_path);
+    int i = 0;
+    if (!root)
+        return NULL;
+    for (i = 0; i < 2; i++) {
+        if (compat_parent_dir(root) != 0)
+            break;
+    }
+    return root;
+}
+
+static char *compat_find_fpm_layout_member_object(const char *root,
+                                                  const char *base) {
+    DIR *d = NULL;
+    struct dirent *ent = NULL;
+    char *found = NULL;
+    if (!root || !base)
+        return NULL;
+    d = opendir(root);
+    if (!d)
+        return NULL;
+    while ((ent = readdir(d)) != NULL) {
+        char *dir = NULL;
+        char *fpm_dir = NULL;
+        char *candidate = NULL;
+        struct stat st;
+        if (strncmp(ent->d_name, "lfortran_", 9) != 0)
+            continue;
+        dir = compat_path_join2(root, ent->d_name);
+        fpm_dir = dir ? compat_path_join2(dir, "fpm") : NULL;
+        candidate = fpm_dir ? compat_path_join2(fpm_dir, base) : NULL;
+        if (candidate && stat(candidate, &st) == 0 && S_ISREG(st.st_mode)) {
+            found = candidate;
+            candidate = NULL;
+        }
+        free(candidate);
+        free(fpm_dir);
+        free(dir);
+        if (found)
+            break;
+    }
+    closedir(d);
+    return found;
+}
+
+static char *compat_find_archive_member_object(const char *archive_path,
+                                               const char *member_name) {
+    char *root = NULL;
+    char *found = NULL;
+    const char *base = NULL;
+    if (!archive_path || !member_name)
+        return NULL;
+    base = compat_basename_ptr(member_name);
+    root = compat_archive_search_root(archive_path);
+    if (!root)
+        return NULL;
+    found = compat_find_fpm_layout_member_object(root, base);
+    if (found) {
+        free(root);
+        return found;
+    }
+    (void)compat_search_object_by_basename(root, base, 5, &found);
+    free(root);
+    return found;
+}
+
+static int compat_ensure_object_sidecars(const char *obj_path,
+                                         char *err, size_t errlen);
+
+static char *compat_parse_ir_symbol_at(const char *at) {
+    const char *p = at;
+    const char *start = NULL;
+    size_t len = 0;
+    char *out = NULL;
+    if (!p || *p != '@')
+        return NULL;
+    p++;
+    if (*p == '"') {
+        p++;
+        start = p;
+        while (*p && *p != '"')
+            p++;
+        if (*p != '"')
+            return NULL;
+        len = (size_t)(p - start);
+    } else {
+        start = p;
+        while (*p && *p != '(' && *p != ',' && *p != ' ' && *p != '\t' &&
+               *p != '=')
+            p++;
+        len = (size_t)(p - start);
+    }
+    if (len == 0)
+        return NULL;
+    out = (char *)malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, start, len);
+    out[len] = '\0';
+    return out;
+}
+
+static int compat_collect_ll_symbols(const uint8_t *data, size_t len,
+                                     compat_string_list_t *defs,
+                                     compat_string_list_t *undefs) {
+    const char *p = (const char *)data;
+    const char *end = (const char *)data + len;
+    if (!data || !defs || !undefs)
+        return -1;
+    while (p < end) {
+        const char *line = p;
+        const char *next = memchr(p, '\n', (size_t)(end - p));
+        size_t line_len = next ? (size_t)(next - line) : (size_t)(end - line);
+        char *sym = NULL;
+        if (line_len >= 7 && memcmp(line, "define", 6) == 0) {
+            const char *at = memchr(line, '@', line_len);
+            sym = compat_parse_ir_symbol_at(at);
+            if (sym) {
+                if (compat_string_list_append_raw(defs, sym) != 0) {
+                    free(sym);
+                    return -1;
+                }
+                free(sym);
+            }
+        } else if (line_len >= 8 && memcmp(line, "declare", 7) == 0) {
+            const char *at = memchr(line, '@', line_len);
+            sym = compat_parse_ir_symbol_at(at);
+            if (sym) {
+                if (compat_symbol_drives_archive_selection(sym) &&
+                    compat_string_list_append_raw(undefs, sym) != 0) {
+                    free(sym);
+                    return -1;
+                }
+                free(sym);
+            }
+        } else if (line_len >= 2 && line[0] == '@') {
+            sym = compat_parse_ir_symbol_at(line);
+            if (sym) {
+                int is_external = strstr(line, " external ") != NULL ||
+                                  strstr(line, "= external ") != NULL;
+                int rc = 0;
+                if (is_external) {
+                    if (compat_symbol_drives_archive_selection(sym))
+                        rc = compat_string_list_append_raw(undefs, sym);
+                } else {
+                    rc = compat_string_list_append_raw(defs, sym);
+                }
+                free(sym);
+                if (rc != 0)
+                    return -1;
+            }
+        }
+        p = next ? next + 1 : end;
+    }
+    return 0;
+}
+
+static int compat_collect_blob_symbols(const uint8_t *data, size_t len,
+                                       compat_string_list_t *defs,
+                                       compat_string_list_t *undefs) {
+    static const uint8_t magic[8] = {'L', 'R', 'B', 'L', 'O', 'B', '1', '\0'};
+    const uint8_t *p = data;
+    const uint8_t *end = data + len;
+    uint32_t version = 0;
+    uint32_t blob_count = 0;
+    uint32_t bi = 0;
+    if (!data || len == 0 || !defs || !undefs)
+        return 0;
+    if (len < 16u || memcmp(p, magic, sizeof(magic)) != 0)
+        return -1;
+    p += sizeof(magic);
+    if (compat_blob_pkg_r32(&p, end, &version) != 0 ||
+        compat_blob_pkg_r32(&p, end, &blob_count) != 0 ||
+        version != 1u) {
+        return -1;
+    }
+    for (bi = 0; bi < blob_count; bi++) {
+        uint32_t name_len = 0;
+        uint64_t code_len = 0;
+        uint32_t num_relocs = 0;
+        char *name = NULL;
+        uint32_t ri = 0;
+        if (compat_blob_pkg_r32(&p, end, &name_len) != 0 ||
+            name_len == 0 || p + name_len > end)
+            return -1;
+        name = (char *)malloc((size_t)name_len + 1u);
+        if (!name)
+            return -1;
+        memcpy(name, p, name_len);
+        name[name_len] = '\0';
+        if (compat_string_list_append_raw(defs, name) != 0) {
+            free(name);
+            return -1;
+        }
+        free(name);
+        p += name_len;
+        if (compat_blob_pkg_r64(&p, end, &code_len) != 0 ||
+            p + code_len > end ||
+            compat_blob_pkg_r32(&p, end, &num_relocs) != 0)
+            return -1;
+        p += (size_t)code_len;
+        for (ri = 0; ri < num_relocs; ri++) {
+            uint32_t off = 0;
+            uint32_t sym_len = 0;
+            char *sym = NULL;
+            if (compat_blob_pkg_r32(&p, end, &off) != 0 || p + 4 > end)
+                return -1;
+            p += 4;
+            if (compat_blob_pkg_r32(&p, end, &sym_len) != 0 ||
+                sym_len == 0 || p + sym_len > end)
+                return -1;
+            sym = (char *)malloc((size_t)sym_len + 1u);
+            if (!sym)
+                return -1;
+            memcpy(sym, p, sym_len);
+            sym[sym_len] = '\0';
+            if (compat_symbol_drives_archive_selection(sym) &&
+                compat_string_list_append_raw(undefs, sym) != 0) {
+                free(sym);
+                return -1;
+            }
+            free(sym);
+            p += sym_len;
+        }
+    }
+    return p == end ? 0 : -1;
+}
+
+static int compat_collect_object_symbols(const char *obj_path,
+                                         compat_string_list_t *defs,
+                                         compat_string_list_t *undefs,
+                                         char *err, size_t errlen) {
+    char *blob_path = NULL;
+    char *ll_path = NULL;
+    uint8_t *blob_data = NULL;
+    uint8_t *ll_data = NULL;
+    size_t blob_len = 0;
+    size_t ll_len = 0;
+    int rc = -1;
+    if (!obj_path || !defs || !undefs)
+        return -1;
+    if (compat_ensure_object_sidecars(obj_path, err, errlen) != 0)
+        return -1;
+    blob_path = compat_sidecar_path(obj_path, ".liric_blob");
+    ll_path = compat_sidecar_path(obj_path, ".liric_ll");
+    if (!blob_path || !ll_path) {
+        compat_set_err(err, errlen, "sidecar path allocation failed");
+        goto done;
+    }
+    if (read_file_bytes_allow_empty(blob_path, &blob_data, &blob_len) != 0 ||
+        read_file_bytes_allow_empty(ll_path, &ll_data, &ll_len) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link symbol scan failed: %s",
+                       obj_path);
+        goto done;
+    }
+    if (compat_collect_blob_symbols(blob_data, blob_len, defs, undefs) != 0 ||
+        compat_collect_ll_symbols(ll_data, ll_len, defs, undefs) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link malformed sidecar symbols: %s",
+                       obj_path);
+        goto done;
+    }
+    compat_string_list_remove_all(undefs, defs);
+    rc = 0;
+
+done:
+    free(blob_path);
+    free(ll_path);
+    free(blob_data);
+    free(ll_data);
+    return rc;
+}
+
+static int compat_archive_size_field(const char *field, size_t *out) {
+    char buf[11];
+    char *end = NULL;
+    unsigned long long v = 0;
+    if (!field || !out)
+        return -1;
+    memcpy(buf, field, 10);
+    buf[10] = '\0';
+    v = strtoull(buf, &end, 10);
+    if (end == buf)
+        return -1;
+    *out = (size_t)v;
+    return 0;
+}
+
+static char *compat_archive_long_name(const char *table, size_t table_len,
+                                      size_t offset) {
+    size_t i = offset;
+    char *out = NULL;
+    if (!table || offset >= table_len)
+        return NULL;
+    while (i < table_len && table[i] != '\n' && table[i] != '/')
+        i++;
+    if (i <= offset)
+        return NULL;
+    out = (char *)malloc(i - offset + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, table + offset, i - offset);
+    out[i - offset] = '\0';
+    return out;
+}
+
+static char *compat_archive_header_name(const char name_field[16],
+                                        const char *long_names,
+                                        size_t long_names_len,
+                                        const uint8_t *name_data,
+                                        size_t name_data_len) {
+    char name[17];
+    char *out = NULL;
+    size_t len = 0;
+    memcpy(name, name_field, 16);
+    name[16] = '\0';
+    while (len < 16 && name[len] != ' ')
+        len++;
+    name[len] = '\0';
+
+    if (name[0] == '/' && isdigit((unsigned char)name[1])) {
+        return compat_archive_long_name(long_names, long_names_len,
+                                        (size_t)strtoull(name + 1, NULL, 10));
+    }
+    if (strncmp(name, "#1/", 3) == 0) {
+        size_t n = (size_t)strtoull(name + 3, NULL, 10);
+        if (n == 0 || n > name_data_len)
+            return NULL;
+        out = (char *)malloc(n + 1);
+        if (!out)
+            return NULL;
+        memcpy(out, name_data, n);
+        out[n] = '\0';
+        return out;
+    }
+    while (len > 0 && name[len - 1] == '/')
+        len--;
+    if (len == 0)
+        return NULL;
+    out = (char *)malloc(len + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, name, len);
+    out[len] = '\0';
+    return out;
+}
+
+static int compat_collect_archive_members(const char *archive_path,
+                                          compat_archive_members_t *members,
+                                          char *err,
+                                          size_t errlen) {
+    static const char global_header[] = "!<arch>\n";
+    FILE *f = NULL;
+    char magic[8];
+    char header[60];
+    char *long_names = NULL;
+    size_t long_names_len = 0;
+    int rc = -1;
+
+    f = fopen(archive_path, "rb");
+    if (!f || !members) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link archive open failed: %s",
+                       archive_path);
+        return -1;
+    }
+    if (fread(magic, 1, sizeof(magic), f) != sizeof(magic) ||
+        memcmp(magic, global_header, sizeof(magic)) != 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link expected ar archive: %s",
+                       archive_path);
+        goto done;
+    }
+
+    while (fread(header, 1, sizeof(header), f) == sizeof(header)) {
+        size_t size = 0;
+        size_t data_size = 0;
+        uint8_t *data = NULL;
+        char *member = NULL;
+        char *obj_path = NULL;
+        if (header[58] != '`' || header[59] != '\n' ||
+            compat_archive_size_field(header + 48, &size) != 0) {
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC no-link malformed ar member: %s",
+                           archive_path);
+            goto done;
+        }
+        data_size = size;
+        if (data_size > 0) {
+            data = (uint8_t *)malloc(data_size);
+            if (!data) {
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link archive member allocation failed");
+                goto done;
+            }
+            if (fread(data, 1, data_size, f) != data_size) {
+                free(data);
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link truncated ar member: %s",
+                               archive_path);
+                goto done;
+            }
+        }
+        if (size & 1)
+            (void)fgetc(f);
+
+        if (strncmp(header, "//", 2) == 0) {
+            free(long_names);
+            long_names = (char *)data;
+            long_names_len = data_size;
+            continue;
+        }
+        if (header[0] == '/' && !isdigit((unsigned char)header[1])) {
+            free(data);
+            continue;
+        }
+        member = compat_archive_header_name(header, long_names, long_names_len,
+                                            data, data_size);
+        free(data);
+        if (!member)
+            continue;
+        if (!compat_ends_with(member, ".o")) {
+            free(member);
+            continue;
+        }
+        obj_path = compat_archive_member_object_path(archive_path, member);
+        free(member);
+        if (!obj_path) {
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC no-link archive path allocation failed");
+            goto done;
+        }
+        if (compat_archive_members_append(members, obj_path) != 0) {
+            free(obj_path);
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC no-link archive list allocation failed");
+            goto done;
+        }
+        if (compat_collect_object_symbols(
+                members->items[members->count - 1].path,
+                &members->items[members->count - 1].defs,
+                &members->items[members->count - 1].undefs,
+                err, errlen) != 0) {
+            goto done;
+        }
+    }
+    if (ferror(f)) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC no-link archive read failed: %s",
+                       archive_path);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    free(long_names);
+    fclose(f);
+    return rc;
+}
+
+static int compat_archive_member_satisfies(
+    const compat_archive_member_t *member,
+    const compat_string_list_t *unresolved) {
+    size_t i = 0;
+    if (!member || !unresolved)
+        return 0;
+    for (i = 0; i < member->defs.count; i++) {
+        if (compat_string_list_contains(unresolved, member->defs.items[i]))
+            return 1;
+    }
+    return 0;
+}
+
+static int compat_select_archive_members(compat_archive_members_t *members,
+                                         compat_string_list_t *defined,
+                                         compat_string_list_t *unresolved,
+                                         char ***objects,
+                                         size_t *object_count,
+                                         size_t *object_cap,
+                                         char *err,
+                                         size_t errlen) {
+    int changed = 1;
+    if (!members || !defined || !unresolved || !objects || !object_count ||
+        !object_cap)
+        return -1;
+    while (changed) {
+        size_t i = 0;
+        changed = 0;
+        for (i = 0; i < members->count; i++) {
+            compat_archive_member_t *member = &members->items[i];
+            char *copy = NULL;
+            if (member->selected ||
+                !compat_archive_member_satisfies(member, unresolved)) {
+                continue;
+            }
+            copy = compat_string_dup(member->path);
+            if (!copy ||
+                compat_path_list_append(objects, object_count, object_cap,
+                                        copy) != 0) {
+                free(copy);
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link selected-object allocation failed");
+                return -1;
+            }
+            member->selected = 1;
+            if (compat_string_list_add_all(defined, &member->defs) != 0 ||
+                compat_string_list_add_missing(unresolved, &member->undefs,
+                                               defined) != 0) {
+                compat_set_err(err, errlen,
+                               "WITH_LIRIC no-link symbol set allocation failed");
+                return -1;
+            }
+            compat_string_list_remove_all(unresolved, &member->defs);
+            changed = 1;
+        }
+    }
+    return 0;
+}
+
 static char *compat_shell_quote(const char *s) {
     size_t i = 0, extra = 0, len = 0;
     char *out = NULL;
@@ -724,22 +1655,31 @@ static int compat_resolve_c_source_for_object(const char *obj_path, char *out_sr
     return -1;
 #else
     {
-        char roots[5][PATH_MAX];
+        char roots[12][PATH_MAX];
         int root_n = 0;
         int i = 0;
         char candidate[PATH_MAX];
         char obj_dir[PATH_MAX];
-        if (getcwd(roots[root_n], sizeof(roots[root_n])) != NULL)
-            root_n++;
-        if (root_n > 0) {
-            if (snprintf(roots[root_n], sizeof(roots[root_n]), "%s", roots[0]) <
-                (int)sizeof(roots[root_n]) &&
-                compat_parent_dir(roots[root_n]) == 0) {
-                root_n++;
+        const char *env_roots = getenv("LIRIC_C_SOURCE_ROOTS");
+        if (env_roots && env_roots[0]) {
+            const char *p = env_roots;
+            while (*p && root_n < 12) {
+                const char *sep = strchr(p, ':');
+                size_t len = sep ? (size_t)(sep - p) : strlen(p);
+                if (len > 0 && len < PATH_MAX) {
+                    memcpy(roots[root_n], p, len);
+                    roots[root_n][len] = '\0';
+                    root_n++;
+                }
+                if (!sep)
+                    break;
+                p = sep + 1;
             }
         }
-        if (root_n > 1) {
-            if (snprintf(roots[root_n], sizeof(roots[root_n]), "%s", roots[1]) <
+        if (root_n < 12 && getcwd(roots[root_n], sizeof(roots[root_n])) != NULL)
+            root_n++;
+        if (root_n > 0 && root_n < 12) {
+            if (snprintf(roots[root_n], sizeof(roots[root_n]), "%s", roots[root_n - 1]) <
                 (int)sizeof(roots[root_n]) &&
                 compat_parent_dir(roots[root_n]) == 0) {
                 root_n++;
@@ -747,16 +1687,17 @@ static int compat_resolve_c_source_for_object(const char *obj_path, char *out_sr
         }
         if (snprintf(obj_dir, sizeof(obj_dir), "%s", obj_path) < (int)sizeof(obj_dir) &&
             compat_parent_dir(obj_dir) == 0) {
-            if (root_n < 5 &&
-                snprintf(roots[root_n], sizeof(roots[root_n]), "%s", obj_dir) <
-                    (int)sizeof(roots[root_n])) {
+            int up = 0;
+            while (root_n < 12 && up < 8) {
+                if (snprintf(roots[root_n], sizeof(roots[root_n]), "%s", obj_dir) >=
+                    (int)sizeof(roots[root_n]))
+                    break;
                 root_n++;
-            }
-            if (root_n < 5 &&
-                snprintf(roots[root_n], sizeof(roots[root_n]), "%s", obj_dir) <
-                    (int)sizeof(roots[root_n]) &&
-                compat_parent_dir(roots[root_n]) == 0) {
-                root_n++;
+                if (compat_parent_dir(obj_dir) != 0)
+                    break;
+                if (strcmp(obj_dir, "/") == 0 || obj_dir[0] == '\0')
+                    break;
+                up++;
             }
         }
         for (i = 0; i < root_n; i++) {
@@ -779,6 +1720,25 @@ static int compat_resolve_c_source_for_object(const char *obj_path, char *out_sr
                     (int)out_src_cap)
                     return -1;
                 return 0;
+            }
+        }
+        {
+            char *found = NULL;
+            size_t found_name_len = 0;
+            for (i = 0; i < root_n; i++) {
+                if (!roots[i][0])
+                    continue;
+                if (strcmp(roots[i], "/") == 0 || strcmp(roots[i], "/tmp") == 0)
+                    continue;
+                (void)compat_search_c_source_by_suffix(roots[i], src_name, 6,
+                                                       &found,
+                                                       &found_name_len);
+            }
+            if (found) {
+                int ok = snprintf(out_src, out_src_cap, "%s", found) <
+                    (int)out_src_cap;
+                free(found);
+                return ok ? 0 : -1;
             }
         }
     }
@@ -842,6 +1802,7 @@ static int compat_generate_sidecars_for_c_object(const char *obj_path,
     char *q_clang = NULL;
     char *q_src_dir = NULL;
     char *q_iso_include_dir = NULL;
+    char *q_project_src = NULL;
     char *cmd = NULL;
     size_t cmd_len = 0;
     int rc = -1;
@@ -889,10 +1850,31 @@ static int compat_generate_sidecars_for_c_object(const char *obj_path,
             goto done;
         }
     }
+    /* lfortran C sources include via the project src prefix (e.g.
+     * <libasr/runtime/lfortran_intrinsics.h>).  iso_include_dir points at
+     * <project>/src/libasr/runtime, so stripping the trailing two path
+     * components gives <project>/src which we add as an extra -I root. */
+    {
+        char project_src[PATH_MAX];
+        if (q_iso_include_dir &&
+            snprintf(project_src, sizeof(project_src), "%s", iso_include_dir) <
+                (int)sizeof(project_src) &&
+            compat_parent_dir(project_src) == 0 &&
+            compat_parent_dir(project_src) == 0) {
+            q_project_src = compat_shell_quote(project_src);
+            if (!q_project_src) {
+                compat_set_err(err, errlen,
+                               "shell quoting failed for LFortran project src directory");
+                goto done;
+            }
+        }
+    }
 
     cmd_len = strlen(q_clang) + strlen(q_src) + strlen(q_ll) + strlen(q_src_dir) + 256;
     if (q_iso_include_dir)
         cmd_len += strlen(q_iso_include_dir) + 16;
+    if (q_project_src)
+        cmd_len += strlen(q_project_src) + 16;
     cmd = (char *)malloc(cmd_len);
     if (!cmd) {
         compat_set_err(err, errlen, "command allocation failed");
@@ -900,9 +1882,13 @@ static int compat_generate_sidecars_for_c_object(const char *obj_path,
     }
     snprintf(cmd, cmd_len,
              "%s -S -emit-llvm -O0 -fno-discard-value-names "
-             "-Xclang -opaque-pointers=0 -I %s%s%s -o %s %s",
-             q_clang, q_src_dir, q_iso_include_dir ? " -I " : "",
-             q_iso_include_dir ? q_iso_include_dir : "", q_ll, q_src);
+             "-Xclang -opaque-pointers=0 -I %s%s%s%s%s -o %s %s",
+             q_clang, q_src_dir,
+             q_iso_include_dir ? " -I " : "",
+             q_iso_include_dir ? q_iso_include_dir : "",
+             q_project_src ? " -I " : "",
+             q_project_src ? q_project_src : "",
+             q_ll, q_src);
     if (system(cmd) != 0 || !compat_path_exists(ll_path)) {
         compat_set_err(err, errlen,
                        "WITH_LIRIC AOT no-link mode failed to generate LLVM sidecar from C source: %s",
@@ -933,6 +1919,8 @@ done:
         free(q_src_dir);
     if (q_iso_include_dir)
         free(q_iso_include_dir);
+    if (q_project_src)
+        free(q_project_src);
     if (cmd)
         free(cmd);
     return rc;
@@ -7130,9 +8118,15 @@ int lc_module_merge_ll_text(lc_module_compat_t *mod,
     if (!mod || !mod->mod || !src || len == 0)
         return -1;
     parsed = lr_parse_ll(src, len, parse_err, sizeof(parse_err));
-    if (!parsed)
+    if (!parsed) {
+        if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_merge_ll_text: parse failed: %s\n",
+                    parse_err[0] ? parse_err : "(no detail)");
         return -1;
+    }
     if (lr_module_merge(mod->mod, parsed) != 0) {
+        if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS"))
+            fprintf(stderr, "lc_module_merge_ll_text: merge failed\n");
         lr_module_free(parsed);
         return -1;
     }
@@ -7300,6 +8294,12 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
                                             char *err, size_t errlen) {
     lc_context_t *ctx = NULL;
     lc_module_compat_t *mod = NULL;
+    char **expanded_objects = NULL;
+    size_t expanded_count = 0;
+    size_t expanded_cap = 0;
+    compat_archive_members_t archive_members = {0};
+    compat_string_list_t defined = {0};
+    compat_string_list_t unresolved = {0};
     size_t i = 0;
     int imported_blob_count = 0;
     int merged_ll_count = 0;
@@ -7310,10 +8310,60 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
         return -1;
     }
 
+    for (i = 0; i < object_count; i++) {
+        const char *obj_path = object_files[i];
+        char *copy = NULL;
+        if (!obj_path || !obj_path[0]) {
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC AOT no-link mode requires non-empty object path");
+            goto done;
+        }
+        if (compat_ends_with(obj_path, ".a")) {
+            if (compat_collect_archive_members(obj_path, &archive_members,
+                                               err, errlen) != 0) {
+                goto done;
+            }
+            continue;
+        }
+        if (compat_collect_object_symbols(obj_path, &defined, &unresolved,
+                                          err, errlen) != 0)
+            goto done;
+        copy = compat_string_dup(obj_path);
+        if (!copy || compat_path_list_append(&expanded_objects,
+                &expanded_count, &expanded_cap, copy) != 0) {
+            free(copy);
+            compat_set_err(err, errlen,
+                           "WITH_LIRIC no-link object list allocation failed");
+            goto done;
+        }
+    }
+    compat_string_list_remove_all(&unresolved, &defined);
+    if (compat_select_archive_members(&archive_members, &defined, &unresolved,
+                                      &expanded_objects, &expanded_count,
+                                      &expanded_cap, err, errlen) != 0) {
+        goto done;
+    }
+    if (getenv("LIRIC_VERBOSE_BLOB_LINK")) {
+        size_t selected_archive_count = 0;
+        for (i = 0; i < archive_members.count; i++) {
+            if (archive_members.items[i].selected)
+                selected_archive_count++;
+        }
+        fprintf(stderr,
+                "WITH_LIRIC no-link inputs: objects=%zu archive_members=%zu selected_archive_members=%zu unresolved=%zu\n",
+                expanded_count, archive_members.count, selected_archive_count,
+                unresolved.count);
+    }
+    if (expanded_count == 0) {
+        compat_set_err(err, errlen,
+                       "WITH_LIRIC AOT no-link mode found no object inputs");
+        goto done;
+    }
+
     ctx = lc_context_create();
     if (!ctx) {
         compat_set_err(err, errlen, "WITH_LIRIC no-link blob-link failed: unable to create context");
-        return -1;
+        goto done;
     }
     mod = lc_module_create(ctx, "lfortran.no_link.link");
     if (!mod) {
@@ -7321,8 +8371,8 @@ int lc_emit_executable_from_object_sidecars(const char *const *object_files,
         goto done;
     }
 
-    for (i = 0; i < object_count; i++) {
-        const char *obj_path = object_files[i];
+    for (i = 0; i < expanded_count; i++) {
+        const char *obj_path = expanded_objects[i];
         char *blob_path = NULL;
         char *ll_path = NULL;
         uint8_t *blob_data = NULL;
@@ -7439,6 +8489,15 @@ fail_file:
     rc = 0;
 
 done:
+    if (expanded_objects) {
+        size_t j = 0;
+        for (j = 0; j < expanded_count; j++)
+            free(expanded_objects[j]);
+        free(expanded_objects);
+    }
+    compat_archive_members_free(&archive_members);
+    compat_string_list_free(&defined);
+    compat_string_list_free(&unresolved);
     if (mod)
         lc_module_destroy(mod);
     if (ctx)
