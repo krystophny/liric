@@ -34,6 +34,10 @@ struct lr_type {
     };
 };
 
+/* Size in bytes of a materialized liric type, matching the layout the
+   backend uses for alloca, GEP, and struct field offsets. */
+size_t lr_type_size(const lr_type_t *t);
+
 struct lr_inst {
     int op;
     lr_type_t *type;
