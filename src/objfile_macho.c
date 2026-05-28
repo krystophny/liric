@@ -34,6 +34,9 @@
 
 #define N_EXT   0x1u
 #define N_SECT  0xEu
+/* n_desc bit marking a weak (coalesced) definition; ld coalesces duplicate
+   weak definitions across objects and keeps one. */
+#define N_WEAK_DEF 0x0080u
 
 #define PLATFORM_MACOS 1u
 #define TOOL_LD 3u
@@ -421,15 +424,18 @@ int write_macho(FILE *out, const uint8_t *code, size_t code_size,
 
             w32(&sp, str_offsets[orig_idx]);
 
+            uint16_t n_desc = 0;
             if (sym->is_defined) {
                 w8(&sp, sym->is_local ? N_SECT : (N_SECT | N_EXT));
                 w8(&sp, sym->section);
+                if (!sym->is_local && sym->is_weak)
+                    n_desc |= N_WEAK_DEF;
             } else {
                 w8(&sp, N_EXT);
                 w8(&sp, 0);
             }
 
-            w16(&sp, 0);
+            w16(&sp, n_desc);
             if (sym->is_defined) {
                 uint64_t value = (uint64_t)sym->offset;
                 if (sym->section == 2)
