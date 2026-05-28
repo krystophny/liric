@@ -130,6 +130,9 @@ lr_type_t *lr_type_function_s(lr_session_t *s, lr_type_t *ret,
 
 uint32_t lr_session_global(lr_session_t *s, const char *name, lr_type_t *type,
                            bool is_const, const void *init, size_t init_size);
+uint32_t lr_session_global_weak(lr_session_t *s, const char *name,
+                                lr_type_t *type, bool is_const,
+                                const void *init, size_t init_size);
 uint32_t lr_session_global_extern(lr_session_t *s, const char *name,
                                   lr_type_t *type);
 void lr_session_global_reloc(lr_session_t *s, uint32_t id, size_t offset,

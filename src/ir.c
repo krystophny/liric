@@ -3274,6 +3274,7 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                 dg->is_const = sg->is_const;
                 dg->is_external = false;
                 dg->is_local = sg->is_local;
+                dg->is_weak = sg->is_weak;
                 dg->init_data = NULL;
                 dg->init_size = 0;
                 dg->relocs = NULL;
@@ -3291,6 +3292,7 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                     dg->type = merge_remap_type(dest, sg->type);
                     dg->is_const = sg->is_const;
                     dg->is_local = sg->is_local;
+                    dg->is_weak = sg->is_weak;
                     dg->init_data = NULL;
                     dg->init_size = 0;
                     dg->relocs = NULL;
@@ -3302,6 +3304,7 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                 merge_remap_type(dest, sg->type), sg->is_const);
             ng->is_external = sg->is_external;
             ng->is_local = sg->is_local;
+            ng->is_weak = sg->is_weak;
             merge_copy_global_data(dest, ng, sg);
         }
     }

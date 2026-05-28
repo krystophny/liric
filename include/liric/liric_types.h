@@ -105,6 +105,7 @@ struct lr_global {
     bool is_const;
     bool is_external;
     bool is_local;
+    bool is_weak;
     uint32_t id;
     struct lr_global *next;
 };

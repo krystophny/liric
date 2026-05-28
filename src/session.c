@@ -2584,6 +2584,19 @@ uint32_t lr_session_global(struct lr_session *s, const char *name,
     return g->id;
 }
 
+uint32_t lr_session_global_weak(struct lr_session *s, const char *name,
+                                lr_type_t *type, bool is_const,
+                                const void *init, size_t init_size) {
+    uint32_t id = lr_session_global(s, name, type, is_const, init, init_size);
+    lr_global_t *g;
+    if (id == UINT32_MAX || !s || !s->module)
+        return id;
+    g = find_global_by_id(s, id);
+    if (g)
+        g->is_weak = true;
+    return id;
+}
+
 uint32_t lr_session_global_extern(struct lr_session *s, const char *name,
                                    lr_type_t *type) {
     lr_global_t *g;

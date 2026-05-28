@@ -1594,6 +1594,8 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
             return -1;
         }
         out->ctx.symbols[gsym].is_local = g->is_local;
+        out->ctx.symbols[gsym].is_weak =
+            out->ctx.symbols[gsym].is_weak || g->is_weak;
 
         for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
             uint32_t sym_idx = lr_obj_ensure_symbol(
@@ -1847,6 +1849,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
             return -1;
         }
         out->ctx.symbols[gsym].is_local = g->is_local;
+        out->ctx.symbols[gsym].is_weak =
+            out->ctx.symbols[gsym].is_weak || g->is_weak;
 
         for (lr_reloc_t *rel = g->relocs; rel; rel = rel->next) {
             const char *rel_name =
