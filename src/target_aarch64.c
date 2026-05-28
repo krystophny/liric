@@ -898,14 +898,26 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
 
 static size_t vreg_slot_size(const a64_compile_ctx_t *ctx, uint32_t vreg);
 
-/* A 16-byte aggregate of exactly two doubles (Fortran complex(8)).  The
-   AArch64 PCS returns such a homogeneous FP aggregate in d0:d1, but liric's
-   aggregate storage is by-pointer for >8-byte values, so without special
-   handling RET would hand back a pointer to callee-local stack and the caller
-   would dereference dangling memory. */
+/* A 16-byte aggregate of exactly two doubles (Fortran complex(8)).  liric
+   represents it as a <2 x double> vector in some places and as a
+   {double,double} struct in others (e.g. arguments/returns of the external
+   complex math routines).  The AArch64 PCS treats both as a homogeneous FP
+   aggregate, passed/returned in d0:d1; liric stores it by-pointer, so calls
+   and returns need explicit per-lane FP moves.  (Only complex(8) is handled
+   here; complex(4) already round-trips via its existing path.) */
 static bool a64_is_complex16(const lr_type_t *t) {
-    return t && t->kind == LR_TYPE_VECTOR && t->array.count == 2 &&
-           t->array.elem && t->array.elem->kind == LR_TYPE_DOUBLE;
+    if (!t) return false;
+    if (t->kind == LR_TYPE_VECTOR && t->array.count == 2 &&
+            t->array.elem && t->array.elem->kind == LR_TYPE_DOUBLE) {
+        return true;
+    }
+    if (t->kind == LR_TYPE_STRUCT && t->struc.num_fields == 2 &&
+            t->struc.fields && t->struc.fields[0] && t->struc.fields[1] &&
+            t->struc.fields[0]->kind == LR_TYPE_DOUBLE &&
+            t->struc.fields[1]->kind == LR_TYPE_DOUBLE) {
+        return true;
+    }
+    return false;
 }
 
 /* Load the address of an aggregate vreg operand's data into `reg`, whatever
@@ -2640,7 +2652,11 @@ static int aarch64_compile_emit(void *compile_ctx,
                 const lr_type_t *at = ops_ptr[i + 1].type;
                 bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
                                     at->kind == LR_TYPE_DOUBLE);
-                if (is_fp) {
+                if (a64_is_complex16(at)) {
+                    /* complex(8) HFA: two consecutive FP registers. */
+                    if (fp_used_count + 2 <= 8) fp_used_count += 2;
+                    else stack_args += 2;
+                } else if (is_fp) {
                     if (fp_used_count < 8) fp_used_count++;
                     else stack_args++;
                 } else {
@@ -2724,7 +2740,29 @@ static int aarch64_compile_emit(void *compile_ctx,
                               ops_ptr[i + 1].type->kind == LR_TYPE_DOUBLE);
                 uint8_t fsz = (ops_ptr[i + 1].type &&
                                ops_ptr[i + 1].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                if (is_fp && fp_used_emit < 8) {
+                if (a64_is_complex16(ops_ptr[i + 1].type) &&
+                        fp_used_emit + 2 <= 8) {
+                    /* complex(8) HFA: load the two doubles into two
+                       consecutive FP argument registers (d n, n+1). */
+                    emit_vreg_data_addr_a64(cc, &ops_ptr[i + 1], A64_X9);
+                    emit_fp_load(cc->buf, &cc->pos, cc->buflen,
+                                 call_fp_regs[fp_used_emit], A64_X9, 0, 8);
+                    emit_fp_load(cc->buf, &cc->pos, cc->buflen,
+                                 call_fp_regs[fp_used_emit + 1], A64_X9, 8, 8);
+                    fp_used_emit += 2;
+                } else if (a64_is_complex16(ops_ptr[i + 1].type)) {
+                    /* complex(8) HFA on the stack (FP regs exhausted). */
+                    emit_vreg_data_addr_a64(cc, &ops_ptr[i + 1], A64_X9);
+                    emit_load(cc->buf, &cc->pos, cc->buflen, A64_X10,
+                              A64_X9, 0, 8);
+                    emit_store(cc->buf, &cc->pos, cc->buflen, A64_X10,
+                               A64_SP, (int32_t)(si * 8), 8);
+                    emit_load(cc->buf, &cc->pos, cc->buflen, A64_X10,
+                              A64_X9, 8, 8);
+                    emit_store(cc->buf, &cc->pos, cc->buflen, A64_X10,
+                               A64_SP, (int32_t)(si * 8 + 8), 8);
+                    si += 2;
+                } else if (is_fp && fp_used_emit < 8) {
                     emit_load_fp_operand(cc, &ops_ptr[i + 1],
                                          call_fp_regs[fp_used_emit], fsz);
                     fp_used_emit++;
