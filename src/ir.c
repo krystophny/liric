@@ -1124,7 +1124,7 @@ typedef struct lr_global_sym_entry {
     uint32_t next;
 } lr_global_sym_entry_t;
 
-enum { LR_CALL_SIG_NONE = UINT32_MAX };
+#define LR_CALL_SIG_NONE UINT32_MAX
 
 static uint32_t ir_call_sig_bucket(uint32_t sym_id, uint32_t bucket_cap) {
     uint32_t x = sym_id;
