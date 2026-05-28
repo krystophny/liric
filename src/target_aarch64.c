@@ -1955,6 +1955,31 @@ static int aarch64_compile_emit(void *compile_ctx,
         bool is64 = lr_type_size(desc->type) > 4;
         bool is_unsigned = (desc->op == LR_OP_UDIV ||
                             desc->op == LR_OP_UREM);
+        /* Signed div/rem run as a 32- or 64-bit sdiv, but a sub-word operand
+           (i8/i16) is loaded zero-extended, so a negative value carries the
+           wrong high bits.  Sign-extend signed operands narrower than the
+           operation width first (e.g. mod(-32767_i16, 17) -> -8, not 10). */
+        if (!is_unsigned) {
+            uint8_t w0 = int_type_width_bits(ops[0].type);
+            uint8_t w1 = int_type_width_bits(ops[1].type);
+            uint8_t opw = is64 ? 64u : 32u;
+            if (w0 > 0 && w0 < opw) {
+                uint8_t sh = (uint8_t)(64 - w0);
+                emit_move_imm_ctx(cc, A64_X12, (int64_t)sh, true);
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_lslv(true, A64_X9, A64_X9, A64_X12));
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_asrv(true, A64_X9, A64_X9, A64_X12));
+            }
+            if (w1 > 0 && w1 < opw) {
+                uint8_t sh = (uint8_t)(64 - w1);
+                emit_move_imm_ctx(cc, A64_X12, (int64_t)sh, true);
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_lslv(true, A64_X10, A64_X10, A64_X12));
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_asrv(true, A64_X10, A64_X10, A64_X12));
+            }
+        }
         emit_mov_reg(cc->buf, &cc->pos, cc->buflen, A64_X11, A64_X9, is64);
         emit_u32(cc->buf, &cc->pos, cc->buflen,
                  is_unsigned ? enc_udiv(is64, A64_X9, A64_X9, A64_X10)
