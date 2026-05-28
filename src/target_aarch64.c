@@ -896,6 +896,48 @@ static void emit_load_operand(a64_compile_ctx_t *ctx,
     }
 }
 
+static size_t vreg_slot_size(const a64_compile_ctx_t *ctx, uint32_t vreg);
+
+/* A 16-byte aggregate of exactly two doubles (Fortran complex(8)).  The
+   AArch64 PCS returns such a homogeneous FP aggregate in d0:d1, but liric's
+   aggregate storage is by-pointer for >8-byte values, so without special
+   handling RET would hand back a pointer to callee-local stack and the caller
+   would dereference dangling memory. */
+static bool a64_is_complex16(const lr_type_t *t) {
+    return t && t->kind == LR_TYPE_VECTOR && t->array.count == 2 &&
+           t->array.elem && t->array.elem->kind == LR_TYPE_DOUBLE;
+}
+
+/* Load the address of an aggregate vreg operand's data into `reg`, whatever
+   its storage form (static alloca, indirect pointer slot, or inline slot). */
+static void emit_vreg_data_addr_a64(a64_compile_ctx_t *ctx,
+                                    const lr_operand_t *op, uint8_t reg) {
+    int32_t static_off, slot_off;
+    size_t slot_sz, logical;
+    if (op->kind != LR_VAL_VREG) {
+        emit_load_operand(ctx, op, reg);
+        return;
+    }
+    static_off = lr_target_lookup_static_alloca_offset(
+        ctx->static_alloca_offsets, ctx->num_static_alloca_offsets, op->vreg);
+    if (static_off != 0) {
+        emit_addr(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, static_off);
+        invalidate_cached_reg_a64(ctx, reg);
+        return;
+    }
+    logical = op->type ? lr_type_size(op->type) : 8;
+    slot_off = alloc_slot(ctx, op->vreg, 8);
+    slot_sz = vreg_slot_size(ctx, op->vreg);
+    if (logical > 8 && slot_sz == 8) {
+        /* indirect: the 8-byte slot holds a pointer to the data */
+        emit_load(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, slot_off, 8);
+    } else {
+        /* inline: the data lives in the slot itself */
+        emit_addr(ctx->buf, &ctx->pos, ctx->buflen, reg, A64_FP, slot_off);
+    }
+    invalidate_cached_reg_a64(ctx, reg);
+}
+
 static void emit_load_fp_slot(a64_compile_ctx_t *ctx,
                                uint32_t vreg, uint8_t fpreg, uint8_t fsize) {
     int32_t off = alloc_slot(ctx, vreg, 8);
@@ -1406,7 +1448,12 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
 
     switch (dt->op) {
     case LR_OP_RET:
-        if (cc->func_uses_fp_abi && is_fp_abi_type(ctx->ret_type)) {
+        if (a64_is_complex16(ctx->ret_type)) {
+            /* complex(8): return the {double,double} HFA in d0:d1 (PCS). */
+            emit_vreg_data_addr_a64(cc, &dt->ops[0], A64_X9);
+            emit_fp_load(cc->buf, &cc->pos, cc->buflen, A64_D0, A64_X9, 0, 8);
+            emit_fp_load(cc->buf, &cc->pos, cc->buflen, A64_D1, A64_X9, 8, 8);
+        } else if (cc->func_uses_fp_abi && is_fp_abi_type(ctx->ret_type)) {
             emit_load_fp_operand(cc, &dt->ops[0], A64_D0,
                                  fp_abi_size(ctx->ret_type));
         } else {
@@ -2714,7 +2761,15 @@ static int aarch64_compile_emit(void *compile_ctx,
             bool ret_fp = use_fp_abi && desc->type &&
                           (desc->type->kind == LR_TYPE_FLOAT ||
                            desc->type->kind == LR_TYPE_DOUBLE);
-            if (ret_fp) {
+            if (a64_is_complex16(desc->type)) {
+                /* complex(8) returned in d0:d1 (PCS); store the two doubles
+                   into a 16-byte inline slot for the dest aggregate. */
+                int32_t off = alloc_slot(cc, desc->dest, 16);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen, A64_D0,
+                              A64_FP, off, 8);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen, A64_D1,
+                              A64_FP, off + 8, 8);
+            } else if (ret_fp) {
                 uint8_t rsz = (desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
                 emit_store_fp_slot(cc, desc->dest, A64_D0, rsz);
             } else {
