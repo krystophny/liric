@@ -2554,18 +2554,45 @@ static int aarch64_compile_emit(void *compile_ctx,
         }
 #endif
 
-        if (use_fp_abi) {
+        if (use_fp_abi && darwin_stack_varargs) {
+            /* Apple ARM64: named stack arguments are packed by their natural
+               size (not rounded up to 8), and the variadic save area begins
+               at the next 8-byte boundary with each variadic value in an
+               8-byte slot.  Mirror clang's layout so the callee's va_arg
+               reads the variadic values from the right offsets. */
+            uint32_t gpr = 0, fpr = 0, named_off = 0, var_off = 0;
+            bool var_started = false;
+            for (uint32_t i = 0; i < nargs; i++) {
+                const lr_type_t *at = ops_ptr[i + 1].type;
+                bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
+                                    at->kind == LR_TYPE_DOUBLE);
+                if (i >= fixed_args) {
+                    if (!var_started) {
+                        var_off = (named_off + 7u) & ~7u;
+                        var_started = true;
+                    }
+                    var_off += 8u;
+                } else if (is_fp && fpr < 8) {
+                    fpr++;
+                } else if (!is_fp && gpr < 8) {
+                    gpr++;
+                } else {
+                    uint32_t sz = at ? (uint32_t)lr_type_size(at) : 8u;
+                    uint32_t al;
+                    if (sz == 0u) sz = 8u;
+                    al = sz > 8u ? 8u : sz;
+                    if (al == 0u) al = 1u;
+                    named_off = (named_off + (al - 1u)) & ~(al - 1u);
+                    named_off += sz;
+                }
+            }
+            stack_bytes = (((var_started ? var_off : named_off) + 15u) & ~15u);
+        } else if (use_fp_abi) {
             uint32_t fp_used_count = 0;
             for (uint32_t i = 0; i < nargs; i++) {
                 const lr_type_t *at = ops_ptr[i + 1].type;
-                bool is_variadic_stack_arg = darwin_stack_varargs &&
-                                             i >= fixed_args;
                 bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
                                     at->kind == LR_TYPE_DOUBLE);
-                if (is_variadic_stack_arg) {
-                    stack_args++;
-                    continue;
-                }
                 if (is_fp) {
                     if (fp_used_count < 8) fp_used_count++;
                     else stack_args++;
@@ -2574,15 +2601,69 @@ static int aarch64_compile_emit(void *compile_ctx,
                     else stack_args++;
                 }
             }
+            stack_bytes = ((stack_args * 8 + 15) & ~15u);
         } else {
             stack_args = nargs > 8 ? nargs - 8 : 0;
+            stack_bytes = ((stack_args * 8 + 15) & ~15u);
         }
-
-        stack_bytes = ((stack_args * 8 + 15) & ~15u);
         if (stack_bytes > 0)
             emit_sp_adjust(cc->buf, &cc->pos, cc->buflen, stack_bytes, true);
 
-        if (use_fp_abi) {
+        if (use_fp_abi && darwin_stack_varargs) {
+            static const uint8_t call_fp_regs[] = {
+                A64_D0, A64_D1, A64_D2, A64_D3,
+                A64_D4, A64_D5, A64_D6, A64_D7
+            };
+            uint32_t gpr = 0, fpr = 0, named_off = 0, var_off = 0;
+            bool var_started = false;
+            for (uint32_t i = 0; i < nargs; i++) {
+                const lr_type_t *at = ops_ptr[i + 1].type;
+                bool is_fp = at && (at->kind == LR_TYPE_FLOAT ||
+                                    at->kind == LR_TYPE_DOUBLE);
+                uint8_t fsz = (at && at->kind == LR_TYPE_FLOAT) ? 4 : 8;
+                if (i >= fixed_args) {
+                    if (!var_started) {
+                        var_off = (named_off + 7u) & ~7u;
+                        var_started = true;
+                    }
+                    if (is_fp) {
+                        emit_load_fp_operand(cc, &ops_ptr[i + 1], A64_D0, fsz);
+                        emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                                      A64_D0, A64_SP, (int32_t)var_off, fsz);
+                    } else {
+                        emit_load_operand(cc, &ops_ptr[i + 1], A64_X9);
+                        emit_store(cc->buf, &cc->pos, cc->buflen,
+                                   A64_X9, A64_SP, (int32_t)var_off, 8);
+                    }
+                    var_off += 8u;
+                } else if (is_fp && fpr < 8) {
+                    emit_load_fp_operand(cc, &ops_ptr[i + 1],
+                                         call_fp_regs[fpr], fsz);
+                    fpr++;
+                } else if (!is_fp && gpr < 8) {
+                    emit_load_operand(cc, &ops_ptr[i + 1], call_regs[gpr]);
+                    gpr++;
+                } else {
+                    uint32_t sz = at ? (uint32_t)lr_type_size(at) : 8u;
+                    uint32_t al;
+                    if (sz == 0u) sz = 8u;
+                    al = sz > 8u ? 8u : sz;
+                    if (al == 0u) al = 1u;
+                    named_off = (named_off + (al - 1u)) & ~(al - 1u);
+                    if (is_fp) {
+                        emit_load_fp_operand(cc, &ops_ptr[i + 1], A64_D0, fsz);
+                        emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                                      A64_D0, A64_SP, (int32_t)named_off, fsz);
+                    } else {
+                        emit_load_operand(cc, &ops_ptr[i + 1], A64_X9);
+                        emit_store(cc->buf, &cc->pos, cc->buflen,
+                                   A64_X9, A64_SP, (int32_t)named_off,
+                                   (uint8_t)(sz > 8u ? 8u : sz));
+                    }
+                    named_off += sz;
+                }
+            }
+        } else if (use_fp_abi) {
             static const uint8_t call_fp_regs[] = {
                 A64_D0, A64_D1, A64_D2, A64_D3,
                 A64_D4, A64_D5, A64_D6, A64_D7
@@ -2591,25 +2672,12 @@ static int aarch64_compile_emit(void *compile_ctx,
             gp_used = 0;
             uint32_t fp_used_emit = 0;
             for (uint32_t i = 0; i < nargs; i++) {
-                bool is_variadic_stack_arg = darwin_stack_varargs &&
-                                             i >= fixed_args;
                 bool is_fp = ops_ptr[i + 1].type &&
                              (ops_ptr[i + 1].type->kind == LR_TYPE_FLOAT ||
                               ops_ptr[i + 1].type->kind == LR_TYPE_DOUBLE);
                 uint8_t fsz = (ops_ptr[i + 1].type &&
                                ops_ptr[i + 1].type->kind == LR_TYPE_FLOAT) ? 4 : 8;
-                if (is_variadic_stack_arg) {
-                    if (is_fp) {
-                        emit_load_fp_operand(cc, &ops_ptr[i + 1], A64_D0, fsz);
-                        emit_fp_store(cc->buf, &cc->pos, cc->buflen,
-                                      A64_D0, A64_SP, (int32_t)(si * 8), fsz);
-                    } else {
-                        emit_load_operand(cc, &ops_ptr[i + 1], A64_X9);
-                        emit_store(cc->buf, &cc->pos, cc->buflen,
-                                   A64_X9, A64_SP, (int32_t)(si * 8), 8);
-                    }
-                    si++;
-                } else if (is_fp && fp_used_emit < 8) {
+                if (is_fp && fp_used_emit < 8) {
                     emit_load_fp_operand(cc, &ops_ptr[i + 1],
                                          call_fp_regs[fp_used_emit], fsz);
                     fp_used_emit++;
