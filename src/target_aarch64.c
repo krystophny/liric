@@ -920,6 +920,29 @@ static bool a64_is_complex16(const lr_type_t *t) {
     return false;
 }
 
+/* An 8-byte aggregate of exactly two floats (Fortran complex(4)).  Like
+   complex(8) it is a homogeneous FP aggregate; the AArch64 PCS passes and
+   returns it in s0:s1 (two single-precision lanes of the first two FP
+   registers).  liric otherwise routes the 8-byte value through a single GP
+   register, so the external complex math routines (_lfortran_csin, ...) read
+   their argument from s0:s1 (stale) and the caller reads the result from x0,
+   losing both lanes.  Move the two float lanes through s-registers on the
+   argument, call-result, return, and incoming-parameter paths. */
+static bool a64_is_complex8_fp(const lr_type_t *t) {
+    if (!t) return false;
+    if (t->kind == LR_TYPE_VECTOR && t->array.count == 2 &&
+            t->array.elem && t->array.elem->kind == LR_TYPE_FLOAT) {
+        return true;
+    }
+    if (t->kind == LR_TYPE_STRUCT && t->struc.num_fields == 2 &&
+            t->struc.fields && t->struc.fields[0] && t->struc.fields[1] &&
+            t->struc.fields[0]->kind == LR_TYPE_FLOAT &&
+            t->struc.fields[1]->kind == LR_TYPE_FLOAT) {
+        return true;
+    }
+    return false;
+}
+
 /* Load the address of an aggregate vreg operand's data into `reg`, whatever
    its storage form (static alloca, indirect pointer slot, or inline slot). */
 static void emit_vreg_data_addr_a64(a64_compile_ctx_t *ctx,
@@ -1465,6 +1488,11 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
             emit_vreg_data_addr_a64(cc, &dt->ops[0], A64_X9);
             emit_fp_load(cc->buf, &cc->pos, cc->buflen, A64_D0, A64_X9, 0, 8);
             emit_fp_load(cc->buf, &cc->pos, cc->buflen, A64_D1, A64_X9, 8, 8);
+        } else if (a64_is_complex8_fp(ctx->ret_type)) {
+            /* complex(4): return the {float,float} HFA in s0:s1 (PCS). */
+            emit_vreg_data_addr_a64(cc, &dt->ops[0], A64_X9);
+            emit_fp_load(cc->buf, &cc->pos, cc->buflen, A64_D0, A64_X9, 0, 4);
+            emit_fp_load(cc->buf, &cc->pos, cc->buflen, A64_D1, A64_X9, 4, 4);
         } else if (cc->func_uses_fp_abi && is_fp_abi_type(ctx->ret_type)) {
             emit_load_fp_operand(cc, &dt->ops[0], A64_D0,
                                  fp_abi_size(ctx->ret_type));
@@ -1658,7 +1686,25 @@ static int aarch64_compile_begin(void **compile_ctx,
         uint32_t stack_used = 0;
         for (uint32_t i = 0; i < num_params; i++) {
             const lr_type_t *pty = param_types ? param_types[i] : NULL;
-            if (is_fp_abi_type(pty) && fp_used < 8) {
+            if (a64_is_complex8_fp(pty) && fp_used + 2 <= 8) {
+                /* complex(4) HFA arrives in two single-precision FP regs
+                   (s n, n+1); store both lanes into the 8-byte slot. */
+                int32_t off = alloc_slot(cc, param_vregs[i], 8);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                              param_fp_regs[fp_used], A64_FP, off, 4);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                              param_fp_regs[fp_used + 1], A64_FP, off + 4, 4);
+                fp_used += 2;
+            } else if (a64_is_complex16(pty) && fp_used + 2 <= 8) {
+                /* complex(8) HFA arrives in two double-precision FP regs
+                   (d n, n+1); store both lanes into the 16-byte slot. */
+                int32_t off = alloc_slot(cc, param_vregs[i], 16);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                              param_fp_regs[fp_used], A64_FP, off, 8);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen,
+                              param_fp_regs[fp_used + 1], A64_FP, off + 8, 8);
+                fp_used += 2;
+            } else if (is_fp_abi_type(pty) && fp_used < 8) {
                 if (getenv("LIRIC_DBG_A64_PARAMS")) {
                     fprintf(stderr,
                             "[a64 param] func=%s idx=%u vreg=%u src=fpr%u ty=%d\n",
@@ -2681,6 +2727,11 @@ static int aarch64_compile_emit(void *compile_ctx,
                     /* complex(8) HFA: two consecutive FP registers. */
                     if (fp_used_count + 2 <= 8) fp_used_count += 2;
                     else stack_args += 2;
+                } else if (a64_is_complex8_fp(at)) {
+                    /* complex(4) HFA: two consecutive single FP registers,
+                       or one 8-byte stack slot if FP regs are exhausted. */
+                    if (fp_used_count + 2 <= 8) fp_used_count += 2;
+                    else stack_args += 1;
                 } else if (is_fp) {
                     if (fp_used_count < 8) fp_used_count++;
                     else stack_args++;
@@ -2787,6 +2838,25 @@ static int aarch64_compile_emit(void *compile_ctx,
                     emit_store(cc->buf, &cc->pos, cc->buflen, A64_X10,
                                A64_SP, (int32_t)(si * 8 + 8), 8);
                     si += 2;
+                } else if (a64_is_complex8_fp(ops_ptr[i + 1].type) &&
+                        fp_used_emit + 2 <= 8) {
+                    /* complex(4) HFA: load the two floats into two consecutive
+                       single-precision FP argument registers (s n, n+1). */
+                    emit_vreg_data_addr_a64(cc, &ops_ptr[i + 1], A64_X9);
+                    emit_fp_load(cc->buf, &cc->pos, cc->buflen,
+                                 call_fp_regs[fp_used_emit], A64_X9, 0, 4);
+                    emit_fp_load(cc->buf, &cc->pos, cc->buflen,
+                                 call_fp_regs[fp_used_emit + 1], A64_X9, 4, 4);
+                    fp_used_emit += 2;
+                } else if (a64_is_complex8_fp(ops_ptr[i + 1].type)) {
+                    /* complex(4) HFA on the stack: one 8-byte slot, two
+                       packed floats. */
+                    emit_vreg_data_addr_a64(cc, &ops_ptr[i + 1], A64_X9);
+                    emit_load(cc->buf, &cc->pos, cc->buflen, A64_X10,
+                              A64_X9, 0, 8);
+                    emit_store(cc->buf, &cc->pos, cc->buflen, A64_X10,
+                               A64_SP, (int32_t)(si * 8), 8);
+                    si += 1;
                 } else if (is_fp && fp_used_emit < 8) {
                     emit_load_fp_operand(cc, &ops_ptr[i + 1],
                                          call_fp_regs[fp_used_emit], fsz);
@@ -2832,6 +2902,14 @@ static int aarch64_compile_emit(void *compile_ctx,
                               A64_FP, off, 8);
                 emit_fp_store(cc->buf, &cc->pos, cc->buflen, A64_D1,
                               A64_FP, off + 8, 8);
+            } else if (a64_is_complex8_fp(desc->type)) {
+                /* complex(4) returned in s0:s1 (PCS); store the two floats
+                   into an 8-byte inline slot for the dest aggregate. */
+                int32_t off = alloc_slot(cc, desc->dest, 8);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen, A64_D0,
+                              A64_FP, off, 4);
+                emit_fp_store(cc->buf, &cc->pos, cc->buflen, A64_D1,
+                              A64_FP, off + 4, 4);
             } else if (ret_fp) {
                 uint8_t rsz = (desc->type->kind == LR_TYPE_FLOAT) ? 4 : 8;
                 emit_store_fp_slot(cc, desc->dest, A64_D0, rsz);
