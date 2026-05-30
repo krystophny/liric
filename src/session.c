@@ -2794,6 +2794,15 @@ int lr_session_func_end(struct lr_session *s, void **out_addr,
         return -1;
     }
 
+    {
+        const char *dbg = getenv("LIRIC_DUMP_IR");
+        if (dbg && s->cur_func) {
+            const char *fn = s->cur_func->name ? s->cur_func->name : "";
+            if (strcmp(dbg, "ALL") == 0 || (fn && strstr(fn, dbg)))
+                lr_dump_func(s->cur_func, s->module, stderr);
+        }
+    }
+
     /* When JIT is deferred (IR mode, DIRECT+llvm) and no address is
        requested, skip validation and compilation entirely.  The compat
        layer may switch between functions, so running
