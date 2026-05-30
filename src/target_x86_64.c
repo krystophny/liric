@@ -1685,15 +1685,20 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
             }
             encode_alu_rr(cc->buf, &cc->pos, cc->buflen, 0x89,
                           X86_RAX, X86_RDI, 8);
-        } else if (cc->func_uses_external_sysv_fp &&
-                   ctx->ret_type && is_fp_abi_type(ctx->ret_type)) {
+        } else if (ctx->ret_type && is_fp_abi_type(ctx->ret_type)) {
+            // FP scalar returns always go in XMM0, for internal and external
+            // callees alike, so indirect (function-pointer / TBP) calls -- which
+            // cannot know the callee's ABI flag -- read the result from the same
+            // place the callee wrote it.
             emit_load_fp_operand(cc, &dt->ops[0], X86_XMM0,
                                  fp_abi_size(ctx->ret_type));
         } else {
             uint8_t ret_lane_size = 0;
             uint8_t ret_lane_count = 0;
-            bool ret_fp_agg = cc->func_uses_external_sysv_fp &&
-                              fp_abi_two_lane_aggregate(ctx->ret_type,
+            // Two-lane FP aggregates (e.g. complex(4) = <2 x float>) likewise
+            // return in XMM0[:XMM1] regardless of the ABI flag, so indirect
+            // calls and the callee's RET agree.
+            bool ret_fp_agg = fp_abi_two_lane_aggregate(ctx->ret_type,
                                                         &ret_lane_size,
                                                         &ret_lane_count);
             if (ret_fp_agg) {
@@ -3171,7 +3176,12 @@ static int x86_64_compile_emit(void *compile_ctx,
                 desc->type, &ret_lane_size, &ret_lane_count);
             if (internal_sret) {
                 /* Already materialized through hidden sret pointer. */
-            } else if (use_external_sysv_fp && ret_fp_agg) {
+            } else if (ret_fp_agg) {
+                // FP returns (scalar and two-lane aggregate) come back in
+                // XMM0[:XMM1] for every callee, so read them there regardless
+                // of use_external_sysv_fp -- an indirect (function-pointer /
+                // TBP) call cannot tell whether the callee was internal or
+                // external, and the callee's RET writes XMM0 either way.
                 size_t dst_sz = lr_type_size(desc->type);
                 size_t dst_align = lr_type_align(desc->type);
                 int32_t doff;
@@ -3186,7 +3196,7 @@ static int x86_64_compile_emit(void *compile_ctx,
                         cc, X86_RBP,
                         doff + (int32_t)ret_lane_size,
                         X86_XMM1, ret_lane_size);
-            } else if (use_external_sysv_fp && is_fp_abi_type(desc->type)) {
+            } else if (is_fp_abi_type(desc->type)) {
                 emit_store_fp_slot(cc, desc->dest, X86_XMM0,
                                    fp_abi_size(desc->type));
             } else {
