@@ -503,8 +503,8 @@ static inline uint32_t lr_emit_call(lr_session_t *s, lr_type_t *ret_type,
                                     uint32_t num_args) {
     lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     uint32_t nops = 1 + num_args;
-    lr_operand_desc_t ops[32];
-    if (nops > 32) return 0;
+    lr_operand_desc_t ops[256];
+    if (nops > 256) return 0;
     ops[0] = callee;
     for (uint32_t i = 0; i < num_args; i++) ops[1 + i] = args[i];
     d.op = LR_OP_CALL; d.type = ret_type; d.operands = ops;
@@ -518,8 +518,8 @@ static inline void lr_emit_call_void(lr_session_t *s,
                                      uint32_t num_args) {
     lr_inst_desc_t d; memset(&d, 0, sizeof(d));
     uint32_t nops = 1 + num_args;
-    lr_operand_desc_t ops[32];
-    if (nops > 32) return;
+    lr_operand_desc_t ops[256];
+    if (nops > 256) return;
     ops[0] = callee;
     for (uint32_t i = 0; i < num_args; i++) ops[1 + i] = args[i];
     d.op = LR_OP_CALL; d.type = lr_type_void_s(s);
