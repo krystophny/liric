@@ -369,6 +369,7 @@ endif()
 set(LIRIC_LIB_SOURCES
     src/arena.c
     src/ir.c
+    src/lr_float128.c
     src/ll_lexer.c
     src/ll_parser.c
     src/frontend_common.c

@@ -2528,6 +2528,10 @@ lr_type_t *lr_type_x86_fp80_s(struct lr_session *s) {
     return (s && s->module) ? s->module->type_x86_fp80 : NULL;
 }
 
+lr_type_t *lr_type_f128_s(struct lr_session *s) {
+    return (s && s->module) ? s->module->type_fp128 : NULL;
+}
+
 lr_type_t *lr_type_ptr_s(struct lr_session *s) {
     return (s && s->module) ? s->module->type_ptr : NULL;
 }

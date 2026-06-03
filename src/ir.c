@@ -71,6 +71,9 @@ lr_module_t *lr_module_create(lr_arena_t *arena) {
     m->type_x86_fp80 = lr_arena_new(arena, lr_type_t);
     m->type_x86_fp80->kind = LR_TYPE_X86_FP80;
 
+    m->type_fp128 = lr_arena_new(arena, lr_type_t);
+    m->type_fp128->kind = LR_TYPE_FP128;
+
     m->type_ptr = lr_arena_new(arena, lr_type_t);
     m->type_ptr->kind = LR_TYPE_PTR;
 
@@ -1507,6 +1510,7 @@ size_t lr_type_size(const lr_type_t *t) {
     case LR_TYPE_FLOAT:  return 4;
     case LR_TYPE_DOUBLE: return 8;
     case LR_TYPE_X86_FP80: return 16;
+    case LR_TYPE_FP128:  return 16;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_size(t->array.elem) * t->array.count;
     case LR_TYPE_VECTOR: return lr_type_size(t->array.elem) * t->array.count;
@@ -1543,6 +1547,7 @@ size_t lr_type_align(const lr_type_t *t) {
     case LR_TYPE_FLOAT:  return 4;
     case LR_TYPE_DOUBLE: return 8;
     case LR_TYPE_X86_FP80: return 16;
+    case LR_TYPE_FP128:  return 16;
     case LR_TYPE_PTR:    return 8;
     case LR_TYPE_ARRAY:  return lr_type_align(t->array.elem);
     case LR_TYPE_VECTOR: {
@@ -1828,6 +1833,7 @@ static const char *type_name(const lr_type_t *t) {
     case LR_TYPE_FLOAT:  return "float";
     case LR_TYPE_DOUBLE: return "double";
     case LR_TYPE_X86_FP80: return "x86_fp80";
+    case LR_TYPE_FP128:  return "fp128";
     case LR_TYPE_PTR:    return "ptr";
     default: return "?";
     }
@@ -2574,6 +2580,7 @@ static const char *noop_cast_opcode(const lr_type_t *t) {
     case LR_TYPE_FLOAT:
     case LR_TYPE_DOUBLE:
     case LR_TYPE_X86_FP80:
+    case LR_TYPE_FP128:
         return "fadd";
     case LR_TYPE_PTR:
         return "getelementptr";
@@ -3084,6 +3091,7 @@ static lr_type_t *merge_remap_type(lr_module_t *dest, const lr_type_t *t) {
     case LR_TYPE_FLOAT:  return dest->type_float;
     case LR_TYPE_DOUBLE: return dest->type_double;
     case LR_TYPE_X86_FP80: return dest->type_x86_fp80;
+    case LR_TYPE_FP128:  return dest->type_fp128;
     case LR_TYPE_PTR:
         return t->array.elem
             ? lr_type_ptr(dest->arena, merge_remap_type(dest, t->array.elem))

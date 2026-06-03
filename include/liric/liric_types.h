@@ -18,6 +18,7 @@ enum lr_type_kind_public {
     LR_TYPE_FLOAT,
     LR_TYPE_DOUBLE,
     LR_TYPE_X86_FP80,
+    LR_TYPE_FP128,
     LR_TYPE_PTR,
     LR_TYPE_ARRAY,
     LR_TYPE_VECTOR,

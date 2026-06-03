@@ -16,6 +16,7 @@ typedef enum lr_type_kind {
     LR_TYPE_FLOAT,
     LR_TYPE_DOUBLE,
     LR_TYPE_X86_FP80,
+    LR_TYPE_FP128,
     LR_TYPE_PTR,
     LR_TYPE_ARRAY,
     LR_TYPE_VECTOR,
@@ -175,6 +176,7 @@ typedef struct lr_module {
     lr_type_t *type_float;
     lr_type_t *type_double;
     lr_type_t *type_x86_fp80;
+    lr_type_t *type_fp128;
     lr_type_t *type_ptr;
     void *obj_ctx;
     bool local_function_collision_scan_dirty;
