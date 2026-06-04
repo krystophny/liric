@@ -231,7 +231,12 @@ static void build_main_ret_duplicate_private_global_module(llvm::Module &mod,
 static void build_main_puts_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
     llvm::Type *i8 = llvm::Type::getInt8Ty(ctx);
+#if LLVM_VERSION_MAJOR >= 21
+    llvm::PointerType *i8ptr = llvm::PointerType::getUnqual(ctx);
+#else
     llvm::PointerType *i8ptr = llvm::PointerType::getUnqual(i8);
+#endif
+    (void)i8;
 
     llvm::FunctionType *puts_ty = llvm::FunctionType::get(i32, {i8ptr}, false);
     llvm::Function *puts_fn = llvm::Function::Create(
@@ -243,7 +248,11 @@ static void build_main_puts_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
     llvm::IRBuilder<> b(entry);
 
+#if LLVM_VERSION_MAJOR >= 20
+    llvm::Value *msg = b.CreateGlobalString("HHH", "puts_msg");
+#else
     llvm::Value *msg = b.CreateGlobalStringPtr("HHH", "puts_msg");
+#endif
 #if LLVM_VERSION_MAJOR >= 11
     b.CreateCall(puts_ty, puts_fn, {msg});
 #else
