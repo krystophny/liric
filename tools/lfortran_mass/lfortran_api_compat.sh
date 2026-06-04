@@ -190,7 +190,8 @@ itest_args_has_filter() {
 }
 
 canonicalize_itest_family() {
-    local token="${1,,}"
+    local token
+    token="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
     token="${token//-/_}"
     case "$token" in
         llvm_base|base|default)
@@ -251,7 +252,8 @@ canonicalize_itest_family() {
 }
 
 populate_itest_families_from_set() {
-    local set_name="${1,,}"
+    local set_name
+    set_name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
     set_name="${set_name//-/_}"
     case "$set_name" in
         legacy)
@@ -733,7 +735,7 @@ build_itest_family_results_json() {
     local duration_ms=""
     local log_file=""
 
-    for entry in "${itest_family_result_entries[@]}"; do
+    for entry in ${itest_family_result_entries[@]+"${itest_family_result_entries[@]}"}; do
         IFS='|' read -r family family_status pass_flag duration_ms log_file <<< "$entry"
         json+="${sep}\"$(json_escape "$family")\":{"
         json+="\"status\":${family_status},"
