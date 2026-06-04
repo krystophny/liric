@@ -61,7 +61,7 @@ static inline int u128_bit(u128 a, int n) {
     if (n >= 64) return (int)((a.hi >> (n - 64)) & 1);
     return (int)((a.lo >> n) & 1);
 }
-static inline u128 u128_shr1(u128 a) { u128 r; r.lo = (a.lo >> 1) | (a.hi << 63); r.hi = a.hi >> 1; return r; }
+static inline __attribute__((unused)) u128 u128_shr1(u128 a) { u128 r; r.lo = (a.lo >> 1) | (a.hi << 63); r.hi = a.hi >> 1; return r; }
 static inline u128 u128_shl1(u128 a) { u128 r; r.hi = (a.hi << 1) | (a.lo >> 63); r.lo = a.lo << 1; return r; }
 
 static inline int lf_clz64(uint64_t v) { return v ? __builtin_clzll(v) : 64; }
