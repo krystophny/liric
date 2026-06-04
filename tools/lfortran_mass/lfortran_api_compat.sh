@@ -549,7 +549,7 @@ run_integration_family() {
         prepare_itest_env
         echo "lfortran_api_compat: running WITH_LIRIC integration suite (${mode_label}, backend=${backend})" >&2
         echo "lfortran_api_compat: integration guards: safe=${safe_itests} workers=${itest_workers} timeout_sec=${itest_timeout_sec} memory_max=${itest_memory_max} tasks_max=${itest_tasks_max} pgroup=${itest_pgroup_isolation}" >&2
-        run_with_itest_shards "$mode_label" "$backend" "${mode_flags[@]}"
+        run_with_itest_shards "$mode_label" "$backend" ${mode_flags[@]+"${mode_flags[@]}"}
     ) 2>&1 | tee "${log_root}/${log_name}" || family_status=1
     if grep -Fq "$NO_LINK_FALLBACK_DIAG_TEXT" "${log_root}/${log_name}"; then
         echo "lfortran_api_compat: fallback diagnostic detected in integration family ${family}; refusing fallback" >&2

@@ -8,6 +8,20 @@
 #include <liric/liric_session.h>
 #include <stdlib.h>
 #include <string.h>
+
+static void *compat_memmem(const void *hay, size_t hlen,
+                           const void *needle, size_t nlen) {
+    if (nlen == 0) return (void *)hay;
+    if (nlen > hlen) return NULL;
+    const unsigned char *h = (const unsigned char *)hay;
+    const unsigned char *n = (const unsigned char *)needle;
+    const unsigned char *end = h + hlen - nlen;
+    for (; h <= end; h++) {
+        if (memcmp(h, n, nlen) == 0)
+            return (void *)h;
+    }
+    return NULL;
+}
 #include <stdio.h>
 #include <stdarg.h>
 #include <limits.h>
@@ -1857,14 +1871,14 @@ static int compat_normalize_clang_ll(const char *ll_path) {
             while (p < eol && (*p == ' ' || *p == '\t'))
                 p++;
             if ((size_t)(eol - p) >= 5 && memcmp(p, "call ", 5) == 0) {
-                if (memmem(p, eol - p, " asm ", 5) ||
-                    memmem(p, eol - p, "\tasm ", 5))
+                if (compat_memmem(p, eol - p, " asm ", 5) ||
+                    compat_memmem(p, eol - p, "\tasm ", 5))
                     is_inline_asm_call = 1;
             }
             if ((size_t)(eol - p) >= 13 && !is_inline_asm_call &&
                 memcmp(p, "tail call ", 10) == 0) {
-                if (memmem(p, eol - p, " asm ", 5) ||
-                    memmem(p, eol - p, "\tasm ", 5))
+                if (compat_memmem(p, eol - p, " asm ", 5) ||
+                    compat_memmem(p, eol - p, "\tasm ", 5))
                     is_inline_asm_call = 1;
             }
         }

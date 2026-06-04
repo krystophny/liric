@@ -71,7 +71,7 @@ set(LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortr
     CACHE PATH "Path to lfortran API compatibility safe-run output artifacts")
 set(LIRIC_LFORTRAN_REPO "https://github.com/krystophny/lfortran.git"
     CACHE STRING "LFortran repository URL for CMake-managed checkout")
-set(LIRIC_LFORTRAN_REF "origin/liric-aot-minimal"
+set(LIRIC_LFORTRAN_REF "origin/liric-showcase"
     CACHE STRING "LFortran git ref for CMake-managed checkout")
 set(LIRIC_LFORTRAN_REMOTE "origin"
     CACHE STRING "Remote name used for LFortran ref policy")

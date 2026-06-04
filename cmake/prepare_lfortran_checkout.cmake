@@ -174,7 +174,7 @@ if(_lfortran_need_generated_refresh)
     endif()
 
     if("${tag_list}" STREQUAL "")
-        set(_fallback_tag "v0.0.0-liric-aot-minimal")
+        set(_fallback_tag "v0.0.0-liric-showcase")
         execute_process(
             COMMAND "${GIT_EXE}" -C "${LFORTRAN_ROOT}" rev-parse "${_fallback_tag}"
             RESULT_VARIABLE fallback_tag_exists_rc

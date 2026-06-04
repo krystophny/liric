@@ -8,9 +8,12 @@
 #include <liric/liric_legacy.h>
 #include <liric/liric_compat.h>
 
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -19,6 +22,17 @@
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
+
+static inline llvm::LoadInst *compat_CreateLoad(
+        llvm::IRBuilder<> &b, llvm::Type *ty, llvm::Value *ptr,
+        const char *name = "") {
+#if LLVM_VERSION_MAJOR >= 11
+    return b.CreateLoad(ty, ptr, name);
+#else
+    (void)ty;
+    return b.CreateLoad(ptr, name);
+#endif
+}
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/stat.h>
@@ -170,49 +184,47 @@ static void build_main_ret42_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     llvm::Function *main_fn = llvm::Function::Create(
         fty, llvm::GlobalValue::ExternalLinkage, "main", mod);
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
-    llvm::IRBuilder<> b(entry, ctx);
+    llvm::IRBuilder<> b(entry);
     b.CreateRet(llvm::ConstantInt::get(i32, 42));
 }
 
 static void build_main_ret_private_global_module(llvm::Module &mod,
                                                  llvm::LLVMContext &ctx) {
     llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
-    const int32_t init = 42;
-    llvm::GlobalVariable *answer = mod.createGlobalVariable(
-        "private_answer", i32, true, llvm::GlobalValue::InternalLinkage,
-        &init, sizeof(init));
-    if (!answer)
-        return;
+    llvm::Constant *init_val = llvm::ConstantInt::get(i32, 42);
+    auto *answer = new llvm::GlobalVariable(
+        mod, i32, true, llvm::GlobalValue::InternalLinkage,
+        init_val, "private_answer");
+    (void)answer;
 
     llvm::FunctionType *fty = llvm::FunctionType::get(i32, false);
     llvm::Function *main_fn = llvm::Function::Create(
         fty, llvm::GlobalValue::ExternalLinkage, "main", mod);
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
-    llvm::IRBuilder<> b(entry, ctx);
-    llvm::Value *loaded = b.CreateLoad(i32, answer, "loaded");
+    llvm::IRBuilder<> b(entry);
+    llvm::Value *loaded = compat_CreateLoad(b, i32, answer, "loaded");
     b.CreateRet(loaded);
 }
 
 static void build_main_ret_duplicate_private_global_module(llvm::Module &mod,
                                                            llvm::LLVMContext &ctx) {
     llvm::Type *i32 = llvm::Type::getInt32Ty(ctx);
-    const int32_t init_a = 7;
-    const int32_t init_b = 42;
-    llvm::GlobalVariable *first = mod.createGlobalVariable(
-        "dup_private_answer", i32, true, llvm::GlobalValue::InternalLinkage,
-        &init_a, sizeof(init_a));
-    llvm::GlobalVariable *second = mod.createGlobalVariable(
-        "dup_private_answer", i32, true, llvm::GlobalValue::InternalLinkage,
-        &init_b, sizeof(init_b));
-    if (!first || !second)
-        return;
+    llvm::Constant *init_a = llvm::ConstantInt::get(i32, 7);
+    llvm::Constant *init_b = llvm::ConstantInt::get(i32, 42);
+    auto *first = new llvm::GlobalVariable(
+        mod, i32, true, llvm::GlobalValue::InternalLinkage,
+        init_a, "dup_private_answer");
+    (void)first;
+    auto *second = new llvm::GlobalVariable(
+        mod, i32, true, llvm::GlobalValue::InternalLinkage,
+        init_b, "dup_private_answer");
 
     llvm::FunctionType *fty = llvm::FunctionType::get(i32, false);
     llvm::Function *main_fn = llvm::Function::Create(
         fty, llvm::GlobalValue::ExternalLinkage, "main", mod);
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
-    llvm::IRBuilder<> b(entry, ctx);
-    llvm::Value *loaded = b.CreateLoad(i32, second, "loaded");
+    llvm::IRBuilder<> b(entry);
+    llvm::Value *loaded = compat_CreateLoad(b, i32, second, "loaded");
     b.CreateRet(loaded);
 }
 
@@ -222,16 +234,21 @@ static void build_main_puts_module(llvm::Module &mod, llvm::LLVMContext &ctx) {
     llvm::PointerType *i8ptr = llvm::PointerType::getUnqual(i8);
 
     llvm::FunctionType *puts_ty = llvm::FunctionType::get(i32, {i8ptr}, false);
-    llvm::FunctionCallee puts_fn = mod.getOrInsertFunction("puts", puts_ty);
+    llvm::Function *puts_fn = llvm::Function::Create(
+        puts_ty, llvm::GlobalValue::ExternalLinkage, "puts", mod);
 
     llvm::FunctionType *main_ty = llvm::FunctionType::get(i32, false);
     llvm::Function *main_fn = llvm::Function::Create(
         main_ty, llvm::GlobalValue::ExternalLinkage, "main", mod);
     llvm::BasicBlock *entry = llvm::BasicBlock::Create(ctx, "entry", main_fn);
-    llvm::IRBuilder<> b(entry, ctx);
+    llvm::IRBuilder<> b(entry);
 
     llvm::Value *msg = b.CreateGlobalStringPtr("HHH", "puts_msg");
+#if LLVM_VERSION_MAJOR >= 11
+    b.CreateCall(puts_ty, puts_fn, {msg});
+#else
     b.CreateCall(puts_fn, {msg});
+#endif
     b.CreateRet(llvm::ConstantInt::get(i32, 0));
 }
 
