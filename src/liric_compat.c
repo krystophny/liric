@@ -2672,116 +2672,8 @@ typedef struct lc_context {
     int backend;
 } lc_context_t;
 
-typedef struct compat_ptr_type_cache_node {
-    const lc_context_t *ctx;
-    const lr_type_t *elem;
-    lr_type_t *ptr;
-    struct compat_ptr_type_cache_node *next;
-    struct compat_ptr_type_cache_node *bucket_next;
-} compat_ptr_type_cache_node_t;
-
-static compat_ptr_type_cache_node_t *g_ptr_type_cache = NULL;
-#define COMPAT_PTR_TYPE_BUCKETS 16384u
-static compat_ptr_type_cache_node_t
-    *g_ptr_type_cache_buckets[COMPAT_PTR_TYPE_BUCKETS];
-static _Thread_local const lc_context_t *g_last_ptr_type_ctx = NULL;
-static _Thread_local const lr_type_t *g_last_ptr_type_elem = NULL;
-static _Thread_local lr_type_t *g_last_ptr_type = NULL;
-
-static unsigned compat_ptr_type_bucket(const lc_context_t *ctx,
-                                       const lr_type_t *elem) {
-    uintptr_t x = (uintptr_t)ctx;
-    x ^= ((uintptr_t)elem >> 4);
-    x *= (uintptr_t)11400714819323198485ull;
-    return (unsigned)(x & (COMPAT_PTR_TYPE_BUCKETS - 1u));
-}
-
-static lr_type_t *compat_lookup_ptr_type(const lc_context_t *ctx,
-                                         const lr_type_t *elem) {
-    compat_ptr_type_cache_node_t *it;
-    if (!ctx || !elem)
-        return NULL;
-    if (g_last_ptr_type_ctx == ctx && g_last_ptr_type_elem == elem)
-        return g_last_ptr_type;
-    for (it = g_ptr_type_cache_buckets[compat_ptr_type_bucket(ctx, elem)];
-         it; it = it->bucket_next) {
-        if (it->ctx == ctx && it->elem == elem) {
-            g_last_ptr_type_ctx = ctx;
-            g_last_ptr_type_elem = elem;
-            g_last_ptr_type = it->ptr;
-            return it->ptr;
-        }
-    }
-    return NULL;
-}
-
-static lr_type_t *compat_get_or_create_ptr_type(lc_context_t *ctx,
-                                                lr_type_t *elem) {
-    compat_ptr_type_cache_node_t *node;
-    lr_type_t *ptr;
-    unsigned bucket;
-    if (!ctx || !elem)
-        return NULL;
-    ptr = compat_lookup_ptr_type(ctx, elem);
-    if (ptr)
-        return ptr;
-    ptr = lr_type_ptr(ctx->type_arena, elem);
-    if (!ptr)
-        return NULL;
-    node = (compat_ptr_type_cache_node_t *)malloc(sizeof(*node));
-    if (!node)
-        return ptr;
-    node->ctx = ctx;
-    node->elem = elem;
-    node->ptr = ptr;
-    node->next = g_ptr_type_cache;
-    g_ptr_type_cache = node;
-    bucket = compat_ptr_type_bucket(ctx, elem);
-    node->bucket_next = g_ptr_type_cache_buckets[bucket];
-    g_ptr_type_cache_buckets[bucket] = node;
-    g_last_ptr_type_ctx = ctx;
-    g_last_ptr_type_elem = elem;
-    g_last_ptr_type = ptr;
-    return ptr;
-}
-
 static void compat_drop_ptr_type_cache(const lc_context_t *ctx) {
-    compat_ptr_type_cache_node_t *it = g_ptr_type_cache;
-    compat_ptr_type_cache_node_t *prev = NULL;
-    while (it) {
-        compat_ptr_type_cache_node_t *next = it->next;
-        if (it->ctx == ctx) {
-            compat_ptr_type_cache_node_t *bucket_it;
-            compat_ptr_type_cache_node_t *bucket_prev = NULL;
-            unsigned bucket = compat_ptr_type_bucket(it->ctx, it->elem);
-            bucket_it = g_ptr_type_cache_buckets[bucket];
-            while (bucket_it) {
-                if (bucket_it == it) {
-                    if (bucket_prev)
-                        bucket_prev->bucket_next = bucket_it->bucket_next;
-                    else
-                        g_ptr_type_cache_buckets[bucket] =
-                            bucket_it->bucket_next;
-                    break;
-                }
-                bucket_prev = bucket_it;
-                bucket_it = bucket_it->bucket_next;
-            }
-            if (prev)
-                prev->next = next;
-            else
-                g_ptr_type_cache = next;
-            free(it);
-        } else {
-            prev = it;
-        }
-        it = next;
-    }
-    if (g_last_ptr_type_ctx == ctx) {
-        g_last_ptr_type_ctx = NULL;
-        g_last_ptr_type_elem = NULL;
-        g_last_ptr_type = NULL;
-    }
+    (void)ctx;
 }
 
 typedef struct lc_phi_node lc_phi_node_t;
@@ -5048,11 +4940,10 @@ lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod) {
 }
 
 lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem) {
+    (void)elem;
     if (!mod || !mod->mod)
         return NULL;
-    if (!elem)
-        return mod->mod->type_ptr;
-    return compat_get_or_create_ptr_type(mod->ctx, elem);
+    return mod->mod->type_ptr;
 }
 
 bool lc_type_is_integer(lr_type_t *ty) {
@@ -8376,7 +8267,7 @@ int lc_module_emit_executable(lc_module_compat_t *mod, const char *filename) {
         }
         return -1;
     }
-    if (compat_try_attach_runtime_archive(mod->session) <= 0) {
+    if (compat_try_attach_runtime_archive(mod->session) < 0) {
         if (getenv("LIRIC_COMPAT_VERBOSE_ERRORS")) {
             fprintf(stderr,
                     "lc_module_emit_executable: runtime unavailable; "
