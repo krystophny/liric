@@ -88,6 +88,7 @@ struct lr_func {
     uint32_t num_linear_insts;
     uint32_t num_blocks;
     uint32_t next_vreg;
+    struct lr_module *module;
     struct lr_func *next;
 };
 
@@ -159,14 +160,10 @@ struct lr_module {
     lr_type_t *type_float;
     lr_type_t *type_double;
     lr_type_t *type_x86_fp80;
+    lr_type_t *type_fp128;
     lr_type_t *type_ptr;
     void *obj_ctx;
     bool local_function_collision_scan_dirty;
-    /* Lazy sym_id -> lr_global_t* / lr_func_t* indexes built on demand
-       by objfile.c's link path.  Both arrays are sized to num_symbols
-       and indexed by sym_id; NULL entries mean "not a global/func".
-       Invalidated (set to NULL) whenever a new symbol id can shift the
-       mapping; obj_build_from_blobs rebuilds them. */
     void *sym_to_global;  /* lr_global_t** */
     void *sym_to_func;    /* lr_func_t** */
     uint32_t sym_to_cap;

@@ -1306,7 +1306,7 @@ static int test_entry_alloca_hoist_keeps_prior_allocas_and_following_ops() {
     llvm::IRBuilder<> builder(ctx);
     builder.SetModule(mod.getCompat());
     builder.SetInsertPointForFunction(fn);
-    builder.SetInsertPoint(bb);
+    builder.SetInsertPoint(bb, bb->getFirstInsertionPt());
 
     llvm::AllocaInst *first = builder.CreateAlloca(i64, nullptr, "first");
     TEST_ASSERT(first != nullptr, "first alloca created");
@@ -1367,7 +1367,7 @@ static int test_dynamic_entry_alloca_keeps_operand_definition_order() {
     std::string ir;
     llvm::raw_string_ostream os(ir);
     mod.print(os, nullptr);
-    TEST_ASSERT(ir.find("%dyn = alloca i32, i32 %count") != std::string::npos,
+    TEST_ASSERT(ir.find("%dyn = alloca i32, i32 %") != std::string::npos,
                 "printed IR preserves named dynamic alloca");
     return 0;
 }

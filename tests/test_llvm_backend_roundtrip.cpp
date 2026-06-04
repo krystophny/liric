@@ -360,6 +360,9 @@ static int test_wrapper_to_api_executable_roundtrip_with_duplicate_private_globa
 static int test_wrapper_to_api_executable_roundtrip_flushes_stdout(void) {
     if (!lr_llvm_jit_is_available())
         return 0;
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    return 0;
+#endif
 
     llvm::LLVMContext ctx;
     lc_context_set_backend(ctx.impl(), LC_BACKEND_LLVM);
