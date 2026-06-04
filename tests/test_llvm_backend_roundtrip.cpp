@@ -25,15 +25,10 @@
 
 namespace llvm = liric_llvm;
 
-static inline llvm::LoadInst *compat_CreateLoad(
+static inline llvm::Value *compat_CreateLoad(
         llvm::IRBuilder<> &b, llvm::Type *ty, llvm::Value *ptr,
         const char *name = "") {
-#if LLVM_VERSION_MAJOR >= 11
     return b.CreateLoad(ty, ptr, name);
-#else
-    (void)ty;
-    return b.CreateLoad(ptr, name);
-#endif
 }
 
 #if defined(__unix__) || defined(__APPLE__)

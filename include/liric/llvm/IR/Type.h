@@ -76,6 +76,7 @@ public:
         case LR_TYPE_FLOAT:  return FloatTyID;
         case LR_TYPE_DOUBLE: return DoubleTyID;
         case LR_TYPE_X86_FP80: return X86_FP80TyID;
+        case LR_TYPE_FP128:  return FP128TyID;
         case LR_TYPE_PTR:    return PointerTyID;
         case LR_TYPE_ARRAY:  return ArrayTyID;
         case LR_TYPE_VECTOR: return FixedVectorTyID;
