@@ -1366,36 +1366,38 @@ add_test(
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_llvm_backend_workflow_contract.cmake
 )
 
-add_test(
-    NAME lfortran_api_compat_ref_policy
-    COMMAND ${CMAKE_COMMAND}
-        -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
-        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_ref_policy.cmake
-)
+if(WITH_LLVM_COMPAT)
+    add_test(
+        NAME lfortran_api_compat_ref_policy
+        COMMAND ${CMAKE_COMMAND}
+            -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_ref_policy.cmake
+    )
 
-add_test(
-    NAME lfortran_api_compat_fresh_workspace
-    COMMAND ${CMAKE_COMMAND}
-        -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
-        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_fresh_workspace.cmake
-)
+    add_test(
+        NAME lfortran_api_compat_fresh_workspace
+        COMMAND ${CMAKE_COMMAND}
+            -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_fresh_workspace.cmake
+    )
 
-add_test(
-    NAME lfortran_api_compat_tool_preflight
-    COMMAND ${CMAKE_COMMAND}
-        -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
-        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_tool_preflight.cmake
-)
+    add_test(
+        NAME lfortran_api_compat_tool_preflight
+        COMMAND ${CMAKE_COMMAND}
+            -DAPI_SCRIPT=${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_tool_preflight.cmake
+    )
 
-add_test(
-    NAME lfortran_api_compat_workflow_contract
-    COMMAND ${CMAKE_COMMAND}
-        -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/lfortran_api_compat.yml
-        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_workflow_contract.cmake
-)
+    add_test(
+        NAME lfortran_api_compat_workflow_contract
+        COMMAND ${CMAKE_COMMAND}
+            -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/lfortran_api_compat.yml
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_workflow_contract.cmake
+    )
+endif()
 
 if(CMAKE_NM AND NOT WITH_REAL_LLVM_BACKEND)
     add_test(
@@ -1441,7 +1443,11 @@ if(WITH_LLVM_COMPAT)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     add_executable(test_llvm_compat tests/test_llvm_compat.cpp)
     target_include_directories(test_llvm_compat PRIVATE include/liric src)
-    target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
+    if(WITH_REAL_LLVM_BACKEND)
+        target_link_libraries(test_llvm_compat PRIVATE liric_nollvm ${LIRIC_PLATFORM_LIBS} stdc++)
+    else()
+        target_link_libraries(test_llvm_compat PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
+    endif()
     target_compile_options(test_llvm_compat PRIVATE
         -Wall -Wextra -Wpedantic -Wno-unused-parameter
         -Wno-error=attributes
