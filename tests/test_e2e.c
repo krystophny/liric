@@ -1,8 +1,19 @@
 #include "../src/liric.h"
 #include "../src/jit.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#ifndef LIRIC_SOURCE_DIR
+#define LIRIC_SOURCE_DIR "."
+#endif
 
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
@@ -46,6 +57,47 @@ static int run_jit_i32(const char *src, const char *fname) {
     lr_jit_destroy(jit);
     lr_module_free(m);
     return result;
+}
+
+static char *read_text_file(const char *path, size_t *out_len) {
+    FILE *fp = fopen(path, "rb");
+    char *buf = NULL;
+    long len;
+    size_t nread;
+
+    if (!fp)
+        return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+    len = ftell(fp);
+    if (len < 0) {
+        fclose(fp);
+        return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        fclose(fp);
+        return NULL;
+    }
+
+    buf = (char *)malloc((size_t)len + 1u);
+    if (!buf) {
+        fclose(fp);
+        return NULL;
+    }
+
+    nread = fread(buf, 1, (size_t)len, fp);
+    fclose(fp);
+    if (nread != (size_t)len) {
+        free(buf);
+        return NULL;
+    }
+
+    buf[len] = '\0';
+    if (out_len)
+        *out_len = (size_t)len;
+    return buf;
 }
 
 int test_e2e_ret_42(void) {
@@ -100,5 +152,37 @@ int test_e2e_loop(void) {
         "}\n";
     int result = run_jit_i32(src, "f");
     TEST_ASSERT_EQ(result, 55, "sum 1..10 = 55");
+    return 0;
+}
+
+int test_e2e_loop_dual_phi_rotation(void) {
+#if defined(__unix__) || defined(__APPLE__)
+    char path[512];
+    char *src;
+    size_t src_len = 0;
+    pid_t pid;
+    int status = 0;
+
+    snprintf(path, sizeof(path), "%s/tests/ll/issue_512_dual_phi.ll",
+             LIRIC_SOURCE_DIR);
+    src = read_text_file(path, &src_len);
+    TEST_ASSERT(src != NULL && src_len > 0, "load issue512 dual-phi fixture");
+
+    pid = fork();
+    TEST_ASSERT(pid >= 0, "fork");
+    if (pid == 0) {
+        alarm(10);
+        {
+            int result = run_jit_i32(src, "main");
+            free(src);
+            _exit(result == 6 ? 0 : 2);
+        }
+    }
+
+    TEST_ASSERT(waitpid(pid, &status, 0) >= 0, "waitpid");
+    free(src);
+    TEST_ASSERT(WIFEXITED(status), "child exited normally");
+    TEST_ASSERT_EQ(WEXITSTATUS(status), 0, "issue512 dual phi");
+#endif
     return 0;
 }

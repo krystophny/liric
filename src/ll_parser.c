@@ -624,6 +624,16 @@ static uint32_t resolve_block_n(lr_parser_t *p, const char *name, size_t name_le
     return b->id;
 }
 
+/* Phi incoming edges may name the entry block as %0. */
+static uint32_t resolve_phi_block_n(lr_parser_t *p, const char *name,
+                                    size_t name_len) {
+    uint32_t numeric_name;
+    if (parse_u32_decimal_n(name, name_len, &numeric_name) &&
+        numeric_name == 0u && p && p->cur_func && p->cur_func->first_block)
+        return p->cur_func->first_block->id;
+    return resolve_block_n(p, name, name_len);
+}
+
 static lr_block_t *resolve_block_ptr_n(lr_parser_t *p, const char *name, size_t name_len) {
     uint32_t hash = hash_name_n(name, name_len);
     uint32_t idx = index_find_block_n(p, name, name_len, hash);
@@ -1941,7 +1951,7 @@ static void parse_instruction(lr_parser_t *p, lr_func_t *func, lr_block_t *block
                     if (check(p, LR_TOK_LOCAL_ID)) {
                         name_view_t bname = tok_name_view(&p->cur);
                         next(p);
-                        uint32_t bid = resolve_block_n(p, bname.s, bname.len);
+                        uint32_t bid = resolve_phi_block_n(p, bname.s, bname.len);
                         ops[nops++] = lr_op_block(bid);
                     } else {
                         free(ops);

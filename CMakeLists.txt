@@ -958,6 +958,9 @@ add_executable(test_liric
 )
 target_link_libraries(test_liric PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(test_liric PRIVATE src)
+target_compile_definitions(test_liric PRIVATE
+    LIRIC_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
 if(WITH_REAL_LLVM_BACKEND)
     target_compile_definitions(test_liric PRIVATE
         LIRIC_HAVE_REAL_LLVM_BACKEND=1
@@ -1076,6 +1079,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
             -DEXPECT_RC=77
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
     )
+
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+        add_test(
+            NAME liric_cli_exe_issue512_dual_phi
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/issue_512_dual_phi.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_issue512_dual_phi
+                -DEXPECT_RC=6
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
+        )
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

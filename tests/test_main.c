@@ -199,6 +199,7 @@ int test_e2e_ret_42(void);
 int test_e2e_add_i32(void);
 int test_e2e_branch(void);
 int test_e2e_loop(void);
+int test_e2e_loop_dual_phi_rotation(void);
 int test_wasm_leb128_u32(void);
 int test_wasm_leb128_i32(void);
 int test_wasm_leb128_i64(void);
@@ -527,6 +528,7 @@ int main(void) {
     RUN_TEST(test_e2e_add_i32);
     RUN_TEST(test_e2e_branch);
     RUN_TEST(test_e2e_loop);
+    RUN_TEST(test_e2e_loop_dual_phi_rotation);
 
     fprintf(stderr, "\nWASM LEB128 tests:\n");
     RUN_TEST(test_wasm_leb128_u32);
