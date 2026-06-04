@@ -23,6 +23,8 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 
+namespace llvm = liric_llvm;
+
 static inline llvm::LoadInst *compat_CreateLoad(
         llvm::IRBuilder<> &b, llvm::Type *ty, llvm::Value *ptr,
         const char *name = "") {

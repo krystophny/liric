@@ -1450,6 +1450,7 @@ if(WITH_LLVM_COMPAT)
 
     if(WITH_REAL_LLVM_BACKEND)
         add_executable(test_llvm_backend_roundtrip tests/test_llvm_backend_roundtrip.cpp)
+        target_include_directories(test_llvm_backend_roundtrip PRIVATE include/liric src)
         target_link_libraries(test_llvm_backend_roundtrip PRIVATE liric ${LIRIC_PLATFORM_LIBS} stdc++)
         target_compile_options(test_llvm_backend_roundtrip PRIVATE
             -Wall -Wextra -Wpedantic
