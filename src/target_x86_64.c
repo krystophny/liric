@@ -1768,6 +1768,9 @@ static int flush_deferred_terminator(x86_direct_ctx_t *ctx) {
             cc->buf[jcc_disp_pos + 3] = (uint8_t)(rel32 >> 24);
         }
 
+        /* Edge copies must reload their sources from slots, not reuse the
+           scratch-register cache left behind by the branch condition. */
+        invalidate_cached_gprs(cc);
         direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id, false);
         if (direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_sourced(cc, true_id, dt->block_id);
