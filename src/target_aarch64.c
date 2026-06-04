@@ -1562,6 +1562,9 @@ static int a64_flush_deferred_terminator(a64_direct_ctx_t *ctx) {
                   (((uint32_t)jcc_imm & 0x7FFFFu) << 5) |
                   cond);
 
+        /* Edge copies must reload their sources from slots, not reuse the
+           scratch-register cache left behind by the branch condition. */
+        invalidate_cached_gprs_a64(cc);
         a64_direct_emit_phi_copies_for_edge(ctx, dt->block_id, true_id);
         if (a64_direct_ensure_fixup_cap(ctx) != 0) return -1;
         emit_jmp_a64(cc, true_id);
