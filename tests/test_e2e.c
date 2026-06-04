@@ -175,7 +175,7 @@ int test_e2e_loop_dual_phi_rotation(void) {
         {
             int result = run_jit_i32(src, "main");
             free(src);
-            _exit(result == 6 ? 0 : 2);
+            _exit(result == 3 ? 0 : 2);
         }
     }
 

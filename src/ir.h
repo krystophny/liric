@@ -217,6 +217,7 @@ uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
 const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
 lr_func_t *lr_module_lookup_function(const lr_module_t *m, const char *name);
 void lr_module_disambiguate_local_function_collisions(lr_module_t *m);
+bool lr_module_disambiguate_local_function_collisions_if_dirty(lr_module_t *m);
 
 size_t lr_type_size(const lr_type_t *t);
 size_t lr_type_align(const lr_type_t *t);

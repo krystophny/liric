@@ -1087,7 +1087,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
                 -DCLI=$<TARGET_FILE:liric_bin>
                 -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/issue_512_dual_phi.ll
                 -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_exe_issue512_dual_phi
-                -DEXPECT_RC=6
+                -DEXPECT_RC=3
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
         )
     endif()

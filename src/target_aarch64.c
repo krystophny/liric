@@ -1648,7 +1648,6 @@ static int aarch64_compile_begin(void **compile_ctx,
                         ? func_meta->func->name
                         : "<anon>";
 
-    lr_module_disambiguate_local_function_collisions(mod);
     attach_obj_symbol_meta_cache(cc);
 
     if (cc->func_is_vararg) {

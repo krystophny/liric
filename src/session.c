@@ -3344,7 +3344,7 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "target not found");
             return -1;
         }
-        lr_module_disambiguate_local_function_collisions(s->module);
+        lr_module_disambiguate_local_function_collisions_if_dirty(s->module);
         session_sync_blob_scoped_locals(s);
         FILE *out = fopen(path, "wb");
         if (!out) {
@@ -3385,7 +3385,7 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
             err_set(err, S_ERR_BACKEND, "target not found");
             return -1;
         }
-        lr_module_disambiguate_local_function_collisions(s->module);
+        lr_module_disambiguate_local_function_collisions_if_dirty(s->module);
         session_sync_blob_scoped_locals(s);
         return lr_emit_object_from_blobs(s->blobs, s->blob_count,
                                          s->module, target, out);
@@ -3468,7 +3468,7 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
             err_set(err, S_ERR_BACKEND, "target not found");
             return -1;
         }
-        lr_module_disambiguate_local_function_collisions(s->module);
+        lr_module_disambiguate_local_function_collisions_if_dirty(s->module);
         session_sync_blob_scoped_locals(s);
         FILE *out = fopen(path, "wb");
         if (!out) {

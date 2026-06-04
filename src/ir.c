@@ -1498,6 +1498,13 @@ cleanup:
     free(global_buckets);
 }
 
+bool lr_module_disambiguate_local_function_collisions_if_dirty(lr_module_t *m) {
+    if (!m || !m->arena || !m->local_function_collision_scan_dirty)
+        return false;
+    lr_module_disambiguate_local_function_collisions(m);
+    return true;
+}
+
 size_t lr_type_size(const lr_type_t *t) {
     if (!t) return 0;
     switch (t->kind) {

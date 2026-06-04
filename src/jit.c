@@ -2822,6 +2822,8 @@ int lr_jit_add_module(lr_jit_t *j, lr_module_t *m) {
         return llvm_rc;
     }
 
+    lr_module_disambiguate_local_function_collisions_if_dirty(m);
+
     bool own_wx_transition = !j->update_active;
     bool lazy_mode = jit_lazy_materialization_enabled();
     int rc = -1;

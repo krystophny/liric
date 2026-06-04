@@ -1492,6 +1492,7 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
         return -1;
     }
 
+    lr_module_disambiguate_local_function_collisions_if_dirty(m);
     out->ctx.preserve_symbol_names = preserve_symbol_names;
     m->obj_ctx = &out->ctx;
     if (lr_obj_build_symbol_cache(&out->ctx, m) != 0) {
@@ -1644,6 +1645,7 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
         return -1;
     }
 
+    lr_module_disambiguate_local_function_collisions_if_dirty(m);
     out->ctx.preserve_symbol_names = preserve_symbol_names;
     const int verbose_blob = (getenv("LIRIC_VERBOSE_BLOB_LINK") != NULL);
     if (lr_obj_build_symbol_cache(&out->ctx, m) != 0) {

@@ -1084,7 +1084,8 @@ int test_parser_disambiguates_llvm_abi_local_function_collision(void) {
 
     TEST_ASSERT(m != NULL, err);
 
-    lr_module_disambiguate_local_function_collisions(m);
+    TEST_ASSERT(lr_module_disambiguate_local_function_collisions_if_dirty(m),
+                "collision scan runs");
 
     for (lr_func_t *f = m->first_func; f; f = f->next) {
         if (!f->name)
@@ -1124,6 +1125,8 @@ int test_parser_disambiguates_llvm_abi_local_function_collision(void) {
     TEST_ASSERT_EQ(call->operands[0].global_id,
                    lr_module_intern_symbol(m, "floor"),
                    "libc-style call keeps plain floor symbol");
+    TEST_ASSERT(!lr_module_disambiguate_local_function_collisions_if_dirty(m),
+                "collision scan stays skipped once clean");
 
     lr_arena_destroy(arena);
     return 0;

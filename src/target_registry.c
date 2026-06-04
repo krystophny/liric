@@ -274,6 +274,8 @@ int lr_target_compile(const lr_target_t *target, lr_compile_mode_t mode,
     if (!lr_func_is_finalized(func) && lr_func_finalize(func, layout_arena) != 0)
         return -1;
 
+    lr_module_disambiguate_local_function_collisions_if_dirty(mod);
+
     memset(&meta, 0, sizeof(meta));
     meta.func = func;
     meta.ret_type = func->ret_type;

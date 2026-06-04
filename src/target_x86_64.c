@@ -1942,7 +1942,6 @@ static int x86_64_compile_begin(void **compile_ctx,
     cc->vararg_named_stack_gp = 0;
     cc->func_uses_external_sysv_fp = function_uses_external_sysv_fp_abi(func_meta);
 
-    lr_module_disambiguate_local_function_collisions(mod);
     attach_obj_symbol_meta_cache(cc);
 
     ctx->prologue_patch_pos = emit_prologue(cc);
