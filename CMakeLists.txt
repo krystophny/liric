@@ -266,11 +266,13 @@ set(OPENLIBM_ARCH_ASM "")
 set(OPENLIBM_ARCH_INCLUDE_DIR "")
 set(OPENLIBM_LD_INCLUDE_DIR "")
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
     set(OPENLIBM_ARCH_INCLUDE_DIR "${openlibm_SOURCE_DIR}/amd64")
     set(OPENLIBM_LD_INCLUDE_DIR "${openlibm_SOURCE_DIR}/ld80")
     file(GLOB OPENLIBM_ARCH_C "${openlibm_SOURCE_DIR}/amd64/*.c")
-    file(GLOB OPENLIBM_ARCH_ASM "${openlibm_SOURCE_DIR}/amd64/*.S")
+    if(NOT WIN32)
+        file(GLOB OPENLIBM_ARCH_ASM "${openlibm_SOURCE_DIR}/amd64/*.S")
+    endif()
     # ld80/Make.files: only these files are part of the build
     set(OPENLIBM_LD_C
         "${openlibm_SOURCE_DIR}/ld80/invtrig.c"
@@ -425,6 +427,9 @@ endif()
 add_library(liric STATIC ${LIRIC_LIB_SOURCES} ${LIRIC_PLATFORM_ASM_SOURCES})
 target_include_directories(liric PUBLIC include)
 target_include_directories(liric PRIVATE src)
+if(WIN32)
+    target_compile_definitions(liric PRIVATE LR_PLATFORM_SKIP_HOST_BLOB_CHECK=1)
+endif()
 # Embed OpenLibm objects into libliric.a
 target_sources(liric PRIVATE ${OPENLIBM_ALL_SOURCES})
 set_source_files_properties(${OPENLIBM_ALL_SOURCES} TARGET_DIRECTORY liric
@@ -485,6 +490,9 @@ if(WITH_REAL_LLVM_BACKEND)
     add_library(liric_nollvm STATIC ${LIRIC_LIB_SOURCES} ${LIRIC_PLATFORM_ASM_SOURCES})
     target_include_directories(liric_nollvm PUBLIC include)
     target_include_directories(liric_nollvm PRIVATE src)
+    if(WIN32)
+        target_compile_definitions(liric_nollvm PRIVATE LR_PLATFORM_SKIP_HOST_BLOB_CHECK=1)
+    endif()
     target_sources(liric_nollvm PRIVATE ${OPENLIBM_ALL_SOURCES})
     set_source_files_properties(${OPENLIBM_ALL_SOURCES} TARGET_DIRECTORY liric_nollvm
         PROPERTIES COMPILE_OPTIONS "${OPENLIBM_COMPILE_FLAGS}"
@@ -520,56 +528,70 @@ list(APPEND LIRIC_PLATFORM_LIBS Threads::Threads)
 target_link_libraries(liric_bin PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_bin PRIVATE src)
 
-add_executable(liric_probe_runner tools/liric_probe_runner.c)
-target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
-target_include_directories(liric_probe_runner PRIVATE src)
+set(LIRIC_PROBE_RUNNER_DEPS "")
+option(WITH_PROBE_RUNNER "Build POSIX LFortran probe runner" ON)
+if(WITH_PROBE_RUNNER AND UNIX)
+    add_executable(liric_probe_runner tools/liric_probe_runner.c)
+    target_link_libraries(liric_probe_runner PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+    target_include_directories(liric_probe_runner PRIVATE src)
+    list(APPEND LIRIC_PROBE_RUNNER_DEPS liric_probe_runner)
+elseif(WITH_PROBE_RUNNER)
+    message(STATUS "POSIX LFortran probe runner is disabled on this platform")
+endif()
 if(LIRIC_LFORTRAN_NO_LTO)
     set_property(TARGET liric PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
     set_property(TARGET liric PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
     set_property(TARGET liric PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
-    set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
-    set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
-    set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
     target_compile_options(liric PRIVATE -fno-lto)
-    target_compile_options(liric_probe_runner PRIVATE -fno-lto)
-    set_property(TARGET liric_probe_runner APPEND_STRING PROPERTY LINK_FLAGS " -fno-lto")
+    if(TARGET liric_probe_runner)
+        set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION FALSE)
+        set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE FALSE)
+        set_property(TARGET liric_probe_runner PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO FALSE)
+        target_compile_options(liric_probe_runner PRIVATE -fno-lto)
+        set_property(TARGET liric_probe_runner APPEND_STRING PROPERTY LINK_FLAGS " -fno-lto")
+    endif()
 endif()
 
 add_executable(liric_runtime_archive tools/liric_runtime_archive.c)
 target_link_libraries(liric_runtime_archive PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_runtime_archive PRIVATE src)
 
-add_executable(bench_compat_check tools/bench_compat_check.c tools/bench_common.c)
-target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
+option(WITH_BENCH_TOOLS "Build POSIX benchmark tools" ON)
+if(WITH_BENCH_TOOLS AND UNIX)
+    add_executable(bench_compat_check tools/bench_compat_check.c tools/bench_common.c)
+    target_link_libraries(bench_compat_check PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_api tools/bench_api.c tools/bench_common.c)
-target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
+    add_executable(bench_api tools/bench_api.c tools/bench_common.c)
+    target_link_libraries(bench_api PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_corpus_compare tools/bench_corpus_compare.c tools/bench_common.c)
-target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
+    add_executable(bench_corpus_compare tools/bench_corpus_compare.c tools/bench_common.c)
+    target_link_libraries(bench_corpus_compare PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-add_executable(bench_matrix tools/bench_matrix.c tools/bench_common.c)
-target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
-target_compile_definitions(bench_matrix PRIVATE
-    LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND=$<BOOL:${WITH_REAL_LLVM_BACKEND}>
-)
+    add_executable(bench_matrix tools/bench_matrix.c tools/bench_common.c)
+    target_link_libraries(bench_matrix PRIVATE ${LIRIC_PLATFORM_LIBS})
+    target_compile_definitions(bench_matrix PRIVATE
+        LIRIC_BENCH_HAVE_REAL_LLVM_BACKEND=$<BOOL:${WITH_REAL_LLVM_BACKEND}>
+    )
 
-add_executable(bench_overhead_probe tools/bench_overhead_probe.c tools/bench_common.c)
-target_link_libraries(bench_overhead_probe PRIVATE ${LIRIC_PLATFORM_LIBS})
+    add_executable(bench_overhead_probe tools/bench_overhead_probe.c tools/bench_common.c)
+    target_link_libraries(bench_overhead_probe PRIVATE ${LIRIC_PLATFORM_LIBS})
 
-option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
-if(WITH_BENCH_TCC)
-    find_path(LIRTCC_INCLUDE_DIR libtcc.h)
-    find_library(LIRTCC_LIB tcc)
-    if(LIRTCC_INCLUDE_DIR AND LIRTCC_LIB)
-        add_executable(bench_tcc tools/bench_tcc.c tools/bench_common.c)
-        target_include_directories(bench_tcc PRIVATE src "${LIRTCC_INCLUDE_DIR}")
-        target_link_libraries(bench_tcc PRIVATE liric "${LIRTCC_LIB}" ${LIRIC_PLATFORM_LIBS})
+    option(WITH_BENCH_TCC "Build bench_tcc target (requires libtcc)" ON)
+    if(WITH_BENCH_TCC)
+        find_path(LIRTCC_INCLUDE_DIR libtcc.h)
+        find_library(LIRTCC_LIB tcc)
+        if(LIRTCC_INCLUDE_DIR AND LIRTCC_LIB)
+            add_executable(bench_tcc tools/bench_tcc.c tools/bench_common.c)
+            target_include_directories(bench_tcc PRIVATE src "${LIRTCC_INCLUDE_DIR}")
+            target_link_libraries(bench_tcc PRIVATE liric "${LIRTCC_LIB}" ${LIRIC_PLATFORM_LIBS})
+        else()
+            message(STATUS "libtcc not found: bench_tcc target will not be built")
+        endif()
     else()
-        message(STATUS "libtcc not found: bench_tcc target will not be built")
+        message(STATUS "bench_tcc target disabled (WITH_BENCH_TCC=OFF)")
     endif()
-else()
-    message(STATUS "bench_tcc target disabled (WITH_BENCH_TCC=OFF)")
+elseif(WITH_BENCH_TOOLS)
+    message(STATUS "POSIX benchmark tools are disabled on this platform")
 endif()
 
 option(WITH_BENCH_LLI_PHASES "Build bench_lli_phases when LLVM C ORC APIs are available" ON)
@@ -591,7 +613,7 @@ else()
         find_program(LLVM_CONFIG_EXE NAMES llvm-config)
     endif()
 endif()
-if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES)
+if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES AND UNIX)
     execute_process(
         COMMAND ${LLVM_CONFIG_EXE} --includedir
         OUTPUT_VARIABLE LLVM_INCLUDE_DIR
@@ -644,7 +666,7 @@ if(LLVM_CONFIG_EXE AND WITH_BENCH_LLI_PHASES)
     endif()
 else()
     if(WITH_BENCH_LLI_PHASES)
-        message(STATUS "llvm-config not found: bench_lli_phases target will not be built")
+        message(STATUS "llvm-config not found or platform is not UNIX: bench_lli_phases target will not be built")
     else()
         message(STATUS "bench_lli_phases target disabled (WITH_BENCH_LLI_PHASES=OFF)")
     endif()
@@ -843,7 +865,7 @@ add_custom_target(
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
         --target lfortran lfortran_runtime build_runtime
         test_cwrapper test_stacktrace test_lfortran --parallel
-    DEPENDS lfortran_prepare liric_probe_runner ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS}
+    DEPENDS lfortran_prepare ${LIRIC_PROBE_RUNNER_DEPS} ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS}
     COMMENT "Configure/build LFortran WITH_LIRIC in ${LIRIC_LFORTRAN_BUILD_LIRIC}"
     USES_TERMINAL
 )
@@ -867,7 +889,7 @@ add_custom_target(
     COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
         --target lfortran lfortran_runtime build_runtime
         test_cwrapper test_stacktrace test_lfortran --parallel
-    DEPENDS lfortran_prepare liric_probe_runner ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM}
+    DEPENDS lfortran_prepare ${LIRIC_PROBE_RUNNER_DEPS} ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM}
     COMMENT "Configure/build LFortran WITH_LIRIC (no LLVM runtime link) in ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}"
     USES_TERMINAL
 )
@@ -1168,6 +1190,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     )
 endif()
 
+if(TARGET bench_compat_check AND TARGET bench_corpus_compare AND
+   TARGET bench_matrix AND TARGET bench_api)
 add_test(
     NAME bench_compat_check_freeze_artifacts
     COMMAND ${CMAKE_COMMAND}
@@ -1324,6 +1348,7 @@ add_test(
         -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_api_clean_gate_forwarding.cmake
 )
+endif()
 
 add_test(
     NAME bench_readme_perf_gate

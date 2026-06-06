@@ -41,6 +41,22 @@ static size_t count_pattern(const uint8_t *buf, size_t buf_len,
     return count;
 }
 
+static void set_compile_mode_env(const char *value) {
+#if defined(_WIN32)
+    if (value) {
+        (void)_putenv_s("LIRIC_COMPILE_MODE", value);
+    } else {
+        (void)_putenv_s("LIRIC_COMPILE_MODE", "");
+    }
+#else
+    if (value) {
+        (void)setenv("LIRIC_COMPILE_MODE", value, 1);
+    } else {
+        (void)unsetenv("LIRIC_COMPILE_MODE");
+    }
+#endif
+}
+
 /*
  * Create a JIT instance in copy-and-patch mode by temporarily setting
  * the LIRIC_COMPILE_MODE env var.
@@ -52,12 +68,12 @@ static lr_jit_t *create_cp_jit(void) {
         size_t n = strlen(old);
         if (n < sizeof(saved)) memcpy(saved, old, n + 1);
     }
-    setenv("LIRIC_COMPILE_MODE", "copy_patch", 1);
+    set_compile_mode_env("copy_patch");
     lr_jit_t *jit = lr_jit_create();
     if (saved[0])
-        setenv("LIRIC_COMPILE_MODE", saved, 1);
+        set_compile_mode_env(saved);
     else
-        unsetenv("LIRIC_COMPILE_MODE");
+        set_compile_mode_env(NULL);
     return jit;
 }
 

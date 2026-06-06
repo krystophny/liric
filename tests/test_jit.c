@@ -11,6 +11,30 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+#if defined(_WIN32)
+static int lr_test_setenv(const char *name, const char *value, int overwrite) {
+    if (!name || !name[0] || strchr(name, '='))
+        return -1;
+    if (!overwrite && getenv(name))
+        return 0;
+    return _putenv_s(name, value ? value : "");
+}
+
+static int lr_test_unsetenv(const char *name) {
+    if (!name || !name[0] || strchr(name, '='))
+        return -1;
+    return _putenv_s(name, "");
+}
+#else
+static int lr_test_setenv(const char *name, const char *value, int overwrite) {
+    return setenv(name, value, overwrite);
+}
+
+static int lr_test_unsetenv(const char *name) {
+    return unsetenv(name);
+}
+#endif
+
 #define TEST_ASSERT(cond, msg) do { \
     if (!(cond)) { \
         fprintf(stderr, "  FAIL: %s (line %d)\n", msg, __LINE__); \
@@ -80,7 +104,7 @@ static int set_parallel_prefetch_env(const char *value, char **old_value, int *h
         if (!*old_value)
             return -1;
     }
-    if (setenv("LIRIC_JIT_MAT_THREADS", value, 1) != 0) {
+    if (lr_test_setenv("LIRIC_JIT_MAT_THREADS", value, 1) != 0) {
         free(*old_value);
         *old_value = NULL;
         *had_old_value = 0;
@@ -91,9 +115,10 @@ static int set_parallel_prefetch_env(const char *value, char **old_value, int *h
 
 static void restore_parallel_prefetch_env(char *old_value, int had_old_value) {
     if (had_old_value) {
-        (void)setenv("LIRIC_JIT_MAT_THREADS", old_value ? old_value : "1", 1);
+        (void)lr_test_setenv("LIRIC_JIT_MAT_THREADS",
+                             old_value ? old_value : "1", 1);
     } else {
-        (void)unsetenv("LIRIC_JIT_MAT_THREADS");
+        (void)lr_test_unsetenv("LIRIC_JIT_MAT_THREADS");
     }
     free(old_value);
 }
@@ -107,7 +132,7 @@ static int set_lazy_materialization_env(const char *value, char **old_value, int
         if (!*old_value)
             return -1;
     }
-    if (setenv("LIRIC_JIT_LAZY", value, 1) != 0) {
+    if (lr_test_setenv("LIRIC_JIT_LAZY", value, 1) != 0) {
         free(*old_value);
         *old_value = NULL;
         *had_old_value = 0;
@@ -118,9 +143,10 @@ static int set_lazy_materialization_env(const char *value, char **old_value, int
 
 static void restore_lazy_materialization_env(char *old_value, int had_old_value) {
     if (had_old_value) {
-        (void)setenv("LIRIC_JIT_LAZY", old_value ? old_value : "0", 1);
+        (void)lr_test_setenv("LIRIC_JIT_LAZY",
+                             old_value ? old_value : "0", 1);
     } else {
-        (void)unsetenv("LIRIC_JIT_LAZY");
+        (void)lr_test_unsetenv("LIRIC_JIT_LAZY");
     }
     free(old_value);
 }
@@ -135,13 +161,13 @@ static int set_compile_mode_env(const char *value, char **old_value, int *had_ol
             return -1;
     }
     if (value) {
-        if (setenv("LIRIC_COMPILE_MODE", value, 1) != 0) {
+        if (lr_test_setenv("LIRIC_COMPILE_MODE", value, 1) != 0) {
             free(*old_value);
             *old_value = NULL;
             *had_old_value = 0;
             return -1;
         }
-    } else if (unsetenv("LIRIC_COMPILE_MODE") != 0) {
+    } else if (lr_test_unsetenv("LIRIC_COMPILE_MODE") != 0) {
         free(*old_value);
         *old_value = NULL;
         *had_old_value = 0;
@@ -152,10 +178,10 @@ static int set_compile_mode_env(const char *value, char **old_value, int *had_ol
 
 static void restore_compile_mode_env(char *old_value, int had_old_value) {
     if (had_old_value) {
-        (void)setenv("LIRIC_COMPILE_MODE",
-                     old_value ? old_value : "copy_patch", 1);
+        (void)lr_test_setenv("LIRIC_COMPILE_MODE",
+                             old_value ? old_value : "copy_patch", 1);
     } else {
-        (void)unsetenv("LIRIC_COMPILE_MODE");
+        (void)lr_test_unsetenv("LIRIC_COMPILE_MODE");
     }
     free(old_value);
 }

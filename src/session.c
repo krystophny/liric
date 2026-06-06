@@ -3393,7 +3393,6 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
 
     /* IR mode: compile from IR using session's compile mode */
     lr_compile_mode_t mode = s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH;
-    char backend_err[256] = {0};
     const lr_target_t *target = session_resolve_target(s);
     if (!target) {
         err_set(err, S_ERR_BACKEND, "target not found");
@@ -3402,6 +3401,7 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
 
     if (mode == LR_COMPILE_LLVM) {
 #if defined(__unix__) || defined(__APPLE__)
+        char backend_err[256] = {0};
         char tmp_tpl[] = "/tmp/liric_emit_obj_XXXXXX";
         int fd = mkstemp(tmp_tpl);
         int rc = -1;

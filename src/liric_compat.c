@@ -42,6 +42,75 @@ static const char *compat_select_runtime_clang(void);
 static int compat_parent_dir(char *path);
 static int compat_write_empty_lines_sidecar(const char *path);
 
+typedef struct compat_text_buf {
+    char *data;
+    size_t len;
+    size_t cap;
+} compat_text_buf_t;
+
+static int compat_text_buf_append(compat_text_buf_t *buf, const char *src,
+                                  size_t len) {
+    char *grown;
+    size_t next_cap;
+    if (!buf || (!src && len > 0))
+        return -1;
+    if (len == 0)
+        return 0;
+    if (buf->len + len + 1 < buf->len)
+        return -1;
+    if (buf->len + len + 1 > buf->cap) {
+        next_cap = buf->cap ? buf->cap : 256u;
+        while (next_cap < buf->len + len + 1) {
+            if (next_cap > SIZE_MAX / 2u)
+                return -1;
+            next_cap *= 2u;
+        }
+        grown = (char *)realloc(buf->data, next_cap);
+        if (!grown)
+            return -1;
+        buf->data = grown;
+        buf->cap = next_cap;
+    }
+    memcpy(buf->data + buf->len, src, len);
+    buf->len += len;
+    buf->data[buf->len] = '\0';
+    return 0;
+}
+
+static int compat_text_buf_append_cstr(compat_text_buf_t *buf,
+                                       const char *src) {
+    return compat_text_buf_append(buf, src, src ? strlen(src) : 0);
+}
+
+static char *compat_read_stream_to_string(FILE *f, size_t *out_len) {
+    long len;
+    char *buf;
+    size_t nread;
+    if (!f)
+        return NULL;
+    if (fflush(f) != 0)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0)
+        return NULL;
+    len = ftell(f);
+    if (len < 0)
+        return NULL;
+    if (fseek(f, 0, SEEK_SET) != 0)
+        return NULL;
+    buf = (char *)malloc((size_t)len + 1u);
+    if (!buf)
+        return NULL;
+    nread = fread(buf, 1, (size_t)len, f);
+    if (nread != (size_t)len || ferror(f)) {
+        free(buf);
+        return NULL;
+    }
+    buf[nread] = '\0';
+    if (out_len)
+        *out_len = nread;
+    return buf;
+}
+
 static int compat_policy_from_env(lr_session_mode_t *out_mode) {
     const char *p;
     if (!out_mode)
@@ -996,6 +1065,7 @@ static int compat_search_object_by_basename(const char *dir,
     return -1;
 }
 
+#if !defined(_WIN32)
 static int compat_c_source_name_matches(const char *wanted,
                                         const char *candidate) {
     size_t wanted_len = 0;
@@ -1060,6 +1130,7 @@ static int compat_search_c_source_by_suffix(const char *dir,
     closedir(d);
     return *out_path ? 0 : -1;
 }
+#endif
 
 static char *compat_archive_search_root(const char *archive_path) {
     char *root = compat_dirname_dup(archive_path);
@@ -1583,7 +1654,7 @@ static int compat_select_archive_members(compat_archive_members_t *members,
 }
 
 static char *compat_shell_quote(const char *s) {
-    size_t i = 0, extra = 0, len = 0;
+    size_t i = 0, len = 0;
     char *out = NULL;
     size_t j = 0;
     if (!s)
@@ -1606,6 +1677,7 @@ static char *compat_shell_quote(const char *s) {
     out[j] = '\0';
     return out;
 #else
+    size_t extra = 0;
     for (i = 0; i < len; i++) {
         if (s[i] == '\'')
             extra += 3; /* '\'' contributes 4 chars instead of 1 */
@@ -2341,6 +2413,7 @@ static int compat_extract_raw_bitcode(const uint8_t *data, size_t len,
     return 0;
 }
 
+#if !defined(_WIN32)
 static int compat_get_executable_path(char *out, size_t out_cap) {
     if (!out || out_cap == 0)
         return -1;
@@ -2421,6 +2494,7 @@ static int compat_guess_runtime_source(char *out_src, size_t out_src_cap,
     }
     return -1;
 }
+#endif
 
 static int compat_build_runtime_bc(uint8_t **out_data, size_t *out_len) {
 #if defined(_WIN32)
@@ -4187,8 +4261,7 @@ static char *compat_reorder_entry_allocas(const char *raw,
     const char *block_end = NULL;
     const char *p = NULL;
     char *out = NULL;
-    size_t out_len = 0;
-    FILE *mem = NULL;
+    compat_text_buf_t buf = {0};
     bool changed = false;
     if (!raw || !entry_dump_vregs)
         return NULL;
@@ -4205,10 +4278,8 @@ static char *compat_reorder_entry_allocas(const char *raw,
         if (!block_end)
             return NULL;
     }
-    mem = open_memstream(&out, &out_len);
-    if (!mem)
+    if (compat_text_buf_append(&buf, raw, (size_t)(block_start - raw)) != 0)
         return NULL;
-    fwrite(raw, 1, (size_t)(block_start - raw), mem);
     for (p = block_start; p < block_end; ) {
         const char *line_end = strchr(p, '\n');
         size_t len;
@@ -4218,7 +4289,8 @@ static char *compat_reorder_entry_allocas(const char *raw,
         if (line_end < block_end)
             len++;
         if (compat_line_is_hoisted_alloca(p, len, entry_dump_vregs, cap)) {
-            fwrite(p, 1, len, mem);
+            if (compat_text_buf_append(&buf, p, len) != 0)
+                goto fail;
             changed = true;
         }
         p = line_end < block_end ? line_end + 1 : block_end;
@@ -4232,16 +4304,21 @@ static char *compat_reorder_entry_allocas(const char *raw,
         if (line_end < block_end)
             len++;
         if (!compat_line_is_hoisted_alloca(p, len, entry_dump_vregs, cap))
-            fwrite(p, 1, len, mem);
+            if (compat_text_buf_append(&buf, p, len) != 0)
+                goto fail;
         p = line_end < block_end ? line_end + 1 : block_end;
     }
-    fputs(block_end, mem);
-    fclose(mem);
+    if (compat_text_buf_append_cstr(&buf, block_end) != 0)
+        goto fail;
     if (!changed) {
-        free(out);
+        free(buf.data);
         return NULL;
     }
+    out = buf.data;
     return out;
+fail:
+    free(buf.data);
+    return NULL;
 }
 
 static void compat_assign_display_vreg_names(const lr_func_t *f,
@@ -4478,11 +4555,14 @@ static void compat_dump_function(lc_module_compat_t *mod,
     const compat_func_dump_entry_t *entry = NULL;
     if (!mod || !f || !out)
         return;
-    mem = open_memstream(&raw, &raw_len);
+    mem = tmpfile();
     if (!mem)
         return;
     lr_dump_func_opts(f, mod->mod, mem, dump_flags);
+    raw = compat_read_stream_to_string(mem, &raw_len);
     fclose(mem);
+    if (!raw)
+        return;
     cap = f->next_vreg > 0 ? f->next_vreg : 1u;
     if (idx)
         entry = compat_func_dump_lookup(idx, f);
@@ -4597,10 +4677,12 @@ void lc_module_print(lc_module_compat_t *mod, FILE *out) {
 char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
     char *buf = NULL;
     size_t len = 0;
-    FILE *f = open_memstream(&buf, &len);
+    FILE *f = tmpfile();
     if (!f) return NULL;
     compat_dump_module(mod, f, 0);
+    buf = compat_read_stream_to_string(f, &len);
     fclose(f);
+    if (!buf) return NULL;
     if (out_len) *out_len = len;
     return buf;
 }
@@ -8376,13 +8458,18 @@ int lc_module_export_sidecar_files(lc_module_compat_t *mod,
     }
 
     {
-        FILE *mem = open_memstream(&ll_text, &ll_len);
+        FILE *mem = tmpfile();
         if (!mem) {
             compat_set_err(err, errlen, "sidecar LLVM IR export failed");
             goto done;
         }
         compat_dump_module_raw(mod, mem, LR_DUMP_PRESERVE_SCOPED_LOCALS);
+        ll_text = compat_read_stream_to_string(mem, &ll_len);
         fclose(mem);
+        if (!ll_text) {
+            compat_set_err(err, errlen, "sidecar LLVM IR export failed");
+            goto done;
+        }
     }
     if (write_file_bytes(ll_path, (const uint8_t *)ll_text, ll_len) != 0) {
         compat_set_err(err, errlen, "WITH_LIRIC no-link sidecar write failed: %s",

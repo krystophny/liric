@@ -63,6 +63,36 @@ static void free_file(file_buf_t *buf) {
     buf->len = 0;
 }
 
+static char *read_stream_to_string(FILE *f, size_t *out_len) {
+    long len;
+    char *buf;
+    size_t nread;
+
+    if (!f)
+        return NULL;
+    if (fflush(f) != 0)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) != 0)
+        return NULL;
+    len = ftell(f);
+    if (len < 0)
+        return NULL;
+    if (fseek(f, 0, SEEK_SET) != 0)
+        return NULL;
+    buf = (char *)malloc((size_t)len + 1u);
+    if (!buf)
+        return NULL;
+    nread = fread(buf, 1, (size_t)len, f);
+    if (nread != (size_t)len || ferror(f)) {
+        free(buf);
+        return NULL;
+    }
+    buf[nread] = '\0';
+    if (out_len)
+        *out_len = nread;
+    return buf;
+}
+
 static void usage(FILE *out) {
     fprintf(out,
             "usage: liric_runtime_archive --input-bc PATH --output PATH "
@@ -152,15 +182,20 @@ int main(int argc, char **argv) {
         fprintf(stderr, "blob export failed: %s\n", err.msg);
         goto done;
     }
-    mem = open_memstream(&ir_buf, &ir_len);
+    mem = tmpfile();
     if (!mem) {
-        fprintf(stderr, "open_memstream failed\n");
+        fprintf(stderr, "tmpfile failed\n");
         goto done;
     }
     lr_module_dump(lr_session_module(session), mem);
+    ir_buf = read_stream_to_string(mem, &ir_len);
+    if (!ir_buf) {
+        fprintf(stderr, "failed to finalize runtime IR buffer\n");
+        goto done;
+    }
     if (fclose(mem) != 0) {
         mem = NULL;
-        fprintf(stderr, "failed to finalize runtime IR buffer\n");
+        fprintf(stderr, "failed to close runtime IR buffer\n");
         goto done;
     }
     mem = NULL;

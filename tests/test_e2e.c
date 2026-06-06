@@ -59,6 +59,7 @@ static int run_jit_i32(const char *src, const char *fname) {
     return result;
 }
 
+#if defined(__unix__) || defined(__APPLE__)
 static char *read_text_file(const char *path, size_t *out_len) {
     FILE *fp = fopen(path, "rb");
     char *buf = NULL;
@@ -99,6 +100,7 @@ static char *read_text_file(const char *path, size_t *out_len) {
         *out_len = (size_t)len;
     return buf;
 }
+#endif
 
 int test_e2e_ret_42(void) {
     const char *src = "define i32 @f() {\nentry:\n  ret i32 42\n}\n";
