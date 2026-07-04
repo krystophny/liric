@@ -199,6 +199,14 @@ int lr_session_compile_auto(lr_session_t *s, const uint8_t *data, size_t len,
 int lr_session_emit_object(lr_session_t *s, const char *path, lr_error_t *err);
 int lr_session_emit_object_stream(lr_session_t *s, FILE *out, lr_error_t *err);
 int lr_session_emit_exe(lr_session_t *s, const char *path, lr_error_t *err);
+/* Like lr_session_emit_exe, but statically links extra_objs (n object-file
+ * paths) into the executable through the system C compiler. The session module
+ * is emitted to a temporary object and combined with the extra objects, so a
+ * separately compiled translation unit (e.g. a module's object) is resolved at
+ * link time. With n == 0 this is equivalent to lr_session_emit_exe. */
+int lr_session_emit_exe_objects(lr_session_t *s, const char *path,
+                                const char *const *extra_objs, int n,
+                                lr_error_t *err);
 
 /* ---- DIRECT blob package I/O ------------------------------------------ */
 

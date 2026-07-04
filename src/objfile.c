@@ -995,6 +995,7 @@ static bool obj_symbol_should_be_weak(const char *name) {
         "_Type_Info_",
         "_VTable_",
         "__module_file_common_block_",
+        ".ffc.",
     };
     if (!name || !name[0])
         return false;

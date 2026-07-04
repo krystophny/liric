@@ -7,6 +7,7 @@
 #include "llvm_backend.h"
 #include "module_emit.h"
 #include "objfile.h"
+#include "platform/platform_os.h"
 #include "runtime_archive.h"
 #include <stdarg.h>
 #include <stdbool.h>
@@ -3502,6 +3503,70 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     if (session_mark_output_executable(path, err) != 0)
         return -1;
     return 0;
+}
+
+int lr_session_emit_exe_objects(struct lr_session *s, const char *path,
+                                const char *const *extra_objs, int n,
+                                session_error_t *err) {
+    char obj_tpl[] = "/tmp/liric_exe_obj_XXXXXX";
+    int obj_fd = -1;
+    const char *cc_env = NULL;
+    const char *cc = NULL;
+    char **argv = NULL;
+    int argc = 0;
+    int status = 0;
+    int rc = -1;
+    int i;
+
+    err_clear(err);
+    if (!s || !s->module || !path) {
+        err_set(err, S_ERR_ARGUMENT, "invalid emit_exe_objects arguments");
+        return -1;
+    }
+    if (n <= 0 || !extra_objs)
+        return lr_session_emit_exe(s, path, err);
+
+    obj_fd = mkstemp(obj_tpl);
+    if (obj_fd < 0) {
+        err_set(err, S_ERR_BACKEND, "mkstemp failed for temporary object");
+        return -1;
+    }
+    close(obj_fd);
+
+    if (lr_session_emit_object(s, obj_tpl, err) != 0)
+        goto done;
+
+    cc_env = getenv("CC");
+    cc = (cc_env && cc_env[0]) ? cc_env : "cc";
+    /* argv: cc -o path tmp.o extra... -lm NULL */
+    argv = (char **)calloc((size_t)(n + 6), sizeof(*argv));
+    if (!argv) {
+        err_set(err, S_ERR_BACKEND, "out of memory building link command");
+        goto done;
+    }
+    argv[argc++] = (char *)cc;
+    argv[argc++] = (char *)"-o";
+    argv[argc++] = (char *)path;
+    argv[argc++] = (char *)obj_tpl;
+    for (i = 0; i < n; i++)
+        argv[argc++] = (char *)extra_objs[i];
+    argv[argc++] = (char *)"-lm";
+    argv[argc] = NULL;
+
+    if (lr_platform_run_process(argv, false, &status) != 0) {
+        err_set(err, S_ERR_BACKEND, "failed to launch linker process");
+        goto done;
+    }
+    if (status != 0) {
+        err_set(err, S_ERR_BACKEND, "linker failed with status=%d", status);
+        goto done;
+    }
+    rc = 0;
+
+done:
+    free(argv);
+    unlink(obj_tpl);
+    return rc;
 }
 
 /* ---- Access to underlying module --------------------------------------- */
