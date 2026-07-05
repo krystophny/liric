@@ -2356,6 +2356,28 @@ static void print_fp_literal(FILE *out, const lr_type_t *ty, double value) {
     fprintf(out, "0x%016" PRIX64, bits64.u);
 }
 
+/* Print a global's address as a plain `ptr` value (name, or a byte-offset
+   getelementptr), with no ptrtoint wrapping. Shared by the LR_VAL_GLOBAL
+   operand path and by call targets, which must always be pointers even when
+   the operand carries an integer result type. */
+static void print_global_addr(FILE *out, const lr_module_t *m,
+                              const lr_operand_t *op) {
+    const char *name = lr_module_symbol_name(m, op->global_id);
+    if (op->global_offset != 0) {
+        fprintf(out, "getelementptr (i8, ptr ");
+        if (name)
+            print_display_symbol_ref(out, '@', name, m);
+        else
+            fprintf(out, "@g%u", op->global_id);
+        fprintf(out, ", i64 %ld)", (long)op->global_offset);
+    } else {
+        if (name)
+            print_display_symbol_ref(out, '@', name, m);
+        else
+            fprintf(out, "@g%u", op->global_id);
+    }
+}
+
 static void print_operand(const lr_operand_t *op, const lr_module_t *m,
                           const lr_func_t *f, FILE *out) {
     switch (op->kind) {
@@ -2404,7 +2426,6 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         break;
     }
     case LR_VAL_GLOBAL: {
-        const char *name = lr_module_symbol_name(m, op->global_id);
         bool need_ptrtoint = op->type &&
             op->type->kind >= LR_TYPE_I1 &&
             op->type->kind <= LR_TYPE_I64;
@@ -2412,19 +2433,7 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
             break;
         if (need_ptrtoint)
             fprintf(out, "ptrtoint (ptr ");
-        if (op->global_offset != 0) {
-            fprintf(out, "getelementptr (i8, ptr ");
-            if (name)
-                print_display_symbol_ref(out, '@', name, m);
-            else
-                fprintf(out, "@g%u", op->global_id);
-            fprintf(out, ", i64 %ld)", (long)op->global_offset);
-        } else {
-            if (name)
-                print_display_symbol_ref(out, '@', name, m);
-            else
-                fprintf(out, "@g%u", op->global_id);
-        }
+        print_global_addr(out, m, op);
         if (need_ptrtoint) {
             fprintf(out, " to ");
             print_type(op->type, out);
@@ -2759,7 +2768,10 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                     fprintf(out, " ");
                 }
             }
-            print_operand(&inst->operands[0], m, f, out);
+            if (inst->operands[0].kind == LR_VAL_GLOBAL)
+                print_global_addr(out, m, &inst->operands[0]);
+            else
+                print_operand(&inst->operands[0], m, f, out);
             fprintf(out, "(");
             for (uint32_t i = 1; i < inst->num_operands; i++) {
                 if (i > 1) fprintf(out, ", ");
