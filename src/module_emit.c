@@ -65,6 +65,7 @@ int lr_emit_module_object_path_mode(lr_module_t *module,
                                     const char *target_name,
                                     lr_compile_mode_t mode,
                                     const char *path,
+                                    int opt_level,
                                     char *err,
                                     size_t err_cap) {
     const lr_target_t *target = NULL;
@@ -81,7 +82,7 @@ int lr_emit_module_object_path_mode(lr_module_t *module,
 
     if (mode == LR_COMPILE_LLVM) {
         char backend_err[256] = {0};
-        rc = lr_llvm_emit_object_path(module, target, path,
+        rc = lr_llvm_emit_object_path(module, target, path, opt_level,
                                       backend_err, sizeof(backend_err));
         if (rc != 0) {
             emit_err(err, err_cap, "llvm object emission failed: %s",
@@ -112,11 +113,12 @@ int lr_emit_module_object_path(lr_module_t *module,
                                size_t err_cap) {
     return lr_emit_module_object_path_mode(module, target_name,
                                            lr_compile_mode_from_env(),
-                                           path, err, err_cap);
+                                           path, 0, err, err_cap);
 }
 
 int lr_emit_module_object_stream(lr_module_t *module,
                                  const char *target_name,
+                                 int opt_level,
                                  FILE *out,
                                  char *err,
                                  size_t err_cap) {
@@ -143,7 +145,7 @@ int lr_emit_module_object_stream(lr_module_t *module,
             return -1;
         }
         close(fd);
-        rc = lr_llvm_emit_object_path(module, target, tmp_tpl,
+        rc = lr_llvm_emit_object_path(module, target, tmp_tpl, opt_level,
                                       backend_err, sizeof(backend_err));
         if (rc == 0)
             rc = copy_file_to_stream(tmp_tpl, out);
@@ -172,6 +174,7 @@ int lr_emit_module_executable_path_mode(lr_module_t *module,
                                         lr_compile_mode_t mode,
                                         const char *path,
                                         const char *entry,
+                                        int opt_level,
                                         char *err,
                                         size_t err_cap) {
     const lr_target_t *target = NULL;
@@ -188,7 +191,7 @@ int lr_emit_module_executable_path_mode(lr_module_t *module,
 
     if (mode == LR_COMPILE_LLVM) {
         char backend_err[256] = {0};
-        rc = lr_llvm_emit_executable_path(module, target, path, entry,
+        rc = lr_llvm_emit_executable_path(module, target, path, entry, opt_level,
                                           backend_err, sizeof(backend_err));
         if (rc != 0) {
             emit_err(err, err_cap, "llvm executable emission failed: %s",
@@ -220,6 +223,6 @@ int lr_emit_module_executable_path(lr_module_t *module,
                                    size_t err_cap) {
     return lr_emit_module_executable_path_mode(module, target_name,
                                                lr_compile_mode_from_env(),
-                                               path, entry,
+                                               path, entry, 0,
                                                err, err_cap);
 }

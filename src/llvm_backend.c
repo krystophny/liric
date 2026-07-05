@@ -18,10 +18,12 @@
 
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Core.h>
+#include <llvm-c/Error.h>
 #include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
+#include <llvm-c/Transforms/PassBuilder.h>
 
 #if !defined(LIRIC_HAVE_LLVM_C_LLJIT)
 #define LIRIC_HAVE_LLVM_C_LLJIT 0
@@ -227,8 +229,8 @@ static int set_err_from_llvm_error(char *err, size_t err_cap,
 #endif
 
 static int emit_object_from_ll_text(const char *ll, size_t ll_len,
-                                    const char *path, char *err,
-                                    size_t err_cap) {
+                                    const char *path, int opt_level,
+                                    char *err, size_t err_cap) {
     LLVMContextRef ctx = NULL;
     LLVMMemoryBufferRef mem = NULL;
     LLVMModuleRef mod = NULL;
@@ -259,7 +261,8 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
     }
 
     tm = LLVMCreateTargetMachine(target, triple, "generic", "",
-                                 LLVMCodeGenLevelDefault,
+                                 opt_level >= 2 ? LLVMCodeGenLevelAggressive
+                                                : LLVMCodeGenLevelDefault,
                                  LLVMRelocPIC,
                                  LLVMCodeModelDefault);
     if (!tm) {
@@ -320,6 +323,28 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
         set_err(err, err_cap, "LLVMVerifyModule failed: %s",
                 msg ? msg : "verify failure");
         goto done;
+    }
+
+    if (opt_level > 0) {
+        const char *passes = (opt_level >= 3) ? "default<O3>"
+                             : (opt_level == 2) ? "default<O2>"
+                                                : "default<O1>";
+        LLVMPassBuilderOptionsRef opts = LLVMCreatePassBuilderOptions();
+        LLVMErrorRef pass_err;
+        if (!opts) {
+            set_err(err, err_cap, "LLVMCreatePassBuilderOptions failed");
+            goto done;
+        }
+        pass_err = LLVMRunPasses(mod, passes, tm, opts);
+        LLVMDisposePassBuilderOptions(opts);
+        if (pass_err) {
+            char *pass_msg = LLVMGetErrorMessage(pass_err);
+            set_err(err, err_cap, "LLVMRunPasses(%s) failed: %s", passes,
+                    (pass_msg && pass_msg[0]) ? pass_msg : "unknown error");
+            if (pass_msg)
+                LLVMDisposeErrorMessage(pass_msg);
+            goto done;
+        }
     }
 
     if (LLVMTargetMachineEmitToFile(tm, mod, (char *)path,
@@ -600,7 +625,8 @@ void lr_llvm_jit_dispose(struct lr_jit *j) {
 }
 
 int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
-                             const char *path, char *err, size_t err_cap) {
+                             const char *path, int opt_level,
+                             char *err, size_t err_cap) {
     const lr_target_t *host = lr_target_host();
     size_t ll_len = 0;
     char *ll = NULL;
@@ -625,7 +651,7 @@ int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
         set_err(err, err_cap, "failed to materialize module text");
         return -1;
     }
-    rc = emit_object_from_ll_text(ll, ll_len, path, err, err_cap);
+    rc = emit_object_from_ll_text(ll, ll_len, path, opt_level, err, err_cap);
     free(ll);
     return rc;
 }
@@ -633,12 +659,14 @@ int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
 int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
                                  const char *path,
                                  const char *entry_symbol,
+                                 int opt_level,
                                  char *err, size_t err_cap) {
 #if !LR_LLVM_BACKEND_CAN_LINK
     (void)m;
     (void)target;
     (void)path;
     (void)entry_symbol;
+    (void)opt_level;
     set_err(err, err_cap, "llvm backend executable linking is unsupported on this platform");
     return -1;
 #else
@@ -671,7 +699,7 @@ int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
     close(obj_fd);
     obj_fd = -1;
 
-    if (lr_llvm_emit_object_path(work, target, obj_tpl, err, err_cap) != 0)
+    if (lr_llvm_emit_object_path(work, target, obj_tpl, opt_level, err, err_cap) != 0)
         goto done;
     if (link_executable_from_object(obj_tpl, path, err, err_cap) != 0)
         goto done;
@@ -712,10 +740,12 @@ void lr_llvm_jit_dispose(struct lr_jit *j) {
 }
 
 int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
-                             const char *path, char *err, size_t err_cap) {
+                             const char *path, int opt_level,
+                             char *err, size_t err_cap) {
     (void)m;
     (void)target;
     (void)path;
+    (void)opt_level;
     if (err && err_cap > 0)
         (void)snprintf(err, err_cap, "real llvm backend is not enabled");
     return -1;
@@ -724,11 +754,13 @@ int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
 int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
                                  const char *path,
                                  const char *entry_symbol,
+                                 int opt_level,
                                  char *err, size_t err_cap) {
     (void)m;
     (void)target;
     (void)path;
     (void)entry_symbol;
+    (void)opt_level;
     if (err && err_cap > 0)
         (void)snprintf(err, err_cap, "real llvm backend is not enabled");
     return -1;

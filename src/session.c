@@ -38,6 +38,7 @@ typedef struct session_config {
     session_mode_t mode;
     const char *target;
     session_backend_t backend;
+    int opt_level;
 } session_config_t;
 
 /* Error mirrors the public lr_error_t. */
@@ -2240,6 +2241,7 @@ struct lr_session *lr_session_create(const void *cfg_ptr,
         s->cfg.mode = cfg->mode;
         s->cfg.target = cfg->target;
         s->cfg.backend = cfg->backend;
+        s->cfg.opt_level = cfg->opt_level;
     }
 
     arena = lr_arena_create(0);
@@ -3364,7 +3366,7 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
 
     if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
                                         s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
-                                        path, backend_err,
+                                        path, s->cfg.opt_level, backend_err,
                                         sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "object emission failed");
@@ -3412,7 +3414,8 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
         }
         close(fd);
         rc = lr_llvm_emit_object_path(s->module, target, tmp_tpl,
-                                      backend_err, sizeof(backend_err));
+                                      s->cfg.opt_level, backend_err,
+                                      sizeof(backend_err));
         if (rc == 0) {
             FILE *in = fopen(tmp_tpl, "rb");
             if (in) {
@@ -3494,7 +3497,7 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
             s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
-            path, entry,
+            path, entry, s->cfg.opt_level,
             backend_err, sizeof(backend_err)) != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "executable emission failed");

@@ -460,10 +460,10 @@ int main(int argc, char **argv) {
         char backend_err[256] = {0};
         emit_rc = emit_object
             ? lr_emit_module_object_path_mode(m, target_name, LR_COMPILE_LLVM,
-                                              out_path, backend_err,
+                                              out_path, 0, backend_err,
                                               sizeof(backend_err))
             : lr_emit_module_executable_path_mode(m, target_name, LR_COMPILE_LLVM,
-                                                  out_path, func_name,
+                                                  out_path, func_name, 0,
                                                   backend_err,
                                                   sizeof(backend_err));
         if (emit_rc != 0) {

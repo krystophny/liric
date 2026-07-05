@@ -34,6 +34,10 @@ typedef struct lr_session_config {
     lr_session_mode_t mode;
     const char *target;
     lr_session_backend_t backend; /* default: LR_SESSION_BACKEND_COPY_PATCH */
+    /* LLVM AOT optimization level: 0 = none (default, direct/unoptimized),
+       1/2/3 = LLVM -O1/-O2/-O3 pass pipelines. Only the LLVM backend honors
+       nonzero values. */
+    int opt_level;
 } lr_session_config_t;
 
 /* ---- Error ------------------------------------------------------------- */

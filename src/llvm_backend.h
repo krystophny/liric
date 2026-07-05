@@ -15,11 +15,13 @@ int lr_llvm_jit_add_module(struct lr_jit *j, lr_module_t *m,
 void lr_llvm_jit_dispose(struct lr_jit *j);
 
 int lr_llvm_emit_object_path(lr_module_t *m, const lr_target_t *target,
-                             const char *path, char *err, size_t err_cap);
+                             const char *path, int opt_level,
+                             char *err, size_t err_cap);
 
 int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
                                  const char *path,
                                  const char *entry_symbol,
+                                 int opt_level,
                                  char *err, size_t err_cap);
 
 #endif

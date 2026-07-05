@@ -8254,7 +8254,8 @@ int lc_module_emit_object_to_file(lc_module_compat_t *mod, FILE *out) {
         return rc;
     }
     char emit_err[256] = {0};
-    return lr_emit_module_object_stream(mod->mod, NULL, out,
+    return lr_emit_module_object_stream(mod->mod, NULL,
+                                        mod->deferred_cfg.opt_level, out,
                                         emit_err, sizeof(emit_err));
 }
 

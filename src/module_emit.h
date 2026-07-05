@@ -10,6 +10,7 @@ int lr_emit_module_object_path_mode(lr_module_t *module,
                                     const char *target_name,
                                     lr_compile_mode_t mode,
                                     const char *path,
+                                    int opt_level,
                                     char *err,
                                     size_t err_cap);
 
@@ -21,6 +22,7 @@ int lr_emit_module_object_path(lr_module_t *module,
 
 int lr_emit_module_object_stream(lr_module_t *module,
                                  const char *target_name,
+                                 int opt_level,
                                  FILE *out,
                                  char *err,
                                  size_t err_cap);
@@ -30,6 +32,7 @@ int lr_emit_module_executable_path_mode(lr_module_t *module,
                                         lr_compile_mode_t mode,
                                         const char *path,
                                         const char *entry,
+                                        int opt_level,
                                         char *err,
                                         size_t err_cap);
 
