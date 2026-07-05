@@ -1113,6 +1113,29 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_exe_run.cmake
         )
     endif()
+
+    if(WITH_REAL_LLVM_BACKEND)
+        add_test(
+            NAME liric_cli_llvm_backend_roundtrip_ret42
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/ret_42.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_llvm_backend_roundtrip_ret42
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_llvm_backend_run.cmake
+        )
+
+        add_test(
+            NAME liric_cli_llvm_backend_roundtrip_dup_decl
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/llvm_roundtrip_dup_decl.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_llvm_backend_roundtrip_dup_decl
+                -DCC=${CMAKE_C_COMPILER}
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_llvm_backend_obj_run.cmake
+        )
+    endif()
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")

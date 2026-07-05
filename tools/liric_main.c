@@ -3,6 +3,7 @@
 #include "../src/ir.h"
 #include "../src/jit.h"
 #include "../src/ll_parser.h"
+#include "../src/module_emit.h"
 #include "../src/objfile.h"
 #include "../src/target.h"
 #include "../src/wasm_decode.h"
@@ -450,23 +451,48 @@ int main(int argc, char **argv) {
     const char *out_path = output_path_opt ? output_path_opt : "a.out";
     bool emit_object = output_path_forces_object(out_path) ||
                        !module_has_main_definition(m);
-    FILE *out = fopen(out_path, "wb");
-    if (!out) {
-        fprintf(stderr, "failed to open output: %s\n", out_path);
-        lr_module_free(m);
-        free(src);
-        return 1;
-    }
 
-    int emit_rc = emit_object ? lr_emit_object(m, target, out)
+    lr_backend_t emit_backend = LR_BACKEND_ISEL;
+    (void)backend_from_env(&emit_backend);
+
+    int emit_rc;
+    if (emit_backend == LR_BACKEND_LLVM) {
+        char backend_err[256] = {0};
+        emit_rc = emit_object
+            ? lr_emit_module_object_path_mode(m, target_name, LR_COMPILE_LLVM,
+                                              out_path, backend_err,
+                                              sizeof(backend_err))
+            : lr_emit_module_executable_path_mode(m, target_name, LR_COMPILE_LLVM,
+                                                  out_path, func_name,
+                                                  backend_err,
+                                                  sizeof(backend_err));
+        if (emit_rc != 0) {
+            fprintf(stderr, "%s\n",
+                    backend_err[0] ? backend_err
+                                   : (emit_object ? "object emission failed"
+                                                  : "executable emission failed"));
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+    } else {
+        FILE *out = fopen(out_path, "wb");
+        if (!out) {
+            fprintf(stderr, "failed to open output: %s\n", out_path);
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
+        emit_rc = emit_object ? lr_emit_object(m, target, out)
                               : lr_emit_executable(m, target, out, func_name);
-    fclose(out);
-    if (emit_rc != 0) {
-        fprintf(stderr, emit_object ? "object emission failed\n"
-                                    : "executable emission failed\n");
-        lr_module_free(m);
-        free(src);
-        return 1;
+        fclose(out);
+        if (emit_rc != 0) {
+            fprintf(stderr, emit_object ? "object emission failed\n"
+                                        : "executable emission failed\n");
+            lr_module_free(m);
+            free(src);
+            return 1;
+        }
     }
 
 #if !defined(_WIN32)

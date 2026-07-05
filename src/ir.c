@@ -159,6 +159,13 @@ lr_func_t *lr_func_create(lr_module_t *m, const char *name, lr_type_t *ret,
 
 lr_func_t *lr_func_declare(lr_module_t *m, const char *name, lr_type_t *ret,
                             lr_type_t **params, uint32_t num_params, bool vararg) {
+    /* A redeclaration of an existing function (declaration or definition) is a
+       no-op: LLVM rejects a module that declares the same symbol twice, so we
+       must never append a duplicate. Reuse the existing node. */
+    for (lr_func_t *ex = m->first_func; ex; ex = ex->next) {
+        if (ex->name && strcmp(ex->name, name) == 0)
+            return ex;
+    }
     lr_func_t *f = lr_func_create(m, name, ret, params, num_params, vararg);
     f->is_decl = true;
     return f;

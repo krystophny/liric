@@ -143,6 +143,34 @@ int test_parser_function_decl(void) {
     return 0;
 }
 
+int test_parser_duplicate_decl_deduped(void) {
+    /* Issue 522: a repeated declaration of the same runtime symbol must not
+       appear twice in the module, or the LLVM backend rejects the emitted IR
+       with "invalid redefinition of function". */
+    const char *src =
+        "declare i32 @snprintf(ptr, i64, ptr, ...)\n"
+        "declare i32 @snprintf(ptr, i64, ptr, ...)\n"
+        "define i32 @main() {\n"
+        "entry:\n"
+        "  ret i32 0\n"
+        "}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char err[256] = {0};
+
+    lr_module_t *m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    int snprintf_count = 0;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, "snprintf") == 0)
+            snprintf_count++;
+    }
+    TEST_ASSERT_EQ(snprintf_count, 1, "snprintf declared exactly once");
+
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_parser_typed_pointer_decl_params(void) {
     const char *src =
         "declare i32 @puts(i8*)\n"
