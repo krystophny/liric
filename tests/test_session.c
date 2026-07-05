@@ -1120,6 +1120,83 @@ int test_session_icmp_branch(void) {
     return 0;
 }
 
+/* Issue 521: an icmp result materialised and stored directly to a memory slot
+   (the raw-icmp-byte-to-slot pattern ffc emits for whole-array comparisons),
+   then reloaded, must reload the correct 0/1 for every predicate and at exact
+   operand ties -- across both native backends and both store widths. */
+static int session_icmp_to_slot_case(lr_session_backend_t backend, int pred,
+                                     int a, int b, bool store_as_i32) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.backend = backend;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s)
+        return -1000;
+
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *i1 = lr_type_i1_s(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+    lr_type_t *store_ty = store_as_i32 ? i32 : i1;
+
+    if (lr_session_func_begin(s, "session_icmp_slot", i32, NULL, 0, false,
+                              &err) != 0) {
+        lr_session_destroy(s);
+        return -1001;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+
+    /* Runtime operands via memory to defeat constant folding. */
+    uint32_t pa = lr_emit_alloca(s, i32);
+    uint32_t pb = lr_emit_alloca(s, i32);
+    uint32_t slot = lr_emit_alloca(s, i32);
+    lr_emit_store(s, LR_IMM(a, i32), LR_VREG(pa, ptr));
+    lr_emit_store(s, LR_IMM(b, i32), LR_VREG(pb, ptr));
+    uint32_t av = lr_emit_load(s, i32, LR_VREG(pa, ptr));
+    uint32_t bv = lr_emit_load(s, i32, LR_VREG(pb, ptr));
+    uint32_t cmp = lr_emit_icmp(s, pred, LR_VREG(av, i32), LR_VREG(bv, i32));
+    lr_emit_store(s, LR_VREG(cmp, store_ty), LR_VREG(slot, ptr));
+    uint32_t r = lr_emit_load(s, i32, LR_VREG(slot, ptr));
+    lr_emit_ret(s, LR_VREG(r, i32));
+
+    void *addr = NULL;
+    if (lr_session_func_end(s, &addr, &err) != 0 || !addr) {
+        lr_session_destroy(s);
+        return -1002;
+    }
+    int (*fn)(void);
+    fn_ptr_cast(&fn, addr);
+    int got = fn();
+    lr_session_destroy(s);
+    return got;
+}
+
+int test_session_icmp_result_to_slot(void) {
+    struct { int pred; int a, b, exp; } cases[] = {
+        { LR_CMP_NE, 5, 5, 0 }, { LR_CMP_NE, 5, 6, 1 },
+        { LR_CMP_EQ, 5, 5, 1 }, { LR_CMP_EQ, 5, 6, 0 },
+        { LR_CMP_SGT, 5, 5, 0 }, { LR_CMP_SGT, 6, 5, 1 }, { LR_CMP_SGT, 4, 5, 0 },
+        { LR_CMP_SLT, 5, 5, 0 }, { LR_CMP_SLT, 4, 5, 1 }, { LR_CMP_SLT, 6, 5, 0 },
+        { LR_CMP_SGE, 5, 5, 1 }, { LR_CMP_SGE, 4, 5, 0 },
+        { LR_CMP_SLE, 5, 5, 1 }, { LR_CMP_SLE, 6, 5, 0 },
+        { LR_CMP_SGT, -3, -3, 0 }, { LR_CMP_SLT, -9, -2, 1 },
+    };
+    lr_session_backend_t backends[] = {
+        LR_SESSION_BACKEND_ISEL, LR_SESSION_BACKEND_COPY_PATCH,
+    };
+    for (size_t bi = 0; bi < sizeof(backends) / sizeof(backends[0]); bi++) {
+        for (int w = 0; w < 2; w++) {
+            for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+                int got = session_icmp_to_slot_case(
+                    backends[bi], cases[i].pred, cases[i].a, cases[i].b, w != 0);
+                TEST_ASSERT_EQ(got, cases[i].exp,
+                               "icmp result stored to slot reloads correctly");
+            }
+        }
+    }
+    return 0;
+}
+
 int test_session_alloca_load_store(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
