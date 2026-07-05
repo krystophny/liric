@@ -241,6 +241,7 @@ int test_session_stream_stencil_no_ir_fallback(void);
 int test_session_add_phi_copy_api(void);
 int test_session_icmp_branch(void);
 int test_session_icmp_result_to_slot(void);
+int test_session_sub_word_ashr_signed(void);
 int test_session_alloca_load_store(void);
 int test_session_loop_phi(void);
 int test_session_call(void);
@@ -584,6 +585,7 @@ int main(void) {
     RUN_TEST(test_session_add_phi_copy_api);
     RUN_TEST(test_session_icmp_branch);
     RUN_TEST(test_session_icmp_result_to_slot);
+    RUN_TEST(test_session_sub_word_ashr_signed);
     RUN_TEST(test_session_alloca_load_store);
     RUN_TEST(test_session_loop_phi);
     RUN_TEST(test_session_call);

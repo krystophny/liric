@@ -967,11 +967,20 @@ static void emit_div_r(x86_compile_ctx_t *ctx, uint8_t src, uint8_t size) {
 }
 
 static void emit_shift(x86_compile_ctx_t *ctx, uint8_t ext, uint8_t dst, uint8_t size) {
-    bool need_rex = (size == 8) || (dst >= 8);
+    /* Shift at the operand's actual width. A fixed 32-bit shift on a byte/word
+       operand zero-extended into the register makes an arithmetic right shift
+       (sar) behave logically for negative sub-word values, since the sign bit
+       lives at bit 7/15, not bit 31. */
+    bool is8 = (size == 1);
+    bool is16 = (size == 2);
+    bool is64 = (size == 8);
+    if (is16)
+        emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x66);
+    bool need_rex = is64 || (dst >= 8) || (is8 && dst >= 4);
     if (need_rex)
         emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                  rex(size == 8, false, false, dst >= 8));
-    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0xD3);
+                  rex(is64, false, false, dst >= 8));
+    emit_byte(ctx->buf, &ctx->pos, ctx->buflen, is8 ? 0xD2 : 0xD3);
     emit_byte(ctx->buf, &ctx->pos, ctx->buflen, modrm(3, ext, dst));
     invalidate_cached_reg(ctx, dst);
 }

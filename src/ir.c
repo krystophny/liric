@@ -1864,10 +1864,13 @@ static void print_type_impl(const lr_type_t *t, FILE *out,
         fprintf(out, "void");
         return;
     }
-    if (t->kind == LR_TYPE_PTR && t->array.elem) {
-        print_type_impl(t->array.elem, out, false);
-        fprintf(out, "*");
-    } else if (t->kind <= LR_TYPE_PTR) {
+    if (t->kind == LR_TYPE_PTR) {
+        /* Opaque pointers: every pointer prints as `ptr`, never the legacy
+           `<pointee>*` form. LLVM (opaque-pointer only since 15) rejects both
+           `i32*` and `ptr*`, so a pointer-to-pointer must not expand its
+           pointee. */
+        fprintf(out, "ptr");
+    } else if (t->kind < LR_TYPE_PTR) {
         fprintf(out, "%s", type_name(t));
     } else if (t->kind == LR_TYPE_ARRAY) {
         fprintf(out, "[%lu x ", (unsigned long)t->array.count);
@@ -2275,9 +2278,7 @@ static bool print_global_i8_ptr_gep(FILE *out, const lr_module_t *m,
         return false;
     fprintf(out, "getelementptr inbounds (");
     print_type(g->type, out);
-    fprintf(out, ", ");
-    print_type(g->type, out);
-    fprintf(out, "* ");
+    fprintf(out, ", ptr ");
     print_display_symbol_ref(out, '@', g->name, m);
     fprintf(out, ", i32 0, i32 0)");
     return true;
@@ -2683,12 +2684,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                 print_type(inst->operands[0].type, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
-            fprintf(out, ", ");
-            if (inst->operands[0].type)
-                print_type(inst->operands[0].type, out);
-            else
-                fprintf(out, "ptr");
-            fprintf(out, "* ");
+            fprintf(out, ", ptr ");
             print_operand(&inst->operands[1], m, f, out);
             if (inst->operands[0].type) {
                 size_t align = ir_type_abi_align(inst->operands[0].type);
@@ -2701,12 +2697,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
     case LR_OP_LOAD:
         if (inst->type) print_type(inst->type, out);
         if (inst->num_operands > 0) {
-            fprintf(out, ", ");
-            if (inst->type)
-                print_type(inst->type, out);
-            else
-                fprintf(out, "ptr");
-            fprintf(out, "* ");
+            fprintf(out, ", ptr ");
             print_operand(&inst->operands[0], m, f, out);
             if (inst->type) {
                 size_t align = ir_type_abi_align(inst->type);
@@ -3765,9 +3756,7 @@ static void dump_global_scalar_expr(const lr_module_t *m, const lr_global_t *g,
                 r->addend == 0) {
                 fprintf(out, "getelementptr inbounds (");
                 print_type(target->type, out);
-                fprintf(out, ", ");
-                print_type(target->type, out);
-                fprintf(out, "* ");
+                fprintf(out, ", ptr ");
                 print_display_symbol_ref(out, '@', r->symbol_name, m);
                 fprintf(out, ", i32 0, i32 0)");
             } else if (r->addend == 0) {

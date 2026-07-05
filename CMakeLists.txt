@@ -1135,6 +1135,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
                 -DEXPECT_RC=42
                 -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_llvm_backend_obj_run.cmake
         )
+
+        add_test(
+            NAME liric_cli_llvm_backend_roundtrip_mem
+            COMMAND ${CMAKE_COMMAND}
+                -DCLI=$<TARGET_FILE:liric_bin>
+                -DINPUT=${CMAKE_CURRENT_SOURCE_DIR}/tests/ll/llvm_roundtrip_mem.ll
+                -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}/liric_cli_llvm_backend_roundtrip_mem
+                -DCC=${CMAKE_C_COMPILER}
+                -DEXPECT_RC=42
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_cli_llvm_backend_obj_run.cmake
+        )
     endif()
 endif()
 

@@ -1197,6 +1197,71 @@ int test_session_icmp_result_to_slot(void) {
     return 0;
 }
 
+/* Sub-word arithmetic right shift of a negative value must shift in sign bits,
+   not zeros: a fixed-width 32-bit shift on a byte/word operand zero-extended
+   into the register turned `ashr` into a logical shift. Runs both native
+   backends; the shift is done at the operand's actual width. */
+static int session_ashr_case(lr_session_backend_t backend,
+                             lr_type_t *(*ty_fn)(lr_session_t *),
+                             long value, long amount) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    cfg.backend = backend;
+    lr_session_t *s = lr_session_create(&cfg, &err);
+    if (!s)
+        return -1000;
+    lr_type_t *i32 = lr_type_i32_s(s);
+    lr_type_t *wt = ty_fn(s);
+    lr_type_t *ptr = lr_type_ptr_s(s);
+    if (lr_session_func_begin(s, "session_ashr", i32, NULL, 0, false,
+                              &err) != 0) {
+        lr_session_destroy(s);
+        return -1001;
+    }
+    uint32_t b0 = lr_session_block(s);
+    lr_session_set_block(s, b0, &err);
+    uint32_t pv = lr_emit_alloca(s, wt);
+    uint32_t pa = lr_emit_alloca(s, wt);
+    lr_emit_store(s, LR_IMM(value, wt), LR_VREG(pv, ptr));
+    lr_emit_store(s, LR_IMM(amount, wt), LR_VREG(pa, ptr));
+    uint32_t v = lr_emit_load(s, wt, LR_VREG(pv, ptr));
+    uint32_t a = lr_emit_load(s, wt, LR_VREG(pa, ptr));
+    uint32_t sh = lr_emit_ashr(s, wt, LR_VREG(v, wt), LR_VREG(a, wt));
+    uint32_t ext = lr_emit_sext(s, i32, LR_VREG(sh, wt));
+    lr_emit_ret(s, LR_VREG(ext, i32));
+    void *addr = NULL;
+    if (lr_session_func_end(s, &addr, &err) != 0 || !addr) {
+        lr_session_destroy(s);
+        return -1002;
+    }
+    int (*fn)(void);
+    fn_ptr_cast(&fn, addr);
+    int got = fn();
+    lr_session_destroy(s);
+    return got;
+}
+
+int test_session_sub_word_ashr_signed(void) {
+    lr_session_backend_t backends[] = {
+        LR_SESSION_BACKEND_ISEL, LR_SESSION_BACKEND_COPY_PATCH,
+    };
+    for (size_t bi = 0; bi < sizeof(backends) / sizeof(backends[0]); bi++) {
+        /* i8: -1 >>a 1 = -1; -50 >>a 2 = -13; 100 >>a 1 = 50 */
+        TEST_ASSERT_EQ(session_ashr_case(backends[bi], lr_type_i8_s, -1, 1), -1,
+                       "i8 ashr -1 by 1 == -1");
+        TEST_ASSERT_EQ(session_ashr_case(backends[bi], lr_type_i8_s, -50, 2), -13,
+                       "i8 ashr -50 by 2 == -13");
+        TEST_ASSERT_EQ(session_ashr_case(backends[bi], lr_type_i8_s, 100, 1), 50,
+                       "i8 ashr 100 by 1 == 50");
+        /* i16: -1 >>a 3 = -1; -1000 >>a 2 = -250 */
+        TEST_ASSERT_EQ(session_ashr_case(backends[bi], lr_type_i16_s, -1, 3), -1,
+                       "i16 ashr -1 by 3 == -1");
+        TEST_ASSERT_EQ(session_ashr_case(backends[bi], lr_type_i16_s, -1000, 2),
+                       -250, "i16 ashr -1000 by 2 == -250");
+    }
+    return 0;
+}
+
 int test_session_alloca_load_store(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
