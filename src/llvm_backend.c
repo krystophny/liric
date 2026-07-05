@@ -387,6 +387,7 @@ static int link_executable_from_object(const char *obj_path, const char *out_pat
         (char *)"-o",
         (char *)out_path,
         (char *)obj_path,
+        (char *)"-lm",
         NULL
     };
 
