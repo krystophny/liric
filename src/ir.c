@@ -2755,18 +2755,21 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                     fprintf(out, ", ");
                 fprintf(out, "...) ");
             } else {
-                print_type(inst->type, out);
-                fprintf(out, " ");
-            }
-            if (!inst->call_vararg &&
-                inst->operands[0].kind == LR_VAL_GLOBAL && m) {
-                const lr_type_t *callee_ty =
-                    find_func_type_by_symbol_id(m, inst->operands[0].global_id);
+                /* Calling a vararg function needs the explicit function type
+                   `<ret> (<params>, ...)`; a non-vararg callee needs just the
+                   return type. These are mutually exclusive - emitting both
+                   yields an invalid `<ret> <ret> (...)` callee. */
+                const lr_type_t *callee_ty = NULL;
+                if (inst->operands[0].kind == LR_VAL_GLOBAL && m)
+                    callee_ty = find_func_type_by_symbol_id(
+                        m, inst->operands[0].global_id);
                 if (callee_ty && callee_ty->kind == LR_TYPE_FUNC &&
                     callee_ty->func.vararg) {
                     print_type(callee_ty, out);
-                    fprintf(out, " ");
+                } else {
+                    print_type(inst->type, out);
                 }
+                fprintf(out, " ");
             }
             if (inst->operands[0].kind == LR_VAL_GLOBAL)
                 print_global_addr(out, m, &inst->operands[0]);
