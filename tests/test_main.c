@@ -250,6 +250,7 @@ int test_session_select(void);
 int test_session_ir_print(void);
 int test_session_scalar_gep_undef_tail_trimmed(void);
 int test_ir_dump_scalar_gep_undef_tail_trimmed(void);
+int test_ir_dump_declares_undeclared_call_targets(void);
 int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void);
 int test_session_ll_compile(void);
 int test_session_bc_compile(void);
@@ -313,6 +314,7 @@ int test_macho_exe_codesign_verify(void);
 #endif
 
 #if defined(__linux__)
+int test_llvm_object_declares_runtime_calls_o0_o2(void);
 int test_session_ir_exe_ret_42(void);
 int test_session_ir_exe_branch(void);
 int test_session_ir_exe_call(void);
@@ -594,6 +596,7 @@ int main(void) {
     RUN_TEST(test_session_ir_print);
     RUN_TEST(test_session_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_ir_dump_scalar_gep_undef_tail_trimmed);
+    RUN_TEST(test_ir_dump_declares_undeclared_call_targets);
     RUN_TEST(test_session_ir_lookup_prefers_module_symbol_over_process_symbol);
     RUN_TEST(test_session_ll_compile);
     RUN_TEST(test_session_bc_compile);
@@ -605,6 +608,7 @@ int main(void) {
 
 #if defined(__linux__)
     fprintf(stderr, "\nSession IR exe tests:\n");
+    RUN_TEST(test_llvm_object_declares_runtime_calls_o0_o2);
     RUN_TEST(test_session_ir_exe_ret_42);
     RUN_TEST(test_session_ir_exe_branch);
     RUN_TEST(test_session_ir_exe_call);

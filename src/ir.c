@@ -3944,6 +3944,104 @@ void lr_dump_global(const lr_module_t *m, const lr_global_t *g, FILE *out) {
     lr_dump_global_opts(m, g, out, 0);
 }
 
+static bool call_target_name_provided(const lr_module_t *m, const char *name) {
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return true;
+    }
+    for (const lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->type && g->type->kind == LR_TYPE_FUNC &&
+            g->name && strcmp(g->name, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+typedef struct lr_name_set {
+    const char **items;
+    size_t count;
+    size_t cap;
+} lr_name_set_t;
+
+static bool name_set_add(lr_name_set_t *s, const char *name) {
+    const char **tmp;
+    size_t new_cap;
+    for (size_t i = 0; i < s->count; i++) {
+        if (strcmp(s->items[i], name) == 0)
+            return false;
+    }
+    if (s->count == s->cap) {
+        new_cap = s->cap ? s->cap * 2u : 16u;
+        tmp = (const char **)realloc(s->items, new_cap * sizeof(*tmp));
+        if (!tmp)
+            return false;
+        s->items = tmp;
+        s->cap = new_cap;
+    }
+    s->items[s->count++] = name;
+    return true;
+}
+
+static void lr_dump_call_declare(const lr_module_t *m, const lr_inst_t *inst,
+                                 const char *name, FILE *out) {
+    bool vararg = inst->call_vararg;
+    uint32_t nparams = vararg
+        ? inst->call_fixed_args
+        : (inst->num_operands > 0 ? inst->num_operands - 1u : 0u);
+    fprintf(out, "declare ");
+    if (!inst->type || inst->type->kind == LR_TYPE_VOID)
+        fprintf(out, "void");
+    else
+        print_type(inst->type, out);
+    fprintf(out, " ");
+    print_display_symbol_ref(out, '@', name, m);
+    fprintf(out, "(");
+    for (uint32_t i = 0; i < nparams && (1u + i) < inst->num_operands; i++) {
+        if (i > 0)
+            fprintf(out, ", ");
+        if (inst->operands[1u + i].type)
+            print_type(inst->operands[1u + i].type, out);
+        else
+            fprintf(out, "ptr");
+    }
+    if (vararg) {
+        if (nparams > 0)
+            fprintf(out, ", ");
+        fprintf(out, "...");
+    }
+    fprintf(out, ")\n");
+}
+
+/* Emit a `declare` for every external call target that the module references
+   but neither defines, declares, nor provides as a FUNC-typed global. The
+   native backends rely on the system linker to resolve these symbols, but the
+   LLVM IR text parser rejects a call to an undeclared value, so the LLVM path
+   needs the declaration emitted explicitly. */
+static void lr_dump_undeclared_call_targets(const lr_module_t *m, FILE *out) {
+    lr_name_set_t seen = {0};
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        for (const lr_block_t *b = f->first_block; b; b = b->next) {
+            for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                const char *name;
+                if (inst->op != LR_OP_CALL || inst->num_operands == 0 ||
+                    inst->operands[0].kind != LR_VAL_GLOBAL) {
+                    continue;
+                }
+                name = lr_module_symbol_name(m, inst->operands[0].global_id);
+                if (!name || !name[0])
+                    continue;
+                if (call_target_name_provided(m, name))
+                    continue;
+                if (!name_set_add(&seen, name))
+                    continue;
+                lr_dump_call_declare(m, inst, name, out);
+            }
+        }
+    }
+    free(seen.items);
+}
+
 void lr_module_dump_opts(lr_module_t *m, FILE *out, unsigned dump_flags) {
     unsigned saved_dump_flags = lr_dump_flags_current;
     lr_dump_flags_current = dump_flags;
@@ -3952,6 +4050,7 @@ void lr_module_dump_opts(lr_module_t *m, FILE *out, unsigned dump_flags) {
     lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
         lr_dump_global_opts(m, g, out, dump_flags);
+    lr_dump_undeclared_call_targets(m, out);
     if (m->first_global && m->first_func)
         fprintf(out, "\n");
     for (lr_func_t *f = m->first_func; f; f = f->next)

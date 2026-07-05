@@ -2,8 +2,10 @@
 #include "arena.h"
 #include "bc_decode.h"
 #include "ir.h"
+#include "ll_parser.h"
 #include "llvm_backend.h"
 #include "runtime_archive.h"
+#include "target.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +13,7 @@
 #if defined(__linux__)
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 extern const uint8_t bc_ret42_data[];
@@ -1683,6 +1686,59 @@ int test_ir_dump_scalar_gep_undef_tail_trimmed(void) {
     return 0;
 }
 
+static const char *undeclared_runtime_call_ir(void) {
+    return
+        "define i32 @main() {\n"
+        "entry:\n"
+        "  %buf = alloca [8 x i8]\n"
+        "  %dst = alloca [8 x i8]\n"
+        "  call void @memset(ptr %buf, i32 42, i64 8)\n"
+        "  call void @memcpy(ptr %dst, ptr %buf, i64 8)\n"
+        "  %b = load i8, ptr %dst\n"
+        "  %r = zext i8 %b to i32\n"
+        "  ret i32 %r\n"
+        "}\n";
+}
+
+int test_ir_dump_declares_undeclared_call_targets(void) {
+    lr_arena_t *arena = NULL;
+    lr_module_t *m = NULL;
+    const char *src = undeclared_runtime_call_ir();
+    char err[256] = {0};
+    FILE *tmp = NULL;
+    long len;
+    char *buf = NULL;
+    size_t nread;
+
+    arena = lr_arena_create(0);
+    TEST_ASSERT(arena != NULL, "arena create");
+    m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    TEST_ASSERT(m != NULL, err);
+
+    tmp = tmpfile();
+    TEST_ASSERT(tmp != NULL, "tmpfile");
+    lr_module_dump(m, tmp);
+    fseek(tmp, 0, SEEK_END);
+    len = ftell(tmp);
+    TEST_ASSERT(len > 0, "dump produced output");
+    fseek(tmp, 0, SEEK_SET);
+    buf = (char *)malloc((size_t)len + 1u);
+    TEST_ASSERT(buf != NULL, "alloc dump buf");
+    nread = fread(buf, 1, (size_t)len, tmp);
+    TEST_ASSERT(nread == (size_t)len, "read dump");
+    buf[len] = '\0';
+    fclose(tmp);
+
+    TEST_ASSERT(strstr(buf, "declare void @memcpy(") != NULL,
+                "dump declares undeclared memcpy call target");
+    TEST_ASSERT(strstr(buf, "declare void @memset(") != NULL,
+                "dump declares undeclared memset call target");
+
+    free(buf);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
@@ -2003,6 +2059,85 @@ static int run_exe_expect(const char *path, int expected_rc) {
         fprintf(stderr, "    expected exit %d, got %d\n", expected_rc, actual);
         return -3;
     }
+    return 0;
+}
+
+static int emit_link_run_llvm_object(int opt_level, int expected_rc) {
+    lr_arena_t *arena = NULL;
+    lr_module_t *m = NULL;
+    const char *src = undeclared_runtime_call_ir();
+    char err[256] = {0};
+    const lr_target_t *target = NULL;
+    char obj_path[] = "/tmp/liric_llvm_decl_obj_XXXXXX.o";
+    char exe_path[] = "/tmp/liric_llvm_decl_exe_XXXXXX";
+    char cmd[512];
+    int obj_fd = -1;
+    int exe_fd = -1;
+    int rc;
+    int result = 1;
+
+    arena = lr_arena_create(0);
+    if (!arena)
+        return 1;
+    m = lr_parse_ll_text(src, strlen(src), arena, err, sizeof(err));
+    if (!m) {
+        fprintf(stderr, "  FAIL: parse: %s\n", err);
+        goto cleanup;
+    }
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->first_block && lr_func_finalize(f, arena) != 0) {
+            fprintf(stderr, "  FAIL: finalize\n");
+            goto cleanup;
+        }
+    }
+
+    target = lr_target_host();
+    if (!target)
+        goto cleanup;
+
+    obj_fd = mkstemps(obj_path, 2);
+    if (obj_fd < 0)
+        goto cleanup;
+    close(obj_fd);
+    obj_fd = -1;
+    exe_fd = mkstemp(exe_path);
+    if (exe_fd < 0)
+        goto cleanup;
+    close(exe_fd);
+    exe_fd = -1;
+
+    rc = lr_llvm_emit_object_path(m, target, obj_path, opt_level,
+                                  err, sizeof(err));
+    if (rc != 0) {
+        fprintf(stderr, "  FAIL: emit object opt=%d: %s\n", opt_level, err);
+        goto cleanup;
+    }
+
+    snprintf(cmd, sizeof(cmd), "cc %s -o %s", obj_path, exe_path);
+    if (system(cmd) != 0) {
+        fprintf(stderr, "  FAIL: link opt=%d\n", opt_level);
+        goto cleanup;
+    }
+    if (run_exe_expect(exe_path, expected_rc) != 0)
+        goto cleanup;
+
+    result = 0;
+
+cleanup:
+    remove(obj_path);
+    remove(exe_path);
+    if (arena)
+        lr_arena_destroy(arena);
+    return result;
+}
+
+int test_llvm_object_declares_runtime_calls_o0_o2(void) {
+    if (!lr_llvm_backend_is_available())
+        return 0;
+    TEST_ASSERT_EQ(emit_link_run_llvm_object(0, 42), 0,
+                   "llvm object with declared runtime calls runs at O0");
+    TEST_ASSERT_EQ(emit_link_run_llvm_object(2, 42), 0,
+                   "llvm object with declared runtime calls runs at O2");
     return 0;
 }
 
