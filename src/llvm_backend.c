@@ -16,17 +16,26 @@
 
 #if defined(LIRIC_HAVE_REAL_LLVM_BACKEND) && LIRIC_HAVE_REAL_LLVM_BACKEND
 
+#if !defined(LIRIC_HAVE_LLVM_C_LLJIT)
+#define LIRIC_HAVE_LLVM_C_LLJIT 0
+#endif
+
 #include <llvm-c/Analysis.h>
 #include <llvm-c/Core.h>
+#if LIRIC_HAVE_LLVM_C_LLJIT || \
+    (defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+     LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 13)
 #include <llvm-c/Error.h>
+#endif
 #include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 13
 #include <llvm-c/Transforms/PassBuilder.h>
-
-#if !defined(LIRIC_HAVE_LLVM_C_LLJIT)
-#define LIRIC_HAVE_LLVM_C_LLJIT 0
+#else
+#include <llvm-c/Transforms/PassManagerBuilder.h>
 #endif
 
 #if LIRIC_HAVE_LLVM_C_LLJIT
@@ -326,6 +335,8 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
     }
 
     if (opt_level > 0) {
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR >= 13
         const char *passes = (opt_level >= 3) ? "default<O3>"
                              : (opt_level == 2) ? "default<O2>"
                                                 : "default<O1>";
@@ -345,6 +356,23 @@ static int emit_object_from_ll_text(const char *ll, size_t ll_len,
                 LLVMDisposeErrorMessage(pass_msg);
             goto done;
         }
+#else
+        LLVMPassManagerBuilderRef builder = LLVMPassManagerBuilderCreate();
+        LLVMPassManagerRef pass_manager = LLVMCreatePassManager();
+        if (!builder || !pass_manager) {
+            if (builder)
+                LLVMPassManagerBuilderDispose(builder);
+            if (pass_manager)
+                LLVMDisposePassManager(pass_manager);
+            set_err(err, err_cap, "legacy LLVM pass manager creation failed");
+            goto done;
+        }
+        LLVMPassManagerBuilderSetOptLevel(builder, (unsigned)opt_level);
+        LLVMPassManagerBuilderPopulateModulePassManager(builder, pass_manager);
+        (void)LLVMRunPassManager(pass_manager, mod);
+        LLVMDisposePassManager(pass_manager);
+        LLVMPassManagerBuilderDispose(builder);
+#endif
     }
 
     if (LLVMTargetMachineEmitToFile(tm, mod, (char *)path,

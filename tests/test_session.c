@@ -1538,6 +1538,108 @@ int test_session_ir_print(void) {
     return 0;
 }
 
+static char *dump_module_text(lr_module_t *module) {
+    FILE *tmp = tmpfile();
+    long len;
+    char *text;
+    if (!tmp)
+        return NULL;
+    lr_module_dump(module, tmp);
+    if (fseek(tmp, 0, SEEK_END) != 0 || (len = ftell(tmp)) <= 0 ||
+        fseek(tmp, 0, SEEK_SET) != 0) {
+        fclose(tmp);
+        return NULL;
+    }
+    text = (char *)malloc((size_t)len + 1u);
+    if (!text || fread(text, 1, (size_t)len, tmp) != (size_t)len) {
+        free(text);
+        fclose(tmp);
+        return NULL;
+    }
+    text[len] = '\0';
+    fclose(tmp);
+    return text;
+}
+
+int test_ir_dump_pointer_dialect_for_backend(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    lr_func_t *f;
+    lr_block_t *b;
+    lr_operand_t ops[2];
+    char *buf;
+    char *second_dump;
+
+    TEST_ASSERT(arena != NULL, "arena create");
+    m = lr_module_create(arena);
+    TEST_ASSERT(m != NULL, "module create");
+    f = lr_func_create(m, "pointer_dialect", m->type_i32, NULL, 0, false);
+    TEST_ASSERT(f != NULL, "function create");
+    f->next_vreg = 6;
+    b = lr_block_create(f, arena, "entry");
+    TEST_ASSERT(b != NULL, "block create");
+
+    lr_block_append(b, lr_inst_create(arena, LR_OP_ALLOCA, m->type_i32,
+                                      1, NULL, 0));
+    ops[0] = lr_op_imm_i64(42, m->type_i32);
+    ops[1] = lr_op_vreg(1, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_STORE, m->type_void,
+                                      0, ops, 2));
+    ops[0] = lr_op_vreg(1, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_LOAD, m->type_i32,
+                                      2, ops, 1));
+    lr_block_append(b, lr_inst_create(arena, LR_OP_ALLOCA, m->type_ptr,
+                                      3, NULL, 0));
+    ops[0] = lr_op_vreg(1, m->type_ptr);
+    ops[1] = lr_op_vreg(3, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_STORE, m->type_void,
+                                      0, ops, 2));
+    ops[0] = lr_op_vreg(3, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_LOAD, m->type_ptr,
+                                      4, ops, 1));
+    ops[0] = lr_op_vreg(4, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_LOAD, m->type_i32,
+                                      5, ops, 1));
+    ops[0] = lr_op_vreg(5, m->type_i32);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_RET, m->type_i32,
+                                      0, ops, 1));
+
+    buf = dump_module_text(m);
+    TEST_ASSERT(buf != NULL, "first IR dump");
+    second_dump = dump_module_text(m);
+    TEST_ASSERT(second_dump != NULL, "second IR dump");
+    TEST_ASSERT(strcmp(buf, second_dump) == 0,
+                "repeated IR dump is idempotent");
+
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    TEST_ASSERT(strstr(buf, "store i32 42, i32* %v1") != NULL,
+                "legacy LLVM dump uses typed store pointer");
+    TEST_ASSERT(strstr(buf, "load i32, i32* %v1") != NULL,
+                "legacy LLVM dump uses typed load pointer");
+    TEST_ASSERT(strstr(buf, "alloca i32*") != NULL,
+                "legacy LLVM dump infers pointer slot type");
+    TEST_ASSERT(strstr(buf, "store i32* %v1, i32** %v3") != NULL,
+                "legacy LLVM dump uses typed pointer store");
+    TEST_ASSERT(strstr(buf, "load i32*, i32** %v3") != NULL,
+                "legacy LLVM dump uses typed pointer load");
+#else
+    TEST_ASSERT(strstr(buf, "store i32 42, ptr %v1") != NULL,
+                "modern LLVM dump uses opaque store pointer");
+    TEST_ASSERT(strstr(buf, "load i32, ptr %v1") != NULL,
+                "modern LLVM dump uses opaque load pointer");
+    TEST_ASSERT(strstr(buf, "alloca ptr") != NULL,
+                "modern LLVM dump keeps opaque pointer slot");
+    TEST_ASSERT(strstr(buf, "store ptr %v1, ptr %v3") != NULL,
+                "modern LLVM dump uses opaque pointer store");
+#endif
+
+    free(buf);
+    free(second_dump);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 int test_session_scalar_gep_undef_tail_trimmed(void) {
     lr_session_config_t cfg = {0};
     lr_error_t err;
@@ -1597,8 +1699,14 @@ int test_session_scalar_gep_undef_tail_trimmed(void) {
     buf[len] = '\0';
     fclose(tmp);
 
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    TEST_ASSERT(strstr(buf, "getelementptr i8, i8*") != NULL,
+                "legacy IR output contains typed scalar gep");
+#else
     TEST_ASSERT(strstr(buf, "getelementptr i8, ptr") != NULL,
-                "ir output contains scalar gep");
+                "IR output contains opaque scalar gep");
+#endif
     TEST_ASSERT(strstr(buf, ", i64 undef") == NULL,
                 "scalar gep omits trailing undef index");
 
@@ -1676,8 +1784,14 @@ int test_ir_dump_scalar_gep_undef_tail_trimmed(void) {
     buf[len] = '\0';
     fclose(tmp);
 
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    TEST_ASSERT(strstr(buf, "getelementptr i8, i8*") != NULL,
+                "legacy dump contains typed scalar gep");
+#else
     TEST_ASSERT(strstr(buf, "getelementptr i8, ptr") != NULL,
-                "ir output contains scalar gep");
+                "dump contains opaque scalar gep");
+#endif
     TEST_ASSERT(strstr(buf, ", i64 undef") == NULL,
                 "dump trims trailing scalar gep undef index");
 
