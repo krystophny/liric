@@ -876,8 +876,7 @@ static lr_type_t *parse_type(lr_parser_t *p) {
      * Examples: i8*, i8**, i32 (i64)*, i8* (i32)* */
     while (true) {
         if (match(p, LR_TOK_STAR)) {
-            /* Typed pointer suffix or pointer to function */
-            ty = p->module->type_ptr;
+            ty = lr_type_ptr(p->arena, ty);
         } else if (check(p, LR_TOK_LPAREN)) {
             /* Function type: RetType (ParamTypes...)
              * Note: ty is the return type at this point */
