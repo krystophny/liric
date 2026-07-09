@@ -187,18 +187,29 @@ int test_parser_typed_pointer_decl_params(void) {
     TEST_ASSERT(strcmp(puts_fn->name, "puts") == 0, "first declaration is puts");
     TEST_ASSERT_EQ(puts_fn->num_params, 1, "puts has one param");
     TEST_ASSERT_EQ(puts_fn->param_types[0]->kind, LR_TYPE_PTR, "i8* parsed as ptr");
+    TEST_ASSERT(puts_fn->param_types[0]->array.elem == m->type_i8,
+                "i8* preserves i8 pointee");
 
     lr_func_t *pp_fn = puts_fn->next;
     TEST_ASSERT(pp_fn != NULL, "take_pp declaration exists");
     TEST_ASSERT(strcmp(pp_fn->name, "take_pp") == 0, "second declaration is take_pp");
     TEST_ASSERT_EQ(pp_fn->num_params, 1, "take_pp has one param");
     TEST_ASSERT_EQ(pp_fn->param_types[0]->kind, LR_TYPE_PTR, "i8** parsed as ptr");
+    TEST_ASSERT(pp_fn->param_types[0]->array.elem != NULL &&
+                pp_fn->param_types[0]->array.elem->kind == LR_TYPE_PTR &&
+                pp_fn->param_types[0]->array.elem->array.elem == m->type_i8,
+                "i8** preserves nested pointee");
 
     lr_func_t *arr_fn = pp_fn->next;
     TEST_ASSERT(arr_fn != NULL, "take_arr_ptr declaration exists");
     TEST_ASSERT(strcmp(arr_fn->name, "take_arr_ptr") == 0, "third declaration is take_arr_ptr");
     TEST_ASSERT_EQ(arr_fn->num_params, 1, "take_arr_ptr has one param");
     TEST_ASSERT_EQ(arr_fn->param_types[0]->kind, LR_TYPE_PTR, "[4 x i8]* parsed as ptr");
+    TEST_ASSERT(arr_fn->param_types[0]->array.elem != NULL &&
+                arr_fn->param_types[0]->array.elem->kind == LR_TYPE_ARRAY &&
+                arr_fn->param_types[0]->array.elem->array.elem == m->type_i8 &&
+                arr_fn->param_types[0]->array.elem->array.count == 4,
+                "array pointer preserves aggregate pointee");
 
     lr_arena_destroy(arena);
     return 0;
