@@ -5,8 +5,15 @@ endif()
 if(NOT EXISTS "${WORKFLOW}")
     message(FATAL_ERROR "workflow file not found: ${WORKFLOW}")
 endif()
+if(NOT DEFINED PROJECT_CMAKE)
+    message(FATAL_ERROR "PROJECT_CMAKE variable is required")
+endif()
+if(NOT EXISTS "${PROJECT_CMAKE}")
+    message(FATAL_ERROR "project CMake file not found: ${PROJECT_CMAKE}")
+endif()
 
 file(READ "${WORKFLOW}" workflow_text)
+file(READ "${PROJECT_CMAKE}" project_cmake_text)
 
 if(NOT workflow_text MATCHES "name:[ \t]*LFortran API Compatibility \\(WITH_LIRIC\\)")
     message(FATAL_ERROR "missing workflow name in ${WORKFLOW}")
@@ -25,4 +32,13 @@ if(NOT workflow_text MATCHES "LIRIC_LFORTRAN_REF")
 endif()
 if(NOT workflow_text MATCHES "--target[ \t]+lfortran_api_compat")
     message(FATAL_ERROR "workflow must execute CMake lfortran_api_compat target")
+endif()
+
+string(REGEX MATCHALL
+    "DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm liric_runtime_archive"
+    runtime_archive_dependencies "${project_cmake_text}")
+list(LENGTH runtime_archive_dependencies runtime_archive_dependency_count)
+if(NOT runtime_archive_dependency_count EQUAL 2)
+    message(FATAL_ERROR
+        "lfortran_api_compat targets must depend on liric_runtime_archive")
 endif()
