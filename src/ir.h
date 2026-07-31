@@ -214,6 +214,10 @@ lr_operand_t lr_op_block(uint32_t id);
 lr_operand_t lr_op_global(uint32_t id, lr_type_t *type);
 lr_operand_t lr_op_null(lr_type_t *type);
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
+
+/* Test hook (issue #525): force the legacy emission clone to fail so the
+   non-mutating contract can be checked on the allocation-failure path. */
+void lr_ir_set_emission_clone_failure_for_testing(bool fail);
 const char *lr_module_symbol_name(const lr_module_t *m, uint32_t id);
 lr_func_t *lr_module_lookup_function(const lr_module_t *m, const char *name);
 void lr_module_disambiguate_local_function_collisions(lr_module_t *m);

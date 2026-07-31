@@ -2842,3 +2842,253 @@ int test_session_runtime_archive_target_mismatch_rejected(void) {
 }
 
 #endif
+
+/* --- Issue #525: legacy pointer legalization must not mutate the source
+   module. Structural snapshots of the caller's `lr_module_t` must be identical
+   before and after any dump or object emission, in either pointer dialect. */
+
+static void snap_type(const lr_type_t *t, char **cur, char *end) {
+    int n;
+    if (*cur >= end)
+        return;
+    if (!t) {
+        n = snprintf(*cur, (size_t)(end - *cur), "<null>");
+        *cur += n > 0 ? n : 0;
+        return;
+    }
+    n = snprintf(*cur, (size_t)(end - *cur), "k%d", (int)t->kind);
+    *cur += n > 0 ? n : 0;
+    if (t->kind == LR_TYPE_PTR || t->kind == LR_TYPE_ARRAY ||
+        t->kind == LR_TYPE_VECTOR) {
+        if (*cur < end) {
+            n = snprintf(*cur, (size_t)(end - *cur), "[");
+            *cur += n > 0 ? n : 0;
+        }
+        snap_type(t->array.elem, cur, end);
+        if (*cur < end) {
+            n = snprintf(*cur, (size_t)(end - *cur), "]");
+            *cur += n > 0 ? n : 0;
+        }
+    } else if (t->kind == LR_TYPE_FUNC) {
+        if (*cur < end) {
+            n = snprintf(*cur, (size_t)(end - *cur), "(");
+            *cur += n > 0 ? n : 0;
+        }
+        snap_type(t->func.ret, cur, end);
+        for (uint32_t i = 0; i < t->func.num_params; i++) {
+            if (*cur < end) {
+                n = snprintf(*cur, (size_t)(end - *cur), ",");
+                *cur += n > 0 ? n : 0;
+            }
+            snap_type(t->func.params[i], cur, end);
+        }
+        if (*cur < end) {
+            n = snprintf(*cur, (size_t)(end - *cur), ")");
+            *cur += n > 0 ? n : 0;
+        }
+    }
+}
+
+static char *snapshot_module_structure(const lr_module_t *m) {
+    size_t cap = 1u << 16;
+    char *buf = (char *)malloc(cap);
+    char *cur;
+    char *end;
+    int n;
+    if (!buf)
+        return NULL;
+    cur = buf;
+    end = buf + cap - 1;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        n = snprintf(cur, (size_t)(end - cur), "func %s vregs=%u params=%u ",
+                     f->name ? f->name : "?", f->next_vreg, f->num_params);
+        cur += n > 0 ? n : 0;
+        snap_type(f->type, &cur, end);
+        n = snprintf(cur, (size_t)(end - cur), " ret=");
+        cur += n > 0 ? n : 0;
+        snap_type(f->ret_type, &cur, end);
+        for (uint32_t i = 0; i < f->num_params; i++) {
+            n = snprintf(cur, (size_t)(end - cur), " p%u=", i);
+            cur += n > 0 ? n : 0;
+            snap_type(f->param_types[i], &cur, end);
+        }
+        n = snprintf(cur, (size_t)(end - cur), "\n");
+        cur += n > 0 ? n : 0;
+        for (const lr_block_t *b = f->first_block; b; b = b->next) {
+            n = snprintf(cur, (size_t)(end - cur), " block %s\n",
+                         b->name ? b->name : "?");
+            cur += n > 0 ? n : 0;
+            for (const lr_inst_t *inst = b->first; inst; inst = inst->next) {
+                n = snprintf(cur, (size_t)(end - cur), "  op=%d dest=%u t=",
+                             (int)inst->op, inst->dest);
+                cur += n > 0 ? n : 0;
+                snap_type(inst->type, &cur, end);
+                for (uint32_t i = 0; i < inst->num_operands; i++) {
+                    n = snprintf(cur, (size_t)(end - cur), " o%u:k%d:", i,
+                                 (int)inst->operands[i].kind);
+                    cur += n > 0 ? n : 0;
+                    snap_type(inst->operands[i].type, &cur, end);
+                }
+                n = snprintf(cur, (size_t)(end - cur), "\n");
+                cur += n > 0 ? n : 0;
+            }
+        }
+    }
+    *cur = '\0';
+    return buf;
+}
+
+/* Builds nested pointer traffic across alloca/load/store/GEP/call/return. */
+static lr_module_t *build_nonmutating_fixture(lr_arena_t *arena) {
+    lr_module_t *m = lr_module_create(arena);
+    lr_func_t *sink;
+    lr_func_t *f;
+    lr_block_t *b;
+    lr_type_t *params[1];
+    lr_operand_t ops[3];
+    if (!m)
+        return NULL;
+    params[0] = m->type_ptr;
+    sink = lr_func_declare(m, "sink_ptr", m->type_i32, params, 1, false);
+    if (!sink)
+        return NULL;
+    f = lr_func_create(m, "nonmutating", m->type_i32, NULL, 0, false);
+    if (!f)
+        return NULL;
+    f->next_vreg = 9;
+    b = lr_block_create(f, arena, "entry");
+    if (!b)
+        return NULL;
+
+    lr_block_append(b, lr_inst_create(arena, LR_OP_ALLOCA, m->type_i32,
+                                      1, NULL, 0));
+    ops[0] = lr_op_imm_i64(7, m->type_i32);
+    ops[1] = lr_op_vreg(1, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_STORE, m->type_void,
+                                      0, ops, 2));
+    lr_block_append(b, lr_inst_create(arena, LR_OP_ALLOCA, m->type_ptr,
+                                      2, NULL, 0));
+    ops[0] = lr_op_vreg(1, m->type_ptr);
+    ops[1] = lr_op_vreg(2, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_STORE, m->type_void,
+                                      0, ops, 2));
+    ops[0] = lr_op_vreg(2, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_LOAD, m->type_ptr,
+                                      3, ops, 1));
+    ops[0] = lr_op_vreg(3, m->type_ptr);
+    ops[1] = lr_op_imm_i64(0, m->type_i64);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_GEP, m->type_i32,
+                                      4, ops, 2));
+    ops[0] = lr_op_vreg(4, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_LOAD, m->type_i32,
+                                      5, ops, 1));
+    ops[0] = lr_op_global(lr_module_intern_symbol(m, "sink_ptr"),
+                          m->type_ptr);
+    ops[1] = lr_op_vreg(1, m->type_ptr);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_CALL, m->type_i32,
+                                      6, ops, 2));
+    ops[0] = lr_op_vreg(5, m->type_i32);
+    lr_block_append(b, lr_inst_create(arena, LR_OP_RET, m->type_i32,
+                                      0, ops, 1));
+    return m;
+}
+
+int test_ir_emission_does_not_mutate_module(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    char *before = NULL;
+    char *after_dump = NULL;
+    char *after_second = NULL;
+    char *dump1 = NULL;
+    char *dump2 = NULL;
+    int result = 1;
+
+    TEST_ASSERT(arena != NULL, "arena create");
+    m = build_nonmutating_fixture(arena);
+    TEST_ASSERT(m != NULL, "fixture module");
+
+    before = snapshot_module_structure(m);
+    TEST_ASSERT(before != NULL, "pre-emission snapshot");
+
+    dump1 = dump_module_text(m);
+    TEST_ASSERT(dump1 != NULL, "first dump");
+    after_dump = snapshot_module_structure(m);
+    TEST_ASSERT(after_dump != NULL, "post-dump snapshot");
+    if (strcmp(before, after_dump) != 0) {
+        fprintf(stderr, "  FAIL: dump mutated source module\n--- before ---\n%s"
+                "--- after ---\n%s", before, after_dump);
+        goto cleanup;
+    }
+
+    dump2 = dump_module_text(m);
+    TEST_ASSERT(dump2 != NULL, "second dump");
+    if (strcmp(dump1, dump2) != 0) {
+        fprintf(stderr, "  FAIL: repeated dump is not stable\n");
+        goto cleanup;
+    }
+    after_second = snapshot_module_structure(m);
+    TEST_ASSERT(after_second != NULL, "post-second-dump snapshot");
+    if (strcmp(before, after_second) != 0) {
+        fprintf(stderr, "  FAIL: second dump mutated source module\n");
+        goto cleanup;
+    }
+
+    result = 0;
+
+cleanup:
+    free(before);
+    free(after_dump);
+    free(after_second);
+    free(dump1);
+    free(dump2);
+    lr_arena_destroy(arena);
+    return result;
+}
+
+int test_ir_emission_clone_failure_preserves_module(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    char *before = NULL;
+    char *after = NULL;
+    char *text = NULL;
+    int result = 1;
+
+    TEST_ASSERT(arena != NULL, "arena create");
+    m = build_nonmutating_fixture(arena);
+    TEST_ASSERT(m != NULL, "fixture module");
+
+    before = snapshot_module_structure(m);
+    TEST_ASSERT(before != NULL, "pre-failure snapshot");
+
+    lr_ir_set_emission_clone_failure_for_testing(true);
+    text = dump_module_text(m);
+    lr_ir_set_emission_clone_failure_for_testing(false);
+
+    after = snapshot_module_structure(m);
+    TEST_ASSERT(after != NULL, "post-failure snapshot");
+    if (strcmp(before, after) != 0) {
+        fprintf(stderr, "  FAIL: failed emission mutated source module\n");
+        goto cleanup;
+    }
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    /* Legacy dialect needs the clone; a clone failure must emit nothing at
+       all rather than a partially legalized module. */
+    if (text != NULL) {
+        fprintf(stderr, "  FAIL: clone failure produced partial output\n");
+        goto cleanup;
+    }
+#else
+    /* Opaque-pointer emission needs no clone and is unaffected. */
+    TEST_ASSERT(text != NULL, "modern dialect still emits without a clone");
+#endif
+
+    result = 0;
+
+cleanup:
+    free(before);
+    free(after);
+    free(text);
+    lr_arena_destroy(arena);
+    return result;
+}

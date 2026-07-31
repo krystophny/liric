@@ -249,6 +249,8 @@ int test_session_operand_global_offset_propagates_to_ir(void);
 int test_session_select(void);
 int test_session_ir_print(void);
 int test_ir_dump_pointer_dialect_for_backend(void);
+int test_ir_emission_does_not_mutate_module(void);
+int test_ir_emission_clone_failure_preserves_module(void);
 int test_session_scalar_gep_undef_tail_trimmed(void);
 int test_ir_dump_scalar_gep_undef_tail_trimmed(void);
 int test_ir_dump_declares_undeclared_call_targets(void);
@@ -596,6 +598,8 @@ int main(void) {
     RUN_TEST(test_session_select);
     RUN_TEST(test_session_ir_print);
     RUN_TEST(test_ir_dump_pointer_dialect_for_backend);
+    RUN_TEST(test_ir_emission_does_not_mutate_module);
+    RUN_TEST(test_ir_emission_clone_failure_preserves_module);
     RUN_TEST(test_session_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_ir_dump_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_ir_dump_declares_undeclared_call_targets);

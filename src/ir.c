@@ -2238,6 +2238,186 @@ static void legacy_materialize_pointer_types(lr_module_t *m) {
         legacy_insert_pointer_casts(m, f);
 }
 
+/* --- Non-mutating legacy emission (issue #525) ---------------------------
+   Legacy typed-pointer legalization rewrites function types, instruction
+   types, operand types, and block instruction lists. Running it on the
+   caller's module would make a dump or an object emission a destructive
+   operation and would make repeated emission order-dependent. Emission
+   therefore runs on an owned clone whose mutable IR lives in a private arena;
+   the source module is left byte-for-byte unchanged. Immutable, shared state
+   (scalar type singletons, interned symbol tables, globals, names) is aliased,
+   never freed through the clone. */
+
+static bool lr_emission_clone_forced_failure = false;
+
+void lr_ir_set_emission_clone_failure_for_testing(bool fail) {
+    lr_emission_clone_forced_failure = fail;
+}
+
+typedef struct lr_emission_clone {
+    lr_module_t *module;
+    lr_arena_t *arena;
+} lr_emission_clone_t;
+
+static lr_type_t *clone_emission_func_type(lr_arena_t *a, lr_type_t *t) {
+    lr_type_t *copy;
+    if (!t || t->kind != LR_TYPE_FUNC)
+        return t;
+    copy = lr_arena_new(a, lr_type_t);
+    if (!copy)
+        return NULL;
+    *copy = *t;
+    if (t->func.num_params > 0) {
+        copy->func.params = lr_arena_array(a, lr_type_t *, t->func.num_params);
+        if (!copy->func.params)
+            return NULL;
+        memcpy(copy->func.params, t->func.params,
+               sizeof(lr_type_t *) * (size_t)t->func.num_params);
+    } else {
+        copy->func.params = NULL;
+    }
+    return copy;
+}
+
+static lr_inst_t *clone_emission_inst(lr_arena_t *a, const lr_inst_t *src) {
+    lr_inst_t *copy = lr_arena_new(a, lr_inst_t);
+    if (!copy)
+        return NULL;
+    *copy = *src;
+    copy->next = NULL;
+    if (src->num_operands > 0) {
+        copy->operands = lr_arena_array(a, lr_operand_t, src->num_operands);
+        if (!copy->operands)
+            return NULL;
+        memcpy(copy->operands, src->operands,
+               sizeof(lr_operand_t) * (size_t)src->num_operands);
+    } else {
+        copy->operands = NULL;
+    }
+    return copy;
+}
+
+static lr_block_t *clone_emission_block(lr_arena_t *a, lr_func_t *owner,
+                                        const lr_block_t *src) {
+    lr_block_t *copy = lr_arena_new(a, lr_block_t);
+    lr_inst_t *tail = NULL;
+    if (!copy)
+        return NULL;
+    *copy = *src;
+    copy->func = owner;
+    copy->next = NULL;
+    copy->first = NULL;
+    copy->last = NULL;
+    copy->inst_array = NULL;
+    for (const lr_inst_t *inst = src->first; inst; inst = inst->next) {
+        lr_inst_t *inst_copy = clone_emission_inst(a, inst);
+        if (!inst_copy)
+            return NULL;
+        if (tail)
+            tail->next = inst_copy;
+        else
+            copy->first = inst_copy;
+        tail = inst_copy;
+    }
+    copy->last = tail;
+    return copy;
+}
+
+static lr_func_t *clone_emission_func(lr_arena_t *a, lr_module_t *owner,
+                                      const lr_func_t *src) {
+    lr_func_t *copy = lr_arena_new(a, lr_func_t);
+    lr_block_t *tail = NULL;
+    if (!copy)
+        return NULL;
+    *copy = *src;
+    copy->module = owner;
+    copy->next = NULL;
+    copy->first_block = NULL;
+    copy->last_block = NULL;
+    copy->block_array = NULL;
+    copy->linear_inst_array = NULL;
+    copy->block_inst_offsets = NULL;
+    copy->num_linear_insts = 0;
+    copy->type = clone_emission_func_type(a, src->type);
+    if (src->type && !copy->type)
+        return NULL;
+    if (src->num_params > 0) {
+        copy->param_types = lr_arena_array(a, lr_type_t *, src->num_params);
+        if (!copy->param_types)
+            return NULL;
+        memcpy(copy->param_types, src->param_types,
+               sizeof(lr_type_t *) * (size_t)src->num_params);
+        if (src->param_vregs) {
+            copy->param_vregs = lr_arena_array(a, uint32_t, src->num_params);
+            if (!copy->param_vregs)
+                return NULL;
+            memcpy(copy->param_vregs, src->param_vregs,
+                   sizeof(uint32_t) * (size_t)src->num_params);
+        }
+    }
+    for (const lr_block_t *b = src->first_block; b; b = b->next) {
+        lr_block_t *block_copy = clone_emission_block(a, copy, b);
+        if (!block_copy)
+            return NULL;
+        if (tail)
+            tail->next = block_copy;
+        else
+            copy->first_block = block_copy;
+        tail = block_copy;
+    }
+    copy->last_block = tail;
+    return copy;
+}
+
+static void lr_emission_clone_release(lr_emission_clone_t *clone) {
+    if (!clone)
+        return;
+    lr_arena_destroy(clone->arena);
+    clone->arena = NULL;
+    clone->module = NULL;
+}
+
+/* Returns false only on allocation failure; the source module is never
+   touched on any path. */
+static bool lr_module_clone_for_emission(lr_module_t *src,
+                                         lr_emission_clone_t *out) {
+    lr_arena_t *arena;
+    lr_module_t *copy;
+    lr_func_t *tail = NULL;
+    out->arena = NULL;
+    out->module = NULL;
+    if (lr_emission_clone_forced_failure)
+        return false;
+    arena = lr_arena_create(0);
+    if (!arena)
+        return false;
+    copy = lr_arena_new(arena, lr_module_t);
+    if (!copy) {
+        lr_arena_destroy(arena);
+        return false;
+    }
+    *copy = *src;
+    copy->arena = arena;
+    copy->first_func = NULL;
+    copy->last_func = NULL;
+    for (const lr_func_t *f = src->first_func; f; f = f->next) {
+        lr_func_t *func_copy = clone_emission_func(arena, copy, f);
+        if (!func_copy) {
+            lr_arena_destroy(arena);
+            return false;
+        }
+        if (tail)
+            tail->next = func_copy;
+        else
+            copy->first_func = func_copy;
+        tail = func_copy;
+    }
+    copy->last_func = tail;
+    out->arena = arena;
+    out->module = copy;
+    return true;
+}
+
 static const char *type_name(const lr_type_t *t) {
     switch (t->kind) {
     case LR_TYPE_VOID:   return "void";
@@ -4517,18 +4697,27 @@ static void lr_dump_undeclared_call_targets(const lr_module_t *m, FILE *out) {
 
 void lr_module_dump_opts(lr_module_t *m, FILE *out, unsigned dump_flags) {
     unsigned saved_dump_flags = lr_dump_flags_current;
+    lr_emission_clone_t clone = {0};
+    lr_module_t *emit = m;
     lr_dump_flags_current = dump_flags;
     if (!m || !out)
         goto done;
-    legacy_materialize_pointer_types(m);
-    lr_dump_named_types(m, out);
-    for (lr_global_t *g = m->first_global; g; g = g->next)
-        lr_dump_global_opts(m, g, out, dump_flags);
-    lr_dump_undeclared_call_targets(m, out);
-    if (m->first_global && m->first_func)
+    if (legacy_pointer_ir_enabled()) {
+        /* Legalize an owned clone so the caller's module is never mutated. */
+        if (!lr_module_clone_for_emission(m, &clone))
+            goto done;
+        emit = clone.module;
+        legacy_materialize_pointer_types(emit);
+    }
+    lr_dump_named_types(emit, out);
+    for (lr_global_t *g = emit->first_global; g; g = g->next)
+        lr_dump_global_opts(emit, g, out, dump_flags);
+    lr_dump_undeclared_call_targets(emit, out);
+    if (emit->first_global && emit->first_func)
         fprintf(out, "\n");
-    for (lr_func_t *f = m->first_func; f; f = f->next)
-        lr_dump_func_opts(f, m, out, dump_flags);
+    for (lr_func_t *f = emit->first_func; f; f = f->next)
+        lr_dump_func_opts(f, emit, out, dump_flags);
+    lr_emission_clone_release(&clone);
 
 done:
     lr_dump_flags_current = saved_dump_flags;
