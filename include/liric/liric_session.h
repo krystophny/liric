@@ -50,12 +50,12 @@ typedef struct lr_error {
 /* Error codes */
 enum {
     LR_OK = 0,
-    LR_ERR_ARGUMENT,
-    LR_ERR_STATE,
-    LR_ERR_MODE,
-    LR_ERR_NOT_FOUND,
-    LR_ERR_BACKEND,
-    LR_ERR_PARSE,
+    LR_ERR_ARGUMENT = 1,
+    LR_ERR_STATE = 2,
+    LR_ERR_MODE = 3,
+    LR_ERR_NOT_FOUND = 4,
+    LR_ERR_BACKEND = 5,
+    LR_ERR_PARSE = 6,
 };
 
 /* ---- Opcodes ------------------------------------------------------------ */
@@ -79,6 +79,47 @@ typedef struct lr_inst_desc {
     bool call_vararg;
     uint32_t call_fixed_args;
 } lr_inst_desc_t;
+
+/* ---- ABI version and layout ------------------------------------------- */
+
+/* Bumped whenever an existing public session layout or enumerator value
+   changes. Appending a field to the end of lr_session_abi_info_t, or an
+   opcode before LR_OP_COUNT, does not require a bump; reordering or inserting
+   does. A foreign-language binding should query lr_session_get_abi_info and
+   refuse to emit instructions when the reported version or layout differs
+   from the one it was generated against. */
+#define LIRIC_SESSION_ABI_VERSION 1u
+
+typedef struct lr_session_abi_info {
+    uint32_t abi_version;
+    size_t struct_size;
+    size_t config_size;
+    size_t error_size;
+    size_t operand_size;
+    size_t inst_size;
+    size_t config_mode_offset;
+    size_t config_target_offset;
+    size_t config_backend_offset;
+    size_t config_opt_level_offset;
+    size_t error_code_offset;
+    size_t error_msg_offset;
+    size_t error_msg_size;
+    size_t operand_kind_offset;
+    size_t operand_type_offset;
+    size_t operand_global_offset_offset;
+    size_t inst_op_offset;
+    size_t inst_type_offset;
+    size_t inst_dest_offset;
+    size_t inst_operands_offset;
+    size_t inst_num_operands_offset;
+    uint32_t opcode_count;
+    uint32_t operand_kind_count;
+} lr_session_abi_info_t;
+
+/* Fills *out with the layout of this build's public session ABI. Returns
+   LR_OK, or LR_ERR_ARGUMENT when out is NULL or out_size is smaller than
+   sizeof(lr_session_abi_info_t). Callable before any session exists. */
+int lr_session_get_abi_info(lr_session_abi_info_t *out, size_t out_size);
 
 /* ---- Lifecycle --------------------------------------------------------- */
 
