@@ -730,8 +730,21 @@ if(NOT LIRIC_LFORTRAN_LLVM_LIBDIR_EFFECTIVE)
     endif()
 endif()
 
+# Public LIRIC headers must be visible to every downstream LFortran build,
+# including the LLVM baseline that still compiles asr_to_liric.cpp. The
+# include contract is explicit so a fresh build tree cannot silently lose
+# <liric/liric_session.h>.
+set(LIRIC_PUBLIC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
+if(NOT EXISTS "${LIRIC_PUBLIC_INCLUDE_DIR}/liric/liric_session.h")
+    message(FATAL_ERROR
+        "LIRIC public include directory is missing liric/liric_session.h: "
+        "${LIRIC_PUBLIC_INCLUDE_DIR}")
+endif()
+
 set(LIRIC_LFORTRAN_LLVM_ARGS "")
 set(LIRIC_LFORTRAN_LIRIC_LLVM_LINK_ARGS "")
+list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
+    -DLIRIC_INCLUDE_DIR=${LIRIC_PUBLIC_INCLUDE_DIR})
 if(LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE)
     list(APPEND LIRIC_LFORTRAN_LLVM_ARGS
         -DLLVM_DIR=${LIRIC_LFORTRAN_LLVM_DIR_EFFECTIVE})
@@ -857,6 +870,7 @@ add_custom_target(
         -DBUILD_TESTING=ON
         -DWITH_LIRIC=yes
         -DLIRIC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+        -DLIRIC_INCLUDE_DIR=${LIRIC_PUBLIC_INCLUDE_DIR}
         -DLIRIC_REQUIRE_REAL_LLVM_LINK=${LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM}
         ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS}
         ${LIRIC_LFORTRAN_LIRIC_CONFIGURE_LLVM_ARGS}
@@ -882,6 +896,7 @@ add_custom_target(
         -DBUILD_TESTING=ON
         -DWITH_LIRIC=yes
         -DLIRIC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+        -DLIRIC_INCLUDE_DIR=${LIRIC_PUBLIC_INCLUDE_DIR}
         -DLIRIC_REQUIRE_REAL_LLVM_LINK=OFF
         ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS_NOLLVM}
         -DWITH_RUNTIME_STACKTRACE=ON
@@ -898,6 +913,13 @@ add_custom_target(
     lfortran_build_all
     DEPENDS lfortran_build_llvm lfortran_build_liric
 )
+
+# Machine-readable record of the LFortran baseline configure arguments so the
+# header contract test can reproduce header discovery in a fresh build tree.
+string(REPLACE ";" "\n" LIRIC_LFORTRAN_LLVM_ARGS_TEXT
+    "${LIRIC_LFORTRAN_LLVM_ARGS}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/lfortran_baseline_configure_args.txt"
+    "${LIRIC_LFORTRAN_LLVM_ARGS_TEXT}\n")
 
 add_custom_target(
     lfortran_api_compat
@@ -1261,6 +1283,15 @@ add_test(
         -DBENCH_MATRIX=$<TARGET_FILE:bench_matrix>
         -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_matrix_lfortran_rebuild.cmake
+)
+
+add_test(
+    NAME bench_matrix_lfortran_header_contract
+    COMMAND ${CMAKE_COMMAND}
+        -DARGS_FILE=${CMAKE_CURRENT_BINARY_DIR}/lfortran_baseline_configure_args.txt
+        -DC_COMPILER=${CMAKE_C_COMPILER}
+        -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_bench_matrix_lfortran_header_contract.cmake
 )
 
 add_test(
