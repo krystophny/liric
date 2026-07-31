@@ -9,6 +9,9 @@ on:
       - main
   workflow_dispatch:
 
+env:
+  LIRIC_LFORTRAN_REF: origin/liric-showcase
+
 jobs:
   bench-matrix-llvm-api:
     name: bench_matrix (mode=llvm api lanes)
@@ -41,7 +44,10 @@ jobs:
             -DLIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=ON \
             -DWITH_BENCH_TCC=OFF \
             -DWITH_BENCH_LLI_PHASES=OFF \
+            -DLIRIC_LFORTRAN_REF="${LIRIC_LFORTRAN_REF}" \
             -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
+          echo "tested LFortran ref: ${LIRIC_LFORTRAN_REF}"
+          grep -F -- "-DLIRIC_INCLUDE_DIR=" build/lfortran_baseline_configure_args.txt
           cmake --build build -j"$(nproc)" --target bench_matrix bench_compat_check bench_api liric_probe_runner lfortran_build_all
 
       - name: Run bench_matrix llvm API lanes
@@ -54,6 +60,7 @@ jobs:
             --policies direct,ir \
             --lanes api_full_llvm,api_backend_llvm \
             --api-cases 10 \
+            --require-cells 4 \
             --timeout 15 \
             --timeout-ms 15000 || {
               rc=$?

@@ -200,3 +200,42 @@ endif()
 if(NOT summary_text MATCHES "\"cells_failed\"[ \t]*:[ \t]*0")
     message(FATAL_ERROR "matrix summary failed count mismatch:\n${summary_text}")
 endif()
+
+# Negative: a matrix smaller than the required cell count fails with a named
+# diagnostic before the results can be reported as complete.
+set(gate_bench_dir "${root}/bench_gate")
+file(MAKE_DIRECTORY "${gate_bench_dir}")
+
+execute_process(
+    COMMAND "${BENCH_MATRIX}"
+        --bench-dir "${gate_bench_dir}"
+        --manifest "${manifest}"
+        --modes isel
+        --policies direct
+        --lanes api_full_llvm
+        --timeout 5
+        --timeout-ms 1000
+        --require-cells 4
+        --cmake "${fake_cmake}"
+        --lfortran-build-dir "${llvm_build_dir}"
+        --lfortran-liric-build-dir "${liric_build_dir}"
+        --lfortran "${fake_lfortran_llvm}"
+        --lfortran-liric "${fake_lfortran_liric}"
+        --bench-compat-check "${fake_compat}"
+        --bench-api "${fake_api}"
+        --build-dir "${build_dir}"
+    WORKING_DIRECTORY "${root}"
+    RESULT_VARIABLE gate_rc
+    OUTPUT_VARIABLE gate_out
+    ERROR_VARIABLE gate_err
+)
+
+if(gate_rc EQUAL 0)
+    message(FATAL_ERROR
+        "bench_matrix accepted a 1-cell matrix under --require-cells 4\n"
+        "stdout:\n${gate_out}\nstderr:\n${gate_err}")
+endif()
+if(NOT gate_err MATCHES "matrix cell gate failed: attempted=1 required=4")
+    message(FATAL_ERROR
+        "missing named cell-gate diagnostic\nstderr:\n${gate_err}")
+endif()

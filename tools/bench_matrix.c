@@ -80,6 +80,7 @@ typedef struct {
 
     int run_compat_check;
     int allow_partial;
+    int require_cells;
     int rebuild_lfortran;
     int rebuild_jobs;
 
@@ -551,6 +552,7 @@ static void usage(void) {
     printf("  --timeout-ms N           timeout ms for bench_api (default: 3000)\n");
     printf("  --skip-compat-check      do not regenerate compat artifacts\n");
     printf("  --allow-partial          report failures but return 0\n");
+    printf("  --require-cells N        fail unless at least N matrix cells are attempted\n");
     printf("  --runtime-bc PATH        runtime bitcode\n");
     printf("  --runtime-lib PATH       runtime shared library\n");
     printf("  --runtime-archive PATH   static runtime archive for bench_api\n");
@@ -592,6 +594,7 @@ static cfg_t parse_args(int argc, char **argv) {
     cfg.timeout_ms = 3000;
     cfg.run_compat_check = 1;
     cfg.allow_partial = 0;
+    cfg.require_cells = 0;
     cfg.rebuild_lfortran = 1;
     cfg.rebuild_jobs = host_nproc();
     cfg.cmake = "cmake";
@@ -647,6 +650,9 @@ static cfg_t parse_args(int argc, char **argv) {
             cfg.run_compat_check = 0;
         } else if (strcmp(argv[i], "--allow-partial") == 0) {
             cfg.allow_partial = 1;
+        } else if (strcmp(argv[i], "--require-cells") == 0 && i + 1 < argc) {
+            cfg.require_cells = atoi(argv[++i]);
+            if (cfg.require_cells < 0) die("invalid --require-cells value");
         } else if (strcmp(argv[i], "--runtime-bc") == 0 && i + 1 < argc) {
             cfg.runtime_bc = argv[++i];
         } else if (strcmp(argv[i], "--runtime-lib") == 0 && i + 1 < argc) {
@@ -2502,6 +2508,12 @@ int main(int argc, char **argv) {
 
     if (cells_attempted == 0) {
         fprintf(stderr, "no matrix cells attempted\n");
+        return 1;
+    }
+    if (cfg.require_cells > 0 && cells_attempted < cfg.require_cells) {
+        fprintf(stderr,
+                "matrix cell gate failed: attempted=%d required=%d\n",
+                cells_attempted, cfg.require_cells);
         return 1;
     }
     if (cells_failed > 0 && !cfg.allow_partial) return 1;
