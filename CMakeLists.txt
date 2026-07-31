@@ -935,7 +935,7 @@ add_custom_target(
         --skip-lfortran-build
         --run-ref-tests yes
         --run-itests yes
-    DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm
+    DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm liric_runtime_archive
     COMMENT "Run LFortran API compatibility suite using CMake-managed builds"
     USES_TERMINAL
 )
@@ -960,7 +960,7 @@ add_custom_target(
         --itest-timeout-sec 600
         --itest-memory-max 4G
         --itest-tasks-max 256
-    DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm
+    DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm liric_runtime_archive
     COMMENT "Run LFortran API compatibility suite (safe profile, logged)"
     USES_TERMINAL
 )
@@ -1485,6 +1485,7 @@ if(WITH_LLVM_COMPAT)
         NAME lfortran_api_compat_workflow_contract
         COMMAND ${CMAKE_COMMAND}
             -DWORKFLOW=${CMAKE_CURRENT_SOURCE_DIR}/.github/workflows/lfortran_api_compat.yml
+            -DPROJECT_CMAKE=${CMAKE_CURRENT_SOURCE_DIR}/CMakeLists.txt
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_lfortran_api_compat_workflow_contract.cmake
     )
 endif()

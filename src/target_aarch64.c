@@ -2045,6 +2045,18 @@ static int aarch64_compile_emit(void *compile_ctx,
         emit_load_operand(cc, &ops[0], A64_X9);
         emit_load_operand(cc, &ops[1], A64_X10);
         bool is64 = lr_type_size(desc->type) > 4;
+        if (desc->op == LR_OP_ASHR) {
+            uint8_t lhs_width = int_type_width_bits(ops[0].type);
+            uint8_t op_width = is64 ? 64u : 32u;
+            if (lhs_width > 0 && lhs_width < op_width) {
+                uint8_t shift = (uint8_t)(64u - lhs_width);
+                emit_move_imm_ctx(cc, A64_X11, (int64_t)shift, true);
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_lslv(true, A64_X9, A64_X9, A64_X11));
+                emit_u32(cc->buf, &cc->pos, cc->buflen,
+                         enc_asrv(true, A64_X9, A64_X9, A64_X11));
+            }
+        }
         switch (desc->op) {
         case LR_OP_SHL:
             emit_u32(cc->buf, &cc->pos, cc->buflen,

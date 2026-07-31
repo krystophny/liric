@@ -1836,6 +1836,408 @@ lr_operand_t lr_canonicalize_gep_index(lr_module_t *m, lr_block_t *b,
     }
 }
 
+static bool legacy_pointer_ir_enabled(void) {
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    return true;
+#else
+    return false;
+#endif
+}
+
+static lr_type_t *legacy_clone_pointer_type(lr_arena_t *arena,
+                                            const lr_type_t *type) {
+    lr_type_t *pointee;
+    if (!type || type->kind != LR_TYPE_PTR)
+        return (lr_type_t *)type;
+    pointee = type->array.elem
+        ? legacy_clone_pointer_type(arena, type->array.elem)
+        : NULL;
+    return lr_type_ptr(arena, pointee);
+}
+
+static bool legacy_refine_types(lr_arena_t *arena, lr_type_t *lhs,
+                                lr_type_t *rhs) {
+    bool changed = false;
+    if (!lhs || !rhs || lhs->kind != rhs->kind || lhs->kind != LR_TYPE_PTR)
+        return false;
+    if (!lhs->array.elem && rhs->array.elem) {
+        lhs->array.elem = legacy_clone_pointer_type(arena, rhs->array.elem);
+        changed = true;
+    }
+    if (!rhs->array.elem && lhs->array.elem) {
+        rhs->array.elem = legacy_clone_pointer_type(arena, lhs->array.elem);
+        changed = true;
+    }
+    if (lhs->array.elem && rhs->array.elem)
+        changed |= legacy_refine_types(arena, lhs->array.elem, rhs->array.elem);
+    return changed;
+}
+
+static lr_type_t *legacy_gep_result_type(const lr_inst_t *inst) {
+    const lr_type_t *current;
+    if (!inst || inst->op != LR_OP_GEP || !inst->type)
+        return NULL;
+    current = inst->type;
+    for (uint32_t i = 1; i < inst->num_operands; i++) {
+        lr_gep_step_t step;
+        if (!lr_gep_analyze_step(current, i == 1, &inst->operands[i], &step))
+            break;
+        current = step.next_type;
+    }
+    return (lr_type_t *)current;
+}
+
+static lr_type_t *legacy_operand_type(const lr_operand_t *op,
+                                      lr_type_t **vreg_types,
+                                      uint32_t num_vregs) {
+    if (!op)
+        return NULL;
+    if (op->kind == LR_VAL_VREG && op->vreg < num_vregs &&
+        vreg_types[op->vreg]) {
+        return vreg_types[op->vreg];
+    }
+    return op->type;
+}
+
+static void legacy_prepare_function_type(lr_module_t *m, lr_func_t *f) {
+    if (f->ret_type && f->ret_type->kind == LR_TYPE_PTR)
+        f->ret_type = legacy_clone_pointer_type(m->arena, f->ret_type);
+    for (uint32_t i = 0; i < f->num_params; i++) {
+        if (f->param_types[i] && f->param_types[i]->kind == LR_TYPE_PTR) {
+            f->param_types[i] = legacy_clone_pointer_type(
+                m->arena, f->param_types[i]);
+        }
+    }
+    if (f->type && f->type->kind == LR_TYPE_FUNC) {
+        f->type->func.ret = f->ret_type;
+        for (uint32_t i = 0; i < f->num_params; i++)
+            f->type->func.params[i] = f->param_types[i];
+    }
+}
+
+static lr_func_t *legacy_call_target(lr_module_t *m,
+                                     const lr_operand_t *callee) {
+    const char *name;
+    if (!m || !callee || callee->kind != LR_VAL_GLOBAL)
+        return NULL;
+    name = lr_module_symbol_name(m, callee->global_id);
+    if (!name)
+        return NULL;
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return f;
+    }
+    return NULL;
+}
+
+static bool legacy_refine_call(lr_module_t *m, lr_func_t *f,
+                               lr_inst_t *inst, lr_type_t **vreg_types,
+                               lr_type_t *result) {
+    lr_func_t *target = legacy_call_target(m, &inst->operands[0]);
+    bool changed = false;
+    uint32_t count;
+    if (!target)
+        return false;
+    count = target->num_params;
+    if (count > inst->num_operands - 1)
+        count = inst->num_operands - 1;
+    for (uint32_t i = 0; i < count; i++) {
+        changed |= legacy_refine_types(m->arena, target->param_types[i],
+            legacy_operand_type(&inst->operands[i + 1], vreg_types,
+                                f->next_vreg));
+    }
+    changed |= legacy_refine_types(m->arena, target->ret_type, result);
+    return changed;
+}
+
+static void legacy_initialize_vreg_types(lr_module_t *m, lr_func_t *f,
+                                          lr_type_t **vreg_types) {
+    for (uint32_t i = 0; i < f->num_params; i++) {
+        uint32_t vreg = f->param_vregs[i];
+        if (vreg < f->next_vreg)
+            vreg_types[vreg] = f->param_types[i];
+    }
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            lr_type_t *result_type = inst->type;
+            if (!inst_defines_dest(inst) || inst->dest >= f->next_vreg ||
+                !inst->type ||
+                inst->type->kind == LR_TYPE_VOID) {
+                continue;
+            }
+            if (inst->op == LR_OP_ALLOCA) {
+                result_type = lr_type_ptr(m->arena,
+                    legacy_clone_pointer_type(m->arena, inst->type));
+            } else if (inst->op == LR_OP_GEP) {
+                result_type = lr_type_ptr(m->arena,
+                    legacy_clone_pointer_type(m->arena,
+                                              legacy_gep_result_type(inst)));
+            } else if (inst->type->kind == LR_TYPE_PTR) {
+                result_type = legacy_clone_pointer_type(m->arena, inst->type);
+            }
+            vreg_types[inst->dest] = result_type;
+        }
+    }
+}
+
+static bool legacy_refine_instruction(lr_module_t *m, lr_func_t *f,
+                                      lr_inst_t *inst,
+                                      lr_type_t **vreg_types) {
+    lr_type_t *result = inst->dest < f->next_vreg
+        ? vreg_types[inst->dest] : NULL;
+    bool changed = false;
+    if (inst->op == LR_OP_STORE && inst->num_operands >= 2) {
+        lr_type_t *value = legacy_operand_type(&inst->operands[0],
+                                               vreg_types, f->next_vreg);
+        lr_type_t *pointer = legacy_operand_type(&inst->operands[1],
+                                                 vreg_types, f->next_vreg);
+        if (pointer && pointer->kind == LR_TYPE_PTR && pointer->array.elem)
+            changed |= legacy_refine_types(m->arena, pointer->array.elem, value);
+    } else if (inst->op == LR_OP_LOAD && inst->num_operands > 0) {
+        lr_type_t *pointer = legacy_operand_type(&inst->operands[0],
+                                                 vreg_types, f->next_vreg);
+        if (pointer && pointer->kind == LR_TYPE_PTR && pointer->array.elem)
+            changed |= legacy_refine_types(m->arena, pointer->array.elem, result);
+    } else if (inst->op == LR_OP_GEP && inst->num_operands > 0) {
+        lr_type_t *pointer = legacy_operand_type(&inst->operands[0],
+                                                 vreg_types, f->next_vreg);
+        if (pointer && pointer->kind == LR_TYPE_PTR && pointer->array.elem)
+            changed |= legacy_refine_types(m->arena, pointer->array.elem,
+                                           inst->type);
+    } else if (inst->op == LR_OP_RET && inst->num_operands > 0) {
+        lr_type_t *value = legacy_operand_type(&inst->operands[0],
+                                               vreg_types, f->next_vreg);
+        changed |= legacy_refine_types(m->arena, f->ret_type, value);
+    } else if (inst->op == LR_OP_PHI && result) {
+        for (uint32_t i = 0; i + 1 < inst->num_operands; i += 2) {
+            changed |= legacy_refine_types(m->arena, result,
+                legacy_operand_type(&inst->operands[i], vreg_types,
+                                    f->next_vreg));
+        }
+    } else if (inst->op == LR_OP_SELECT && result && inst->num_operands >= 3) {
+        changed |= legacy_refine_types(m->arena, result,
+            legacy_operand_type(&inst->operands[1], vreg_types,
+                                f->next_vreg));
+        changed |= legacy_refine_types(m->arena, result,
+            legacy_operand_type(&inst->operands[2], vreg_types,
+                                f->next_vreg));
+    } else if (inst->op == LR_OP_CALL && inst->num_operands > 0) {
+        changed |= legacy_refine_call(m, f, inst, vreg_types, result);
+    }
+    return changed;
+}
+
+static void legacy_apply_vreg_types(lr_func_t *f, lr_type_t **vreg_types) {
+    for (uint32_t i = 0; i < f->num_params; i++) {
+        uint32_t vreg = f->param_vregs[i];
+        if (vreg < f->next_vreg && vreg_types[vreg])
+            f->param_types[i] = vreg_types[vreg];
+    }
+    for (lr_block_t *b = f->first_block; b; b = b->next) {
+        for (lr_inst_t *inst = b->first; inst; inst = inst->next) {
+            if (inst_defines_dest(inst) && inst->dest < f->next_vreg &&
+                vreg_types[inst->dest]) {
+                if (inst->op == LR_OP_ALLOCA &&
+                    vreg_types[inst->dest]->kind == LR_TYPE_PTR) {
+                    inst->type = vreg_types[inst->dest]->array.elem;
+                } else if (inst->type && inst->type->kind == LR_TYPE_PTR) {
+                    inst->type = vreg_types[inst->dest];
+                }
+            }
+            for (uint32_t i = 0; i < inst->num_operands; i++) {
+                lr_operand_t *op = &inst->operands[i];
+                if (op->kind == LR_VAL_VREG && op->vreg < f->next_vreg &&
+                    vreg_types[op->vreg]) {
+                    op->type = vreg_types[op->vreg];
+                }
+            }
+        }
+    }
+    if (f->type && f->type->kind == LR_TYPE_FUNC) {
+        f->type->func.ret = f->ret_type;
+        for (uint32_t i = 0; i < f->num_params; i++)
+            f->type->func.params[i] = f->param_types[i];
+    }
+}
+
+static bool legacy_types_equal_impl(const lr_type_t *lhs,
+                                    const lr_type_t *rhs,
+                                    uint32_t depth) {
+    if (lhs == rhs)
+        return true;
+    if (!lhs || !rhs || lhs->kind != rhs->kind || depth > 64)
+        return false;
+    if (lhs->kind == LR_TYPE_PTR)
+        return legacy_types_equal_impl(lhs->array.elem, rhs->array.elem,
+                                       depth + 1);
+    if (lhs->kind == LR_TYPE_ARRAY || lhs->kind == LR_TYPE_VECTOR) {
+        return lhs->array.count == rhs->array.count &&
+            legacy_types_equal_impl(lhs->array.elem, rhs->array.elem,
+                                    depth + 1);
+    }
+    if (lhs->kind == LR_TYPE_STRUCT) {
+        if (lhs->struc.name || rhs->struc.name) {
+            return lhs->struc.name && rhs->struc.name &&
+                strcmp(lhs->struc.name, rhs->struc.name) == 0;
+        }
+        if (lhs->struc.num_fields != rhs->struc.num_fields ||
+            lhs->struc.packed != rhs->struc.packed) {
+            return false;
+        }
+        for (uint32_t i = 0; i < lhs->struc.num_fields; i++) {
+            if (!legacy_types_equal_impl(lhs->struc.fields[i],
+                                         rhs->struc.fields[i], depth + 1))
+                return false;
+        }
+    } else if (lhs->kind == LR_TYPE_FUNC) {
+        if (lhs->func.num_params != rhs->func.num_params ||
+            lhs->func.vararg != rhs->func.vararg ||
+            !legacy_types_equal_impl(lhs->func.ret, rhs->func.ret, depth + 1)) {
+            return false;
+        }
+        for (uint32_t i = 0; i < lhs->func.num_params; i++) {
+            if (!legacy_types_equal_impl(lhs->func.params[i],
+                                         rhs->func.params[i], depth + 1))
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool legacy_types_equal(const lr_type_t *lhs, const lr_type_t *rhs) {
+    return legacy_types_equal_impl(lhs, rhs, 0);
+}
+
+static lr_type_t *legacy_global_operand_type(lr_module_t *m,
+                                             lr_operand_t *op) {
+    const char *name;
+    if (!m || !op || op->kind != LR_VAL_GLOBAL)
+        return op ? op->type : NULL;
+    name = lr_module_symbol_name(m, op->global_id);
+    if (!name)
+        return op->type;
+    for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->name && strcmp(g->name, name) == 0)
+            return lr_type_ptr(m->arena, g->type);
+    }
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        if (f->name && strcmp(f->name, name) == 0)
+            return lr_type_ptr(m->arena, f->type);
+    }
+    return op->type;
+}
+
+static lr_inst_t *legacy_coerce_pointer_operand(lr_module_t *m, lr_func_t *f,
+                                                 lr_block_t *block,
+                                                 lr_inst_t *previous,
+                                                 lr_inst_t *inst,
+                                                 uint32_t operand_index,
+                                                 lr_type_t *expected) {
+    lr_operand_t *operand;
+    lr_type_t *actual;
+    lr_inst_t *cast;
+    uint32_t dest;
+    if (!m || !f || !block || !inst || operand_index >= inst->num_operands ||
+        !expected || expected->kind != LR_TYPE_PTR) {
+        return previous;
+    }
+    operand = &inst->operands[operand_index];
+    actual = operand->kind == LR_VAL_GLOBAL
+        ? legacy_global_operand_type(m, operand) : operand->type;
+    if (!actual || actual->kind != LR_TYPE_PTR ||
+        legacy_types_equal(actual, expected)) {
+        return previous;
+    }
+    operand->type = actual;
+    dest = f->next_vreg++;
+    cast = lr_inst_create(m->arena, LR_OP_BITCAST, expected, dest, operand, 1);
+    if (!cast)
+        return previous;
+    cast->next = inst;
+    if (previous)
+        previous->next = cast;
+    else
+        block->first = cast;
+    *operand = lr_op_vreg(dest, expected);
+    block->inst_array = NULL;
+    f->linear_inst_array = NULL;
+    f->block_inst_offsets = NULL;
+    f->num_linear_insts = 0;
+    return cast;
+}
+
+static void legacy_insert_pointer_casts(lr_module_t *m, lr_func_t *f) {
+    for (lr_block_t *block = f->first_block; block; block = block->next) {
+        lr_inst_t *previous = NULL;
+        lr_inst_t *inst = block->first;
+        while (inst) {
+            lr_inst_t *next = inst->next;
+            if (inst->op == LR_OP_STORE && inst->num_operands >= 2) {
+                lr_type_t *value_type = inst->operands[0].type;
+                lr_type_t *expected = lr_type_ptr(m->arena, value_type);
+                previous = legacy_coerce_pointer_operand(
+                    m, f, block, previous, inst, 1, expected);
+            } else if (inst->op == LR_OP_LOAD && inst->num_operands > 0) {
+                lr_type_t *expected = lr_type_ptr(m->arena, inst->type);
+                previous = legacy_coerce_pointer_operand(
+                    m, f, block, previous, inst, 0, expected);
+            } else if (inst->op == LR_OP_GEP && inst->num_operands > 0) {
+                lr_type_t *expected = lr_type_ptr(m->arena, inst->type);
+                previous = legacy_coerce_pointer_operand(
+                    m, f, block, previous, inst, 0, expected);
+            } else if (inst->op == LR_OP_CALL && inst->num_operands > 0) {
+                lr_func_t *target = legacy_call_target(m, &inst->operands[0]);
+                if (target) {
+                    uint32_t count = target->num_params;
+                    if (count > inst->num_operands - 1)
+                        count = inst->num_operands - 1;
+                    for (uint32_t i = 0; i < count; i++) {
+                        previous = legacy_coerce_pointer_operand(
+                            m, f, block, previous, inst, i + 1,
+                            target->param_types[i]);
+                    }
+                }
+            } else if (inst->op == LR_OP_RET && inst->num_operands > 0) {
+                previous = legacy_coerce_pointer_operand(
+                    m, f, block, previous, inst, 0, f->ret_type);
+            }
+            previous = inst;
+            inst = next;
+        }
+        block->last = previous;
+    }
+}
+
+static void legacy_materialize_pointer_types(lr_module_t *m) {
+    if (!legacy_pointer_ir_enabled() || !m)
+        return;
+    for (lr_func_t *f = m->first_func; f; f = f->next)
+        legacy_prepare_function_type(m, f);
+    for (lr_func_t *f = m->first_func; f; f = f->next) {
+        lr_type_t **vreg_types;
+        bool changed = true;
+        uint32_t rounds = 0;
+        if (f->next_vreg == 0)
+            continue;
+        vreg_types = (lr_type_t **)calloc(f->next_vreg, sizeof(*vreg_types));
+        if (!vreg_types)
+            continue;
+        legacy_initialize_vreg_types(m, f, vreg_types);
+        while (changed && rounds++ <= f->next_vreg) {
+            changed = false;
+            for (lr_block_t *b = f->first_block; b; b = b->next) {
+                for (lr_inst_t *inst = b->first; inst; inst = inst->next)
+                    changed |= legacy_refine_instruction(m, f, inst, vreg_types);
+            }
+        }
+        legacy_apply_vreg_types(f, vreg_types);
+        free(vreg_types);
+    }
+    for (lr_func_t *f = m->first_func; f; f = f->next)
+        legacy_insert_pointer_casts(m, f);
+}
+
 static const char *type_name(const lr_type_t *t) {
     switch (t->kind) {
     case LR_TYPE_VOID:   return "void";
@@ -1865,11 +2267,15 @@ static void print_type_impl(const lr_type_t *t, FILE *out,
         return;
     }
     if (t->kind == LR_TYPE_PTR) {
-        /* Opaque pointers: every pointer prints as `ptr`, never the legacy
-           `<pointee>*` form. LLVM (opaque-pointer only since 15) rejects both
-           `i32*` and `ptr*`, so a pointer-to-pointer must not expand its
-           pointee. */
-        fprintf(out, "ptr");
+        if (!legacy_pointer_ir_enabled()) {
+            fprintf(out, "ptr");
+        } else {
+            if (t->array.elem)
+                print_type_impl(t->array.elem, out, false);
+            else
+                fprintf(out, "i8");
+            fprintf(out, "*");
+        }
     } else if (t->kind < LR_TYPE_PTR) {
         fprintf(out, "%s", type_name(t));
     } else if (t->kind == LR_TYPE_ARRAY) {
@@ -1926,6 +2332,18 @@ static void print_struct_body(const lr_type_t *t, FILE *out) {
 
 static void print_type(const lr_type_t *t, FILE *out) {
     print_type_impl(t, out, false);
+}
+
+static void print_pointer_type(const lr_type_t *pointee, FILE *out) {
+    if (!legacy_pointer_ir_enabled()) {
+        fprintf(out, "ptr");
+        return;
+    }
+    if (pointee)
+        print_type(pointee, out);
+    else
+        fprintf(out, "i8");
+    fprintf(out, "*");
 }
 
 static bool ir_name_is_plain(const char *name) {
@@ -2276,9 +2694,15 @@ static bool print_global_i8_ptr_gep(FILE *out, const lr_module_t *m,
     g = find_global_by_symbol_id(m, op->global_id);
     if (!global_is_i8_array_literal(g))
         return false;
+    if (legacy_pointer_ir_enabled() && op->type &&
+        op->type->array.elem == g->type) {
+        return false;
+    }
     fprintf(out, "getelementptr inbounds (");
     print_type(g->type, out);
-    fprintf(out, ", ptr ");
+    fprintf(out, ", ");
+    print_pointer_type(g->type, out);
+    fprintf(out, " ");
     print_display_symbol_ref(out, '@', g->name, m);
     fprintf(out, ", i32 0, i32 0)");
     return true;
@@ -2364,11 +2788,28 @@ static void print_global_addr(FILE *out, const lr_module_t *m,
                               const lr_operand_t *op) {
     const char *name = lr_module_symbol_name(m, op->global_id);
     if (op->global_offset != 0) {
-        fprintf(out, "getelementptr (i8, ptr ");
+        const lr_global_t *g = find_global_by_symbol_id(m, op->global_id);
+        const lr_type_t *fn_ty = find_func_type_by_symbol_id(m, op->global_id);
+        const lr_type_t *target_ty = g ? g->type : fn_ty;
+        fprintf(out, "getelementptr (i8, ");
+        print_pointer_type(m ? m->type_i8 : NULL, out);
+        fprintf(out, " ");
+        if (legacy_pointer_ir_enabled() && target_ty &&
+            target_ty->kind != LR_TYPE_I8) {
+            fprintf(out, "bitcast (");
+            print_pointer_type(target_ty, out);
+            fprintf(out, " ");
+        }
         if (name)
             print_display_symbol_ref(out, '@', name, m);
         else
             fprintf(out, "@g%u", op->global_id);
+        if (legacy_pointer_ir_enabled() && target_ty &&
+            target_ty->kind != LR_TYPE_I8) {
+            fprintf(out, " to ");
+            print_pointer_type(m ? m->type_i8 : NULL, out);
+            fprintf(out, ")");
+        }
         fprintf(out, ", i64 %ld)", (long)op->global_offset);
     } else {
         if (name)
@@ -2432,7 +2873,13 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         if (!need_ptrtoint && print_global_i8_ptr_gep(out, m, op))
             break;
         if (need_ptrtoint)
-            fprintf(out, "ptrtoint (ptr ");
+            fprintf(out, "ptrtoint (");
+        if (need_ptrtoint) {
+            const lr_global_t *g = find_global_by_symbol_id(m, op->global_id);
+            const lr_type_t *fn_ty = find_func_type_by_symbol_id(m, op->global_id);
+            print_pointer_type(g ? g->type : fn_ty, out);
+            fprintf(out, " ");
+        }
         print_global_addr(out, m, op);
         if (need_ptrtoint) {
             fprintf(out, " to ");
@@ -2693,7 +3140,9 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                 print_type(inst->operands[0].type, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
-            fprintf(out, ", ptr ");
+            fprintf(out, ", ");
+            print_pointer_type(inst->operands[0].type, out);
+            fprintf(out, " ");
             print_operand(&inst->operands[1], m, f, out);
             if (inst->operands[0].type) {
                 size_t align = ir_type_abi_align(inst->operands[0].type);
@@ -2706,7 +3155,9 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
     case LR_OP_LOAD:
         if (inst->type) print_type(inst->type, out);
         if (inst->num_operands > 0) {
-            fprintf(out, ", ptr ");
+            fprintf(out, ", ");
+            print_pointer_type(inst->type, out);
+            fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
             if (inst->type) {
                 size_t align = ir_type_abi_align(inst->type);
@@ -2748,7 +3199,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                     if (inst->operands[1u + i].type) {
                         print_type(inst->operands[1u + i].type, out);
                     } else {
-                        fprintf(out, "ptr");
+                        print_pointer_type(NULL, out);
                     }
                 }
                 if (fixed_args > 0)
@@ -2837,7 +3288,8 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                         print_type(inst->operands[0].type, out);
                         fprintf(out, " ");
                     } else {
-                        fprintf(out, "ptr ");
+                        print_pointer_type(inst->type, out);
+                        fprintf(out, " ");
                     }
                 } else if (idx_ty) {
                     if (first_index &&
@@ -2911,7 +3363,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
             if (inst->operands[0].type)
                 print_type(inst->operands[0].type, out);
             else
-                fprintf(out, "ptr");
+                print_pointer_type(NULL, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
             if (inst->num_indices > 0 && inst->indices) {
@@ -2931,7 +3383,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
             if (inst->operands[0].type)
                 print_type(inst->operands[0].type, out);
             else
-                fprintf(out, "ptr");
+                print_pointer_type(NULL, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
             if (inst->num_indices > 0 && inst->indices) {
@@ -2953,7 +3405,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
             else if (inst->operands[0].type)
                 print_type(inst->operands[0].type, out);
             else
-                fprintf(out, "ptr");
+                print_pointer_type(NULL, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
             fprintf(out, ", ");
@@ -2982,7 +3434,7 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
             else if (inst->operands[0].type)
                 print_type(inst->operands[0].type, out);
             else
-                fprintf(out, "ptr");
+                print_pointer_type(NULL, out);
             fprintf(out, " ");
             print_operand(&inst->operands[0], m, f, out);
             fprintf(out, ", ");
@@ -3033,7 +3485,9 @@ void lr_dump_inst_opts(const lr_inst_t *inst, const lr_module_t *m,
                     fprintf(out, ", 0.0");
                     break;
                 case LR_TYPE_PTR:
-                    fprintf(out, "i8, ptr ");
+                    fprintf(out, "i8, ");
+                    print_pointer_type(m ? m->type_i8 : NULL, out);
+                    fprintf(out, " ");
                     print_operand(&inst->operands[0], m, f, out);
                     fprintf(out, ", i64 0");
                     break;
@@ -3771,14 +4225,28 @@ static void dump_global_scalar_expr(const lr_module_t *m, const lr_global_t *g,
                 r->addend == 0) {
                 fprintf(out, "getelementptr inbounds (");
                 print_type(target->type, out);
-                fprintf(out, ", ptr ");
+                fprintf(out, ", ");
+                print_pointer_type(target->type, out);
+                fprintf(out, " ");
                 print_display_symbol_ref(out, '@', r->symbol_name, m);
                 fprintf(out, ", i32 0, i32 0)");
             } else if (r->addend == 0) {
                 print_display_symbol_ref(out, '@', r->symbol_name, m);
             } else {
-                fprintf(out, "getelementptr (i8, ptr ");
+                fprintf(out, "getelementptr (i8, ");
+                print_pointer_type(m ? m->type_i8 : NULL, out);
+                fprintf(out, " ");
+                if (legacy_pointer_ir_enabled() && target && target->type) {
+                    fprintf(out, "bitcast (");
+                    print_pointer_type(target->type, out);
+                    fprintf(out, " ");
+                }
                 print_display_symbol_ref(out, '@', r->symbol_name, m);
+                if (legacy_pointer_ir_enabled() && target && target->type) {
+                    fprintf(out, " to ");
+                    print_pointer_type(m ? m->type_i8 : NULL, out);
+                    fprintf(out, ")");
+                }
                 fprintf(out, ", i64 %" PRId64 ")", r->addend);
             }
             break;
@@ -3787,8 +4255,10 @@ static void dump_global_scalar_expr(const lr_module_t *m, const lr_global_t *g,
             fprintf(out, "null");
             break;
         }
-        fprintf(out, "inttoptr (i64 %" PRIu64 " to ptr)",
+        fprintf(out, "inttoptr (i64 %" PRIu64 " to ",
                 global_read_le_u64(g, off, lr_type_size(ty)));
+        print_type(ty, out);
+        fprintf(out, ")");
         break;
     }
     default:
@@ -3897,7 +4367,7 @@ void lr_dump_global_opts(const lr_module_t *m, const lr_global_t *g, FILE *out,
             if (g->type->func.params && g->type->func.params[i])
                 print_type(g->type->func.params[i], out);
             else
-                fprintf(out, "ptr");
+                print_pointer_type(NULL, out);
         }
         if (g->type->func.vararg) {
             if (g->type->func.num_params > 0)
@@ -4006,7 +4476,7 @@ static void lr_dump_call_declare(const lr_module_t *m, const lr_inst_t *inst,
         if (inst->operands[1u + i].type)
             print_type(inst->operands[1u + i].type, out);
         else
-            fprintf(out, "ptr");
+            print_pointer_type(NULL, out);
     }
     if (vararg) {
         if (nparams > 0)
@@ -4050,6 +4520,7 @@ void lr_module_dump_opts(lr_module_t *m, FILE *out, unsigned dump_flags) {
     lr_dump_flags_current = dump_flags;
     if (!m || !out)
         goto done;
+    legacy_materialize_pointer_types(m);
     lr_dump_named_types(m, out);
     for (lr_global_t *g = m->first_global; g; g = g->next)
         lr_dump_global_opts(m, g, out, dump_flags);
