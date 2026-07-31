@@ -124,6 +124,12 @@ lr_type_t *lr_type_f64_s(lr_session_t *s);
 lr_type_t *lr_type_x86_fp80_s(lr_session_t *s);
 lr_type_t *lr_type_f128_s(lr_session_t *s);
 lr_type_t *lr_type_ptr_s(lr_session_t *s);
+/* Session-scoped pointer type that preserves its pointee. LLVM 3.8 through 14
+   print this as typed-pointer text (`i32*`); LLVM 15 and newer still print
+   `ptr` while the pointee metadata remains reachable through the type.
+   `lr_type_ptr_s` stays the opaque, pointee-less singleton. Returns NULL for a
+   null session or a null pointee. */
+lr_type_t *lr_type_ptr_to_s(lr_session_t *s, lr_type_t *pointee);
 lr_type_t *lr_type_array_s(lr_session_t *s, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_vector_s(lr_session_t *s, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_struct_s(lr_session_t *s, lr_type_t **fields, uint32_t n,

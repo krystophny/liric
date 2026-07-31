@@ -2538,6 +2538,11 @@ lr_type_t *lr_type_f128_s(struct lr_session *s) {
 lr_type_t *lr_type_ptr_s(struct lr_session *s) {
     return (s && s->module) ? s->module->type_ptr : NULL;
 }
+lr_type_t *lr_type_ptr_to_s(struct lr_session *s, lr_type_t *pointee) {
+    if (!s || !s->module || !pointee)
+        return NULL;
+    return lr_type_ptr(s->module->arena, pointee);
+}
 
 lr_type_t *lr_type_array_s(struct lr_session *s, lr_type_t *elem,
                             uint64_t count) {

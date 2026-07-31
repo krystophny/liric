@@ -3092,3 +3092,164 @@ cleanup:
     lr_arena_destroy(arena);
     return result;
 }
+
+/* --- Issue #526: typed pointer metadata through the session API ---------- */
+
+static char *session_dump_text(lr_session_t *s) {
+    lr_error_t err;
+    FILE *tmp = tmpfile();
+    long len;
+    char *buf;
+    if (!tmp)
+        return NULL;
+    if (lr_session_dump_ir(s, tmp, &err) != 0) {
+        fclose(tmp);
+        return NULL;
+    }
+    if (fseek(tmp, 0, SEEK_END) != 0 || (len = ftell(tmp)) <= 0 ||
+        fseek(tmp, 0, SEEK_SET) != 0) {
+        fclose(tmp);
+        return NULL;
+    }
+    buf = (char *)malloc((size_t)len + 1u);
+    if (!buf || fread(buf, 1, (size_t)len, tmp) != (size_t)len) {
+        free(buf);
+        fclose(tmp);
+        return NULL;
+    }
+    buf[len] = '\0';
+    fclose(tmp);
+    return buf;
+}
+
+int test_session_typed_pointer_metadata(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    lr_type_t *i32;
+    lr_type_t *i64;
+    lr_type_t *opaque;
+    lr_type_t *p_i32;
+    lr_type_t *p_i32_again;
+    lr_type_t *pp_i32;
+    lr_type_t *arr;
+    lr_type_t *p_arr;
+    lr_type_t *fnty;
+    lr_type_t *p_fn;
+    lr_type_t *params[1];
+    uint32_t slot;
+    uint32_t slot2;
+    uint32_t loaded;
+    uint32_t elem;
+    uint32_t value;
+    char *buf = NULL;
+    int rc;
+    int result = 1;
+
+    cfg.mode = LR_MODE_IR;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i32 = lr_type_i32_s(s);
+    i64 = lr_type_i64_s(s);
+    opaque = lr_type_ptr_s(s);
+    TEST_ASSERT(i32 && i64 && opaque, "scalar and opaque pointer types");
+
+    /* The opaque singleton must survive unchanged alongside typed pointers. */
+    TEST_ASSERT(lr_type_ptr_s(s) == opaque, "opaque pointer stays a singleton");
+    TEST_ASSERT(opaque->array.elem == NULL, "opaque pointer carries no pointee");
+
+    p_i32 = lr_type_ptr_to_s(s, i32);
+    TEST_ASSERT(p_i32 != NULL, "i32* type");
+    TEST_ASSERT(p_i32->kind == LR_TYPE_PTR, "i32* is a pointer");
+    TEST_ASSERT(p_i32->array.elem == i32, "i32* preserves its pointee");
+    TEST_ASSERT(p_i32 != opaque, "typed pointer is not the opaque singleton");
+
+    p_i32_again = lr_type_ptr_to_s(s, i32);
+    TEST_ASSERT(p_i32_again != NULL, "repeated i32* type");
+    TEST_ASSERT(p_i32_again->array.elem == i32,
+                "repeated i32* preserves its pointee");
+
+    pp_i32 = lr_type_ptr_to_s(s, p_i32);
+    TEST_ASSERT(pp_i32 != NULL, "i32** type");
+    TEST_ASSERT(pp_i32->array.elem == p_i32, "i32** preserves nesting");
+    TEST_ASSERT(pp_i32->array.elem->array.elem == i32,
+                "i32** preserves the inner pointee");
+
+    arr = lr_type_array_s(s, i32, 4);
+    TEST_ASSERT(arr != NULL, "[4 x i32] type");
+    p_arr = lr_type_ptr_to_s(s, arr);
+    TEST_ASSERT(p_arr != NULL, "array pointer type");
+    TEST_ASSERT(p_arr->array.elem == arr, "array pointer preserves element");
+
+    params[0] = i32;
+    fnty = lr_type_function_s(s, i32, params, 1, false);
+    TEST_ASSERT(fnty != NULL, "function type");
+    p_fn = lr_type_ptr_to_s(s, fnty);
+    TEST_ASSERT(p_fn != NULL, "function pointer type");
+    TEST_ASSERT(p_fn->array.elem == fnty,
+                "function pointer preserves the function pointee");
+    TEST_ASSERT(p_fn->array.elem->kind == LR_TYPE_FUNC,
+                "function pointee metadata is a function type");
+
+    /* Negative: a null session or a null pointee yields no type. */
+    TEST_ASSERT(lr_type_ptr_to_s(NULL, i32) == NULL, "null session rejected");
+    TEST_ASSERT(lr_type_ptr_to_s(s, NULL) == NULL, "null pointee rejected");
+
+    rc = lr_session_func_begin(s, "typed_pointer_metadata", i32, NULL, 0,
+                               false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+    rc = lr_session_set_block(s, lr_session_block(s), &err);
+    TEST_ASSERT_EQ(rc, 0, "set block");
+
+    slot = lr_emit_alloca(s, i32);
+    lr_emit_store(s, LR_IMM(11, i32), LR_VREG(slot, p_i32));
+    slot2 = lr_emit_alloca(s, p_i32);
+    lr_emit_store(s, LR_VREG(slot, p_i32), LR_VREG(slot2, pp_i32));
+    loaded = lr_emit_load(s, p_i32, LR_VREG(slot2, pp_i32));
+    elem = lr_emit_load(s, i32, LR_VREG(loaded, p_i32));
+    value = elem;
+    lr_emit_ret(s, LR_VREG(value, i32));
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    buf = session_dump_text(s);
+    TEST_ASSERT(buf != NULL, "ir dump");
+
+#if defined(LIRIC_BACKEND_LLVM_VERSION_MAJOR) && \
+    LIRIC_BACKEND_LLVM_VERSION_MAJOR < 15
+    if (!strstr(buf, "i32*")) {
+        fprintf(stderr, "  FAIL: legacy dump lacks typed pointer text\n%s", buf);
+        goto cleanup;
+    }
+    if (!strstr(buf, "i32**")) {
+        fprintf(stderr, "  FAIL: legacy dump lacks nested typed pointer\n%s",
+                buf);
+        goto cleanup;
+    }
+#else
+    if (!strstr(buf, "store i32 11, ptr ")) {
+        fprintf(stderr, "  FAIL: modern dump is not opaque\n%s", buf);
+        goto cleanup;
+    }
+    if (strstr(buf, "i32*") != NULL) {
+        fprintf(stderr, "  FAIL: modern dump leaked typed pointer text\n%s",
+                buf);
+        goto cleanup;
+    }
+    /* Metadata is still reachable through the session type even though the
+       printed dialect is opaque. */
+    if (p_i32->array.elem != i32 || pp_i32->array.elem != p_i32) {
+        fprintf(stderr, "  FAIL: pointee metadata lost after emission\n");
+        goto cleanup;
+    }
+#endif
+
+    result = 0;
+
+cleanup:
+    free(buf);
+    lr_session_destroy(s);
+    return result;
+}

@@ -252,6 +252,7 @@ int test_ir_dump_pointer_dialect_for_backend(void);
 int test_ir_emission_does_not_mutate_module(void);
 int test_ir_emission_clone_failure_preserves_module(void);
 int test_session_scalar_gep_undef_tail_trimmed(void);
+int test_session_typed_pointer_metadata(void);
 int test_ir_dump_scalar_gep_undef_tail_trimmed(void);
 int test_ir_dump_declares_undeclared_call_targets(void);
 int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void);
@@ -601,6 +602,7 @@ int main(void) {
     RUN_TEST(test_ir_emission_does_not_mutate_module);
     RUN_TEST(test_ir_emission_clone_failure_preserves_module);
     RUN_TEST(test_session_scalar_gep_undef_tail_trimmed);
+    RUN_TEST(test_session_typed_pointer_metadata);
     RUN_TEST(test_ir_dump_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_ir_dump_declares_undeclared_call_targets);
     RUN_TEST(test_session_ir_lookup_prefers_module_symbol_over_process_symbol);
