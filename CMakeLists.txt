@@ -395,6 +395,7 @@ set(LIRIC_LIB_SOURCES
     src/stencil_data.c
     src/stencil_runtime.c
     src/session.c
+    src/session_abi.c
     src/module_emit.c
     src/llvm_backend.c
     src/objfile.c

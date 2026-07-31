@@ -3253,3 +3253,163 @@ cleanup:
     lr_session_destroy(s);
     return result;
 }
+
+/* --- Issue #527: version and verify the public session ABI --------------- */
+
+int test_session_abi_info_contract(void) {
+    lr_session_abi_info_t info;
+    lr_session_abi_info_t small;
+    int rc;
+
+    memset(&info, 0xAB, sizeof(info));
+    rc = lr_session_get_abi_info(&info, sizeof(info));
+    TEST_ASSERT_EQ(rc, LR_OK, "abi info query");
+
+    TEST_ASSERT_EQ(info.abi_version, LIRIC_SESSION_ABI_VERSION,
+                   "reported ABI version matches the published macro");
+    TEST_ASSERT_EQ(info.struct_size, sizeof(lr_session_abi_info_t),
+                   "reported struct size");
+
+    TEST_ASSERT_EQ(info.config_size, sizeof(lr_session_config_t),
+                   "config size");
+    TEST_ASSERT_EQ(info.error_size, sizeof(lr_error_t), "error size");
+    TEST_ASSERT_EQ(info.operand_size, sizeof(lr_operand_desc_t),
+                   "operand size");
+    TEST_ASSERT_EQ(info.inst_size, sizeof(lr_inst_desc_t), "inst size");
+
+    TEST_ASSERT_EQ(info.config_mode_offset,
+                   offsetof(lr_session_config_t, mode), "config.mode offset");
+    TEST_ASSERT_EQ(info.config_target_offset,
+                   offsetof(lr_session_config_t, target),
+                   "config.target offset");
+    TEST_ASSERT_EQ(info.config_backend_offset,
+                   offsetof(lr_session_config_t, backend),
+                   "config.backend offset");
+    TEST_ASSERT_EQ(info.config_opt_level_offset,
+                   offsetof(lr_session_config_t, opt_level),
+                   "config.opt_level offset");
+
+    TEST_ASSERT_EQ(info.error_code_offset, offsetof(lr_error_t, code),
+                   "error.code offset");
+    TEST_ASSERT_EQ(info.error_msg_offset, offsetof(lr_error_t, msg),
+                   "error.msg offset");
+    TEST_ASSERT_EQ(info.error_msg_size, sizeof(((lr_error_t *)0)->msg),
+                   "error.msg size");
+
+    TEST_ASSERT_EQ(info.operand_kind_offset,
+                   offsetof(lr_operand_desc_t, kind), "operand.kind offset");
+    TEST_ASSERT_EQ(info.operand_type_offset,
+                   offsetof(lr_operand_desc_t, type), "operand.type offset");
+    TEST_ASSERT_EQ(info.operand_global_offset_offset,
+                   offsetof(lr_operand_desc_t, global_offset),
+                   "operand.global_offset offset");
+
+    TEST_ASSERT_EQ(info.inst_op_offset, offsetof(lr_inst_desc_t, op),
+                   "inst.op offset");
+    TEST_ASSERT_EQ(info.inst_type_offset, offsetof(lr_inst_desc_t, type),
+                   "inst.type offset");
+    TEST_ASSERT_EQ(info.inst_dest_offset, offsetof(lr_inst_desc_t, dest),
+                   "inst.dest offset");
+    TEST_ASSERT_EQ(info.inst_operands_offset,
+                   offsetof(lr_inst_desc_t, operands),
+                   "inst.operands offset");
+    TEST_ASSERT_EQ(info.inst_num_operands_offset,
+                   offsetof(lr_inst_desc_t, num_operands),
+                   "inst.num_operands offset");
+
+    TEST_ASSERT_EQ(info.opcode_count, LR_OP_COUNT, "opcode count");
+    TEST_ASSERT_EQ(info.operand_kind_count, LR_OP_KIND_COUNT,
+                   "operand kind count");
+
+    /* Negative: null and undersized outputs are rejected. */
+    TEST_ASSERT_EQ(lr_session_get_abi_info(NULL, sizeof(info)),
+                   LR_ERR_ARGUMENT, "null output rejected");
+    TEST_ASSERT_EQ(lr_session_get_abi_info(&small, sizeof(info) - 1u),
+                   LR_ERR_ARGUMENT, "undersized output rejected");
+    TEST_ASSERT_EQ(lr_session_get_abi_info(&small, 0), LR_ERR_ARGUMENT,
+                   "zero-sized output rejected");
+
+    return 0;
+}
+
+/* Freezes the pre-change opcode and operand-kind numbering. Inserting a value
+   before an existing one changes these constants and must therefore come with
+   an ABI version bump; appending at the end does not. */
+int test_session_abi_enum_values_frozen(void) {
+    TEST_ASSERT_EQ(LIRIC_SESSION_ABI_VERSION, 1u, "published ABI version");
+
+    TEST_ASSERT_EQ(LR_OP_RET, 0, "LR_OP_RET");
+    TEST_ASSERT_EQ(LR_OP_RET_VOID, 1, "LR_OP_RET_VOID");
+    TEST_ASSERT_EQ(LR_OP_BR, 2, "LR_OP_BR");
+    TEST_ASSERT_EQ(LR_OP_CONDBR, 3, "LR_OP_CONDBR");
+    TEST_ASSERT_EQ(LR_OP_UNREACHABLE, 4, "LR_OP_UNREACHABLE");
+    TEST_ASSERT_EQ(LR_OP_ADD, 5, "LR_OP_ADD");
+    TEST_ASSERT_EQ(LR_OP_SUB, 6, "LR_OP_SUB");
+    TEST_ASSERT_EQ(LR_OP_MUL, 7, "LR_OP_MUL");
+    TEST_ASSERT_EQ(LR_OP_SDIV, 8, "LR_OP_SDIV");
+    TEST_ASSERT_EQ(LR_OP_SREM, 9, "LR_OP_SREM");
+    TEST_ASSERT_EQ(LR_OP_UDIV, 10, "LR_OP_UDIV");
+    TEST_ASSERT_EQ(LR_OP_UREM, 11, "LR_OP_UREM");
+    TEST_ASSERT_EQ(LR_OP_AND, 12, "LR_OP_AND");
+    TEST_ASSERT_EQ(LR_OP_OR, 13, "LR_OP_OR");
+    TEST_ASSERT_EQ(LR_OP_XOR, 14, "LR_OP_XOR");
+    TEST_ASSERT_EQ(LR_OP_SHL, 15, "LR_OP_SHL");
+    TEST_ASSERT_EQ(LR_OP_LSHR, 16, "LR_OP_LSHR");
+    TEST_ASSERT_EQ(LR_OP_ASHR, 17, "LR_OP_ASHR");
+    TEST_ASSERT_EQ(LR_OP_FADD, 18, "LR_OP_FADD");
+    TEST_ASSERT_EQ(LR_OP_FSUB, 19, "LR_OP_FSUB");
+    TEST_ASSERT_EQ(LR_OP_FMUL, 20, "LR_OP_FMUL");
+    TEST_ASSERT_EQ(LR_OP_FDIV, 21, "LR_OP_FDIV");
+    TEST_ASSERT_EQ(LR_OP_FREM, 22, "LR_OP_FREM");
+    TEST_ASSERT_EQ(LR_OP_FNEG, 23, "LR_OP_FNEG");
+    TEST_ASSERT_EQ(LR_OP_ICMP, 24, "LR_OP_ICMP");
+    TEST_ASSERT_EQ(LR_OP_FCMP, 25, "LR_OP_FCMP");
+    TEST_ASSERT_EQ(LR_OP_ALLOCA, 26, "LR_OP_ALLOCA");
+    TEST_ASSERT_EQ(LR_OP_LOAD, 27, "LR_OP_LOAD");
+    TEST_ASSERT_EQ(LR_OP_STORE, 28, "LR_OP_STORE");
+    TEST_ASSERT_EQ(LR_OP_GEP, 29, "LR_OP_GEP");
+    TEST_ASSERT_EQ(LR_OP_CALL, 30, "LR_OP_CALL");
+    TEST_ASSERT_EQ(LR_OP_PHI, 31, "LR_OP_PHI");
+    TEST_ASSERT_EQ(LR_OP_SELECT, 32, "LR_OP_SELECT");
+    TEST_ASSERT_EQ(LR_OP_SEXT, 33, "LR_OP_SEXT");
+    TEST_ASSERT_EQ(LR_OP_ZEXT, 34, "LR_OP_ZEXT");
+    TEST_ASSERT_EQ(LR_OP_TRUNC, 35, "LR_OP_TRUNC");
+    TEST_ASSERT_EQ(LR_OP_BITCAST, 36, "LR_OP_BITCAST");
+    TEST_ASSERT_EQ(LR_OP_PTRTOINT, 37, "LR_OP_PTRTOINT");
+    TEST_ASSERT_EQ(LR_OP_INTTOPTR, 38, "LR_OP_INTTOPTR");
+    TEST_ASSERT_EQ(LR_OP_SITOFP, 39, "LR_OP_SITOFP");
+    TEST_ASSERT_EQ(LR_OP_UITOFP, 40, "LR_OP_UITOFP");
+    TEST_ASSERT_EQ(LR_OP_FPTOSI, 41, "LR_OP_FPTOSI");
+    TEST_ASSERT_EQ(LR_OP_FPTOUI, 42, "LR_OP_FPTOUI");
+    TEST_ASSERT_EQ(LR_OP_FPEXT, 43, "LR_OP_FPEXT");
+    TEST_ASSERT_EQ(LR_OP_FPTRUNC, 44, "LR_OP_FPTRUNC");
+    TEST_ASSERT_EQ(LR_OP_EXTRACTVALUE, 45, "LR_OP_EXTRACTVALUE");
+    TEST_ASSERT_EQ(LR_OP_INSERTVALUE, 46, "LR_OP_INSERTVALUE");
+    TEST_ASSERT_EQ(LR_OP_COUNT, 47, "opcode count sentinel");
+
+    TEST_ASSERT_EQ(LR_OP_KIND_VREG, 0, "LR_OP_KIND_VREG");
+    TEST_ASSERT_EQ(LR_OP_KIND_IMM_I64, 1, "LR_OP_KIND_IMM_I64");
+    TEST_ASSERT_EQ(LR_OP_KIND_IMM_F64, 2, "LR_OP_KIND_IMM_F64");
+    TEST_ASSERT_EQ(LR_OP_KIND_BLOCK, 3, "LR_OP_KIND_BLOCK");
+    TEST_ASSERT_EQ(LR_OP_KIND_GLOBAL, 4, "LR_OP_KIND_GLOBAL");
+    TEST_ASSERT_EQ(LR_OP_KIND_NULL, 5, "LR_OP_KIND_NULL");
+    TEST_ASSERT_EQ(LR_OP_KIND_UNDEF, 6, "LR_OP_KIND_UNDEF");
+    TEST_ASSERT_EQ(LR_OP_KIND_COUNT, 7, "operand kind count sentinel");
+
+    TEST_ASSERT_EQ(LR_OK, 0, "LR_OK");
+    TEST_ASSERT_EQ(LR_ERR_ARGUMENT, 1, "LR_ERR_ARGUMENT");
+    TEST_ASSERT_EQ(LR_ERR_STATE, 2, "LR_ERR_STATE");
+    TEST_ASSERT_EQ(LR_ERR_MODE, 3, "LR_ERR_MODE");
+    TEST_ASSERT_EQ(LR_ERR_NOT_FOUND, 4, "LR_ERR_NOT_FOUND");
+    TEST_ASSERT_EQ(LR_ERR_BACKEND, 5, "LR_ERR_BACKEND");
+    TEST_ASSERT_EQ(LR_ERR_PARSE, 6, "LR_ERR_PARSE");
+
+    TEST_ASSERT_EQ(LR_MODE_DIRECT, 0, "LR_MODE_DIRECT");
+    TEST_ASSERT_EQ(LR_MODE_IR, 1, "LR_MODE_IR");
+    TEST_ASSERT_EQ(LR_SESSION_BACKEND_DEFAULT, 0, "backend default");
+    TEST_ASSERT_EQ(LR_SESSION_BACKEND_ISEL, 1, "backend isel");
+    TEST_ASSERT_EQ(LR_SESSION_BACKEND_COPY_PATCH, 2, "backend copy-patch");
+    TEST_ASSERT_EQ(LR_SESSION_BACKEND_LLVM, 3, "backend llvm");
+
+    return 0;
+}
