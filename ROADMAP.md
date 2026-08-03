@@ -6,7 +6,7 @@ changes require generated-code and runtime evidence.
 
 ## Current handoff (2026-08-03)
 
-- `main` is `5436e5cfba46109cbe1b0981a346a3c8a74c7543`.
+- `main` is `feada60` (backend implementation baseline `5436e5c`).
 - PR #524 is merged and the session/header CI contract from #528 is closed.
 - The remaining open backend blocker is
   [#523](https://github.com/krystophny/liric/issues/523): serialized
