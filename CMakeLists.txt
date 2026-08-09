@@ -1022,6 +1022,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
 endif()
 add_test(NAME liric_tests COMMAND test_liric)
 
+add_executable(test_public_session tests/test_public_session.c)
+target_link_libraries(test_public_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+add_test(NAME public_session_c_oracle COMMAND test_public_session)
+
 add_test(
     NAME liric_cli_output_flag_auto_obj_no_main
     COMMAND ${CMAKE_COMMAND}
@@ -1516,6 +1520,7 @@ install(FILES
     include/liric/liric.h
     include/liric/liric_legacy.h
     include/liric/liric_ir_shared.h
+    include/liric/liric_session.h
     include/liric/liric_types.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
 )
