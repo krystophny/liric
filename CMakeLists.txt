@@ -1027,6 +1027,15 @@ target_link_libraries(test_public_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 add_test(NAME public_session_c_oracle COMMAND test_public_session)
 
 add_test(
+    NAME cmake_install_public_session_oracle
+    COMMAND ${CMAKE_COMMAND}
+        -DBUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
+        -DPREFIX=${LIRIC_CTEST_WORK_ROOT}/cmake_install_public_session/prefix
+        -DC_COMPILER=${CMAKE_C_COMPILER}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_cmake_install_public_session.cmake
+)
+
+add_test(
     NAME liric_cli_output_flag_auto_obj_no_main
     COMMAND ${CMAKE_COMMAND}
         -DCLI=$<TARGET_FILE:liric_bin>
@@ -1530,8 +1539,16 @@ if(LIRIC_INSTALL_COMPAT_HEADERS)
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
     )
 endif()
-install(DIRECTORY include/llvm DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY include/llvm-c DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+foreach(LIRIC_OPTIONAL_INCLUDE_DIR IN ITEMS include/llvm include/llvm-c)
+    if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${LIRIC_OPTIONAL_INCLUDE_DIR}")
+        install(DIRECTORY "${LIRIC_OPTIONAL_INCLUDE_DIR}"
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    else()
+        message(STATUS
+            "Skipping absent legacy compatibility include tree: "
+            "${LIRIC_OPTIONAL_INCLUDE_DIR}")
+    endif()
+endforeach()
 install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(WITH_LLVM_COMPAT)

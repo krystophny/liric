@@ -31,10 +31,13 @@ execute a function returning 42 and to check rejected null/short ABI queries
 plus null-session function finalization. Focused evidence after the fix is
 `cmake --build build --target test_liric test_public_session -j2`, followed by
 `ctest --test-dir build --output-on-failure -R '^(liric_tests|public_session_c_oracle)$'`:
-100% pass. Staged-header compile
-also passes. The install command still exits 1 after installing the headers
-because this checkout separately lacks `include/llvm`; the producer/nightly
-gates remain the red runs listed above and were not claimed as fixed here.
+100% pass. The install oracle now runs `cmake --install` into a clean staging
+prefix and compiles a fresh C probe against the staged
+`liric/liric_session.h`. The legacy `include/llvm` and `include/llvm-c`
+install entries are skipped with a configure-time status message when those
+optional trees are absent; this avoids turning a missing producer/compatibility
+artifact into a late install failure. The producer/nightly gates remain the
+red runs listed above and are not claimed as fixed here.
 
 ## Immediate order
 
@@ -42,9 +45,10 @@ gates remain the red runs listed above and were not claimed as fixed here.
    compatibility jobs under [#533](https://github.com/krystophny/liric/issues/533),
    with explicit tool discovery, minimum versions, and a skip/fail policy
    that names the missing tool or incompatible version.
-2. Restore the installed public session producer artifact. The source-tree
-   header contract alone is insufficient for downstream package consumers;
-   verify the installed header with a fresh C compile probe.
+2. Keep the installed public session producer artifact covered by the CMake
+   install oracle. The source-tree header contract alone is insufficient for
+   downstream package consumers; verify the staged header with a fresh C
+   compile probe.
 3. Reduce #523 to a public C session producer. Verify the IR before and after
    serialization, emit an object, link a small consumer, and compare behavior.
    This assigns ownership between ffc's producer and LIRIC's serializer without
