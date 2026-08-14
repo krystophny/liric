@@ -2254,11 +2254,6 @@ void lr_ir_set_emission_clone_failure_for_testing(bool fail) {
     lr_emission_clone_forced_failure = fail;
 }
 
-typedef struct lr_emission_clone {
-    lr_module_t *module;
-    lr_arena_t *arena;
-} lr_emission_clone_t;
-
 static lr_type_t *clone_emission_func_type(lr_arena_t *a, lr_type_t *t) {
     lr_type_t *copy;
     if (!t || t->kind != LR_TYPE_FUNC)
@@ -2369,7 +2364,7 @@ static lr_func_t *clone_emission_func(lr_arena_t *a, lr_module_t *owner,
     return copy;
 }
 
-static void lr_emission_clone_release(lr_emission_clone_t *clone) {
+void lr_emission_clone_release(lr_emission_clone_t *clone) {
     if (!clone)
         return;
     lr_arena_destroy(clone->arena);
@@ -2379,7 +2374,7 @@ static void lr_emission_clone_release(lr_emission_clone_t *clone) {
 
 /* Returns false only on allocation failure; the source module is never
    touched on any path. */
-static bool lr_module_clone_for_emission(lr_module_t *src,
+bool lr_module_clone_for_emission(lr_module_t *src,
                                          lr_emission_clone_t *out) {
     lr_arena_t *arena;
     lr_module_t *copy;

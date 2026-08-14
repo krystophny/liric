@@ -3338,9 +3338,32 @@ static const lr_target_t *session_resolve_target(struct lr_session *s) {
     return lr_target_host();
 }
 
+
+/* Issue #523: native object emission finalizes (DCE / constant-folds) the IR
+   inside lr_target_compile. Running that on the live session module would
+   mutate a valid CFG across serialization (the integer-print definition would
+   be rewritten away). Run native emission on a non-mutating clone so the live
+   module stays byte-for-byte stable through dump and object emission. The
+   LLVM backend already serializes from module text and needs no clone. */
+static lr_module_t *session_emission_module(struct lr_session *s,
+                                            lr_emission_clone_t *clone,
+                                            session_error_t *err) {
+    memset(clone, 0, sizeof(*clone));
+    if (s->jit && s->jit->mode == LR_COMPILE_LLVM)
+        return s->module;
+    if (!lr_module_clone_for_emission(s->module, clone)) {
+        err_set(err, S_ERR_BACKEND, "object emission clone failed");
+        return NULL;
+    }
+    return clone->module;
+}
+
 int lr_session_emit_object(struct lr_session *s, const char *path,
                             session_error_t *err) {
     char backend_err[256] = {0};
+    lr_emission_clone_t clone = {0};
+    lr_module_t *emit;
+    int rc;
 
     err_clear(err);
     if (!s || !s->module || !path) {
@@ -3370,10 +3393,15 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
         return 0;
     }
 
-    if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
-                                        s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
-                                        path, s->cfg.opt_level, backend_err,
-                                        sizeof(backend_err)) != 0) {
+    emit = session_emission_module(s, &clone, err);
+    if (!emit)
+        return -1;
+    rc = lr_emit_module_object_path_mode(emit, s->cfg.target,
+                                         s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
+                                         path, s->cfg.opt_level, backend_err,
+                                         sizeof(backend_err));
+    lr_emission_clone_release(&clone);
+    if (rc != 0) {
         err_set(err, S_ERR_BACKEND, "%s",
                 backend_err[0] ? backend_err : "object emission failed");
         return -1;
@@ -3449,9 +3477,18 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
 #endif
     }
 
-    if (lr_emit_object(s->module, target, out) != 0) {
-        err_set(err, S_ERR_BACKEND, "object emission failed");
-        return -1;
+    {
+        lr_emission_clone_t clone = {0};
+        lr_module_t *emit = session_emission_module(s, &clone, err);
+        int rc;
+        if (!emit)
+            return -1;
+        rc = lr_emit_object(emit, target, out);
+        lr_emission_clone_release(&clone);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "object emission failed");
+            return -1;
+        }
     }
     return 0;
 }
@@ -3500,14 +3537,23 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
     }
 
     entry = session_entry_symbol(s->module);
-    if (lr_emit_module_executable_path_mode(
-            s->module, s->cfg.target,
-            s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
-            path, entry, s->cfg.opt_level,
-            backend_err, sizeof(backend_err)) != 0) {
-        err_set(err, S_ERR_BACKEND, "%s",
-                backend_err[0] ? backend_err : "executable emission failed");
-        return -1;
+    {
+        lr_emission_clone_t clone = {0};
+        lr_module_t *emit = session_emission_module(s, &clone, err);
+        int rc;
+        if (!emit)
+            return -1;
+        rc = lr_emit_module_executable_path_mode(
+                emit, s->cfg.target,
+                s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
+                path, entry, s->cfg.opt_level,
+                backend_err, sizeof(backend_err));
+        lr_emission_clone_release(&clone);
+        if (rc != 0) {
+            err_set(err, S_ERR_BACKEND, "%s",
+                    backend_err[0] ? backend_err : "executable emission failed");
+            return -1;
+        }
     }
     if (session_mark_output_executable(path, err) != 0)
         return -1;

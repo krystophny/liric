@@ -3413,3 +3413,200 @@ int test_session_abi_enum_values_frozen(void) {
 
     return 0;
 }
+
+/* Issue #523: an i64 print definition placed in a block that dominates its
+   printf use must survive serialization unchanged. Object emission used to
+   run the finalize/DCE peephole (which constant-folds) on the live session
+   module, destroying the definition and rewriting the call operand. Emission
+   must run on a non-mutating clone so the snapshot before and after
+   dump + object emission is identical and the definition still dominates. */
+int test_session_integer_print_dominance_preserved(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i64 = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *ptr = NULL;
+    uint32_t entry = 0, print = 0, wide = 0, r = 0;
+    int rc = -1;
+    int result = 1;
+    char *snap_before = NULL;
+    char *snap_after = NULL;
+    char *dump1 = NULL;
+    char *dump2 = NULL;
+    const char *obj_path = "/tmp/liric_test_dominance_int_print.o";
+
+    cfg.mode = LR_MODE_IR;
+    cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i64 = lr_type_i64_s(s);
+    i32 = lr_type_i32_s(s);
+    ptr = lr_type_ptr_s(s);
+    TEST_ASSERT(i64 != NULL && i32 != NULL && ptr != NULL, "primitive types");
+
+    /* define i32 @f() {
+     *   entry: %w = add i64 1, 1      ; i64 print definition (foldable)
+     *          br label %print
+     *   print: %r = call i32 @printf(ptr null, i64 %w)
+     *          ret i32 %r
+     * }
+     * entry dominates print, so %w must dominate its printf use. */
+    rc = lr_session_func_begin(s, "dominance_int_print", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    entry = lr_session_block(s);
+    print = lr_session_block(s);
+    lr_session_set_block(s, entry, &err);
+    wide = lr_emit_add(s, i64, LR_IMM(1, i64), LR_IMM(1, i64));
+    lr_emit_br(s, print);
+
+    lr_session_set_block(s, print, &err);
+    {
+        uint32_t printf_sym = lr_session_intern(s, "printf");
+        lr_operand_desc_t args[2] = {LR_IMM(0, ptr), LR_VREG(wide, i64)};
+        r = lr_emit_call(s, i32, LR_GLOBAL(printf_sym, ptr), args, 2);
+        lr_emit_ret(s, LR_VREG(r, i32));
+    }
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    snap_before = snapshot_module_structure(lr_session_module(s));
+    TEST_ASSERT(snap_before != NULL, "pre-emission snapshot");
+
+    dump1 = session_dump_text(s);
+    TEST_ASSERT(dump1 != NULL, "first dump");
+    TEST_ASSERT(strstr(dump1, "%v0 = add i64 1, 1") != NULL,
+                "i64 print definition present before emission");
+    TEST_ASSERT(strstr(dump1, "call i32 @printf(ptr null, i64 %v0)") != NULL,
+                "printf use references the dominating definition");
+
+    rc = lr_session_emit_object(s, obj_path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit object");
+
+    snap_after = snapshot_module_structure(lr_session_module(s));
+    TEST_ASSERT(snap_after != NULL, "post-emission snapshot");
+    TEST_ASSERT(strcmp(snap_before, snap_after) == 0,
+                "module unchanged across object emission");
+
+    dump2 = session_dump_text(s);
+    TEST_ASSERT(dump2 != NULL, "second dump");
+    TEST_ASSERT(strcmp(dump1, dump2) == 0,
+                "dump stable across object emission");
+    TEST_ASSERT(strstr(dump2, "%v0 = add i64 1, 1") != NULL,
+                "i64 print definition still dominates after emission");
+    TEST_ASSERT(strstr(dump2, "call i32 @printf(ptr null, i64 %v0)") != NULL,
+                "printf use still references the dominating definition");
+
+    result = 0;
+    goto cleanup;
+
+cleanup:
+    remove(obj_path);
+    free(snap_before);
+    free(snap_after);
+    free(dump1);
+    free(dump2);
+    if (s)
+        lr_session_destroy(s);
+    return result;
+}
+
+/* Issue #523 negative: an intentionally non-dominating value (defined in a
+   block that does not dominate its printf use) must not be silently moved or
+   repaired by serialization. The session emits it as-is (the producer owns
+   the CFG error); no backend repair logic relocates the definition to a
+   dominating block. The module and dump stay byte-for-byte stable across
+   dump + object emission. */
+int test_session_non_dominating_value_not_moved(void) {
+    lr_session_config_t cfg = {0};
+    lr_error_t err = {0};
+    lr_session_t *s = NULL;
+    lr_type_t *i64 = NULL;
+    lr_type_t *i32 = NULL;
+    lr_type_t *ptr = NULL;
+    uint32_t entry = 0, print = 0, other = 0, exitb = 0;
+    int rc = -1;
+    int result = 1;
+    char *snap_before = NULL;
+    char *snap_after = NULL;
+    char *dump1 = NULL;
+    char *dump2 = NULL;
+    const char *obj_path = "/tmp/liric_test_non_dominating.o";
+
+    cfg.mode = LR_MODE_IR;
+    cfg.backend = LR_SESSION_BACKEND_COPY_PATCH;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+
+    i64 = lr_type_i64_s(s);
+    i32 = lr_type_i32_s(s);
+    ptr = lr_type_ptr_s(s);
+
+    /* entry br print; print defines %x then br exit; other (not dominated by
+       print) uses %x; exit ret. %x does not dominate its use in other. */
+    rc = lr_session_func_begin(s, "non_dominating_print", i32, NULL, 0, false, &err);
+    TEST_ASSERT_EQ(rc, 0, "func begin");
+
+    entry = lr_session_block(s);
+    print = lr_session_block(s);
+    other = lr_session_block(s);
+    exitb = lr_session_block(s);
+
+    lr_session_set_block(s, entry, &err);
+    lr_emit_br(s, print);
+
+    lr_session_set_block(s, print, &err);
+    {
+        uint32_t x = lr_emit_add(s, i64, LR_IMM(1, i64), LR_IMM(1, i64));
+        lr_emit_br(s, exitb);
+        lr_session_set_block(s, other, &err);
+        uint32_t printf_sym = lr_session_intern(s, "printf");
+        lr_operand_desc_t args[2] = {LR_IMM(0, ptr), LR_VREG(x, i64)};
+        lr_emit_call(s, i32, LR_GLOBAL(printf_sym, ptr), args, 2);
+        lr_emit_br(s, exitb);
+        lr_session_set_block(s, exitb, &err);
+        lr_emit_ret(s, LR_IMM(0, i32));
+    }
+
+    rc = lr_session_func_end(s, NULL, &err);
+    TEST_ASSERT_EQ(rc, 0, "func end");
+
+    snap_before = snapshot_module_structure(lr_session_module(s));
+    TEST_ASSERT(snap_before != NULL, "pre-emission snapshot");
+
+    dump1 = session_dump_text(s);
+    TEST_ASSERT(dump1 != NULL, "first dump");
+
+    rc = lr_session_emit_object(s, obj_path, &err);
+    TEST_ASSERT_EQ(rc, 0, "emit object succeeds for non-dominating producer CFG");
+
+    snap_after = snapshot_module_structure(lr_session_module(s));
+    TEST_ASSERT(snap_after != NULL, "post-emission snapshot");
+    TEST_ASSERT(strcmp(snap_before, snap_after) == 0,
+                "non-dominating value not moved by serialization");
+
+    dump2 = session_dump_text(s);
+    TEST_ASSERT(dump2 != NULL, "second dump");
+    TEST_ASSERT(strcmp(dump1, dump2) == 0,
+                "non-dominating value dump stable");
+    /* The definition must still sit in the print block (b1), not be
+       relocated to a dominating block. %v0 is defined in b1 and used in b2. */
+    TEST_ASSERT(strstr(dump2, "%v0 = add i64 1, 1") != NULL,
+                "non-dominating definition preserved, not folded away");
+
+    result = 0;
+    goto cleanup;
+
+cleanup:
+    remove(obj_path);
+    free(snap_before);
+    free(snap_after);
+    free(dump1);
+    free(dump2);
+    if (s)
+        lr_session_destroy(s);
+    return result;
+}

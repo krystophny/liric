@@ -215,6 +215,19 @@ lr_operand_t lr_op_global(uint32_t id, lr_type_t *type);
 lr_operand_t lr_op_null(lr_type_t *type);
 uint32_t lr_module_intern_symbol(lr_module_t *m, const char *name);
 
+/* Non-mutating emission clone (issue #525 / #523). Emission (dump, object,
+   executable) may finalize/legalize IR. To keep a valid session module
+   stable across serialization, these passes run on an owned clone whose
+   mutable IR lives in a private arena. The source module is never touched.
+   lr_module_clone_for_emission returns false only on allocation failure. */
+typedef struct lr_emission_clone {
+    lr_module_t *module;
+    lr_arena_t *arena;
+} lr_emission_clone_t;
+bool lr_module_clone_for_emission(lr_module_t *src,
+                                  lr_emission_clone_t *out);
+void lr_emission_clone_release(lr_emission_clone_t *clone);
+
 /* Test hook (issue #525): force the legacy emission clone to fail so the
    non-mutating contract can be checked on the allocation-failure path. */
 void lr_ir_set_emission_clone_failure_for_testing(bool fail);
