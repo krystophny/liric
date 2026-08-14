@@ -255,6 +255,8 @@ int test_session_scalar_gep_undef_tail_trimmed(void);
 int test_session_typed_pointer_metadata(void);
 int test_session_abi_info_contract(void);
 int test_session_abi_enum_values_frozen(void);
+int test_session_integer_print_dominance_preserved(void);
+int test_session_non_dominating_value_not_moved(void);
 int test_ir_dump_scalar_gep_undef_tail_trimmed(void);
 int test_ir_dump_declares_undeclared_call_targets(void);
 int test_session_ir_lookup_prefers_module_symbol_over_process_symbol(void);
@@ -607,6 +609,8 @@ int main(void) {
     RUN_TEST(test_session_typed_pointer_metadata);
     RUN_TEST(test_session_abi_info_contract);
     RUN_TEST(test_session_abi_enum_values_frozen);
+    RUN_TEST(test_session_integer_print_dominance_preserved);
+    RUN_TEST(test_session_non_dominating_value_not_moved);
     RUN_TEST(test_ir_dump_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_ir_dump_declares_undeclared_call_targets);
     RUN_TEST(test_session_ir_lookup_prefers_module_symbol_over_process_symbol);
