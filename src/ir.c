@@ -326,6 +326,8 @@ static bool operand_equal(const lr_operand_t *a, const lr_operand_t *b) {
         memcpy(&a_bits, &a->imm_f64, sizeof(a_bits));
         memcpy(&b_bits, &b->imm_f64, sizeof(b_bits));
         return a_bits == b_bits;
+    case LR_VAL_IMM_F128:
+        return memcmp(a->imm_f128, b->imm_f128, sizeof(a->imm_f128)) == 0;
     case LR_VAL_BLOCK:  return a->block_id == b->block_id;
     case LR_VAL_GLOBAL: return a->global_id == b->global_id;
     case LR_VAL_NULL:
@@ -695,6 +697,7 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
                             (replacement.kind == LR_VAL_VREG ||
                              replacement.kind == LR_VAL_IMM_I64 ||
                              replacement.kind == LR_VAL_IMM_F64 ||
+                             replacement.kind == LR_VAL_IMM_F128 ||
                              replacement.kind == LR_VAL_NULL ||
                              replacement.kind == LR_VAL_UNDEF)) {
                             replacement.type = inst->type;
@@ -941,6 +944,16 @@ lr_operand_t lr_op_imm_f64(double val, lr_type_t *type) {
     return (lr_operand_t){
         .kind = LR_VAL_IMM_F64, .imm_f64 = val, .type = type, .global_offset = 0
     };
+}
+
+lr_operand_t lr_op_imm_f128(const uint8_t bits[16], lr_type_t *type) {
+    lr_operand_t op;
+    memset(&op, 0, sizeof(op));
+    op.kind = LR_VAL_IMM_F128;
+    op.type = type;
+    if (bits)
+        memcpy(op.imm_f128, bits, sizeof(op.imm_f128));
+    return op;
 }
 
 lr_operand_t lr_op_block(uint32_t id) {
@@ -3041,6 +3054,14 @@ static void print_operand(const lr_operand_t *op, const lr_module_t *m,
         }
         break;
     }
+    case LR_VAL_IMM_F128:
+        {
+            uint64_t lo = 0, hi = 0;
+            memcpy(&lo, op->imm_f128, sizeof(lo));
+            memcpy(&hi, op->imm_f128 + sizeof(lo), sizeof(hi));
+            fprintf(out, "0xL%016" PRIX64 "%016" PRIX64, hi, lo);
+        }
+        break;
     case LR_VAL_BLOCK: {
         fprintf(out, "label ");
         print_block_ref(out, f, op->block_id);

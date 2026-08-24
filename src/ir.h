@@ -47,6 +47,7 @@ typedef enum lr_operand_kind {
     LR_VAL_GLOBAL,
     LR_VAL_NULL,
     LR_VAL_UNDEF,
+    LR_VAL_IMM_F128,
 } lr_operand_kind_t;
 
 typedef struct lr_operand {
@@ -57,6 +58,7 @@ typedef struct lr_operand {
         uint32_t vreg;
         int64_t imm_i64;
         double imm_f64;
+        uint8_t imm_f128[16];
         uint32_t block_id;
         uint32_t global_id;
     };
@@ -210,6 +212,7 @@ lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
 lr_operand_t lr_op_vreg(uint32_t vreg, lr_type_t *type);
 lr_operand_t lr_op_imm_i64(int64_t val, lr_type_t *type);
 lr_operand_t lr_op_imm_f64(double val, lr_type_t *type);
+lr_operand_t lr_op_imm_f128(const uint8_t bits[16], lr_type_t *type);
 lr_operand_t lr_op_block(uint32_t id);
 lr_operand_t lr_op_global(uint32_t id, lr_type_t *type);
 lr_operand_t lr_op_null(lr_type_t *type);

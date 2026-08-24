@@ -88,7 +88,7 @@ typedef struct lr_inst_desc {
    does. A foreign-language binding should query lr_session_get_abi_info and
    refuse to emit instructions when the reported version or layout differs
    from the one it was generated against. */
-#define LIRIC_SESSION_ABI_VERSION 1u
+#define LIRIC_SESSION_ABI_VERSION 2u
 
 typedef struct lr_session_abi_info {
     uint32_t abi_version;

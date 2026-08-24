@@ -351,6 +351,9 @@ static lr_operand_t operand_desc_to_operand(const lr_operand_desc_t *d) {
     case LR_OP_KIND_IMM_F64:
         op.imm_f64 = d->imm_f64;
         break;
+    case LR_OP_KIND_IMM_F128:
+        memcpy(op.imm_f128, d->imm_f128, sizeof(op.imm_f128));
+        break;
     case LR_OP_KIND_BLOCK:
         op.block_id = d->block_id;
         break;
@@ -361,6 +364,16 @@ static lr_operand_t operand_desc_to_operand(const lr_operand_desc_t *d) {
         break;
     }
     return op;
+}
+
+lr_operand_desc_t lr_operand_imm_f128(const uint8_t bits[16], lr_type_t *type) {
+    lr_operand_desc_t d;
+    memset(&d, 0, sizeof(d));
+    d.kind = LR_OP_KIND_IMM_F128;
+    d.type = type;
+    if (bits)
+        memcpy(d.imm_f128, bits, sizeof(d.imm_f128));
+    return d;
 }
 
 static size_t align_up_size(size_t value, size_t alignment) {

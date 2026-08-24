@@ -7322,6 +7322,10 @@ lc_value_t *lc_create_gep(lc_module_compat_t *mod, lr_block_t *b,
             case LR_VAL_IMM_F64:
                 idx_op.imm_f64 = ops[1u + i].imm_f64;
                 break;
+            case LR_VAL_IMM_F128:
+                memcpy(idx_op.imm_f128, ops[1u + i].imm_f128,
+                       sizeof(idx_op.imm_f128));
+                break;
             case LR_VAL_BLOCK:
                 idx_op.block_id = ops[1u + i].block_id;
                 break;

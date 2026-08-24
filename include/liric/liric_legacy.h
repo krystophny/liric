@@ -52,6 +52,7 @@ lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
     ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t), .global_offset = 0 })
 #define LR_IMM_F(v, t) \
     ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t), .global_offset = 0 })
+#define LR_IMM_F128(v, t) lr_operand_imm_f128((v), (t))
 #define LR_BLOCK(id) \
     ((lr_operand_desc_t){ .kind = LR_OP_KIND_BLOCK, .block_id = (id), .type = NULL, .global_offset = 0 })
 #define LR_GLOBAL(id, t) \
@@ -60,6 +61,10 @@ lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
     ((lr_operand_desc_t){ .kind = LR_OP_KIND_NULL, .type = (t), .global_offset = 0 })
 #define LR_UNDEF(t) \
     ((lr_operand_desc_t){ .kind = LR_OP_KIND_UNDEF, .type = (t), .global_offset = 0 })
+
+/* Construct a binary128 immediate without imposing a host floating-point
+   ABI on callers. The bytes use LLVM's little-endian binary128 layout. */
+lr_operand_desc_t lr_operand_imm_f128(const uint8_t bits[16], lr_type_t *type);
 
 /* Comparison predicates */
 enum {

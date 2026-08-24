@@ -2525,6 +2525,10 @@ static lr_operand_desc_t bc_operand_to_desc(const lr_operand_t *op) {
         desc.kind = LR_OP_KIND_IMM_F64;
         desc.imm_f64 = op->imm_f64;
         break;
+    case LR_VAL_IMM_F128:
+        desc.kind = LR_OP_KIND_IMM_F128;
+        memcpy(desc.imm_f128, op->imm_f128, sizeof(desc.imm_f128));
+        break;
     case LR_VAL_BLOCK:
         desc.kind = LR_OP_KIND_BLOCK;
         desc.block_id = op->block_id;
@@ -5004,6 +5008,10 @@ static lr_operand_desc_t bc_map_operand_to_session(const lr_operand_t *src_op,
     case LR_VAL_IMM_F64:
         out.kind = LR_OP_KIND_IMM_F64;
         out.imm_f64 = src_op->imm_f64;
+        break;
+    case LR_VAL_IMM_F128:
+        out.kind = LR_OP_KIND_IMM_F128;
+        memcpy(out.imm_f128, src_op->imm_f128, sizeof(out.imm_f128));
         break;
     case LR_VAL_BLOCK:
         out.kind = LR_OP_KIND_BLOCK;

@@ -76,6 +76,7 @@ typedef struct lr_operand_desc {
         uint32_t vreg;
         int64_t imm_i64;
         double imm_f64;
+        uint8_t imm_f128[16];
         uint32_t block_id;
         uint32_t global_id;
     };
@@ -97,9 +98,10 @@ enum {
     LR_OP_KIND_GLOBAL  = 4,
     LR_OP_KIND_NULL    = 5,
     LR_OP_KIND_UNDEF   = 6,
+    LR_OP_KIND_IMM_F128 = 7,
 };
 
-enum { LR_OP_KIND_COUNT = LR_OP_KIND_UNDEF + 1 };
+enum { LR_OP_KIND_COUNT = LR_OP_KIND_IMM_F128 + 1 };
 
 #ifdef __cplusplus
 }

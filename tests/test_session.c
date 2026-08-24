@@ -3336,7 +3336,7 @@ int test_session_abi_info_contract(void) {
    before an existing one changes these constants and must therefore come with
    an ABI version bump; appending at the end does not. */
 int test_session_abi_enum_values_frozen(void) {
-    TEST_ASSERT_EQ(LIRIC_SESSION_ABI_VERSION, 1u, "published ABI version");
+    TEST_ASSERT_EQ(LIRIC_SESSION_ABI_VERSION, 2u, "published ABI version");
 
     TEST_ASSERT_EQ(LR_OP_RET, 0, "LR_OP_RET");
     TEST_ASSERT_EQ(LR_OP_RET_VOID, 1, "LR_OP_RET_VOID");
@@ -3394,7 +3394,8 @@ int test_session_abi_enum_values_frozen(void) {
     TEST_ASSERT_EQ(LR_OP_KIND_GLOBAL, 4, "LR_OP_KIND_GLOBAL");
     TEST_ASSERT_EQ(LR_OP_KIND_NULL, 5, "LR_OP_KIND_NULL");
     TEST_ASSERT_EQ(LR_OP_KIND_UNDEF, 6, "LR_OP_KIND_UNDEF");
-    TEST_ASSERT_EQ(LR_OP_KIND_COUNT, 7, "operand kind count sentinel");
+    TEST_ASSERT_EQ(LR_OP_KIND_IMM_F128, 7, "LR_OP_KIND_IMM_F128");
+    TEST_ASSERT_EQ(LR_OP_KIND_COUNT, 8, "operand kind count sentinel");
 
     TEST_ASSERT_EQ(LR_OK, 0, "LR_OK");
     TEST_ASSERT_EQ(LR_ERR_ARGUMENT, 1, "LR_ERR_ARGUMENT");
