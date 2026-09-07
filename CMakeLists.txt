@@ -1026,6 +1026,16 @@ add_executable(test_public_session tests/test_public_session.c)
 target_link_libraries(test_public_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 add_test(NAME public_session_c_oracle COMMAND test_public_session)
 
+if(UNIX)
+    add_executable(test_tmpdir_session tests/test_tmpdir_session.c)
+    target_link_libraries(test_tmpdir_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+    target_include_directories(test_tmpdir_session PRIVATE src)
+    target_compile_definitions(test_tmpdir_session PRIVATE
+        LIRIC_TEST_C_COMPILER="${CMAKE_C_COMPILER}")
+    add_test(NAME tmpdir_session_c_oracle
+        COMMAND test_tmpdir_session "${LIRIC_CTEST_WORK_ROOT}")
+endif()
+
 add_test(
     NAME cmake_install_public_session_oracle
     COMMAND ${CMAKE_COMMAND}

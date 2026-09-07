@@ -699,7 +699,7 @@ int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
     set_err(err, err_cap, "llvm backend executable linking is unsupported on this platform");
     return -1;
 #else
-    char obj_tpl[] = "/tmp/liric_llvm_obj_XXXXXX";
+    char *obj_tpl = NULL;
     int obj_fd = -1;
     lr_module_t *work = NULL;
     int rc = -1;
@@ -720,7 +720,7 @@ int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
     if (add_entry_wrapper_if_needed(work, entry_symbol, err, err_cap) != 0)
         goto done;
 
-    obj_fd = mkstemp(obj_tpl);
+    obj_fd = lr_platform_mkstemp("liric_llvm_obj_", &obj_tpl);
     if (obj_fd < 0) {
         set_err(err, err_cap, "mkstemp failed for temporary object");
         goto done;
@@ -738,7 +738,10 @@ int lr_llvm_emit_executable_path(lr_module_t *m, const lr_target_t *target,
 done:
     if (obj_fd >= 0)
         close(obj_fd);
-    unlink(obj_tpl);
+    if (obj_tpl) {
+        unlink(obj_tpl);
+        free(obj_tpl);
+    }
     if (work)
         lr_module_free(work);
     return rc;

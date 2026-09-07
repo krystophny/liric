@@ -22,4 +22,8 @@ void *lr_platform_dlsym_default(const char *name);
 
 int lr_platform_run_process(char *const argv[], bool quiet, int *out_status);
 
+/* Creates a private file in TMPDIR (or /tmp when unset/empty). The caller
+   owns the returned descriptor and allocated path, including unlinking it. */
+int lr_platform_mkstemp(const char *prefix, char **out_path);
+
 #endif

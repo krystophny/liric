@@ -5,6 +5,9 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -20,6 +23,40 @@
 #else
 #define LR_PLATFORM_CAN_USE_MAP_JIT 0
 #endif
+
+int lr_platform_mkstemp(const char *prefix, char **out_path) {
+    const char *dir = getenv("TMPDIR");
+    char *path;
+    size_t dir_len, prefix_len;
+    int fd, saved_errno;
+
+    if (!out_path || !prefix || !prefix[0] || strchr(prefix, '/')) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_path = NULL;
+    if (!dir || !dir[0])
+        dir = "/tmp";
+    dir_len = strlen(dir);
+    prefix_len = strlen(prefix);
+    if (dir_len > SIZE_MAX - prefix_len - 8) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    path = malloc(dir_len + prefix_len + 8);
+    if (!path)
+        return -1;
+    snprintf(path, dir_len + prefix_len + 8, "%s/%sXXXXXX", dir, prefix);
+    fd = mkstemp(path);
+    if (fd < 0) {
+        saved_errno = errno;
+        free(path);
+        errno = saved_errno;
+        return -1;
+    }
+    *out_path = path;
+    return fd;
+}
 
 void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {
     void *map = MAP_FAILED;
@@ -180,6 +217,13 @@ int lr_platform_run_process(char *const argv[], bool quiet, int *out_status) {
 }
 
 #else
+
+int lr_platform_mkstemp(const char *prefix, char **out_path) {
+    (void)prefix;
+    if (out_path)
+        *out_path = NULL;
+    return -1;
+}
 
 void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {
     (void)len;

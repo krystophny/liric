@@ -3,6 +3,7 @@
 #include "compile_mode.h"
 #include "llvm_backend.h"
 #include "objfile.h"
+#include "platform/platform_os.h"
 #include "target.h"
 
 #include <stdarg.h>
@@ -136,9 +137,9 @@ int lr_emit_module_object_stream(lr_module_t *module,
     mode = lr_compile_mode_from_env();
     if (mode == LR_COMPILE_LLVM) {
 #if defined(__unix__) || defined(__APPLE__)
-        char tmp_tpl[] = "/tmp/liric_emit_obj_XXXXXX";
+        char *tmp_tpl = NULL;
         char backend_err[256] = {0};
-        int fd = mkstemp(tmp_tpl);
+        int fd = lr_platform_mkstemp("liric_emit_obj_", &tmp_tpl);
         int rc = -1;
         if (fd < 0) {
             emit_err(err, err_cap, "temporary file creation failed");
@@ -150,6 +151,7 @@ int lr_emit_module_object_stream(lr_module_t *module,
         if (rc == 0)
             rc = copy_file_to_stream(tmp_tpl, out);
         unlink(tmp_tpl);
+        free(tmp_tpl);
         if (rc != 0) {
             emit_err(err, err_cap, "llvm object stream emission failed: %s",
                      backend_err[0] ? backend_err : "copy failed");

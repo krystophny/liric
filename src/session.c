@@ -3424,8 +3424,8 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
     if (mode == LR_COMPILE_LLVM) {
 #if defined(__unix__) || defined(__APPLE__)
         char backend_err[256] = {0};
-        char tmp_tpl[] = "/tmp/liric_emit_obj_XXXXXX";
-        int fd = mkstemp(tmp_tpl);
+        char *tmp_tpl = NULL;
+        int fd = lr_platform_mkstemp("liric_emit_obj_", &tmp_tpl);
         int rc = -1;
         if (fd < 0) {
             err_set(err, S_ERR_BACKEND, "temporary file creation failed");
@@ -3450,6 +3450,7 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
             }
         }
         unlink(tmp_tpl);
+        free(tmp_tpl);
         if (rc != 0) {
             err_set(err, S_ERR_BACKEND, "llvm object stream emission failed: %s",
                     backend_err[0] ? backend_err : "copy failed");
@@ -3530,7 +3531,7 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
 int lr_session_emit_exe_objects(struct lr_session *s, const char *path,
                                 const char *const *extra_objs, int n,
                                 session_error_t *err) {
-    char obj_tpl[] = "/tmp/liric_exe_obj_XXXXXX";
+    char *obj_tpl = NULL;
     int obj_fd = -1;
     const char *cc_env = NULL;
     const char *cc = NULL;
@@ -3548,7 +3549,7 @@ int lr_session_emit_exe_objects(struct lr_session *s, const char *path,
     if (n <= 0 || !extra_objs)
         return lr_session_emit_exe(s, path, err);
 
-    obj_fd = mkstemp(obj_tpl);
+    obj_fd = lr_platform_mkstemp("liric_exe_obj_", &obj_tpl);
     if (obj_fd < 0) {
         err_set(err, S_ERR_BACKEND, "mkstemp failed for temporary object");
         return -1;
@@ -3588,6 +3589,7 @@ int lr_session_emit_exe_objects(struct lr_session *s, const char *path,
 done:
     free(argv);
     unlink(obj_tpl);
+    free(obj_tpl);
     return rc;
 }
 

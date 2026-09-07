@@ -2504,7 +2504,7 @@ static int compat_build_runtime_bc(uint8_t **out_data, size_t *out_len) {
 #else
     char src_path[PATH_MAX];
     char include_root[PATH_MAX];
-    char tmp_bc[] = "/tmp/liric_runtime_bc_XXXXXX";
+    char *tmp_bc = NULL;
     const char *clang_bin = compat_select_runtime_clang();
     int fd = -1;
     int status = -1;
@@ -2520,13 +2520,14 @@ static int compat_build_runtime_bc(uint8_t **out_data, size_t *out_len) {
                                     include_root, sizeof(include_root)) != 0)
         return -1;
 
-    fd = mkstemp(tmp_bc);
+    fd = lr_platform_mkstemp("liric_runtime_bc_", &tmp_bc);
     if (fd < 0)
         return -1;
     close(fd);
     if (snprintf(include_arg, sizeof(include_arg), "-I%s", include_root) >=
         (int)sizeof(include_arg)) {
         unlink(tmp_bc);
+        free(tmp_bc);
         return -1;
     }
 
@@ -2544,15 +2545,18 @@ static int compat_build_runtime_bc(uint8_t **out_data, size_t *out_len) {
         };
         if (lr_platform_run_process(argv, true, &status) != 0 || status != 0) {
             unlink(tmp_bc);
+            free(tmp_bc);
             return -1;
         }
     }
 
     if (read_file_bytes(tmp_bc, &wrapped, &wrapped_len) != 0) {
         unlink(tmp_bc);
+        free(tmp_bc);
         return -1;
     }
     unlink(tmp_bc);
+    free(tmp_bc);
     if (compat_extract_raw_bitcode(wrapped, wrapped_len, &raw, &raw_len) != 0) {
         free(wrapped);
         return -1;
