@@ -4559,7 +4559,7 @@ static void compat_dump_function(lc_module_compat_t *mod,
     const compat_func_dump_entry_t *entry = NULL;
     if (!mod || !f || !out)
         return;
-    mem = tmpfile();
+    mem = lr_platform_tmpfile();
     if (!mem)
         return;
     lr_dump_func_opts(f, mod->mod, mem, dump_flags);
@@ -4681,7 +4681,7 @@ void lc_module_print(lc_module_compat_t *mod, FILE *out) {
 char *lc_module_sprint(lc_module_compat_t *mod, size_t *out_len) {
     char *buf = NULL;
     size_t len = 0;
-    FILE *f = tmpfile();
+    FILE *f = lr_platform_tmpfile();
     if (!f) return NULL;
     compat_dump_module(mod, f, 0);
     buf = compat_read_stream_to_string(f, &len);
@@ -8467,7 +8467,7 @@ int lc_module_export_sidecar_files(lc_module_compat_t *mod,
     }
 
     {
-        FILE *mem = tmpfile();
+        FILE *mem = lr_platform_tmpfile();
         if (!mem) {
             compat_set_err(err, errlen, "sidecar LLVM IR export failed");
             goto done;

@@ -1,5 +1,6 @@
 #include <liric/liric_session.h>
 #include <liric/liric_types.h>
+#include "platform/platform_os.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -90,7 +91,7 @@ static int test_f128_immediate_ir(void) {
     lr_emit_ret(session, LR_VREG(2, f128));
     if (lr_session_func_end_preserve_ir(session, &err) != 0)
         return fail("f128 function end");
-    tmp = tmpfile();
+    tmp = lr_platform_tmpfile();
     if (!tmp || lr_session_dump_ir(session, tmp, &err) != 0)
         return fail("f128 IR dump");
     rewind(tmp);

@@ -132,7 +132,7 @@ static char *module_to_ll_text(lr_module_t *m, size_t *out_len) {
     char *buf = NULL;
     if (!m)
         return NULL;
-    tmp = tmpfile();
+    tmp = lr_platform_tmpfile();
     if (!tmp)
         return NULL;
     lr_module_dump(m, tmp);

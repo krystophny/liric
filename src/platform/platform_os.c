@@ -58,6 +58,31 @@ int lr_platform_mkstemp(const char *prefix, char **out_path) {
     return fd;
 }
 
+FILE *lr_platform_tmpfile(void) {
+    char *path = NULL;
+    FILE *stream;
+    int fd = lr_platform_mkstemp("liric_stream_", &path);
+    int saved_errno;
+
+    if (fd < 0)
+        return NULL;
+    if (unlink(path) != 0) {
+        saved_errno = errno;
+        close(fd);
+        free(path);
+        errno = saved_errno;
+        return NULL;
+    }
+    free(path);
+    stream = fdopen(fd, "w+b");
+    if (!stream) {
+        saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+    }
+    return stream;
+}
+
 void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {
     void *map = MAP_FAILED;
 
@@ -223,6 +248,10 @@ int lr_platform_mkstemp(const char *prefix, char **out_path) {
     if (out_path)
         *out_path = NULL;
     return -1;
+}
+
+FILE *lr_platform_tmpfile(void) {
+    return NULL;
 }
 
 void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled) {

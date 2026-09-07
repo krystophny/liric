@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 void *lr_platform_alloc_jit_code(size_t len, bool *out_map_jit_enabled);
 void *lr_platform_alloc_rw(size_t len);
@@ -25,5 +26,8 @@ int lr_platform_run_process(char *const argv[], bool quiet, int *out_status);
 /* Creates a private file in TMPDIR (or /tmp when unset/empty). The caller
    owns the returned descriptor and allocated path, including unlinking it. */
 int lr_platform_mkstemp(const char *prefix, char **out_path);
+
+/* A seekable binary scratch stream in TMPDIR, unlinked before returning. */
+FILE *lr_platform_tmpfile(void);
 
 #endif

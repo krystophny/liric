@@ -1024,6 +1024,7 @@ add_test(NAME liric_tests COMMAND test_liric)
 
 add_executable(test_public_session tests/test_public_session.c)
 target_link_libraries(test_public_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+target_include_directories(test_public_session PRIVATE src)
 add_test(NAME public_session_c_oracle COMMAND test_public_session)
 
 if(UNIX)
@@ -1034,6 +1035,14 @@ if(UNIX)
         LIRIC_TEST_C_COMPILER="${CMAKE_C_COMPILER}")
     add_test(NAME tmpdir_session_c_oracle
         COMMAND test_tmpdir_session "${LIRIC_CTEST_WORK_ROOT}")
+    add_executable(test_tmpfile_stream tests/test_tmpfile_stream.c)
+    target_link_libraries(test_tmpfile_stream PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+    target_include_directories(test_tmpfile_stream PRIVATE src)
+    add_test(NAME tmpfile_stream_c_oracle
+        COMMAND test_tmpfile_stream "${LIRIC_CTEST_WORK_ROOT}")
+    file(MAKE_DIRECTORY "${LIRIC_CTEST_WORK_ROOT}/public_session_scratch")
+    set_tests_properties(public_session_c_oracle PROPERTIES ENVIRONMENT
+        "TMPDIR=${LIRIC_CTEST_WORK_ROOT}/public_session_scratch")
 endif()
 
 add_test(
