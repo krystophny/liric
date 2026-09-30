@@ -1055,6 +1055,15 @@ int test_dynelf_readelf_dynamic(void) {
     rc = system(cmd);
     TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0, "readelf shows R_X86_64_GLOB_DAT");
 
+    /* User-visible contract: a generated executable must not carry
+     * DT_TEXTREL. That flag means text needed relocation at load time, so
+     * the loader maps it writable+executable. Global references reach through
+     * the GOT instead, so no absolute relocation lands in .text. */
+    snprintf(cmd, sizeof(cmd), "readelf -d %s 2>/dev/null | grep -q 'TEXTREL'", path);
+    rc = system(cmd);
+    TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) != 0,
+                "readelf shows no DT_TEXTREL");
+
     snprintf(cmd, sizeof(cmd), "readelf -l %s 2>/dev/null | grep -q 'INTERP'", path);
     rc = system(cmd);
     TEST_ASSERT(WIFEXITED(rc) && WEXITSTATUS(rc) == 0, "readelf shows PT_INTERP");

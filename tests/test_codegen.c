@@ -131,7 +131,7 @@ int test_codegen_x86_global_reloc_uses_gotpcrel_when_jit_and_objctx(void) {
     char err[256] = {0};
     int rc;
     uint32_t gotpcrel_for_g = 0;
-    uint32_t non_gotpcrel_for_g = 0;
+    uint32_t total_for_g = 0;
     const uintptr_t far_addr = (uintptr_t)0x700000000000ULL;
 
     target = lr_target_host();
@@ -224,37 +224,52 @@ int test_codegen_x86_global_reloc_uses_gotpcrel_when_jit_and_objctx(void) {
         name = obj_ctx.symbols[r->symbol_idx].name;
         if (!name || strcmp(name, "g") != 0)
             continue;
-        if (r->type == LR_RELOC_X86_64_64 ||
-            r->type == LR_RELOC_X86_64_PC32)
-            non_gotpcrel_for_g++;
+        total_for_g++;
         if (r->type == LR_RELOC_X86_64_GOTPCREL)
             gotpcrel_for_g++;
     }
 
-    /* The session path must reach the global through the GOT. ABS64 puts a
-     * 64-bit absolute relocation in .text, which is what made ld emit
-     * DT_TEXTREL. PC32 is rejected here for a different reason: it is not a
-     * text relocation and would not set DT_TEXTREL by itself, but a symbol
-     * bound beyond rel32 from this code could not be encoded, and the GOT
-     * slot keeps the reachable range unbounded. */
+    /* Exhaustive: every relocation against g must be GOTPCREL. Counting only
+     * two buckets would let a third type (e.g. PLT32) slip through unnoted. */
     TEST_ASSERT(gotpcrel_for_g >= 2, "global load/store use gotpcrel relocations");
-    TEST_ASSERT_EQ(non_gotpcrel_for_g, 0,
-                   "global is not reached by abs64 or pc32");
+    TEST_ASSERT_EQ(gotpcrel_for_g, total_for_g,
+                   "every relocation against the global is gotpcrel");
     lr_jit_add_symbol(jit, "g", (void *)far_addr);
     TEST_ASSERT_EQ(lr_jit_patch_relocs(jit, &obj_ctx), 0,
                    "patch relocs succeeds with far global address");
     {
-        /* Positive evidence: the far address must have landed in a writable
-         * GOT slot. Without this the patch could leave disp32 == 0 and the
-         * "not baked into .text" scan below would still pass. */
-        int far_in_got = 0;
-        for (size_t off = 0; off + sizeof(uintptr_t) <= jit->data_size; off += sizeof(uintptr_t)) {
-            uintptr_t word = 0;
-            memcpy(&word, jit->data_buf + off, sizeof(word));
-            if (word == far_addr)
-                far_in_got = 1;
+        /* Positive evidence, computed from the encoding rather than scanned:
+         * follow each gotpcrel disp32 to the slot the instruction actually
+         * reads and require that slot to hold the far address. This closes a
+         * disp32 == 0 patch miss by construction, which a bare "address not
+         * present in .text" scan would pass. */
+        int checked = 0;
+        for (uint32_t i = 0; i < obj_ctx.num_relocs; i++) {
+            lr_obj_reloc_t *r = &obj_ctx.relocs[i];
+            const char *name;
+            int32_t disp = 0;
+            uintptr_t slot;
+            void *held = NULL;
+            if (r->symbol_idx >= obj_ctx.num_symbols)
+                continue;
+            name = obj_ctx.symbols[r->symbol_idx].name;
+            if (!name || strcmp(name, "g") != 0)
+                continue;
+            if (r->type != LR_RELOC_X86_64_GOTPCREL)
+                continue;
+            TEST_ASSERT((size_t)r->offset + 4 <= jit->code_size,
+                        "gotpcrel displacement field inside code");
+            memcpy(&disp, jit->code_buf + r->offset, sizeof(disp));
+            slot = (uintptr_t)(jit->code_buf + r->offset + 4) + (intptr_t)disp;
+            TEST_ASSERT(slot >= (uintptr_t)jit->data_buf &&
+                        slot + sizeof(void *) <= (uintptr_t)jit->data_buf + jit->data_size,
+                        "got slot lies inside the writable data mapping");
+            memcpy(&held, (void *)slot, sizeof(held));
+            TEST_ASSERT((uintptr_t)held == far_addr,
+                       "got slot holds the far global address");
+            checked++;
         }
-        TEST_ASSERT_EQ(far_in_got, 1, "far global address landed in a got slot");
+        TEST_ASSERT(checked >= 2, "both global accesses resolved through the got");
         /* Negative evidence: no absolute address in the instruction stream. */
         int found_far_in_text = 0;
         for (size_t off = 0; off + sizeof(uintptr_t) <= jit->code_size; off++) {
