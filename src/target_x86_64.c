@@ -2549,18 +2549,24 @@ static int x86_64_compile_emit(void *compile_ctx,
     case LR_OP_STORE: {
         emit_load_operand(cc, &ops[1], X86_RCX);
         size_t store_sz = lr_type_size(ops[0].type);
-        /* A store may legitimately carry a value narrower than the slot it
-           writes: a comparison result is i1 while the LOGICAL element it
-           initialises lives in a four-byte slot. Taking the width from the
-           VALUE alone emitted `mov %al,(%rcx)` into a stride-4 slot, leaving
-           the upper three bytes uninitialised while the matching load reads
-           four bytes - so a .false. element came back as uninitialised stack
-           garbage and printed .true., nondeterministically. When the
-           instruction declares a type, that declared width is the slot and it
-           wins if wider; a null declared type keeps the previous behaviour
-           exactly, and a declared width no wider than the value changes
-           nothing. */
-        if (desc->type != NULL) {
+        /* Narrow, documented exception: an i1 VALUE may legitimately arrive
+           in a slot wider than one byte - a comparison result is i1 while
+           the LOGICAL element it initialises occupies a four-byte slot. The
+           old code took the width from the VALUE alone and emitted
+           `mov %al,(%rcx)` into a stride-4 slot, leaving the upper three
+           bytes uninitialised against a four-byte load - a .false. element
+           came back as stack garbage and printed .true., nondeterministically.
+           The widening is restricted to i1 values on purpose: every i1 value
+           is canonicalised 0/1 across the full register before it reaches a
+           store (LR_OP_ICMP above ends in emit_movzx_rr; narrow loads are
+           movzx; narrow stores are byte-granular), so writing the declared
+           slot width stores canonical bits, never register garbage. Any
+           other narrower-value case (e.g. i8 into i32) keeps the previous
+           width exactly - widening THERE could overwrite bytes a caller
+           deliberately left alone, the same silent-corruption class this
+           guard fixes. A null declared type keeps the old behaviour. */
+        if (desc->type != NULL && ops[0].type != NULL &&
+            ops[0].type->kind == LR_TYPE_I1) {
             size_t slot_sz = lr_type_size(desc->type);
             if (slot_sz > store_sz)
                 store_sz = slot_sz;
