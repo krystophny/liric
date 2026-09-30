@@ -131,7 +131,7 @@ int test_codegen_x86_global_reloc_uses_gotpcrel_when_jit_and_objctx(void) {
     char err[256] = {0};
     int rc;
     uint32_t gotpcrel_for_g = 0;
-    uint32_t textrel_for_g = 0;
+    uint32_t non_gotpcrel_for_g = 0;
     const uintptr_t far_addr = (uintptr_t)0x700000000000ULL;
 
     target = lr_target_host();
@@ -226,24 +226,36 @@ int test_codegen_x86_global_reloc_uses_gotpcrel_when_jit_and_objctx(void) {
             continue;
         if (r->type == LR_RELOC_X86_64_64 ||
             r->type == LR_RELOC_X86_64_PC32)
-            textrel_for_g++;
+            non_gotpcrel_for_g++;
         if (r->type == LR_RELOC_X86_64_GOTPCREL)
             gotpcrel_for_g++;
     }
 
-    /* GOTPCREL keeps the 64-bit address out of .text: the instruction only
-     * carries a rel32 displacement to a writable .got slot, so ld emits no
-     * DT_TEXTREL. PC32 is also banned here because a symbol defined in this
-     * unit is not necessarily within rel32 of the code that reaches it. */
+    /* The session path must reach the global through the GOT. ABS64 puts a
+     * 64-bit absolute relocation in .text, which is what made ld emit
+     * DT_TEXTREL. PC32 is rejected here for a different reason: it is not a
+     * text relocation and would not set DT_TEXTREL by itself, but a symbol
+     * bound beyond rel32 from this code could not be encoded, and the GOT
+     * slot keeps the reachable range unbounded. */
     TEST_ASSERT(gotpcrel_for_g >= 2, "global load/store use gotpcrel relocations");
-    TEST_ASSERT_EQ(textrel_for_g, 0, "no text relocations against the global");
+    TEST_ASSERT_EQ(non_gotpcrel_for_g, 0,
+                   "global is not reached by abs64 or pc32");
     lr_jit_add_symbol(jit, "g", (void *)far_addr);
     TEST_ASSERT_EQ(lr_jit_patch_relocs(jit, &obj_ctx), 0,
                    "patch relocs succeeds with far global address");
-    /* The far target must have landed in a writable GOT slot, not in the
-     * instruction: scan the emitted code for the 8-byte far address, whose
-     * absence proves the reference stayed RIP-relative. */
     {
+        /* Positive evidence: the far address must have landed in a writable
+         * GOT slot. Without this the patch could leave disp32 == 0 and the
+         * "not baked into .text" scan below would still pass. */
+        int far_in_got = 0;
+        for (size_t off = 0; off + sizeof(uintptr_t) <= jit->data_size; off += sizeof(uintptr_t)) {
+            uintptr_t word = 0;
+            memcpy(&word, jit->data_buf + off, sizeof(word));
+            if (word == far_addr)
+                far_in_got = 1;
+        }
+        TEST_ASSERT_EQ(far_in_got, 1, "far global address landed in a got slot");
+        /* Negative evidence: no absolute address in the instruction stream. */
         int found_far_in_text = 0;
         for (size_t off = 0; off + sizeof(uintptr_t) <= jit->code_size; off++) {
             uintptr_t word = 0;
