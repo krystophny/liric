@@ -110,7 +110,7 @@ static int operand_to_desc_codegen(const lr_operand_t *op,
     }
 }
 
-int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
+int test_codegen_x86_global_reloc_uses_gotpcrel_when_jit_and_objctx(void) {
     const char *src =
         "@g = external global i64\n"
         "define i64 @f(i64 %x) {\n"
@@ -130,8 +130,8 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
     size_t code_len = 0;
     char err[256] = {0};
     int rc;
-    uint32_t abs64_for_g = 0;
-    uint32_t disallowed_for_g = 0;
+    uint32_t gotpcrel_for_g = 0;
+    uint32_t textrel_for_g = 0;
     const uintptr_t far_addr = (uintptr_t)0x700000000000ULL;
 
     target = lr_target_host();
@@ -224,18 +224,36 @@ int test_codegen_x86_global_reloc_uses_abs64_when_jit_and_objctx(void) {
         name = obj_ctx.symbols[r->symbol_idx].name;
         if (!name || strcmp(name, "g") != 0)
             continue;
-        if (r->type == LR_RELOC_X86_64_64)
-            abs64_for_g++;
-        if (r->type == LR_RELOC_X86_64_PC32 ||
-            r->type == LR_RELOC_X86_64_GOTPCREL)
-            disallowed_for_g++;
+        if (r->type == LR_RELOC_X86_64_64 ||
+            r->type == LR_RELOC_X86_64_PC32)
+            textrel_for_g++;
+        if (r->type == LR_RELOC_X86_64_GOTPCREL)
+            gotpcrel_for_g++;
     }
 
-    TEST_ASSERT(abs64_for_g >= 2, "global load/store use abs64 relocations");
-    TEST_ASSERT_EQ(disallowed_for_g, 0, "no rel32-style global relocations");
+    /* GOTPCREL keeps the 64-bit address out of .text: the instruction only
+     * carries a rel32 displacement to a writable .got slot, so ld emits no
+     * DT_TEXTREL. PC32 is also banned here because a symbol defined in this
+     * unit is not necessarily within rel32 of the code that reaches it. */
+    TEST_ASSERT(gotpcrel_for_g >= 2, "global load/store use gotpcrel relocations");
+    TEST_ASSERT_EQ(textrel_for_g, 0, "no text relocations against the global");
     lr_jit_add_symbol(jit, "g", (void *)far_addr);
     TEST_ASSERT_EQ(lr_jit_patch_relocs(jit, &obj_ctx), 0,
                    "patch relocs succeeds with far global address");
+    /* The far target must have landed in a writable GOT slot, not in the
+     * instruction: scan the emitted code for the 8-byte far address, whose
+     * absence proves the reference stayed RIP-relative. */
+    {
+        int found_far_in_text = 0;
+        for (size_t off = 0; off + sizeof(uintptr_t) <= jit->code_size; off++) {
+            uintptr_t word = 0;
+            memcpy(&word, jit->code_buf + off, sizeof(word));
+            if (word == far_addr)
+                found_far_in_text = 1;
+        }
+        TEST_ASSERT_EQ(found_far_in_text, 0,
+                       "far global address is not baked into .text");
+    }
     lr_jit_end_update(jit);
 
     m->obj_ctx = NULL;

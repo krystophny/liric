@@ -675,19 +675,23 @@ static void emit_load_operand(x86_compile_ctx_t *ctx,
             return;
         }
 
+        /* A movabs (R_X86_64_64) against a symbol referenced from .text puts
+         * a 64-bit relocation in a read-only section: ld then emits
+         * DT_TEXTREL and maps every ffc executable's text writable and
+         * relocated. Route through the GOT instead. The 64-bit address lives
+         * in a writable .got slot, so the instruction carries only a rel32
+         * displacement to that near slot and the symbol target itself may sit
+         * anywhere - including the far addresses the session JIT hands out. */
         if (ctx->jit) {
-            /*
-             * DIRECT/session JIT paths can map code/data beyond rel32 reach.
-             * Emit absolute relocations there to avoid out-of-range failures.
-             */
             emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                      rex(true, false, false, reg >= 8));
+                      rex(true, reg >= 8, false, false));
+            emit_byte(ctx->buf, &ctx->pos, ctx->buflen, 0x8B);
             emit_byte(ctx->buf, &ctx->pos, ctx->buflen,
-                      (uint8_t)(0xB8 + (reg & 7)));
-            size_t imm_off = ctx->pos;
-            emit_u64(ctx->buf, &ctx->pos, ctx->buflen, 0);
-            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)imm_off, sym_idx,
-                             LR_RELOC_X86_64_64);
+                      modrm(0, reg, 5)); /* mod=00, rm=5 = RIP-relative */
+            size_t disp_off = ctx->pos;
+            emit_u32(ctx->buf, &ctx->pos, ctx->buflen, 0);
+            lr_obj_add_reloc(ctx->obj_ctx, (uint32_t)disp_off, sym_idx,
+                             LR_RELOC_X86_64_GOTPCREL);
         } else {
             bool defined = false;
             if (op->global_id < ctx->sym_count)
