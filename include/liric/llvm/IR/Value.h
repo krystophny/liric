@@ -44,6 +44,14 @@ public:
         return name ? StringRef(name) : StringRef("");
     }
 
+    void takeName(Value *other) {
+        if (!other || other == this) return;
+        if (impl()->kind == LC_VAL_GLOBAL || other->impl()->kind == LC_VAL_GLOBAL)
+            throw std::runtime_error("liric: transferring global symbol names is not supported");
+        std::string name = other->getName().str();
+        other->setName("");
+        setName(name);
+    }
     bool hasName() const { return lc_value_has_name(impl()); }
 
     void print(raw_ostream &OS, bool IsForDebug = false) const {

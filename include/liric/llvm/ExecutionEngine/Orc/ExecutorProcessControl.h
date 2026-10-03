@@ -14,7 +14,7 @@ namespace orc {
 
 class ExecutorProcessControl {
 protected:
-    Triple TargetTriple;
+    Triple TargetTriple{LLVM_DEFAULT_TARGET_TRIPLE};
     std::shared_ptr<SymbolStringPool> SSP;
 
 public:

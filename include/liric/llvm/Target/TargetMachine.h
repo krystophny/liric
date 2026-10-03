@@ -26,19 +26,24 @@ inline thread_local ObjEmitState obj_emit_state;
 } // namespace detail
 
 class TargetMachine {
+    Triple triple_;
+    DataLayout layout_;
 public:
+    TargetMachine(): TargetMachine(Triple(LLVM_DEFAULT_TARGET_TRIPLE)) {}
+    explicit TargetMachine(const Triple &triple): triple_(triple),
+        layout_(triple.isAArch64()
+            ? "e-p:64:64-i64:64-i128:128-n32:64-S128"
+            : "e-p:64:64-i64:64-f80:128-n8:16:32:64-S128") {}
     virtual ~TargetMachine() = default;
 
     const DataLayout &getDataLayout() const {
-        static DataLayout dl;
-        return dl;
+        return layout_;
     }
 
-    DataLayout createDataLayout() const { return DataLayout(); }
+    DataLayout createDataLayout() const { return layout_; }
 
     const Triple &getTargetTriple() const {
-        static Triple t;
-        return t;
+        return triple_;
     }
 
     void setFastISel(bool) {}
@@ -59,9 +64,33 @@ public:
     TargetOptions Options;
 };
 
-inline std::string sys_getDefaultTargetTriple() { return ""; }
-inline std::string sys_getHostCPUName() { return "generic"; }
+inline TargetMachine *Target::createTargetMachine(
+    const Triple &triple, StringRef cpu, StringRef features,
+    const TargetOptions &options, std::optional<Reloc::Model> relocation,
+    std::optional<CodeModel::Model> code_model, CodeGenOptLevel level, bool jit) const {
+    (void)level; (void)jit;
+    if (!TargetRegistry::isNative(triple)
+            || (!cpu.empty() && cpu.str() != "generic") || !features.empty()
+            || (code_model && *code_model != CodeModel::Small)
+            || (relocation && *relocation != Reloc::Static && *relocation != Reloc::PIC_))
+        return nullptr;
+    auto *machine = new TargetMachine(triple);
+    machine->Options = options;
+    return machine;
+}
+inline TargetMachine *Target::createTargetMachine(
+    StringRef triple, StringRef cpu, StringRef features,
+    const TargetOptions &options, std::optional<Reloc::Model> relocation,
+    std::optional<CodeModel::Model> code_model, CodeGenOptLevel level, bool jit) const {
+    return createTargetMachine(Triple(triple), cpu, features, options,
+        relocation, code_model, level, jit);
+}
+inline MCSubtargetInfo *Target::createMCSubtargetInfo(
+    StringRef triple, StringRef cpu, StringRef features) const {
+    if (!TargetRegistry::isNative(Triple(triple))
+            || (!cpu.empty() && cpu.str() != "generic") || !features.empty()) return nullptr;
+    return new MCSubtargetInfo();
+}
 
 } // namespace liric_llvm
-
 #endif

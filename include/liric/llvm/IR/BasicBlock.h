@@ -3,6 +3,9 @@
 
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Value.h"
+#include "llvm/IR/InstrTypes.h"
+#include <stdexcept>
+#include <new>
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include <liric/llvm_compat_c.h>
@@ -96,6 +99,16 @@ public:
         return !b || !b->first;
     }
 
+    Instruction &back() const {
+        lr_block_t *block = impl_block();
+        if (!block || !block->last) throw std::runtime_error("liric: empty block has no last instruction");
+        lc_value_t *value = lc_value_alloc(impl()->owner);
+        if (!value) throw std::bad_alloc();
+        value->kind = LC_VAL_INSTRUCTION;
+        value->instruction.instruction = block->last;
+        value->type = block->last->type;
+        return *reinterpret_cast<Instruction *>(value);
+    }
     iterator end() { return iterator(iterator::at_end); }
     iterator getFirstInsertionPt() {
         return iterator(iterator::first_insertion);
@@ -104,7 +117,7 @@ public:
     Instruction *getTerminator() const {
         lr_block_t *b = impl_block();
         if (!b || !lc_block_has_terminator(b)) return nullptr;
-        return reinterpret_cast<Instruction *>(b);
+        return &back();
     }
 
     BasicBlock *getSinglePredecessor() const { return nullptr; }

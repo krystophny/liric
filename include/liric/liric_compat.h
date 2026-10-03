@@ -20,6 +20,7 @@ typedef enum lc_value_kind {
     LC_VAL_ARGUMENT,
     LC_VAL_BLOCK,
     LC_VAL_CONST_AGGREGATE,
+    LC_VAL_INSTRUCTION,
 } lc_value_kind_t;
 
 struct lc_module_compat;
@@ -39,6 +40,7 @@ typedef struct lc_value {
         struct { uint32_t param_idx; lr_func_t *func; } argument;
         struct { lr_block_t *block; } block;
         struct { const void *data; size_t size; } aggregate;
+        struct { struct lr_inst *instruction; } instruction;
     };
 } lc_value_t;
 
@@ -149,6 +151,7 @@ lc_value_t *lc_value_const_aggregate(lc_module_compat_t *mod, lr_type_t *type,
 void lc_value_set_name(lc_value_t *val, const char *name);
 const char *lc_value_get_name(const lc_value_t *val);
 bool lc_value_has_name(const lc_value_t *val);
+bool lc_value_needs_relocation(const lc_value_t *val);
 void lc_value_set_prefer_entry_dump(lc_value_t *val, bool prefer_entry_dump);
 bool lc_value_get_prefer_entry_dump(const lc_value_t *val);
 int lc_value_move_before_block_terminator(lc_value_t *val);
@@ -167,6 +170,7 @@ lr_type_t *lc_get_void_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_float_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_double_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_x86_fp80_type(lc_module_compat_t *mod);
+lr_type_t *lc_get_fp128_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_ptr_type(lc_module_compat_t *mod);
 lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem);
 bool lc_type_is_integer(lr_type_t *ty);
@@ -177,6 +181,8 @@ unsigned lc_type_primitive_size_bits(lr_type_t *ty);
 size_t lc_type_size_bits(lr_type_t *ty);
 size_t lc_type_store_size(lr_type_t *ty);
 size_t lc_type_alloc_size(lr_type_t *ty);
+size_t lc_type_abi_align(lr_type_t *ty);
+size_t lc_type_struct_offset(lr_type_t *ty, unsigned index);
 lr_type_t *lc_type_struct_field(lr_type_t *ty, unsigned idx);
 lr_type_t *lc_type_contained(lr_type_t *ty, unsigned idx);
 unsigned lc_type_struct_num_fields(lr_type_t *ty);

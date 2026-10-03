@@ -28,6 +28,17 @@ public:
         BitCast = 49,
     };
 
+    bool isTerminator() const {
+        lc_value_t *value = impl();
+        if (!value || value->kind != LC_VAL_INSTRUCTION) return false;
+        auto *instruction = value->instruction.instruction;
+        if (!instruction) return false;
+        switch (instruction->op) {
+            case LR_OP_RET: case LR_OP_RET_VOID: case LR_OP_BR:
+            case LR_OP_CONDBR: case LR_OP_UNREACHABLE: return true;
+            default: return false;
+        }
+    }
     void eraseFromParent() {}
     BasicBlock *getParent() const { return nullptr; }
     Function *getFunction() const {

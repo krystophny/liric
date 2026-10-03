@@ -1040,9 +1040,9 @@ public:
         return static_cast<Constant *>(Value::wrap(ptr));
     }
 
-    Value *CreateGlobalString(StringRef Str, const Twine &Name = "",
+    Constant *CreateGlobalString(StringRef Str, const Twine &Name = "",
                               unsigned AddressSpace = 0) {
-        return CreateGlobalStringPtr(Str, Name, AddressSpace);
+        return static_cast<Constant *>(CreateGlobalStringPtr(Str, Name, AddressSpace));
     }
 
     Value *CreateIntrinsic(Intrinsic::ID ID, ArrayRef<Type *> Types,

@@ -3,6 +3,11 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
+#include <iterator>
+#include <stdexcept>
+#include <llvm/IR/GlobalAlias.h>
+#include <llvm/Transforms/Utils/ModuleUtils.h>
 
 #include <liric/liric_compat.h>
 
@@ -2605,6 +2610,169 @@ static int test_first_insertion_call_moves_before_terminator() {
     return 0;
 }
 
+// Native layout is checked against the host C++ ABI, not a copied layout string.
+static int test_native_target_and_layout_contract() {
+    llvm::Triple native(LLVM_DEFAULT_TARGET_TRIPLE);
+    TEST_ASSERT(llvm::Triple().getArch() == llvm::Triple::UnknownArch, "empty triple is unknown");
+    TEST_ASSERT(llvm::Triple::normalize("x86_64-linux-gnu") == "x86_64-unknown-linux-gnu", "normalize missing vendor");
+    TEST_ASSERT(llvm::Triple("notx86_64-unknown-notlinux-gnu").getArch() == llvm::Triple::UnknownArch, "architecture token must match");
+    TEST_ASSERT(llvm::Triple("x86_64-unknown-notlinux-gnu").getOS() == llvm::Triple::UnknownOS, "OS token must match");
+    TEST_ASSERT(llvm::Triple("wasm32-unknown-wasi").isArch32Bit(), "wasm32 pointer width");
+    TEST_ASSERT(llvm::Triple("wasm64-unknown-wasi").isArch64Bit(), "wasm64 pointer width");
+    std::string error;
+    const llvm::Target *target = llvm::TargetRegistry::lookupTarget(native, error);
+    TEST_ASSERT(target != nullptr && error.empty(), "host target available");
+    const char *unsupported[] = {"wasm32-unknown-emscripten", "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnueabi", "x86_64-unknown-linux-gnux32",
+        "x86_64-unknown-linux-gnu-coff", "aarch64-apple-darwin-gnueabi"};
+    for (const char *text: unsupported) {
+        TEST_ASSERT(llvm::TargetRegistry::lookupTarget(llvm::Triple(text), error) == nullptr, "incompatible target rejected");
+        TEST_ASSERT(!error.empty(), "unsupported target diagnostic");
+    }
+    std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(native,
+        "generic", "", llvm::TargetOptions(), llvm::Reloc::PIC_));
+    TEST_ASSERT(machine != nullptr, "native machine created");
+    TEST_ASSERT(machine->getTargetTriple() == native, "requested native triple retained");
+    TEST_ASSERT(target->createTargetMachine(native, "invented-cpu", "", llvm::TargetOptions()) == nullptr, "unknown CPU rejected");
+    TEST_ASSERT(target->createTargetMachine(native, "generic", "+invented-feature", llvm::TargetOptions()) == nullptr, "unknown feature rejected");
+    llvm::LLVMContext ctx;
+    llvm::Module mod("native_layout", ctx);
+    auto layout = machine->createDataLayout();
+    mod.setDataLayout(layout);
+    mod.setTargetTriple(native.getTriple());
+    TEST_ASSERT(mod.getDataLayout().getStringRepresentation() == layout.getStringRepresentation(), "module layout roundtrip");
+    TEST_ASSERT(mod.getTargetTriple().str() == native.str(), "module triple roundtrip");
+    TEST_ASSERT_EQ(layout.getPointerSize(), sizeof(void *), "native pointer ABI");
+    auto *i8 = llvm::Type::getInt8Ty(ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    auto *i64 = llvm::Type::getInt64Ty(ctx);
+    TEST_ASSERT_EQ(layout.getTypeAllocSize(i32), sizeof(int32_t), "native integer size");
+    TEST_ASSERT_EQ(layout.getABITypeAlign(i32), alignof(int32_t), "native integer alignment");
+    struct NativeFields { uint8_t a; uint64_t b; uint8_t c; };
+    llvm::Type *fields[] = {i8, i64, i8};
+    auto *structure = llvm::StructType::get(ctx, fields);
+    const auto *structure_layout = layout.getStructLayout(structure);
+    TEST_ASSERT_EQ(structure_layout->getElementOffset(1), offsetof(NativeFields, b), "native padding before wide field");
+    TEST_ASSERT_EQ(structure_layout->getElementOffset(2), offsetof(NativeFields, c), "native final field offset");
+    TEST_ASSERT_EQ(structure_layout->getSizeInBytes(), sizeof(NativeFields), "native trailing padding");
+    llvm::Type *packed_fields[] = {i8, i32};
+    const auto *packed = layout.getStructLayout(llvm::StructType::get(ctx, packed_fields, true));
+    TEST_ASSERT_EQ(packed->getElementOffset(1), 1, "packed field offset");
+    TEST_ASSERT_EQ(packed->getSizeInBytes(), 5, "packed structure size");
+    for (const char *text: {"E-p:64:64", "e-p:128:128", "e-p0:32:32", "e-i64:32"}) {
+        bool rejected = false;
+        try { llvm::DataLayout unsupported_layout(text); }
+        catch (const std::runtime_error &) { rejected = true; }
+        TEST_ASSERT(rejected, "incompatible data layout rejected");
+    }
+    auto host = llvm::orc::JITTargetMachineBuilder::detectHost();
+    TEST_ASSERT(host && host->getTargetTriple() == native, "ORC detects explicit host");
+    llvm::orc::JITTargetMachineBuilder cross(llvm::Triple("wasm32-unknown-wasi"));
+    auto cross_machine = cross.createTargetMachine();
+    TEST_ASSERT(!cross_machine, "ORC rejects cross target");
+    llvm::consumeError(cross_machine.takeError());
+    return 0;
+}
+
+static int test_module_iteration_and_real_terminators() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("iteration", ctx);
+    TEST_ASSERT_EQ(std::distance(mod.begin(), mod.end()), 0, "empty module iteration");
+    auto *type = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), false);
+    auto *declaration = llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, "declaration", &mod);
+    auto *definition = llvm::Function::Create(type, llvm::GlobalValue::ExternalLinkage, "definition", &mod);
+    auto *entry = llvm::BasicBlock::Create(ctx, "entry", definition);
+    llvm::IRBuilder<> builder(entry);
+    TEST_ASSERT(entry->getTerminator() == nullptr, "empty block has no terminator");
+    builder.CreateAlloca(llvm::Type::getInt32Ty(ctx));
+    TEST_ASSERT(!entry->back().isTerminator() && entry->getTerminator() == nullptr, "ordinary last instruction is not a terminator");
+    auto *exit = llvm::BasicBlock::Create(ctx, "exit", definition);
+    builder.CreateBr(exit);
+    TEST_ASSERT(entry->back().isTerminator() && entry->getTerminator() != nullptr, "branch terminates entry");
+    builder.SetInsertPoint(exit);
+    builder.CreateRetVoid();
+    TEST_ASSERT(exit->back().isTerminator(), "void return terminates block");
+    TEST_ASSERT(declaration->isDeclaration() && !definition->isDeclaration(), "declaration and definition preserved");
+    TEST_ASSERT_EQ(std::distance(mod.begin(), mod.end()), 2, "two functions in module");
+    auto it = mod.begin();
+    TEST_ASSERT(&*it++ == declaration && &*it == definition, "function insertion order and identity");
+    TEST_ASSERT(mod.getFunction("definition") == definition, "lookup does not duplicate wrappers");
+    TEST_ASSERT(lc_func_declare(mod.getCompat(), "lazy", type->impl()) != nullptr, "C API declaration inserted");
+    const llvm::Module &constant = mod;
+    TEST_ASSERT_EQ(std::distance(constant.begin(), constant.end()), 3, "iteration includes C API functions");
+    auto last = std::next(constant.begin(), 2);
+    TEST_ASSERT(last->getName().str() == "lazy", "const iterator materializes lazy wrapper");
+    return 0;
+}
+
+static int test_wide_bits_and_explicit_unsupported_constants() {
+    uint64_t short_words[] = {42};
+    llvm::APInt zero_extended(128, llvm::ArrayRef<uint64_t>(short_words));
+    TEST_ASSERT(zero_extended.getRawData()[0] == 42 && zero_extended.getRawData()[1] == 0, "missing words zero-filled");
+    uint64_t masked_words[] = {0x1ff};
+    llvm::APInt masked(8, llvm::ArrayRef<uint64_t>(masked_words));
+    TEST_ASSERT(masked.getZExtValue() == 255 && masked.getSExtValue() == -1, "subword masking and signed interpretation");
+    TEST_ASSERT(!(masked == uint64_t(511)), "integer comparison does not truncate operand");
+    TEST_ASSERT(masked.sext(128).getSExtValue() == -1, "wide sign extension");
+    uint64_t x87_words[] = {0x8000000000000001ULL, 0x3fff}; // 1 + 2^-63
+    uint64_t quad_words[] = {1, 0x3fff000000000000ULL}; // 1 + 2^-112
+    llvm::APInt x87_bits(80, llvm::ArrayRef<uint64_t>(x87_words));
+    llvm::APInt quad_bits(128, llvm::ArrayRef<uint64_t>(quad_words));
+    TEST_ASSERT(x87_bits.getRawData()[0] == x87_words[0] && x87_bits.getRawData()[1] == x87_words[1], "x87 payload retained");
+    TEST_ASSERT(quad_bits.getRawData()[0] == quad_words[0] && quad_bits.getRawData()[1] == quad_words[1], "quad payload retained");
+    bool x87_rejected = false, quad_rejected = false;
+    try { llvm::APFloat value(llvm::APFloat::x87DoubleExtended(), x87_bits); }
+    catch (const std::runtime_error &) { x87_rejected = true; }
+    try { llvm::APFloat value(llvm::APFloat::IEEEquad(), quad_bits); }
+    catch (const std::runtime_error &) { quad_rejected = true; }
+    TEST_ASSERT(x87_rejected && quad_rejected, "unsupported precision cannot silently round to double");
+    llvm::LLVMContext ctx;
+    llvm::Module mod("extended_constants", ctx);
+    auto *fp80 = llvm::Type::getX86_FP80Ty(ctx);
+    auto *fp128 = llvm::Type::getFP128Ty(ctx);
+    TEST_ASSERT(fp80->getTypeID() == llvm::Type::X86_FP80TyID && fp80->getPrimitiveSizeInBits() == 80, "genuine fp80 type");
+    TEST_ASSERT(fp128->getTypeID() == llvm::Type::FP128TyID && fp128->getPrimitiveSizeInBits() == 128, "genuine fp128 type");
+    for (auto *type: {fp80, fp128}) {
+        bool rejected = false;
+        try { llvm::ConstantFP::get(type, 1.0); }
+        catch (const std::runtime_error &) { rejected = true; }
+        TEST_ASSERT(rejected, "extended typed constant rejected");
+    }
+    return 0;
+}
+
+static int test_relocation_and_unsupported_global_operations() {
+    llvm::LLVMContext ctx;
+    llvm::Module mod("relocations", ctx);
+    auto *i32 = llvm::Type::getInt32Ty(ctx);
+    auto *number = llvm::ConstantInt::get(i32, 7);
+    TEST_ASSERT(!number->needsRelocation(), "integer requires no relocation");
+    auto *global = new llvm::GlobalVariable(mod, i32, false,
+        llvm::GlobalValue::ExternalLinkage, number, "global_number");
+    TEST_ASSERT(global->needsRelocation(), "global address requires relocation");
+    llvm::Type *plain_fields[] = {i32, i32};
+    llvm::Constant *plain_values[] = {number, number};
+    auto *plain = llvm::ConstantStruct::get(llvm::StructType::get(ctx, plain_fields), plain_values);
+    TEST_ASSERT(!plain->needsRelocation(), "numeric aggregate requires no relocation");
+    llvm::Type *pointer_fields[] = {global->getType(), i32};
+    llvm::Constant *pointer_values[] = {global, number};
+    auto *relocated = llvm::ConstantStruct::get(llvm::StructType::get(ctx, pointer_fields), pointer_values);
+    TEST_ASSERT(relocated->needsRelocation(), "aggregate preserves global-address relocation");
+    auto *function_type = llvm::FunctionType::get(llvm::Type::getVoidTy(ctx), false);
+    auto *donor = llvm::Function::Create(function_type, llvm::GlobalValue::ExternalLinkage, "donor", &mod);
+    auto *receiver = llvm::Function::Create(function_type, llvm::GlobalValue::ExternalLinkage, "receiver", &mod);
+    bool name_rejected = false, alias_rejected = false, ctor_rejected = false;
+    try { receiver->takeName(donor); }
+    catch (const std::runtime_error &) { name_rejected = true; }
+    TEST_ASSERT(name_rejected && mod.getFunction("donor") == donor && mod.getFunction("receiver") == receiver, "unsupported transfer preserves global identities");
+    try { llvm::GlobalAlias::create(i32, 0, llvm::GlobalValue::ExternalLinkage, "alias", global, &mod); }
+    catch (const std::runtime_error &) { alias_rejected = true; }
+    try { llvm::appendToGlobalCtors(mod, donor, 65535); }
+    catch (const std::runtime_error &) { ctor_rejected = true; }
+    TEST_ASSERT(alias_rejected && ctor_rejected, "unsupported global operations reject explicitly");
+    return 0;
+}
+
 int main() {
     fprintf(stderr, "LLVM C++ compat test suite\n");
     fprintf(stderr, "==========================\n\n");
@@ -2621,6 +2789,10 @@ int main() {
     RUN_TEST(test_apint_apfloat);
     RUN_TEST(test_casting_helpers);
     RUN_TEST(test_target_select_noop);
+    RUN_TEST(test_native_target_and_layout_contract);
+    RUN_TEST(test_module_iteration_and_real_terminators);
+    RUN_TEST(test_wide_bits_and_explicit_unsupported_constants);
+    RUN_TEST(test_relocation_and_unsupported_global_operations);
 
     fprintf(stderr, "\nModule and Type tests:\n");
     RUN_TEST(test_context_and_module);

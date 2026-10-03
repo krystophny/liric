@@ -14,13 +14,15 @@ enum Model {
 };
 } // namespace Reloc
 
-enum class CodeModel {
+namespace CodeModel {
+enum Model {
     Tiny,
     Small,
     Kernel,
     Medium,
     Large
 };
+} // namespace CodeModel
 
 enum class CodeGenFileType {
     AssemblyFile,

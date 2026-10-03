@@ -2708,6 +2708,7 @@ typedef enum lc_value_kind {
     LC_VAL_ARGUMENT,
     LC_VAL_BLOCK,
     LC_VAL_CONST_AGGREGATE,
+    LC_VAL_INSTRUCTION,
 } lc_value_kind_t;
 
 enum {
@@ -2731,6 +2732,7 @@ typedef struct lc_value {
         struct { uint32_t param_idx; lr_func_t *func; } argument;
         struct { lr_block_t *block; lr_func_t *func; } block;
         struct { const void *data; size_t size; } aggregate;
+        struct { struct lr_inst *instruction; } instruction;
     };
 } lc_value_t;
 
@@ -3654,6 +3656,9 @@ lr_operand_desc_t lc_value_to_desc(lc_value_t *val) {
             d.kind = LR_OP_KIND_IMM_I64;
             d.imm_i64 = 0;
         }
+        break;
+    case LC_VAL_INSTRUCTION:
+        d.kind = LR_OP_KIND_UNDEF;
         break;
     case LC_VAL_CONST_AGGREGATE:
         d.kind = LR_OP_KIND_IMM_I64;
@@ -4965,6 +4970,15 @@ int lc_value_move_before_block_terminator(lc_value_t *val) {
     return -1;
 }
 
+bool lc_value_needs_relocation(const lc_value_t *value) {
+    lc_const_value_meta_t *meta;
+    if (!value) return false;
+    if (value->kind == LC_VAL_GLOBAL) return true;
+    if (value->kind != LC_VAL_CONST_AGGREGATE) return false;
+    meta = lookup_const_value_meta(value->owner, (lc_value_t *)value);
+    return meta && meta->relocs;
+}
+
 int lc_value_const_aggregate_add_reloc(lc_module_compat_t *mod,
                                         lc_value_t *aggregate,
                                         size_t offset,
@@ -5032,6 +5046,15 @@ lr_type_t *lc_get_ptr_type_to(lc_module_compat_t *mod, lr_type_t *elem) {
     return mod->mod->type_ptr;
 }
 
+lr_type_t *lc_get_fp128_type(lc_module_compat_t *mod) {
+    return mod && mod->mod ? mod->mod->type_fp128 : NULL;
+}
+
+size_t lc_type_abi_align(lr_type_t *ty) { return lr_type_align(ty); }
+size_t lc_type_struct_offset(lr_type_t *ty, unsigned index) {
+    return lr_struct_field_offset(ty, index);
+}
+
 bool lc_type_is_integer(lr_type_t *ty) {
     if (!ty) return false;
     return ty->kind >= LR_TYPE_I1 && ty->kind <= LR_TYPE_I64;
@@ -5041,7 +5064,7 @@ bool lc_type_is_floating(lr_type_t *ty) {
     if (!ty) return false;
     return ty->kind == LR_TYPE_FLOAT ||
            ty->kind == LR_TYPE_DOUBLE ||
-           ty->kind == LR_TYPE_X86_FP80;
+           ty->kind == LR_TYPE_X86_FP80 || ty->kind == LR_TYPE_FP128;
 }
 
 bool lc_type_is_pointer(lr_type_t *ty) {
@@ -5061,11 +5084,15 @@ unsigned lc_type_int_width(lr_type_t *ty) {
     }
 }
 
+unsigned lc_type_primitive_size_bits(lr_type_t *ty);
+
 size_t lc_type_size_bits(lr_type_t *ty) {
-    return lr_type_size(ty) * 8;
+    unsigned primitive = lc_type_primitive_size_bits(ty);
+    return primitive ? primitive : lr_type_size(ty) * 8;
 }
 
 size_t lc_type_store_size(lr_type_t *ty) {
+    if (ty && ty->kind == LR_TYPE_X86_FP80) return 10;
     return lr_type_size(ty);
 }
 
@@ -5086,6 +5113,7 @@ unsigned lc_type_primitive_size_bits(lr_type_t *ty) {
     case LR_TYPE_FLOAT:  return 32;
     case LR_TYPE_DOUBLE: return 64;
     case LR_TYPE_X86_FP80: return 80;
+    case LR_TYPE_FP128: return 128;
     case LR_TYPE_PTR:    return 64;
     default:             return 0;
     }

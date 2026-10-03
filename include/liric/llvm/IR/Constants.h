@@ -9,6 +9,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include <liric/liric_compat.h>
 #include <string>
+#include <stdexcept>
 #include <vector>
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -43,6 +44,8 @@ public:
         }
         return getNullValue(Ty);
     }
+
+    bool needsRelocation() const { return lc_value_needs_relocation(impl()); }
 
     bool isNullValue() const {
         return impl()->kind == LC_VAL_CONST_NULL;
@@ -150,6 +153,8 @@ public:
     static ConstantFP *get(Type *Ty, double V) {
         lc_module_compat_t *mod = liric_get_current_module();
         if (!mod || !Ty || !Ty->impl()) return nullptr;
+        if (!Ty->isFloatTy() && !Ty->isDoubleTy())
+            throw std::runtime_error("liric: extended floating-point constants are not supported");
         bool is_double = Ty->isDoubleTy();
         return static_cast<ConstantFP *>(Value::wrap(
             lc_value_const_fp(mod, Ty->impl(), V, is_double)));

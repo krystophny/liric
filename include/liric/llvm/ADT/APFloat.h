@@ -4,6 +4,7 @@
 #include "llvm/ADT/APInt.h"
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 
 namespace liric_llvm {
 
@@ -16,6 +17,8 @@ public:
     static const fltSemantics &IEEEhalf();
     static const fltSemantics &IEEEsingle();
     static const fltSemantics &IEEEdouble();
+    static const fltSemantics &x87DoubleExtended();
+    static const fltSemantics &IEEEquad();
 };
 
 inline const fltSemantics &fltSemantics::IEEEhalf() {
@@ -31,10 +34,25 @@ inline const fltSemantics &fltSemantics::IEEEdouble() {
     return s;
 }
 
+inline const fltSemantics &fltSemantics::x87DoubleExtended() {
+    static fltSemantics semantics;
+    return semantics;
+}
+inline const fltSemantics &fltSemantics::IEEEquad() {
+    static fltSemantics semantics;
+    return semantics;
+}
+
 class APFloat {
     double val_;
     bool is_single_;
 
+    static void requireSupported(const fltSemantics &semantics) {
+        if (&semantics == &fltSemantics::x87DoubleExtended()
+                || &semantics == &fltSemantics::IEEEquad()) {
+            throw std::runtime_error("liric: extended floating-point constants are not supported");
+        }
+    }
     static bool isSingleSemantics(const fltSemantics &sem) {
         return &sem == &fltSemantics::IEEEsingle();
     }
@@ -57,6 +75,7 @@ class APFloat {
 
     static double decodeBits(const fltSemantics &sem, uint64_t raw,
                              unsigned fallback_bit_width) {
+        requireSupported(sem);
         if (isSingleSemantics(sem)) {
             return decodeBits(raw, 32);
         }
@@ -74,7 +93,7 @@ public:
         : val_(decodeBits(sem, bits, 64)),
           is_single_(isSingleSemantics(sem)) {}
     APFloat(const fltSemantics &sem, const APInt &bits)
-        : val_(decodeBits(sem, bits.getZExtValue(), bits.getBitWidth())),
+        : val_((requireSupported(sem), decodeBits(sem, bits.getZExtValue(), bits.getBitWidth()))),
           is_single_(isSingleSemantics(sem)) {}
 
     double convertToDouble() const { return val_; }
@@ -94,16 +113,19 @@ public:
     bool isNegative() const { return val_ < 0.0; }
 
     static APFloat getZero(const fltSemantics &sem, bool negative = false) {
+        requireSupported(sem);
         APFloat r(negative ? -0.0 : 0.0);
         r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
         return r;
     }
     static APFloat getInf(const fltSemantics &sem, bool negative = false) {
+        requireSupported(sem);
         APFloat r(negative ? -__builtin_inf() : __builtin_inf());
         r.is_single_ = (&sem == &fltSemantics::IEEEsingle());
         return r;
     }
     static APFloat getNaN(const fltSemantics &sem, bool negative = false, uint64_t payload = 0) {
+        requireSupported(sem);
         (void)payload;
         double v = __builtin_nan("");
         APFloat r(negative ? -v : v);
@@ -111,6 +133,8 @@ public:
         return r;
     }
 
+    static const fltSemantics &x87DoubleExtended() { return fltSemantics::x87DoubleExtended(); }
+    static const fltSemantics &IEEEquad() { return fltSemantics::IEEEquad(); }
     using Semantics = APFloatBase::Semantics;
 
     enum opStatus {

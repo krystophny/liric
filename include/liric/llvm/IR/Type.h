@@ -144,6 +144,7 @@ public:
         if (isFloatTy()) return 32;
         if (isDoubleTy()) return 64;
         if (getTypeID() == X86_FP80TyID) return 80;
+        if (getTypeID() == FP128TyID) return 128;
         if (isPointerTy()) return 64;
         return 0;
     }
@@ -197,6 +198,8 @@ public:
     static Type *getVoidTy(LLVMContext &C);
     static Type *getFloatTy(LLVMContext &C);
     static Type *getDoubleTy(LLVMContext &C);
+    static Type *getX86_FP80Ty(LLVMContext &C);
+    static Type *getFP128Ty(LLVMContext &C);
     static IntegerType *getInt1Ty(LLVMContext &C);
     static IntegerType *getInt8Ty(LLVMContext &C);
     static IntegerType *getInt16Ty(LLVMContext &C);

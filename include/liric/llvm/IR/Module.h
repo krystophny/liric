@@ -8,6 +8,7 @@
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/GlobalAlias.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/ADT/StringRef.h"
@@ -21,6 +22,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
+#include <type_traits>
+#include <iterator>
 
 namespace liric_llvm {
 
@@ -34,6 +37,8 @@ class LIRIC_LLVM_COMPAT_HIDDEN Module {
     lc_module_compat_t *compat_;
     LLVMContext &ctx_;
     std::string name_;
+    std::string triple_;
+    DataLayout layout_;
     std::vector<std::unique_ptr<Function>> owned_functions_;
     std::vector<std::unique_ptr<GlobalVariable>> owned_globals_;
 
@@ -102,15 +107,11 @@ public:
     const LLVMContext &getContext() const { return ctx_; }
     StringRef getName() const { return name_; }
 
-    void setDataLayout(StringRef DL) { (void)DL; }
-    void setDataLayout(const class DataLayout &DL) { (void)DL; }
-    const class DataLayout &getDataLayout() const {
-        static DataLayout dl;
-        return dl;
-    }
-
-    void setTargetTriple(StringRef Triple) { (void)Triple; }
-    StringRef getTargetTriple() const { return ""; }
+    void setDataLayout(StringRef layout) { layout_ = DataLayout(layout); }
+    void setDataLayout(const DataLayout &layout) { layout_ = layout; }
+    const DataLayout &getDataLayout() const { return layout_; }
+    void setTargetTriple(StringRef triple) { triple_ = triple.str(); }
+    StringRef getTargetTriple() const { return triple_; }
 
     Function *getFunction(StringRef Name) const {
         lr_module_t *m = lc_module_get_ir(compat_);
@@ -197,7 +198,31 @@ public:
 
     void dump() const { lc_module_dump(compat_); }
 
-    using iterator = Function **;
+    template<bool IsConst> class function_iterator {
+        const Module *owner_ = nullptr;
+        lr_func_t *function_ = nullptr;
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = Function;
+        using difference_type = std::ptrdiff_t;
+        using pointer = std::conditional_t<IsConst, const Function *, Function *>;
+        using reference = std::conditional_t<IsConst, const Function &, Function &>;
+        function_iterator() = default;
+        function_iterator(const Module *owner, lr_func_t *function):
+            owner_(owner), function_(function) {}
+        reference operator*() const { return *owner_->getFunction(function_->name); }
+        auto operator->() const { return &operator*(); }
+        function_iterator &operator++() { function_ = function_->next; return *this; }
+        function_iterator operator++(int) { auto previous = *this; ++*this; return previous; }
+        bool operator==(const function_iterator &other) const { return function_ == other.function_; }
+        bool operator!=(const function_iterator &other) const { return !(*this == other); }
+    };
+    using iterator = function_iterator<false>;
+    using const_iterator = function_iterator<true>;
+    iterator begin() { return iterator(this, getIR()->first_func); }
+    iterator end() { return iterator(this, nullptr); }
+    const_iterator begin() const { return const_iterator(this, getIR()->first_func); }
+    const_iterator end() const { return const_iterator(this, nullptr); }
 
     void addModuleFlag(unsigned, StringRef, unsigned) {}
     void addModuleFlag(unsigned, StringRef, Value *) {}
@@ -374,6 +399,18 @@ inline Type *Type::getDoubleTy(LLVMContext &C) {
     Type *ty = mod ? Type::wrap(lc_get_double_type(mod)) : nullptr;
     if (ty) detail::register_type_context(ty->impl(), &C);
     return ty;
+}
+inline Type *Type::getX86_FP80Ty(LLVMContext &context) {
+    auto *mod = context.getDefaultModule();
+    Type *type = mod ? Type::wrap(lc_get_x86_fp80_type(mod)) : nullptr;
+    if (type) detail::register_type_context(type->impl(), &context);
+    return type;
+}
+inline Type *Type::getFP128Ty(LLVMContext &context) {
+    auto *mod = context.getDefaultModule();
+    Type *type = mod ? Type::wrap(lc_get_fp128_type(mod)) : nullptr;
+    if (type) detail::register_type_context(type->impl(), &context);
+    return type;
 }
 inline IntegerType *Type::getInt1Ty(LLVMContext &C) {
     lc_module_compat_t *mod = C.getDefaultModule();
