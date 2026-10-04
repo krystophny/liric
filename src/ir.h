@@ -154,6 +154,10 @@ typedef struct lr_global {
     bool is_weak;
     uint32_t id;
     struct lr_global *next;
+    bool is_tls_control;
+    unsigned tls_mode;
+    size_t alignment;
+    struct lr_global *tls_control;
 } lr_global_t;
 
 typedef struct lr_module {
@@ -206,6 +210,8 @@ lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
 void lr_block_append(lr_block_t *b, lr_inst_t *inst);
 int lr_func_finalize(lr_func_t *f, lr_arena_t *a);
 bool lr_func_is_finalized(const lr_func_t *f);
+int lr_tls_prepare_module(lr_module_t *m);
+int lr_tls_lower_function(lr_func_t *f);
 lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
                                bool is_const);
 

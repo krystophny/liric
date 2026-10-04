@@ -1514,7 +1514,8 @@ static int finish_direct_compile(struct lr_session *s, void **out_addr,
         lr_compile_func_meta_t meta;
         lr_arena_t *arena = s->module->arena;
 
-        if (lr_func_finalize(s->cur_func, arena) != 0) {
+        if (lr_func_finalize(s->cur_func, arena) != 0 ||
+            lr_jit_materialize_globals(s->jit, s->module) != 0) {
             err_set(err, S_ERR_BACKEND, "function finalization failed");
             s->module->obj_ctx = NULL;
             if (should_close_update && s->jit->update_active)

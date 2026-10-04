@@ -390,6 +390,7 @@ endif()
 set(LIRIC_LIB_SOURCES
     src/arena.c
     src/ir.c
+    src/tls.c
     src/lr_float128.c
     src/ll_lexer.c
     src/ll_parser.c
@@ -1040,6 +1041,41 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     )
 endif()
 add_test(NAME liric_tests COMMAND test_liric)
+
+add_executable(test_tls tests/test_tls.c)
+target_link_libraries(test_tls PRIVATE liric ${LIRIC_PLATFORM_LIBS})
+target_include_directories(test_tls PRIVATE src)
+target_compile_definitions(test_tls PRIVATE
+    LIRIC_TLS_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/thread_local_storage.ll")
+add_test(NAME tls_storage_isel COMMAND test_tls)
+set_tests_properties(tls_storage_isel PROPERTIES ENVIRONMENT "LIRIC_COMPILE_MODE=isel")
+add_test(NAME tls_storage_roundtrip COMMAND test_tls --roundtrip)
+add_test(NAME tls_storage_copy_patch COMMAND test_tls)
+set_tests_properties(tls_storage_copy_patch PROPERTIES ENVIRONMENT "LIRIC_COMPILE_MODE=copy_patch")
+
+add_test(NAME tls_storage_object COMMAND ${CMAKE_COMMAND}
+    -DTEST_TLS=$<TARGET_FILE:test_tls> -DCC=${CMAKE_C_COMPILER}
+    -DDRIVER=${CMAKE_CURRENT_SOURCE_DIR}/tests/tls_object_driver.c
+    -DEXTERNAL_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/thread_local_external.ll
+    -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/tls-object-test
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_tls_object.cmake)
+
+find_program(LIRIC_TLS_LLVM_AS NAMES llvm-as llvm-as-21 llvm-as-20 llvm-as-19)
+if(LIRIC_TLS_LLVM_AS)
+    add_test(NAME tls_storage_bitcode COMMAND ${CMAKE_COMMAND}
+        -DTEST_TLS=$<TARGET_FILE:test_tls> -DLLVM_AS=${LIRIC_TLS_LLVM_AS}
+        -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/thread_local_storage.ll
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/tls-bitcode-test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_tls_bitcode.cmake)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    add_test(NAME tls_storage_executable COMMAND ${CMAKE_COMMAND}
+        -DTEST_TLS=$<TARGET_FILE:test_tls>
+        -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/thread_local_openmp.ll
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/tls-executable-test
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_tls_executable.cmake)
+endif()
 
 add_executable(test_public_session tests/test_public_session.c)
 target_link_libraries(test_public_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})

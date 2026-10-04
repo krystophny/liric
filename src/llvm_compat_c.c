@@ -1490,3 +1490,27 @@ int lr_llvm_compat_symbolize_code(const char *binary_path,
         *out_line = 0;
     return 0;
 }
+
+void lr_llvm_compat_global_set_tls(lc_module_compat_t *mod, lc_value_t *value, unsigned mode) {
+    if (!mod || !value || value->kind != LC_VAL_GLOBAL || mode > 4)
+        return;
+    lr_global_t *g = lc_module_lookup_global(mod, value->global.name);
+    if (g)
+        g->tls_mode = mode;
+}
+
+unsigned lr_llvm_compat_global_get_tls(lc_module_compat_t *mod, lc_value_t *value) {
+    if (!mod || !value || value->kind != LC_VAL_GLOBAL)
+        return 0;
+    lr_global_t *g = lc_module_lookup_global(mod, value->global.name);
+    return g ? g->tls_mode : 0;
+}
+
+void lr_llvm_compat_global_set_alignment(lc_module_compat_t *mod, lc_value_t *value, size_t alignment) {
+    if (!mod || !value || value->kind != LC_VAL_GLOBAL || !alignment ||
+        (alignment & (alignment - 1)))
+        return;
+    lr_global_t *g = lc_module_lookup_global(mod, value->global.name);
+    if (g)
+        g->alignment = alignment;
+}

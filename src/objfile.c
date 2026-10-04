@@ -1552,6 +1552,8 @@ static int obj_build_module(lr_module_t *m, const lr_target_t *target,
     }
 
     for (lr_global_t *g = m->first_global; g; g = g->next) {
+        if (g->tls_mode)
+            continue;
         if (g->is_external) {
             if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) == UINT32_MAX) {
                 m->obj_ctx = NULL;
@@ -1811,6 +1813,8 @@ static int obj_build_from_blobs(const lr_func_blob_t *blobs,
                     g->init_size,
                     nrel);
         }
+        if (g->tls_mode)
+            continue;
         if (g->is_external) {
             if (lr_obj_ensure_symbol(&out->ctx, g->name, false, 0, 0) ==
                 UINT32_MAX) {

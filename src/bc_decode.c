@@ -4557,6 +4557,7 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
             }
             case MODULE_CODE_GLOBALVAR: {
                 uint32_t strtab_off = 0, strtab_size = 0;
+                uint32_t alignment = 0, tls_mode = 0;
                 uint32_t type_idx;
                 uint32_t linkage = 0;
                 uint32_t init_id = 0;
@@ -4587,6 +4588,9 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                     is_const = (isconst_plus1 > 1);
                 }
 
+                size_t attr_offset = d->bc_version >= 2 ? 6 : 5;
+                if (r->record_len > attr_offset) alignment = (uint32_t)r->record[attr_offset];
+                if (r->record_len > attr_offset + 3) tls_mode = (uint32_t)r->record[attr_offset + 3];
                 gtype = bc_get_type(d, type_idx);
                 if (!gtype)
                     gtype = d->module->type_i8;
@@ -4616,6 +4620,9 @@ static bool bc_decode_module_block(bc_decoder_t *d, bc_reader_t *r, size_t end_p
                 if (g) {
                     g->is_external = is_external;
                     g->is_local = is_local;
+                    g->tls_mode = tls_mode;
+                    if (alignment && alignment <= 32)
+                        g->alignment = (size_t)1 << (alignment - 1);
                 }
 
                 lr_frontend_intern_symbol(d->module, global_name);

@@ -110,6 +110,10 @@ struct lr_global {
     bool is_weak;
     uint32_t id;
     struct lr_global *next;
+    bool is_tls_control;
+    unsigned tls_mode;
+    size_t alignment;
+    struct lr_global *tls_control;
 };
 
 /*

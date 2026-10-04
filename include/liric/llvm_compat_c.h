@@ -80,6 +80,10 @@ size_t lr_llvm_compat_linkage_scoped_global_name(const lc_module_compat_t *compa
                                                  int linkage,
                                                  char *out_name,
                                                  size_t out_name_cap);
+void lr_llvm_compat_global_set_tls(lc_module_compat_t *mod, lc_value_t *value, unsigned mode);
+unsigned lr_llvm_compat_global_get_tls(lc_module_compat_t *mod, lc_value_t *value);
+void lr_llvm_compat_global_set_alignment(lc_module_compat_t *mod, lc_value_t *value, size_t alignment);
+
 void lr_llvm_compat_apply_global_linkage(lc_module_compat_t *compat,
                                          lc_value_t *global_value,
                                          int linkage);

@@ -1,0 +1,25 @@
+file(MAKE_DIRECTORY "${WORK_DIR}")
+set(object "${WORK_DIR}/tls.o")
+set(program "${WORK_DIR}/tls-test")
+execute_process(COMMAND "${TEST_TLS}" --object "${object}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "TLS object emission failed: ${stdout}${stderr}")
+endif()
+set(external_object "${WORK_DIR}/tls-external.o")
+execute_process(COMMAND "${TEST_TLS}" --object "${EXTERNAL_FIXTURE}" "${external_object}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "TLS external object emission failed: ${stdout}${stderr}")
+endif()
+execute_process(COMMAND "${CC}" "${DRIVER}" "${object}" "${external_object}" -pthread -o "${program}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "TLS object link failed: ${stdout}${stderr}")
+endif()
+execute_process(COMMAND "${program}"
+    RESULT_VARIABLE result OUTPUT_VARIABLE stdout ERROR_VARIABLE stderr)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "TLS object behavior failed: ${stdout}${stderr}")
+endif()
+message(STATUS "${stdout}")

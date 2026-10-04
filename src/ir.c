@@ -798,6 +798,8 @@ static int run_func_peephole_passes(lr_func_t *f, lr_arena_t *a) {
 int lr_func_finalize(lr_func_t *f, lr_arena_t *a) {
     if (!f || !a)
         return -1;
+    if (lr_tls_lower_function(f) != 0)
+        return -1;
 
     if (lr_func_is_finalized(f))
         return 0;
@@ -3958,6 +3960,9 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                 dg->is_external = false;
                 dg->is_local = sg->is_local;
                 dg->is_weak = sg->is_weak;
+                dg->tls_mode = sg->tls_mode;
+                dg->alignment = sg->alignment;
+                dg->is_tls_control = sg->is_tls_control;
                 dg->init_data = NULL;
                 dg->init_size = 0;
                 dg->relocs = NULL;
@@ -3976,6 +3981,9 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
                     dg->is_const = sg->is_const;
                     dg->is_local = sg->is_local;
                     dg->is_weak = sg->is_weak;
+                    dg->tls_mode = sg->tls_mode;
+                    dg->alignment = sg->alignment;
+                    dg->is_tls_control = sg->is_tls_control;
                     dg->init_data = NULL;
                     dg->init_size = 0;
                     dg->relocs = NULL;
@@ -3988,6 +3996,9 @@ int lr_module_merge(lr_module_t *dest, lr_module_t *src) {
             ng->is_external = sg->is_external;
             ng->is_local = sg->is_local;
             ng->is_weak = sg->is_weak;
+            ng->tls_mode = sg->tls_mode;
+            ng->alignment = sg->alignment;
+            ng->is_tls_control = sg->is_tls_control;
             merge_copy_global_data(dest, ng, sg);
         }
     }
@@ -4582,12 +4593,14 @@ void lr_dump_global_opts(const lr_module_t *m, const lr_global_t *g, FILE *out,
     print_display_symbol_ref(out, '@', g->name, m);
     fprintf(out, " = ");
     if (g->is_external) {
-        fprintf(out, "external global ");
+        fprintf(out, "external ");
+        if (g->tls_mode) fprintf(out, "thread_local ");
+        fprintf(out, "global ");
         print_type(gty, out);
         fprintf(out, "\n");
         goto done;
     }
-    if (global_is_i8_array_literal(g)) {
+    if (!g->tls_mode && global_is_i8_array_literal(g)) {
         if (global_is_nul_terminated_c_string(g))
             fprintf(out, "private unnamed_addr constant ");
         else
@@ -4601,13 +4614,21 @@ void lr_dump_global_opts(const lr_module_t *m, const lr_global_t *g, FILE *out,
             fprintf(out, "\n");
         goto done;
     }
-    fprintf(out, "private %s ", g->is_const ? "constant" : "global");
+    if ((!g->tls_mode && !g->is_tls_control) || g->is_local)
+        fprintf(out, "private ");
+    if (g->tls_mode) {
+        const char *models[] = {"", "", "localdynamic", "initialexec", "localexec"};
+        if (g->tls_mode == 1) fprintf(out, "thread_local ");
+        else fprintf(out, "thread_local(%s) ", models[g->tls_mode]);
+    }
+    fprintf(out, "%s ", g->is_const ? "constant" : "global");
     print_type(gty, out);
     fprintf(out, " ");
     if ((g->init_data && g->init_size > 0) || g->relocs)
         dump_global_const_expr(m, g, gty, 0, false, out);
     else
         fprintf(out, "zeroinitializer");
+    if (g->alignment) fprintf(out, ", align %zu", g->alignment);
     fprintf(out, "\n");
 
 done:

@@ -398,7 +398,7 @@ static void compat_collect_module_scoped_locals(const lr_module_t *m,
     if (!m || !map)
         return;
     for (g = m->first_global; g; g = g->next) {
-        if (!g->name || !g->name[0])
+        if (!g->name || !g->name[0] || g->tls_mode)
             continue;
         if (compat_name_in_list(g->name, exclude, exclude_count))
             continue;
@@ -2948,7 +2948,7 @@ static void rebuild_symbol_caches(lc_module_compat_t *mod) {
         reserve_symbol_name_variants(mod, f->name);
     }
     for (g = mod->mod->first_global; g; g = g->next) {
-        if (!g->name || !g->name[0])
+        if (!g->name || !g->name[0] || g->tls_mode)
             continue;
         sym_id = lr_module_intern_symbol(mod->mod, g->name);
         if (sym_id == UINT32_MAX || ensure_symbol_cache_cap(mod, sym_id + 1u) != 0)
@@ -8183,7 +8183,7 @@ static int compat_add_to_jit_direct(lc_module_compat_t *mod, lr_jit_t *jit) {
 
     for (g = mod->mod->first_global; g; g = g->next) {
         void *addr = NULL;
-        if (!g->name || !g->name[0])
+        if (!g->name || !g->name[0] || g->tls_mode)
             continue;
         if (g->is_external) {
             addr = lr_jit_get_symbol(session_jit, g->name);

@@ -1,3 +1,4 @@
+#include <llvm/IR/GlobalVariable.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -6,6 +7,8 @@
 #include <cstddef>
 #include <iterator>
 #include <stdexcept>
+#include <atomic>
+#include <thread>
 #include <llvm/IR/GlobalAlias.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
@@ -455,6 +458,63 @@ static int test_parse_assembly_rejects_type_mismatch() {
     TEST_ASSERT(!err.getMessage().empty(), "invalid IR reports parse error");
     TEST_ASSERT(err.getMessage().find("type mismatch") != std::string::npos,
                 "error reports type mismatch");
+    return 0;
+}
+
+static int test_thread_local_global_storage() {
+    for (unsigned mode = 1; mode <= 4; mode++) {
+        llvm::LLVMContext ctx;
+        llvm::Module mod("tls_compat", ctx);
+        char global_name[40], function_name[40];
+        std::snprintf(global_name, sizeof(global_name), "compat_tls_%u", mode);
+        std::snprintf(function_name, sizeof(function_name), "get_compat_tls_%u", mode);
+        auto *i64 = llvm::Type::getInt64Ty(ctx);
+        llvm::GlobalVariable global(mod, i64, false,
+            llvm::GlobalValue::ExternalLinkage,
+            llvm::ConstantInt::get(i64, 17), global_name, nullptr,
+            llvm::GlobalValue::GeneralDynamicTLSModel);
+        global.setThreadLocalMode(static_cast<llvm::GlobalValue::ThreadLocalMode>(mode));
+        global.setAlignment(llvm::MaybeAlign(64));
+        auto *type = llvm::FunctionType::get(llvm::PointerType::getUnqual(ctx), false);
+        auto *function = llvm::Function::Create(type,
+            llvm::GlobalValue::ExternalLinkage, function_name, mod);
+        auto *entry = llvm::BasicBlock::Create(ctx, "entry", function);
+        llvm::IRBuilder<> builder(entry);
+        builder.CreateRet(&global);
+        llvm::orc::LLJIT jit;
+        TEST_ASSERT_EQ(jit.addModule(mod), 0, "compile TLS through compat API");
+        using getter_t = int64_t *(*)();
+        auto get = reinterpret_cast<getter_t>(jit.lookup(function_name));
+        TEST_ASSERT(get != nullptr, "find TLS getter");
+        auto *main_value = get();
+        TEST_ASSERT(main_value != nullptr, "main thread TLS address");
+        TEST_ASSERT_EQ(*main_value, 17, "main thread initializer");
+        *main_value = -99;
+        std::atomic<unsigned> arrived{0}, failures{0};
+        uintptr_t addresses[4] = {};
+        std::thread threads[4];
+        for (unsigned i = 0; i < 4; i++) {
+            threads[i] = std::thread([&, i] {
+                auto *value = get();
+                addresses[i] = reinterpret_cast<uintptr_t>(value);
+                if (*value != 17 || addresses[i] % 64 != 0)
+                    failures++;
+                *value = 100 + i;
+                arrived++;
+                while (arrived.load() != 4) std::this_thread::yield();
+                if (*get() != 100 + i || get() != value) failures++;
+            });
+        }
+        for (auto &thread : threads) thread.join();
+        TEST_ASSERT_EQ(failures.load(), 0, "thread values and initialization stay private");
+        TEST_ASSERT_EQ(*main_value, -99, "worker writes preserve main thread value");
+        for (unsigned i = 0; i < 4; i++) {
+            TEST_ASSERT(addresses[i] != reinterpret_cast<uintptr_t>(main_value),
+                "worker address differs from main thread");
+            for (unsigned j = 0; j < i; j++)
+                TEST_ASSERT(addresses[i] != addresses[j], "live worker addresses differ");
+        }
+    }
     return 0;
 }
 
@@ -2809,6 +2869,7 @@ int main() {
     RUN_TEST(test_constant_data_array_addnull);
     RUN_TEST(test_constant_struct_and_array_bytes);
     RUN_TEST(test_constant_array_single_aggregate_payload_preserved);
+    RUN_TEST(test_thread_local_global_storage);
     RUN_TEST(test_global_lookup_set_initializer_and_jit);
     RUN_TEST(test_internal_global_address_via_helper_call_jit);
     RUN_TEST(test_create_global_without_initializer_is_declaration);

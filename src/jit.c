@@ -1372,12 +1372,17 @@ static void *resolve_symbol_from_loaded_libraries(lr_jit_t *j, const char *name)
 static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
     const char *lookup = NULL;
     void *addr = NULL;
-    (void)j;
     if (!name || !name[0])
         return NULL;
     lookup = name;
     if ((unsigned char)lookup[0] == 1 && lookup[1] != '\0')
         lookup = lookup + 1;
+#if defined(__linux__)
+    if (strcmp(lookup, "__emutls_get_address") == 0) {
+        if (lr_jit_load_library(j, "libgcc_s.so.1") == 0)
+            return resolve_symbol_from_loaded_libraries(j, lookup);
+    }
+#endif
     addr = lr_platform_dlsym_default(lookup);
     if (!addr && lookup[0] == '_')
         addr = lr_platform_dlsym_default(lookup + 1);
@@ -1627,10 +1632,12 @@ static int apply_module_global_relocs(lr_jit_t *j, lr_module_t *m) {
 }
 
 int lr_jit_materialize_globals(lr_jit_t *j, lr_module_t *m) {
+    if (lr_tls_prepare_module(m) != 0)
+        return -1;
     int dbg_a = getenv("LIRIC_DEBUG_A") != NULL;
     /* First pass: allocate space and copy raw init_data for all globals */
     for (lr_global_t *g = m->first_global; g; g = g->next) {
-        if (!g->name || !g->name[0])
+        if (!g->name || !g->name[0] || g->tls_mode)
             continue;
         if (dbg_a && strcmp(g->name, "a") == 0) {
             void *probe = lookup_symbol(j, g->name);
@@ -2984,6 +2991,27 @@ void lr_jit_end_update(lr_jit_t *j) {
 void *lr_jit_get_symbol(lr_jit_t *j, const char *name) {
     if (!j || !name || !name[0])
         return NULL;
+    /* TLS addresses belong to the calling thread. Never cache the returned
+       object address under the original global symbol. */
+    size_t name_len = strlen(name);
+    static const char prefix[] = "__emutls_v.";
+    if (name_len > SIZE_MAX - sizeof(prefix))
+        return NULL;
+    char *control_name = malloc(sizeof(prefix) + name_len);
+    if (!control_name)
+        return NULL;
+    memcpy(control_name, prefix, sizeof(prefix) - 1);
+    memcpy(control_name + sizeof(prefix) - 1, name, name_len + 1);
+    void *control = lookup_symbol(j, control_name);
+    free(control_name);
+    if (control) {
+        void *runtime = lookup_symbol(j, "__emutls_get_address");
+        void *(*get_address)(void *) = NULL;
+        if (!runtime)
+            return NULL;
+        memcpy(&get_address, &runtime, sizeof(get_address));
+        return get_address(control);
+    }
     uint32_t hash = symbol_hash(name);
     void *addr = lookup_symbol_hashed(j, name, hash);
     if (addr)

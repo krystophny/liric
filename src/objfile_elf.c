@@ -1066,6 +1066,7 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     static const char libc_name[] = "libc.so.6";
     static const char libm_name[] = "libm.so.6";
     static const char libgcc_name[] = "libgcc_s.so.1";
+    static const char libgomp_name[] = "libgomp.so.1";
 
     /* Track referenced undefined symbols only. Declarations without relocations
        must not become runtime imports. Always inject "exit" for _start. */
@@ -1139,11 +1140,15 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     }
 
     bool needs_libgcc = false;
+    bool needs_libgomp = false;
     for (uint32_t i = 0; i < num_dynimport; i++) {
         const char *name = dyn_names[i];
         if (!name)
             continue;
-        if (strcmp(name, "__muldc3") == 0 ||
+        if (strncmp(name, "GOMP_", 5) == 0 || strncmp(name, "omp_", 4) == 0)
+            needs_libgomp = true;
+        if (strcmp(name, "__emutls_get_address") == 0 ||
+            strcmp(name, "__muldc3") == 0 ||
             strcmp(name, "__mulsc3") == 0 ||
             strcmp(name, "__mulxc3") == 0 ||
             strcmp(name, "__divdc3") == 0 ||
@@ -1151,7 +1156,6 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             strcmp(name, "__divxc3") == 0 ||
             strncmp(name, "_Unwind_", 8) == 0) {
             needs_libgcc = true;
-            break;
         }
     }
 
@@ -1165,6 +1169,11 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
     if (needs_libgcc) {
         libgcc_name_off = dynstr_size;
         dynstr_size += sizeof(libgcc_name); /* includes NUL */
+    }
+    size_t libgomp_name_off = 0;
+    if (needs_libgomp) {
+        libgomp_name_off = dynstr_size;
+        dynstr_size += sizeof(libgomp_name);
     }
     uint32_t *dyn_name_off = (uint32_t *)malloc(num_dynimport * sizeof(uint32_t));
     if (!dyn_name_off) {
@@ -1194,7 +1203,8 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
      * DT_STRSZ, DT_SYMENT, DT_RELA, DT_RELASZ, DT_RELAENT, DT_BIND_NOW,
      * DT_TEXTREL?(optional), DT_FLAGS, DT_FLAGS_1, DT_NULL */
     uint32_t num_dynamic_entries = (num_textrel_abs64 > 0 ? 15u : 14u) +
-                                   (needs_libgcc ? 1u : 0u);
+                                   (needs_libgcc ? 1u : 0u) +
+                                   (needs_libgomp ? 1u : 0u);
     size_t dynamic_size = (size_t)num_dynamic_entries * 16;
 
     /* -- Layout computation --
@@ -1671,6 +1681,10 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
             memcpy(dp, libgcc_name, sizeof(libgcc_name));
             dp += sizeof(libgcc_name);
         }
+        if (needs_libgomp) {
+            memcpy(dp, libgomp_name, sizeof(libgomp_name));
+            dp += sizeof(libgomp_name);
+        }
         for (uint32_t i = 0; i < num_dynimport; i++) {
             const char *name = dyn_names[i];
             size_t slen = strlen(name) + 1;
@@ -1744,6 +1758,9 @@ int write_elf_dynamic_executable_x86_64(FILE *out,
         if (needs_libgcc) {
             /* DT_NEEDED "libgcc_s.so.1" for compiler-rt complex/unwind helpers */
             w64(&dp, DT_NEEDED);  w64(&dp, libgcc_name_off);
+        }
+        if (needs_libgomp) {
+            w64(&dp, DT_NEEDED);  w64(&dp, libgomp_name_off);
         }
         /* DT_HASH */
         w64(&dp, DT_HASH);    w64(&dp, hash_vaddr);

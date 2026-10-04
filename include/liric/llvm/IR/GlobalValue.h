@@ -4,6 +4,10 @@
 #include "llvm/IR/Constants.h"
 #include <liric/llvm_compat_c.h>
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility push(hidden)
+#endif
+
 namespace liric_llvm {
 
 class Module;
@@ -29,6 +33,14 @@ public:
         PrivateLinkage,
         ExternalWeakLinkage,
         CommonLinkage,
+    };
+
+    enum ThreadLocalMode {
+        NotThreadLocal = 0,
+        GeneralDynamicTLSModel,
+        LocalDynamicTLSModel,
+        InitialExecTLSModel,
+        LocalExecTLSModel,
     };
 
     enum VisibilityTypes {
@@ -84,5 +96,9 @@ public:
 };
 
 } // namespace liric_llvm
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC visibility pop
+#endif
 
 #endif

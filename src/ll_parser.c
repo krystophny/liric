@@ -692,6 +692,15 @@ static void register_global_override(lr_parser_t *p, const char *name,
     uint32_t idx;
     if (!p || !name)
         return;
+    /* Earlier global initializers can reference a private definition before
+       its scoped name is known. Keep those relocations bound to this TU. */
+    const char *resolved = lr_module_symbol_name(p->module, id);
+    if (resolved && strcmp(resolved, name) != 0) {
+        for (lr_global_t *g = p->module->first_global; g; g = g->next)
+            for (lr_reloc_t *r = g->relocs; r; r = r->next)
+                if (strcmp(r->symbol_name, name) == 0)
+                    r->symbol_name = lr_arena_strdup(p->arena, resolved, strlen(resolved));
+    }
     idx = index_find_global_n(p, name, strlen(name), hash_name_n(name, strlen(name)));
     if (idx != UINT32_MAX) {
         p->global_map[idx].id = id;
@@ -3007,6 +3016,10 @@ static void parse_global(lr_parser_t *p) {
     bool saw_initializer = false;
     bool linkage_external = false;
     bool linkage_local = false;
+    unsigned tls_mode = 0;
+    const char *line_end = memchr(p->cur.start, '\n',
+        p->lex.src_len - (size_t)(p->cur.start - p->lex.src));
+    if (!line_end) line_end = p->lex.src + p->lex.src_len;
     next(p);
     expect(p, LR_TOK_EQUALS);
 
@@ -3014,7 +3027,24 @@ static void parse_global(lr_parser_t *p) {
     while (check(p, LR_TOK_EXTERNAL) || check(p, LR_TOK_INTERNAL) ||
            check(p, LR_TOK_PRIVATE) || check(p, LR_TOK_COMMON) ||
            check(p, LR_TOK_LINKONCE_ODR) || check(p, LR_TOK_DSOLOCAL) ||
-           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR)) {
+           check(p, LR_TOK_UNNAMED_ADDR) || check(p, LR_TOK_LOCAL_UNNAMED_ADDR) ||
+           token_equals(&p->cur, "thread_local")) {
+        if (token_equals(&p->cur, "thread_local")) {
+            tls_mode = 1;
+            next(p);
+            if (match(p, LR_TOK_LPAREN)) {
+                if (token_equals(&p->cur, "localdynamic")) tls_mode = 2;
+                else if (token_equals(&p->cur, "initialexec")) tls_mode = 3;
+                else if (token_equals(&p->cur, "localexec")) tls_mode = 4;
+                else {
+                    error(p, "unknown thread-local model");
+                    return;
+                }
+                next(p);
+                expect(p, LR_TOK_RPAREN);
+            }
+            continue;
+        }
         if (check(p, LR_TOK_EXTERNAL))
             linkage_external = true;
         if (check(p, LR_TOK_INTERNAL) || check(p, LR_TOK_PRIVATE))
@@ -3048,6 +3078,8 @@ static void parse_global(lr_parser_t *p) {
         strncmp(name, ".lc.constagg.", 12) != 0)
         global_name = scoped_local_global_name(p, name);
     lr_global_t *g = lr_global_create(p->module, global_name, ty, is_const);
+    g->tls_mode = tls_mode;
+    g->is_tls_control = strncmp(global_name, "__emutls_v.", 11) == 0;
     uint32_t sym_id = lr_frontend_intern_symbol(p->module, g->name);
     if (linkage_local)
         register_global_override(p, name, sym_id);
@@ -3213,6 +3245,14 @@ static void parse_global(lr_parser_t *p) {
         g->relocs = r;
     }
 
+    while (p->cur.start < line_end && p->cur.kind != LR_TOK_EOF) {
+        if (match(p, LR_TOK_ALIGN)) {
+            if (check(p, LR_TOK_INT_LIT)) {
+                g->alignment = (size_t)p->cur.int_val;
+            }
+        }
+        next(p);
+    }
     if (saw_initializer) {
         skip_line(p);
     } else {

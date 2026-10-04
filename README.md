@@ -199,3 +199,19 @@ Runnability/behavior parity remains guarded by `bench_compat_check`.
 | isel | ir | 3.290 | 0.131 | **25.11x** |
 | copy_patch | direct | 3.120 | 0.149 | **20.94x** |
 | copy_patch | ir | 3.274 | 0.149 | **22.02x** |
+
+### Thread-local globals
+
+LLVM IR `thread_local` globals and the LLVM compatibility API use emulated TLS
+with the GCC/compiler-rt `__emutls_get_address` ABI. Each thread receives its own
+aligned storage and a copy of the constant initializer. General-dynamic,
+local-dynamic, initial-exec and local-exec model selections preserve the same
+storage semantics through this lowering. Object files share control symbols
+across translation units; `lr_jit_get_symbol` returns the calling thread's address.
+
+Linux native executables load `libgcc_s.so.1` when TLS is used and `libgomp.so.1`
+when OpenMP functions are imported. This requires those runtime libraries on the
+execution host. Native ELF TLS relocations and interoperability with compiler
+objects using native TLS are not implemented; use emulated TLS in both objects.
+The registered TLS tests cover both native compilation modes, LLVM bitcode,
+IR serialization, separately emitted objects and a no-link OpenMP executable.

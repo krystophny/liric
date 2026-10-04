@@ -613,7 +613,7 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
                                        GlobalVariable *InsertBefore,
                                        ThreadLocalMode TLMode,
                                        unsigned AddressSpace) {
-    (void)InsertBefore; (void)TLMode; (void)AddressSpace;
+    (void)InsertBefore; (void)AddressSpace;
     GlobalVariable *created =
         M.createGlobalVariable(Name.c_str(), Ty, isConstant, Linkage);
     setCompatMod(M.getCompat());
@@ -621,6 +621,7 @@ inline GlobalVariable::GlobalVariable(Module &M, Type *Ty, bool isConstant,
         detail::register_value_wrapper(this,
             detail::lookup_value_wrapper(created));
         setLinkage(Linkage);
+        setThreadLocalMode(TLMode);
         if (Initializer) {
             Module::setCurrentModule(M.getCompat());
             setInitializer(Initializer);

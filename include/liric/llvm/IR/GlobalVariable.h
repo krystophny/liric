@@ -3,6 +3,8 @@
 
 #include "llvm/IR/GlobalValue.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/Alignment.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC visibility push(hidden)
@@ -14,15 +16,6 @@ class Constant;
 class Module;
 
 class GlobalVariable : public GlobalValue {
-public:
-    enum ThreadLocalMode {
-        NotThreadLocal = 0,
-        GeneralDynamicTLSModel,
-        LocalDynamicTLSModel,
-        InitialExecTLSModel,
-        LocalExecTLSModel,
-    };
-
 private:
     lc_module_compat_t *compat_mod_ = nullptr;
 
@@ -57,8 +50,21 @@ public:
         return lc_value_get_func(v) == nullptr;
     }
 
-    template <typename AlignTy>
-    void setAlignment(AlignTy A) { (void)A; }
+    void setThreadLocalMode(ThreadLocalMode mode) {
+        lr_llvm_compat_global_set_tls(compat_mod_, impl(), static_cast<unsigned>(mode));
+    }
+    ThreadLocalMode getThreadLocalMode() const {
+        return static_cast<ThreadLocalMode>(lr_llvm_compat_global_get_tls(compat_mod_, impl()));
+    }
+    bool isThreadLocal() const { return getThreadLocalMode() != NotThreadLocal; }
+
+    void setAlignment(Align alignment) {
+        lr_llvm_compat_global_set_alignment(compat_mod_, impl(), alignment.value());
+    }
+    void setAlignment(MaybeAlign alignment) {
+        lr_llvm_compat_global_set_alignment(compat_mod_, impl(), alignment.valueOrOne());
+    }
+
 };
 
 } // namespace liric_llvm
