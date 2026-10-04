@@ -1,39 +1,26 @@
-# LFortran + Liric Investigation Plan
+# LFortran compatibility goals
 
-## Scope
+Make the supported LIRIC backend a correct drop-in consumer path with minimal
+required upstream deltas. Both LLVM IR replay and compile-time API use must
+produce independently correct results under their declared scope.
 
-Goal: make Liric a drop-in backend for LFortran with minimal LFortran branch deltas versus upstream `main`.
+## Success
 
-Two required compatibility lanes:
+- Current hard crashes, unsupported ABI failures and semantic/output mismatches
+  are reproduced with exact producer/backend identities and assigned to their
+  actual owner.
+- Backend defects are fixed in LIRIC; genuine producer defects receive the
+  smallest upstream-compatible repair rather than a permanent backend workaround.
+- Focused regressions and the original affected consumer establish each repair.
+- A declared drop-in milestone has complete relevant replay/API evidence and
+  the promised absence of LLVM runtime dependencies in the WITH_LIRIC binary.
+- Missing producer tools/artifacts, unsupported cases and incomplete audit work
+  are explicit, never counted as parity.
 
-1. LLVM IR replay lane (`bench_compat_check` / `nightly_mass.sh`)
-2. Compile-time API lane (`WITH_LIRIC` LFortran binary running LFortran test suites directly)
-
-## Task Board Source
-
-- Active checklist: `docs/lfortran_mass/failure_task_list.md`
-- Taxonomy definitions: `docs/lfortran_failure_taxonomy.md`
-
-## Investigation Order
-
-1. `unsupported_abi` first (hard crashes / link ABI issues)
-2. `mismatch` next (runtime semantic/output drift)
-3. `lfortran_emit_fail` last and only if reproduced uniquely in `WITH_LIRIC` builds
-
-## Per-Test Workflow
-
-For each unchecked case in `failure_task_list.md`:
-
-1. Reproduce in LLVM IR replay lane (`tools/lfortran_mass/nightly_mass.sh`)
-2. Reproduce in compile-time API lane (`tools/lfortran_mass/lfortran_api_compat.sh`)
-3. Classify ownership:
-   - Liric runtime/JIT issue -> fix in `liric`
-   - LFortran emitter/front-end issue -> keep minimal LFortran patch, prefer upstream-compatible change
-4. Add/adjust a focused test in `liric` to lock regression
-5. Re-run both lanes and check off case only when both pass
-
-## Required Gates Before Marking Drop-In
-
-1. `nightly_mass.sh` gate passes (`mismatch_count=0`, `unsupported_abi=0`)
-2. `lfortran_api_compat.sh` passes reference + integration suites on CI matrix
-3. No LLVM runtime deps in `WITH_LIRIC` LFortran binary (checked by `lfortran_api_compat.sh`)
+The [case evidence](failure_task_list.md) and
+[taxonomy](../lfortran_failure_taxonomy.md) record observations. Internal
+investigation order and debugging technique are agent choices. Apply
+[development principles](https://github.com/lazy-fortran/fo/blob/main/doc/GOAL_DRIVEN_DEVELOPMENT.md)
+and [ROADMAP goals](../../ROADMAP.md); independent audit CI does not block useful
+local implementation. Historical recipes remain in
+[the earlier plan](https://github.com/krystophny/liric/blob/5bb0e02ebac0faf77249eabc492644bc525099cb/docs/lfortran_mass/investigation_plan.md).

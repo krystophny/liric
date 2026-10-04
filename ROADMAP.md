@@ -1,107 +1,49 @@
-# LIRIC roadmap
+# LIRIC goals
 
-## Compiler execution plan
+Provide correct public session/backend behavior and emitted artifacts for FFC
+and supported LLVM/WebAssembly consumers. Existing public API/ABI and language
+semantics remain authoritative. Apply
+[goals and architectural freedom](https://github.com/lazy-fortran/fo/blob/main/doc/GOAL_DRIVEN_DEVELOPMENT.md):
+defer internal architecture until needed and change it when evidence warrants.
 
-The full compiler roadmap is [ffc PLAN.md](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md);
-[fo Gremlin PLAN.md](https://github.com/lazy-fortran/fo/blob/main/PLAN.md) owns the
-shared continuous-testing/bootstrap provider. Follow the master stage order:
-complete that enabling stage and verify the ffc adapter before compiler-feature
-work; independent provider tasks and read-only review can proceed in parallel
-when their prerequisites are met. Use explicit serial main-session or parallel
-luna worktree mode, one integration controller, shared CLI/MCP semantics and
-bounded corpus sampling/retention. Fix fo workflow defects first; use the updated
-CLI during execution when MCP cannot reload. Local contracts below retain their
-owners and scope within this authorized implementation sequence; they do not
-exclude required modern standard Fortran facilities.
-Historical snapshots are dated evidence, not claims of current full green.
+## Current goals
 
-Snapshot: 2026-08-09. LIRIC owns the backend-neutral public session ABI,
-verification, serialization, and object emission used by ffc. Fortran
-semantics, descriptors, and lowering policy remain in FortFront/ffc.
+- [#523](https://github.com/krystophny/liric/issues/523): valid control-flow and
+  integer output survive public-session construction, serialization and emission.
+- [#533](https://github.com/krystophny/liric/issues/533): independent producer
+  builds supply usable artifacts; missing setup cannot masquerade as parity.
+- [#535](https://github.com/krystophny/liric/issues/535): dependency debug
+  information follows the selected downstream profile.
+- [Fo #205](https://github.com/lazy-fortran/fo/issues/205): reduce maintained
+  backend/test/documentation burden without shifting complexity between providers.
 
-## Current truth
+## Required behavior
 
-The audited baseline is `3facb898`. Producer/compatibility/nightly evidence
-is not green: compatibility [run 31074525402](https://github.com/krystophny/liric/actions/runs/31074525402)
-is red for missing `llvm-dwarfdump` on Linux and an incompatible macOS bison;
-nightly [run 31076199691](https://github.com/krystophny/liric/actions/runs/31076199691)
-fails while building LFortran (`LIBUNWIND`) and has missing result artifacts;
-the bench matrix [run 30805088672](https://github.com/krystophny/liric/actions/runs/30805088672)
-also lacks the `liric/liric_session.h` producer artifact. These failures are
-tracked by [#533](https://github.com/krystophny/liric/issues/533), which gates
-[#523](https://github.com/krystophny/liric/issues/523): they are not evidence
-for or against the serializer defect and must not be reported as semantic
-passes.
+Public operations expose sufficient types, lifetimes, ownership and errors for
+correct consumers. Valid IR retains definitions, control flow, symbols/types and
+target semantics through supported serialization/emission. Invalid IR is
+diagnosed and cannot produce reusable success. Public installed artifacts are
+actually consumable, not merely present in a checkout.
 
-The bounded blocker reproduced from `14ca403` was narrower and local to the
-producer artifact: `include/liric/liric_session.h` existed in the checkout but
-was omitted from the CMake install manifest. On Linux, the smallest probe was
-the file containing `#include <liric/liric_session.h>` and
-`int main(void) { return 0; }`, compiled with
-`cc -fsyntax-only -I<staged-prefix>/include probe.c`; it failed with
-`fatal error: liric/liric_session.h: No such file or directory`.
-This commit adds the header to the install list. The independent
-`public_session_c_oracle` test uses only the public header and library to
-execute a function returning 42 and to check rejected null/short ABI queries
-plus null-session function finalization. Focused evidence after the fix is
-`cmake --build build --target test_liric test_public_session -j2`, followed by
-`ctest --test-dir build --output-on-failure -R '^(liric_tests|public_session_c_oracle)$'`:
-100% pass. The install oracle now runs `cmake --install` into a clean staging
-prefix and compiles a fresh C probe against the staged
-`liric/liric_session.h`. The legacy `include/llvm` and `include/llvm-c`
-install entries are skipped with a configure-time status message when those
-optional trees are absent; this avoids turning a missing producer/compatibility
-artifact into a late install failure. The producer/nightly gates remain the
-red runs listed above and are not claimed as fixed here.
+Independent public producers and linked/executed consumers establish behavior.
+Repair defects in the owning layer and recheck FFC; do not mask invalid frontend
+input with backend special cases. Keep Fortran semantic policy in its owner.
 
-## Immediate order
+## Delivery and evidence
 
-1. Restore producer-build artifacts and the scheduled platform/tool
-   compatibility jobs under [#533](https://github.com/krystophny/liric/issues/533),
-   with explicit tool discovery, minimum versions, and a skip/fail policy
-   that names the missing tool or incompatible version.
-2. Keep the installed public session producer artifact covered by the CMake
-   install oracle. The source-tree header contract alone is insufficient for
-   downstream package consumers; verify the staged header with a fresh C
-   compile probe.
-3. Reduce #523 to a public C session producer. Verify the IR before and after
-   serialization, emit an object, link a small consumer, and compare behavior.
-   This assigns ownership between ffc's producer and LIRIC's serializer without
-   relying on ffc internals.
-4. Fix the owning layer, then run the same public producer through current ffc
-   generated-code/runtime gates.
-5. Freeze and version the session/serialized schema needed by ffc module and
-   runtime ABI work. Reject unknown major versions and target-incompatible
-   artifacts explicitly.
+[FFC PLAN](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) orders the
+compiler program. Actual consumer dependencies determine when a task can run;
+unrelated Fo cleanup and independent audit CI are not prerequisites. Use focused
+local evidence and publish verified increments promptly.
 
-## Contract
+The installed-header public-consumer repair has prior focused evidence.
+Historical producer/tool setup failures do not prove or disprove a serializer
+defect. Reproduce current behavior before attributing ownership or claiming green.
+Compatibility/nightly/benchmark campaigns report exact identities and unsupported/
+unrun work truthfully; performance audits stay advisory during development.
 
-- Session operations have explicit types, ownership, lifetime, error results,
-  and verification points. No hidden process-global state controls emission.
-- Serialization round-trips definitions, CFG/dominance, types, symbols,
-  target information, and required runtime declarations without depending on
-  insertion order.
-- Public headers and Fortran bindings are generated or checked from one API
-  definition. ABI changes update both in one commit.
-- Verification precedes object emission. A verifier failure cannot produce or
-  cache a reusable artifact.
-- Performance counters separate session construction, verification,
-  serialization, optimization, and object emission, with peak RSS and output
-  size.
-
-## Delivery gates
-
-Every ABI or serializer change needs:
-
-- a minimal public C-session behavioral reproducer and a deliberately invalid
-  negative case;
-- before/after serialization structural equivalence plus object
-  compile/link/run output;
-- current public-header and Fortran-binding compatibility tests;
-- the affected ffc generated-code/runtime cluster at pinned revisions; and
-- one full `fo` pipeline before the final commit.
-
-For performance claims, validate generated behavior first, interleave old/new
-runs on a controlled host, repeat, and report effect size and confidence
-interval. Update ffc's runtime/ABI documentation in the same linked changes
-when the public contract changes.
+[Direct-mode goals](TODO.md) and
+[LFortran compatibility goals](docs/lfortran_mass/investigation_plan.md) describe
+scoped behavior rather than compulsory debugging algorithms. Earlier detailed
+observations remain at
+[the pre-revision roadmap](https://github.com/krystophny/liric/blob/5bb0e02ebac0faf77249eabc492644bc525099cb/ROADMAP.md).
