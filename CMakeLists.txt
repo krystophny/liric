@@ -1598,7 +1598,6 @@ include(GNUInstallDirs)
 install(TARGETS liric ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
     include/liric/liric.h
-    include/liric/liric_legacy.h
     include/liric/liric_ir_shared.h
     include/liric/liric_session.h
     include/liric/liric_types.h

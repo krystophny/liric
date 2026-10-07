@@ -2,19 +2,6 @@
 #define LIRIC_LIRIC_H
 
 #include "ir.h"
-#include <stddef.h>
-#include <stdint.h>
-
-lr_module_t *lr_parse_ll(const char *src, size_t len, char *err, size_t errlen);
-lr_module_t *lr_parse_ll_streaming(const char *src, size_t len,
-                                   int (*on_func)(lr_func_t *func,
-                                                  lr_module_t *mod,
-                                                  void *ctx),
-                                   void *ctx, char *err, size_t errlen);
-lr_module_t *lr_parse_bc(const uint8_t *data, size_t len, char *err, size_t errlen);
-lr_module_t *lr_parse_wasm(const uint8_t *data, size_t len, char *err, size_t errlen);
-lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t errlen);
-void lr_module_free(lr_module_t *m);
-int lr_module_merge(lr_module_t *dest, lr_module_t *src);
+#include "liric_low_level.h"
 
 #endif

@@ -2,6 +2,7 @@
 #include "../src/bc_decode.h"
 #include "../src/ir.h"
 #include "../src/jit.h"
+#include "../src/liric.h"
 #include "../src/ll_parser.h"
 #include "../src/module_emit.h"
 #include "../src/objfile.h"
@@ -9,7 +10,6 @@
 #include "../src/wasm_decode.h"
 #include "../src/wasm_to_ir.h"
 #include <liric/liric.h>
-#include <liric/liric_legacy.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

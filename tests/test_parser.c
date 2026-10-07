@@ -1,6 +1,7 @@
 #include "../src/arena.h"
 #include "../src/ir.h"
 #include "../src/ll_parser.h"
+#include "../src/liric.h"
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>

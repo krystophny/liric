@@ -1,30 +1,17 @@
-#ifndef LIRIC_LEGACY_H
-#define LIRIC_LEGACY_H
+#ifndef LIRIC_LOW_LEVEL_H
+#define LIRIC_LOW_LEVEL_H
 
+#include <liric/liric_ir_shared.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <liric/liric_ir_shared.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/*
- * Legacy low-level API retained for internal plumbing and LLVM C++ compat.
- * New integrations should use <liric/liric.h> unified lr_compiler_* API.
- */
-
-typedef struct lr_module lr_module_t;
-typedef struct lr_func lr_func_t;
-typedef struct lr_block lr_block_t;
-typedef struct lr_type lr_type_t;
-typedef struct lr_global lr_global_t;
-typedef struct lr_jit lr_jit_t;
-
 typedef int (*lr_ll_func_cb_t)(lr_func_t *func, lr_module_t *mod, void *ctx);
 
-/* Frontend parsers */
 lr_module_t *lr_parse_ll(const char *src, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_ll_streaming(const char *src, size_t len,
                                    lr_ll_func_cb_t on_func, void *ctx,
@@ -32,12 +19,9 @@ lr_module_t *lr_parse_ll_streaming(const char *src, size_t len,
 lr_module_t *lr_parse_bc(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_wasm(const uint8_t *data, size_t len, char *err, size_t errlen);
 lr_module_t *lr_parse_auto(const uint8_t *data, size_t len, char *err, size_t errlen);
-
-/* Module lifecycle */
 void lr_module_free(lr_module_t *m);
 int lr_module_merge(lr_module_t *dest, lr_module_t *src);
 
-/* Composite type constructors */
 lr_type_t *lr_type_array_new(lr_module_t *m, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_vector_new(lr_module_t *m, lr_type_t *elem, uint64_t count);
 lr_type_t *lr_type_struct_new(lr_module_t *m, lr_type_t **fields,
@@ -46,34 +30,6 @@ lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
                             lr_type_t **params, uint32_t num_params,
                             bool vararg);
 
-#define LR_VREG(v, t) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_VREG, .vreg = (v), .type = (t), .global_offset = 0 })
-#define LR_IMM(v, t) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t), .global_offset = 0 })
-#define LR_IMM_F(v, t) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t), .global_offset = 0 })
-#define LR_IMM_F128(v, t) lr_operand_imm_f128((v), (t))
-#define LR_BLOCK(id) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_BLOCK, .block_id = (id), .type = NULL, .global_offset = 0 })
-#define LR_GLOBAL(id, t) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_GLOBAL, .global_id = (id), .type = (t), .global_offset = 0 })
-#define LR_NULL(t) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_NULL, .type = (t), .global_offset = 0 })
-#define LR_UNDEF(t) \
-    ((lr_operand_desc_t){ .kind = LR_OP_KIND_UNDEF, .type = (t), .global_offset = 0 })
-
-/* Construct a binary128 immediate without imposing a host floating-point
-   ABI on callers. The bytes use LLVM's little-endian binary128 layout. */
-lr_operand_desc_t lr_operand_imm_f128(const uint8_t bits[16], lr_type_t *type);
-
-/* Comparison predicates */
-enum {
-    LR_CMP_EQ = 0, LR_CMP_NE,
-    LR_CMP_SGT, LR_CMP_SGE, LR_CMP_SLT, LR_CMP_SLE,
-    LR_CMP_UGT, LR_CMP_UGE, LR_CMP_ULT, LR_CMP_ULE,
-};
-
-/* Low-level JIT API */
 lr_jit_t *lr_jit_create(void);
 lr_jit_t *lr_jit_create_for_target(const char *target_name);
 const char *lr_jit_host_target_name(void);

@@ -1,11 +1,19 @@
 #ifndef LIRIC_IR_SHARED_H
 #define LIRIC_IR_SHARED_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct lr_module lr_module_t;
+typedef struct lr_func lr_func_t;
+typedef struct lr_block lr_block_t;
+typedef struct lr_type lr_type_t;
+typedef struct lr_global lr_global_t;
+typedef struct lr_jit lr_jit_t;
 
 /* Explicit, append-only opcode values. These numbers are frozen public ABI:
    inserting a value before an existing one requires bumping
@@ -102,6 +110,31 @@ enum {
 };
 
 enum { LR_OP_KIND_COUNT = LR_OP_KIND_IMM_F128 + 1 };
+
+#define LR_VREG(v, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_VREG, .vreg = (v), .type = (t), .global_offset = 0 })
+#define LR_IMM(v, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_I64, .imm_i64 = (v), .type = (t), .global_offset = 0 })
+#define LR_IMM_F(v, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_IMM_F64, .imm_f64 = (v), .type = (t), .global_offset = 0 })
+#define LR_IMM_F128(v, t) lr_operand_imm_f128((v), (t))
+#define LR_BLOCK(id) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_BLOCK, .block_id = (id), .type = NULL, .global_offset = 0 })
+#define LR_GLOBAL(id, t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_GLOBAL, .global_id = (id), .type = (t), .global_offset = 0 })
+#define LR_NULL(t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_NULL, .type = (t), .global_offset = 0 })
+#define LR_UNDEF(t) \
+    ((lr_operand_desc_t){ .kind = LR_OP_KIND_UNDEF, .type = (t), .global_offset = 0 })
+
+/* Bytes use LLVM's little-endian binary128 layout. */
+lr_operand_desc_t lr_operand_imm_f128(const uint8_t bits[16], lr_type_t *type);
+
+enum {
+    LR_CMP_EQ = 0, LR_CMP_NE,
+    LR_CMP_SGT, LR_CMP_SGE, LR_CMP_SLT, LR_CMP_SLE,
+    LR_CMP_UGT, LR_CMP_UGE, LR_CMP_ULT, LR_CMP_ULE,
+};
 
 #ifdef __cplusplus
 }

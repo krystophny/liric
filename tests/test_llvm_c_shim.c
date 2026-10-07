@@ -1,5 +1,5 @@
 #include <liric/liric_compat.h>
-#include <liric/liric_legacy.h>
+#include "../src/liric_low_level.h"
 #include <stdio.h>
 #include <string.h>
 

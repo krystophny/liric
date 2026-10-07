@@ -1,13 +1,22 @@
 #ifndef LIRIC_COMPAT_H
 #define LIRIC_COMPAT_H
 
-#include <liric/liric_legacy.h>
+#include <liric/liric_ir_shared.h>
 #include <liric/liric_types.h>
 #include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Constructors used by the LLVM shim. */
+lr_type_t *lr_type_array_new(lr_module_t *m, lr_type_t *elem, uint64_t count);
+lr_type_t *lr_type_vector_new(lr_module_t *m, lr_type_t *elem, uint64_t count);
+lr_type_t *lr_type_struct_new(lr_module_t *m, lr_type_t **fields,
+                              uint32_t num_fields, bool packed);
+lr_type_t *lr_type_func_new(lr_module_t *m, lr_type_t *ret,
+                            lr_type_t **params, uint32_t num_params,
+                            bool vararg);
 
 /* Value kind tags */
 typedef enum lc_value_kind {

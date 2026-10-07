@@ -1,4 +1,5 @@
 #include "bc_decode.h"
+#include "liric_low_level.h"
 #include "ll_parser.h"
 #include "wasm_decode.h"
 #include "wasm_to_ir.h"

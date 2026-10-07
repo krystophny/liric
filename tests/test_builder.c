@@ -1,4 +1,4 @@
-#include <liric/liric_legacy.h>
+#include "../src/liric_low_level.h"
 #include <liric/liric_compat.h>
 #include <stdio.h>
 #include <stdlib.h>

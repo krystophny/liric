@@ -1,6 +1,5 @@
 #include "platform/platform_os.h"
 #include <liric/liric_compat.h>
-#include <liric/liric_legacy.h>
 
 #include <errno.h>
 #include <stdlib.h>

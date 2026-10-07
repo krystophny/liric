@@ -1,4 +1,5 @@
-#include <liric/liric_legacy.h>
+#include "../src/liric.h"
+#include "../src/jit.h"
 #include "ir.h"
 #include "jit.h"
 #include "target.h"

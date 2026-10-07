@@ -5,7 +5,7 @@
 #include <string>
 #include <system_error>
 
-#include <liric/liric_legacy.h>
+#include "../src/liric_low_level.h"
 #include <liric/liric_compat.h>
 
 #include <llvm/Config/llvm-config.h>
