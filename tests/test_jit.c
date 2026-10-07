@@ -89,7 +89,8 @@ static uintptr_t lr_test_capture_complex_vararg(
 }
 
 static int require_intrinsic_blob(const char *name) {
-    if (lr_platform_intrinsic_supported(name))
+    lr_platform_intrinsic_info_t info;
+    if (lr_platform_intrinsic_lookup(name, &info) != 0 && info.has_blob)
         return 1;
     fprintf(stderr, "  note: skipping intrinsic test (unsupported on this platform): %s\n", name);
     return 0;
@@ -2550,7 +2551,10 @@ int test_jit_llvm_intrinsic_extended_blob_coverage(void) {
         "llvm.is.fpclass.f32", "llvm.is.fpclass.f64",
     };
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        TEST_ASSERT(lr_platform_intrinsic_supported(names[i]), names[i]);
+        lr_platform_intrinsic_info_t info;
+        TEST_ASSERT(lr_platform_intrinsic_lookup(names[i], &info) != 0 &&
+                        info.has_blob,
+                    names[i]);
     }
 #endif
     return 0;

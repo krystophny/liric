@@ -1208,16 +1208,17 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
-    size_t n = lr_platform_intrinsic_count();
+    size_t n = lr_platform_intrinsic_registry_count();
     for (size_t i = 0; i < n; i++) {
-        const char *name = lr_platform_intrinsic_name(i);
+        const char *name = lr_platform_intrinsic_registry_name(i);
         lr_platform_intrinsic_info_t info;
         const uint8_t *blob_begin, *blob_end;
         void *addr = NULL;
         if (!name || lr_platform_intrinsic_lookup(name, &info) == 0)
             continue;
-        if (info.has_blob &&
-            lr_platform_intrinsic_blob_lookup(name, &blob_begin, &blob_end)) {
+        if (info.has_blob) {
+            blob_begin = info.blob_begin;
+            blob_end = info.blob_end;
             size_t blob_size = (size_t)(blob_end - blob_begin);
             size_t dest = align_up(j->code_size, 16);
             if (dest + blob_size > j->code_cap)

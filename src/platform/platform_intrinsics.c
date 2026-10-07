@@ -868,36 +868,6 @@ const char *lr_platform_intrinsic_registry_name(size_t idx) {
     return g_intrinsics[idx].name;
 }
 
-bool lr_platform_intrinsic_supported(const char *name) {
-    lr_platform_intrinsic_info_t info;
-    if (lr_platform_intrinsic_lookup(name, &info) == 0)
-        return false;
-    return info.has_blob;
-}
-
-bool lr_platform_intrinsic_blob_lookup(const char *name,
-                                       const uint8_t **begin,
-                                       const uint8_t **end) {
-    lr_platform_intrinsic_info_t info;
-    if (!begin || !end)
-        return false;
-    if (lr_platform_intrinsic_lookup(name, &info) == 0)
-        return false;
-    if (!info.has_blob)
-        return false;
-    *begin = info.blob_begin;
-    *end = info.blob_end;
-    return true;
-}
-
-size_t lr_platform_intrinsic_count(void) {
-    return lr_platform_intrinsic_registry_count();
-}
-
-const char *lr_platform_intrinsic_name(size_t idx) {
-    return lr_platform_intrinsic_registry_name(idx);
-}
-
 const char *lr_platform_intrinsic_libc_name(const char *name) {
     const char *canonical = normalize_intrinsic_name(name);
     const char *mapped;
@@ -1024,7 +994,9 @@ bool lr_platform_intrinsic_supported_for_target(const char *name,
     }
 
     /* Non-riscv64 targets: use host blob table */
-    return lr_platform_intrinsic_supported(canonical);
+    lr_platform_intrinsic_info_t info;
+    return lr_platform_intrinsic_lookup(canonical, &info) != 0 &&
+           info.has_blob;
 }
 
 bool lr_platform_intrinsic_blob_lookup_for_target(const char *name,
@@ -1049,5 +1021,13 @@ bool lr_platform_intrinsic_blob_lookup_for_target(const char *name,
         return true;
     }
 
-    return lr_platform_intrinsic_blob_lookup(canonical, begin, end);
+    {
+        lr_platform_intrinsic_info_t info;
+        if (lr_platform_intrinsic_lookup(canonical, &info) == 0 ||
+            !info.has_blob)
+            return false;
+        *begin = info.blob_begin;
+        *end = info.blob_end;
+        return true;
+    }
 }
