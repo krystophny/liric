@@ -207,9 +207,6 @@ if(WITH_REAL_LLVM_BACKEND)
 endif()
 
 option(WITH_LLVM_COMPAT "Build LLVM C++ compatibility layer tests" OFF)
-option(LIRIC_INSTALL_COMPAT_HEADERS
-    "Install deprecated liric_compat.h forwarding header"
-    OFF)
 if(WITH_REAL_LLVM_BACKEND AND WITH_LLVM_COMPAT)
     if(LIRIC_BACKEND_LLVM_VERSION_MAJOR LESS LIRIC_LLVM_COMPAT_MIN_MAJOR)
         message(FATAL_ERROR
@@ -1607,22 +1604,6 @@ install(FILES
     include/liric/liric_types.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
 )
-if(LIRIC_INSTALL_COMPAT_HEADERS)
-    install(FILES
-        include/liric/liric_compat.h
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/liric
-    )
-endif()
-foreach(LIRIC_OPTIONAL_INCLUDE_DIR IN ITEMS include/llvm include/llvm-c)
-    if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${LIRIC_OPTIONAL_INCLUDE_DIR}")
-        install(DIRECTORY "${LIRIC_OPTIONAL_INCLUDE_DIR}"
-            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    else()
-        message(STATUS
-            "Skipping absent legacy compatibility include tree: "
-            "${LIRIC_OPTIONAL_INCLUDE_DIR}")
-    endif()
-endforeach()
 install(TARGETS liric_bin RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(WITH_LLVM_COMPAT)
