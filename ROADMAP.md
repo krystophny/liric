@@ -31,6 +31,13 @@ input with backend special cases. Keep Fortran semantic policy in its owner.
 
 ## Delivery and evidence
 
+2026-10-07: `196bba7` removed four legacy platform-intrinsic wrappers and
+migrated their internal callers to the registry and explicit blob metadata.
+The task candidate built with the existing Release CMake profile and its
+registered `liric_tests` CTest passed, including JIT intrinsic coverage.
+The source-tree artifact guard also passed. This removes dead API surface
+without changing the separate LLVM C++ integration.
+
 [FFC PLAN](https://github.com/lazy-fortran/ffc/blob/main/PLAN.md) orders the
 compiler program. Actual consumer dependencies determine when a task can run;
 unrelated Fo cleanup and independent audit CI are not prerequisites. Use focused
