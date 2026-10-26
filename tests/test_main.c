@@ -251,6 +251,8 @@ int test_session_ir_print(void);
 int test_ir_dump_pointer_dialect_for_backend(void);
 int test_ir_emission_does_not_mutate_module(void);
 int test_ir_emission_clone_failure_preserves_module(void);
+int test_ir_print_dominance_survives_emission(void);
+int test_ir_print_dominance_oracle_rejects_bad_cfg(void);
 int test_session_scalar_gep_undef_tail_trimmed(void);
 int test_session_typed_pointer_metadata(void);
 int test_session_abi_info_contract(void);
@@ -603,6 +605,8 @@ int main(void) {
     RUN_TEST(test_ir_dump_pointer_dialect_for_backend);
     RUN_TEST(test_ir_emission_does_not_mutate_module);
     RUN_TEST(test_ir_emission_clone_failure_preserves_module);
+    RUN_TEST(test_ir_print_dominance_survives_emission);
+    RUN_TEST(test_ir_print_dominance_oracle_rejects_bad_cfg);
     RUN_TEST(test_session_scalar_gep_undef_tail_trimmed);
     RUN_TEST(test_session_typed_pointer_metadata);
     RUN_TEST(test_session_abi_info_contract);

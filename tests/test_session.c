@@ -4,6 +4,7 @@
 #include "ir.h"
 #include "ll_parser.h"
 #include "llvm_backend.h"
+#include "platform/platform_os.h"
 #include "runtime_archive.h"
 #include "target.h"
 #include <stdint.h>
@@ -3091,6 +3092,215 @@ cleanup:
     free(text);
     lr_arena_destroy(arena);
     return result;
+}
+
+/* Issue #523: a test-only dominance oracle, independent of legalization and
+   native codegen. Removing the defining block must make the print use
+   unreachable. The scope is the producer's i64 load/print CFG. */
+static bool print_load_dominates_use(const lr_module_t *m) {
+    const lr_func_t *f = lr_module_lookup_function(m, "dominance_print");
+    const lr_block_t *blocks[64] = {0};
+    const lr_block_t *def_block = NULL, *use_block = NULL;
+    const lr_inst_t *definition = NULL, *use = NULL;
+    uint32_t value = UINT32_MAX;
+    uint64_t pending, seen = 0;
+    if (!f || !f->first_block || f->num_blocks > 64)
+        return false;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        bool terminated = false;
+        if (b->id >= 64)
+            return false;
+        blocks[b->id] = b;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (i->op == LR_OP_CALL && i->num_operands == 2 &&
+                i->operands[0].kind == LR_VAL_GLOBAL &&
+                strcmp(lr_module_symbol_name(m, i->operands[0].global_id),
+                       "dominance_print_i64") == 0) {
+                if (terminated || use || i->operands[1].kind != LR_VAL_VREG ||
+                    i->operands[1].type->kind != LR_TYPE_I64)
+                    return false;
+                use = i;
+                use_block = b;
+                value = i->operands[1].vreg;
+            }
+            if (i->op == LR_OP_BR || i->op == LR_OP_CONDBR ||
+                i->op == LR_OP_RET || i->op == LR_OP_UNREACHABLE)
+                terminated = true;
+        }
+    }
+    if (!use)
+        return false;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        bool terminated = false;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (i->op == LR_OP_LOAD && i->dest == value) {
+                if (terminated || definition || i->type->kind != LR_TYPE_I64)
+                    return false;
+                definition = i;
+                def_block = b;
+            }
+            if (i->op == LR_OP_BR || i->op == LR_OP_CONDBR ||
+                i->op == LR_OP_RET || i->op == LR_OP_UNREACHABLE)
+                terminated = true;
+        }
+    }
+    if (!definition)
+        return false;
+    if (def_block == use_block) {
+        for (const lr_inst_t *i = def_block->first; i; i = i->next) {
+            if (i == definition)
+                return true;
+            if (i == use)
+                return false;
+        }
+    }
+    pending = UINT64_C(1) << f->first_block->id;
+    while (pending) {
+        uint32_t id = 0;
+        const lr_block_t *b;
+        while (!(pending & (UINT64_C(1) << id)))
+            id++;
+        pending &= ~(UINT64_C(1) << id);
+        if ((seen & (UINT64_C(1) << id)) || !(b = blocks[id]) || b == def_block)
+            continue;
+        if (b == use_block)
+            return false;
+        seen |= UINT64_C(1) << id;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (i->op != LR_OP_BR && i->op != LR_OP_CONDBR)
+                continue;
+            for (uint32_t n = 0; n < i->num_operands; n++) {
+                if (i->operands[n].kind == LR_VAL_BLOCK &&
+                    i->operands[n].block_id < 64)
+                    pending |= UINT64_C(1) << i->operands[n].block_id;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+static lr_module_t *build_print_dominance_fixture(lr_arena_t *arena, bool valid) {
+    static const char format[] =
+        "declare void @dominance_print_i64(i64)\n"
+        "define i32 @dominance_print(i32 %%selector) {\n"
+        "entry:\n"
+        "  %%slot = alloca i64\n"
+        "  store i64 -4294967338, ptr %%slot\n"
+        "%s"
+        "  %%take_left = icmp ne i32 %%selector, 0\n"
+        "  br i1 %%take_left, label %%left, label %%right\n"
+        "left:\n"
+        "%s"
+        "  br label %%join\n"
+        "right:\n"
+        "  br label %%join\n"
+        "join:\n"
+        "  call void @dominance_print_i64(i64 %%value)\n"
+        "  ret i32 0\n"
+        "}\n";
+    const char *load = "  %value = load i64, ptr %slot\n";
+    char text[1024], err[256];
+    snprintf(text, sizeof(text), format, valid ? load : "", valid ? "" : load);
+    return lr_parse_ll_text(text, strlen(text), arena, err, sizeof(err));
+}
+
+static int64_t dominance_print_value;
+static unsigned dominance_print_count;
+
+static void dominance_print_i64(int64_t value) {
+    dominance_print_value = value;
+    dominance_print_count++;
+}
+
+int test_ir_print_dominance_survives_emission(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    char *before;
+    typedef int (*fn_t)(int);
+    fn_t fn;
+    void (*printer)(int64_t) = dominance_print_i64;
+    void *printer_addr = NULL, *addr;
+    TEST_ASSERT(arena != NULL, "fixture arena");
+    m = build_print_dominance_fixture(arena, true);
+    TEST_ASSERT(m != NULL, "valid i64 print fixture");
+    TEST_ASSERT(print_load_dominates_use(m), "load dominates print before emission");
+    before = snapshot_module_structure(m);
+    TEST_ASSERT(before != NULL, "source snapshot");
+    cfg.mode = LR_MODE_IR;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+    TEST_ASSERT_EQ(lr_session_set_module(s, m, &err), 0, "set fixture module");
+    for (unsigned n = 0; n < 2; n++) {
+        lr_arena_t *roundtrip_arena = lr_arena_create(0);
+        char parse_err[256];
+        char *text = dump_module_text(m), *after;
+        lr_module_t *roundtrip;
+        FILE *object = lr_platform_tmpfile();
+        TEST_ASSERT(roundtrip_arena != NULL && text != NULL && object != NULL,
+                    "emission outputs");
+        roundtrip = lr_parse_ll_text(text, strlen(text), roundtrip_arena,
+                                    parse_err, sizeof(parse_err));
+        TEST_ASSERT(roundtrip != NULL, "serialized CFG parses");
+        TEST_ASSERT(print_load_dominates_use(roundtrip), "serialized load dominates print");
+        TEST_ASSERT_EQ(lr_session_emit_object_stream(s, object, &err), 0,
+                       "native object emission");
+        TEST_ASSERT(ftell(object) > 0, "native object contains bytes");
+        fclose(object);
+        TEST_ASSERT(print_load_dominates_use(m), "emission preserves source dominance");
+        after = dump_module_text(m);
+        TEST_ASSERT(after != NULL && strcmp(text, after) == 0,
+                    "object emission preserves serialized CFG");
+        free(after);
+        after = snapshot_module_structure(m);
+        TEST_ASSERT(after != NULL && strcmp(before, after) == 0,
+                    "emission preserves source IR");
+        free(after);
+        free(text);
+        lr_arena_destroy(roundtrip_arena);
+    }
+    memcpy(&printer_addr, &printer, sizeof(printer_addr));
+    lr_session_add_symbol(s, "dominance_print_i64", printer_addr);
+    addr = lr_session_lookup(s, "dominance_print");
+    TEST_ASSERT(addr != NULL, "compiled print function");
+    fn_ptr_cast(&fn, addr);
+    dominance_print_count = 0;
+    TEST_ASSERT_EQ(fn(0), 0, "right branch runs");
+    TEST_ASSERT_EQ(dominance_print_value, INT64_C(-4294967338), "right prints full i64");
+    TEST_ASSERT_EQ(fn(1), 0, "left branch runs");
+    TEST_ASSERT_EQ(dominance_print_value, INT64_C(-4294967338), "left prints full i64");
+    TEST_ASSERT_EQ(dominance_print_count, 2, "both branches print exactly once");
+    free(before);
+    lr_session_destroy(s);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_ir_print_dominance_oracle_rejects_bad_cfg(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    TEST_ASSERT(arena != NULL, "fixture arena");
+    m = build_print_dominance_fixture(arena, false);
+    TEST_ASSERT(m != NULL, "nondominating control parses");
+    TEST_ASSERT(!print_load_dominates_use(m), "oracle rejects bypassed load definition");
+    for (unsigned n = 0; n < 2; n++) {
+        lr_arena_t *roundtrip_arena = lr_arena_create(0);
+        char err[256], *text = dump_module_text(m);
+        lr_module_t *roundtrip;
+        TEST_ASSERT(roundtrip_arena != NULL && text != NULL, "bad CFG dump");
+        TEST_ASSERT(!print_load_dominates_use(m), "dump preserves invalid source CFG");
+        roundtrip = lr_parse_ll_text(text, strlen(text), roundtrip_arena, err, sizeof(err));
+        TEST_ASSERT(roundtrip != NULL, "bad CFG remains parseable");
+        TEST_ASSERT(!print_load_dominates_use(roundtrip), "dump does not repair invalid SSA");
+        free(text);
+        lr_arena_destroy(roundtrip_arena);
+    }
+    lr_arena_destroy(arena);
+    return 0;
 }
 
 /* --- Issue #526: typed pointer metadata through the session API ---------- */
