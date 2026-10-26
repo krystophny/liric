@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 env:
-  LIRIC_LFORTRAN_REF: origin/liric-showcase
+  LIRIC_LFORTRAN_REF: origin/liric-aot-minimal
 
 jobs:
   bench-matrix-llvm-api:
@@ -41,21 +41,28 @@ jobs:
           fi
           cmake -S . -B build -G Ninja \
             -DWITH_REAL_LLVM_BACKEND=ON \
-            -DLIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=ON \
+            -DLIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM=OFF \
             -DWITH_BENCH_TCC=OFF \
             -DWITH_BENCH_LLI_PHASES=OFF \
             -DLIRIC_LFORTRAN_REF="${LIRIC_LFORTRAN_REF}" \
-            -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}"
+            -DLIRIC_LLVM_CONFIG_EXE="${llvm_config}" || {
+            echo 'PRODUCER_BUILD_FAIL: bench matrix producer configuration' >&2
+            exit 1
+          }
           echo "tested LFortran ref: ${LIRIC_LFORTRAN_REF}"
           grep -F -- "-DLIRIC_INCLUDE_DIR=" build/lfortran_baseline_configure_args.txt
-          cmake --build build -j"$(nproc)" --target bench_matrix bench_compat_check bench_api liric_probe_runner lfortran_build_all
+          cmake --build build -j"$(nproc)" --target bench_matrix bench_compat_check bench_api liric_probe_runner lfortran_producer_ready || {
+            echo 'PRODUCER_BUILD_FAIL: bench matrix producers' >&2
+            exit 1
+          }
 
       - name: Run bench_matrix llvm API lanes
         shell: bash -e -l {0}
         run: |
-          rm -rf /tmp/liric_bench_llvm_api
+          ./build/liric_producer_manifest --check "${GITHUB_WORKSPACE}/build/producer/liric.manifest"
+          rm -rf /var/tmp/liric_bench_llvm_api
           ./build/bench_matrix \
-            --bench-dir /tmp/liric_bench_llvm_api \
+            --bench-dir /var/tmp/liric_bench_llvm_api \
             --modes llvm \
             --policies direct,ir \
             --lanes api_full_llvm,api_backend_llvm \
@@ -64,13 +71,13 @@ jobs:
             --timeout 15 \
             --timeout-ms 15000 || {
               rc=$?
-              if [[ -f /tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
+              if [[ -f /var/tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
                 echo "matrix_failures.jsonl:"
-                cat /tmp/liric_bench_llvm_api/matrix_failures.jsonl
+                cat /var/tmp/liric_bench_llvm_api/matrix_failures.jsonl
               fi
-              if [[ -f /tmp/liric_bench_llvm_api/matrix_summary.json ]]; then
+              if [[ -f /var/tmp/liric_bench_llvm_api/matrix_summary.json ]]; then
                 echo "matrix_summary.json:"
-                cat /tmp/liric_bench_llvm_api/matrix_summary.json
+                cat /var/tmp/liric_bench_llvm_api/matrix_summary.json
               fi
               exit "${rc}"
             }
@@ -78,7 +85,7 @@ jobs:
       - name: Assert summary
         shell: bash -e -l {0}
         run: |
-          summary=/tmp/liric_bench_llvm_api/matrix_summary.json
+          summary=/var/tmp/liric_bench_llvm_api/matrix_summary.json
           test -f "${summary}"
           jq -e '
             .status == "OK" and
@@ -86,8 +93,16 @@ jobs:
             .cells_failed == 0 and
             .compat_ok == true
           ' "${summary}" >/dev/null
-          if [[ -s /tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
+          if [[ -s /var/tmp/liric_bench_llvm_api/matrix_failures.jsonl ]]; then
             echo "matrix_failures.jsonl is not empty" >&2
-            cat /tmp/liric_bench_llvm_api/matrix_failures.jsonl >&2
+            cat /var/tmp/liric_bench_llvm_api/matrix_failures.jsonl >&2
             exit 1
           fi
+
+      - name: Upload producer manifests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-matrix-producer-linux-x86_64
+          if-no-files-found: warn
+          path: build/producer/*.manifest

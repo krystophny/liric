@@ -21,6 +21,21 @@ ctest --test-dir build --output-on-failure
 
 The prepare step always checks out `origin/liric-aot-minimal` before rebuilding.
 
+Before a campaign, build `lfortran_producer_ready` (or
+`lfortran_producer_ready_nollvm` for the compatibility suites). This publishes
+`build/producer/liric.manifest` with the include directory, archive, compiler,
+host target, runtime, runtime tool, and both LFortran executable paths. The
+publisher checks the producer versions, then compiles and runs a C session
+against the declared public header and archive; its generated function must
+print `42`. The no-LLVM variant publishes `liric_nollvm.manifest`.
+
+Each consumer checks its manifest with
+`./build/liric_producer_manifest --check build/producer/liric.manifest`.
+Missing artifacts, unusable producers, link failures, and incorrect smoke
+output stop with `PRODUCER_BUILD_FAIL` before parity starts. Readiness confirms
+the build contract; the campaign still supplies the language semantics gate.
+CI publishes the manifests separately for each operating system.
+
 ### WITH_LIRIC `-c` sidecars
 
 In WITH_LIRIC AOT no-link flows, `-c` emits:

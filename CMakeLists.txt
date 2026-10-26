@@ -71,7 +71,7 @@ set(LIRIC_LFORTRAN_API_OUTPUT_ROOT_SAFE "${CMAKE_CURRENT_BINARY_DIR}/deps/lfortr
     CACHE PATH "Path to lfortran API compatibility safe-run output artifacts")
 set(LIRIC_LFORTRAN_REPO "https://github.com/krystophny/lfortran.git"
     CACHE STRING "LFortran repository URL for CMake-managed checkout")
-set(LIRIC_LFORTRAN_REF "origin/liric-showcase"
+set(LIRIC_LFORTRAN_REF "origin/liric-aot-minimal"
     CACHE STRING "LFortran git ref for CMake-managed checkout")
 set(LIRIC_LFORTRAN_REMOTE "origin"
     CACHE STRING "Remote name used for LFortran ref policy")
@@ -531,6 +531,7 @@ find_package(Threads REQUIRED)
 if(UNIX AND NOT APPLE)
     list(APPEND LIRIC_PLATFORM_LIBS dl)
 endif()
+set(LIRIC_PRODUCER_BUILD_COMMAND "")
 if(UNIX)
     list(APPEND LIRIC_PLATFORM_LIBS m)
 endif()
@@ -565,6 +566,13 @@ endif()
 add_executable(liric_runtime_archive tools/liric_runtime_archive.c)
 target_link_libraries(liric_runtime_archive PRIVATE liric ${LIRIC_PLATFORM_LIBS})
 target_include_directories(liric_runtime_archive PRIVATE src)
+
+if(UNIX)
+    add_executable(liric_producer_manifest
+        tools/liric_producer_manifest.c tools/bench_common.c)
+    target_link_libraries(liric_producer_manifest PRIVATE ${LIRIC_PLATFORM_LIBS})
+    set(LIRIC_PRODUCER_BUILD_COMMAND $<TARGET_FILE:liric_producer_manifest> --run)
+endif()
 
 option(WITH_BENCH_TOOLS "Build POSIX benchmark tools" ON)
 if(WITH_BENCH_TOOLS AND UNIX)
@@ -747,7 +755,7 @@ endif()
 set(LIRIC_PUBLIC_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 if(NOT EXISTS "${LIRIC_PUBLIC_INCLUDE_DIR}/liric/liric_session.h")
     message(FATAL_ERROR
-        "LIRIC public include directory is missing liric/liric_session.h: "
+        "PRODUCER_BUILD_FAIL: LIRIC public include directory is missing liric/liric_session.h: "
         "${LIRIC_PUBLIC_INCLUDE_DIR}")
 endif()
 
@@ -839,19 +847,20 @@ endif()
 
 add_custom_target(
     lfortran_prepare
-    COMMAND ${CMAKE_COMMAND}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND}
         -DLFORTRAN_ROOT=${LIRIC_LFORTRAN_ROOT}
         -DLFORTRAN_REPO=${LIRIC_LFORTRAN_REPO}
         -DLFORTRAN_REF=${LIRIC_LFORTRAN_REF}
         -DLFORTRAN_REMOTE=${LIRIC_LFORTRAN_REMOTE}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepare_lfortran_checkout.cmake
+    DEPENDS $<$<BOOL:${UNIX}>:liric_producer_manifest>
     COMMENT "Prepare LFortran checkout in ${LIRIC_LFORTRAN_ROOT}"
     USES_TERMINAL
 )
 
 add_custom_target(
     lfortran_build_llvm
-    COMMAND ${CMAKE_COMMAND}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND}
         -S ${LIRIC_LFORTRAN_ROOT}
         -B ${LIRIC_LFORTRAN_BUILD_LLVM}
         -G Ninja
@@ -861,7 +870,7 @@ add_custom_target(
         -DBUILD_TESTING=OFF
         -DWITH_LLVM=yes
         -DUSE_DYNAMIC_ZSTD=yes
-    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LLVM}
         --target lfortran lfortran_runtime build_runtime --parallel
     DEPENDS lfortran_prepare
     COMMENT "Configure/build LFortran baseline LLVM in ${LIRIC_LFORTRAN_BUILD_LLVM}"
@@ -870,8 +879,8 @@ add_custom_target(
 
 add_custom_target(
     lfortran_build_liric
-    COMMAND ${LIRIC_LFORTRAN_LIRIC_PRECONFIGURE_COMMAND}
-    COMMAND ${CMAKE_COMMAND}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${LIRIC_LFORTRAN_LIRIC_PRECONFIGURE_COMMAND}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND}
         -S ${LIRIC_LFORTRAN_ROOT}
         -B ${LIRIC_LFORTRAN_BUILD_LIRIC}
         -G Ninja
@@ -886,7 +895,7 @@ add_custom_target(
         ${LIRIC_LFORTRAN_LIRIC_CONFIGURE_LLVM_ARGS}
         -DWITH_RUNTIME_STACKTRACE=ON
         -DWITH_LLVM=OFF
-    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC}
         --target lfortran lfortran_runtime build_runtime
         test_cwrapper test_stacktrace test_lfortran --parallel
     DEPENDS lfortran_prepare ${LIRIC_PROBE_RUNNER_DEPS} ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS}
@@ -896,8 +905,8 @@ add_custom_target(
 
 add_custom_target(
     lfortran_build_liric_nollvm
-    COMMAND ${CMAKE_COMMAND} -E rm -rf ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
-    COMMAND ${CMAKE_COMMAND}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND} -E rm -rf ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND}
         -S ${LIRIC_LFORTRAN_ROOT}
         -B ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
         -G Ninja
@@ -911,7 +920,7 @@ add_custom_target(
         ${LIRIC_LFORTRAN_LIRIC_LIB_ARGS_NOLLVM}
         -DWITH_RUNTIME_STACKTRACE=ON
         -DWITH_LLVM=OFF
-    COMMAND ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
+    COMMAND ${LIRIC_PRODUCER_BUILD_COMMAND} ${CMAKE_COMMAND} --build ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM}
         --target lfortran lfortran_runtime build_runtime
         test_cwrapper test_stacktrace test_lfortran --parallel
     DEPENDS lfortran_prepare ${LIRIC_PROBE_RUNNER_DEPS} ${LIRIC_LFORTRAN_LIRIC_LIB_DEPS_NOLLVM}
@@ -924,6 +933,62 @@ add_custom_target(
     DEPENDS lfortran_build_llvm lfortran_build_liric
 )
 
+if(TARGET liric_producer_manifest)
+    # A consumer executes this manifest check before attempting parity. The
+    # independent C session smoke compiles against exactly the published
+    # header/archive and checks its generated code's stdout.
+    set(_producer_link_args --link-arg -pthread)
+    if(WITH_SLEEF)
+        list(APPEND _producer_link_args --link-arg $<TARGET_FILE:sleef>)
+    endif()
+    if(UNIX AND NOT APPLE)
+        list(APPEND _producer_link_args --link-arg -ldl --link-arg -lm
+             --link-arg -no-pie)
+    endif()
+    set(_producer_archive $<TARGET_FILE:liric>)
+    if(TARGET liric_nollvm)
+        set(_producer_archive $<TARGET_FILE:liric_nollvm>)
+    endif()
+    foreach(_producer_variant IN ITEMS liric liric_nollvm)
+        if(_producer_variant STREQUAL "liric")
+            set(_producer_build ${LIRIC_LFORTRAN_BUILD_LIRIC})
+            set(_producer_name lfortran_producer_ready)
+        else()
+            set(_producer_build ${LIRIC_LFORTRAN_BUILD_LIRIC_NOLLVM})
+            set(_producer_name lfortran_producer_ready_nollvm)
+        endif()
+        set(_producer_variant_archive ${_producer_archive})
+        set(_producer_variant_link_args ${_producer_link_args})
+        if(_producer_variant STREQUAL "liric" AND
+           LIRIC_LFORTRAN_LIRIC_LINK_REAL_LLVM)
+            set(_producer_variant_archive $<TARGET_FILE:liric>)
+            foreach(_link_arg IN LISTS LIRIC_REAL_LLVM_LDFLAGS_LIST
+                    LIRIC_REAL_LLVM_LIBS_LIST LIRIC_REAL_LLVM_SYSTEM_LIBS_LIST)
+                list(APPEND _producer_variant_link_args --link-arg ${_link_arg})
+            endforeach()
+            list(APPEND _producer_variant_link_args --link-arg -lstdc++)
+        endif()
+        add_custom_target(${_producer_name}
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                ${CMAKE_CURRENT_BINARY_DIR}/producer
+            COMMAND $<TARGET_FILE:liric_producer_manifest>
+                --publish ${CMAKE_CURRENT_BINARY_DIR}/producer/${_producer_variant}.manifest
+                --include ${LIRIC_PUBLIC_INCLUDE_DIR}
+                --archive ${_producer_variant_archive}
+                --compiler ${CMAKE_C_COMPILER}
+                --target ${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}
+                --runtime ${LIRIC_LFORTRAN_BUILD_LLVM}/src/runtime/liblfortran_runtime${CMAKE_SHARED_LIBRARY_SUFFIX}
+                --runtime-tool $<TARGET_FILE:liric_runtime_archive>
+                --producer-llvm ${LIRIC_LFORTRAN_BUILD_LLVM}/src/bin/lfortran
+                --producer-liric ${_producer_build}/src/bin/lfortran
+                ${_producer_variant_link_args}
+            DEPENDS lfortran_build_llvm lfortran_build_${_producer_variant}
+                liric_producer_manifest liric_runtime_archive
+            VERBATIM
+            COMMENT "Publish validated ${_producer_variant} producer artifacts")
+    endforeach()
+endif()
+
 # Machine-readable record of the LFortran baseline configure arguments so the
 # header contract test can reproduce header discovery in a fresh build tree.
 string(REPLACE ";" "\n" LIRIC_LFORTRAN_LLVM_ARGS_TEXT
@@ -933,6 +998,8 @@ file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/lfortran_baseline_configure_args.txt"
 
 add_custom_target(
     lfortran_api_compat
+    COMMAND $<TARGET_FILE:liric_producer_manifest>
+        --check ${CMAKE_CURRENT_BINARY_DIR}/producer/liric_nollvm.manifest
     COMMAND ${CMAKE_COMMAND} -E env
         LIRIC_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
         bash ${CMAKE_CURRENT_SOURCE_DIR}/tools/lfortran_mass/lfortran_api_compat.sh
@@ -946,12 +1013,15 @@ add_custom_target(
         --run-ref-tests yes
         --run-itests yes
     DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm liric_runtime_archive
+        lfortran_producer_ready_nollvm
     COMMENT "Run LFortran API compatibility suite using CMake-managed builds"
     USES_TERMINAL
 )
 
 add_custom_target(
     lfortran_api_compat_safe
+    COMMAND $<TARGET_FILE:liric_producer_manifest>
+        --check ${CMAKE_CURRENT_BINARY_DIR}/producer/liric_nollvm.manifest
     COMMAND ${CMAKE_COMMAND} -E env
         CMAKE_BUILD_PARALLEL_LEVEL=2
         LIRIC_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}
@@ -971,6 +1041,7 @@ add_custom_target(
         --itest-memory-max 4G
         --itest-tasks-max 256
     DEPENDS lfortran_build_llvm lfortran_build_liric_nollvm liric_runtime_archive
+        lfortran_producer_ready_nollvm
     COMMENT "Run LFortran API compatibility suite (safe profile, logged)"
     USES_TERMINAL
 )
@@ -1030,6 +1101,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64
     )
 endif()
 add_test(NAME liric_tests COMMAND test_liric)
+
+if(TARGET liric_producer_manifest)
+    set(_producer_test_sleef "")
+    if(WITH_SLEEF)
+        set(_producer_test_sleef $<TARGET_FILE:sleef>)
+    endif()
+    add_test(NAME liric_producer_manifest
+        COMMAND ${CMAKE_COMMAND}
+            -DTOOL=$<TARGET_FILE:liric_producer_manifest>
+            -DINCLUDE=${LIRIC_PUBLIC_INCLUDE_DIR}
+            -DARCHIVE=${_producer_archive}
+            -DCOMPILER=${CMAKE_C_COMPILER}
+            -DRUNTIME_TOOL=$<TARGET_FILE:liric_runtime_archive>
+            -DSLEEF=${_producer_test_sleef}
+            -DWORKDIR=${LIRIC_CTEST_WORK_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cmake/test_liric_producer_manifest.cmake)
+endif()
 
 add_executable(test_public_session tests/test_public_session.c)
 target_link_libraries(test_public_session PRIVATE liric ${LIRIC_PLATFORM_LIBS})

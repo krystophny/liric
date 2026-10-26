@@ -27,9 +27,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 360
     env:
-      LIRIC_BUILD: ${{ github.workspace }}/build
+      LIRIC_BUILD: ${{ github.workspace }}/build/${{ matrix.label }}
       LFORTRAN_REPO: https://github.com/krystophny/lfortran.git
-      LFORTRAN_REF: origin/liric-showcase
+      LFORTRAN_REF: origin/liric-aot-minimal
 
     steps:
       - name: Checkout liric
@@ -52,7 +52,10 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DLIRIC_LFORTRAN_REPO="${LFORTRAN_REPO}" \
             -DLIRIC_LFORTRAN_REF="${LFORTRAN_REF}" \
-            -DLIRIC_LFORTRAN_REMOTE=origin
+            -DLIRIC_LFORTRAN_REMOTE=origin || {
+            echo 'PRODUCER_BUILD_FAIL: compatibility producer configuration' >&2
+            exit 1
+          }
 
       - name: Run LFortran full suites with WITH_LIRIC
         run: |
@@ -67,5 +70,6 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
           path: |
-            ${{ github.workspace }}/build/deps/lfortran_api_compat_out/summary.json
-            ${{ github.workspace }}/build/deps/lfortran_api_compat_out/logs/*.log
+            ${{ env.LIRIC_BUILD }}/producer/*.manifest
+            ${{ env.LIRIC_BUILD }}/deps/lfortran_api_compat_out/summary.json
+            ${{ env.LIRIC_BUILD }}/deps/lfortran_api_compat_out/logs/*.log
