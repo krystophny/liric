@@ -206,6 +206,12 @@ lr_inst_t *lr_inst_create(lr_arena_t *a, lr_opcode_t op, lr_type_t *type,
 void lr_block_append(lr_block_t *b, lr_inst_t *inst);
 int lr_func_finalize(lr_func_t *f, lr_arena_t *a);
 bool lr_func_is_finalized(const lr_func_t *f);
+/* Non-mutating definite-assignment check for serialized/native module output.
+   Repeated vreg definitions are permitted; PHI inputs are checked on edges.
+   serialized_cfg includes the dumper's implicit lexical fallthrough edges;
+   native replay terminates missing-terminator blocks with UNREACHABLE. */
+int lr_module_validate_definitions(const lr_module_t *m, bool serialized_cfg,
+                                   char *err, size_t errcap);
 lr_global_t *lr_global_create(lr_module_t *m, const char *name, lr_type_t *type,
                                bool is_const);
 

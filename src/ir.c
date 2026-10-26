@@ -377,6 +377,267 @@ static bool inst_defines_dest(const lr_inst_t *inst) {
     }
 }
 
+static bool inst_is_terminator(const lr_inst_t *inst);
+
+typedef struct lr_definition_block {
+    const lr_block_t *block;
+    uint32_t successors[2], count, pred;
+    bool reachable;
+} lr_definition_block_t;
+
+typedef struct lr_definition_edge {
+    uint32_t from, next;
+} lr_definition_edge_t;
+
+static bool definition_has(const uint64_t *set, uint32_t value) {
+    return (set[value / 64u] & (UINT64_C(1) << (value % 64u))) != 0;
+}
+
+static void definition_add(uint64_t *set, uint32_t value) {
+    set[value / 64u] |= UINT64_C(1) << (value % 64u);
+}
+
+static int definition_error(const lr_func_t *f, uint32_t block, uint32_t value,
+                            const char *message, char *err, size_t errcap) {
+    if (err && errcap)
+        snprintf(err, errcap, "%s in function '%s', block %u, vreg %u",
+                 message, f->name ? f->name : "?", block, value);
+    return -1;
+}
+
+static void definition_in(uint64_t *in, uint32_t id, uint32_t entry,
+                          const uint64_t *params, const uint64_t *out,
+                          size_t words, const lr_definition_block_t *blocks,
+                          const lr_definition_edge_t *edges) {
+    if (id == entry) {
+        memcpy(in, params, words * sizeof(*in));
+        return;
+    }
+    memset(in, 0xff, words * sizeof(*in));
+    for (uint32_t e = blocks[id].pred; e != UINT32_MAX; e = edges[e].next) {
+        uint32_t from = edges[e].from;
+        if (blocks[from].reachable) {
+            for (size_t w = 0; w < words; w++)
+                in[w] &= out[(size_t)from * words + w];
+        }
+    }
+}
+
+/* Must-dataflow over reachable paths. Repeated destinations remain legal:
+   this verifies availability, not LLVM's separate single-definition rule. */
+static int validate_func_definitions(const lr_func_t *f, bool serialized_cfg,
+                                     char *err, size_t errcap) {
+    uint32_t count = f->num_blocks, entry, tail = 0, edge_count = 0;
+    size_t words = ((size_t)f->next_vreg + 63u) / 64u;
+    lr_definition_block_t *blocks = NULL;
+    lr_definition_edge_t *edges = NULL;
+    uint32_t *queue = NULL;
+    uint64_t *gen = NULL, *out = NULL, *in = NULL, *params = NULL;
+    const char *failure = "invalid IR control flow";
+    uint32_t failure_block = 0, failure_value = 0;
+    int result = -1;
+    bool changed;
+    if (f->is_decl || !f->first_block)
+        return 0;
+    if (!words)
+        words = 1;
+    if (!count || count > UINT32_MAX / 2u || words > SIZE_MAX / sizeof(uint64_t) / count)
+        goto cleanup;
+    blocks = calloc(count, sizeof(*blocks));
+    edges = calloc((size_t)count * 2u, sizeof(*edges));
+    queue = calloc(count, sizeof(*queue));
+    gen = calloc((size_t)count * words, sizeof(*gen));
+    out = malloc((size_t)count * words * sizeof(*out));
+    in = calloc(words, sizeof(*in));
+    params = calloc(words, sizeof(*params));
+    if (!blocks || !edges || !queue || !gen || !out || !in || !params) {
+        failure = "IR definition analysis allocation failed";
+        goto cleanup;
+    }
+    memset(out, 0xff, (size_t)count * words * sizeof(*out));
+    for (uint32_t b = 0; b < count; b++)
+        blocks[b].pred = UINT32_MAX;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        const lr_inst_t *term = NULL;
+        failure_block = b->id;
+        if (b->id >= count || blocks[b->id].block)
+            goto cleanup;
+        blocks[b->id].block = b;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (inst_is_terminator(i)) {
+                term = i;
+                break;
+            }
+        }
+        if (term && (term->op == LR_OP_BR || term->op == LR_OP_CONDBR)) {
+            uint32_t first = term->op == LR_OP_BR ? 0u : 1u;
+            uint32_t n = term->op == LR_OP_BR ? 1u : 2u;
+            if (!term->operands || term->num_operands != first + n)
+                goto cleanup;
+            for (uint32_t s = 0; s < n; s++) {
+                const lr_operand_t *op = &term->operands[first + s];
+                if (op->kind != LR_VAL_BLOCK || op->block_id >= count)
+                    goto cleanup;
+                blocks[b->id].successors[blocks[b->id].count++] = op->block_id;
+            }
+        } else if (!term && serialized_cfg && b->next) {
+            blocks[b->id].successors[blocks[b->id].count++] = b->next->id;
+        }
+    }
+    entry = f->first_block->id;
+    blocks[entry].reachable = true;
+    queue[tail++] = entry;
+    for (uint32_t q = 0; q < tail; q++) {
+        uint32_t id = queue[q];
+        for (uint32_t s = 0; s < blocks[id].count; s++) {
+            uint32_t to = blocks[id].successors[s];
+            failure_block = id;
+            if (to >= count || !blocks[to].block)
+                goto cleanup;
+            edges[edge_count].from = id;
+            edges[edge_count].next = blocks[to].pred;
+            blocks[to].pred = edge_count++;
+            if (!blocks[to].reachable) {
+                blocks[to].reachable = true;
+                queue[tail++] = to;
+            }
+        }
+    }
+    if (f->num_params && !f->param_vregs)
+        goto cleanup;
+    for (uint32_t p = 0; p < f->num_params; p++) {
+        failure_value = f->param_vregs[p];
+        if (failure_value >= f->next_vreg)
+            goto cleanup;
+        definition_add(params, failure_value);
+    }
+    for (uint32_t q = 0; q < tail; q++) {
+        uint32_t id = queue[q];
+        const lr_inst_t *term = NULL;
+        failure_block = id;
+        for (const lr_inst_t *i = blocks[id].block->first; i; i = i->next) {
+            failure_value = i->dest;
+            /* PHI edge copies and same-block ALLOCA precede a deferred
+               native branch. Preserve those existing layout semantics. */
+            if (term && i->op != LR_OP_PHI &&
+                !(i->op == LR_OP_ALLOCA &&
+                  (term->op == LR_OP_BR || term->op == LR_OP_CONDBR))) {
+                failure = "instruction after terminator";
+                goto cleanup;
+            }
+            if (i->num_operands && !i->operands)
+                goto cleanup;
+            if (inst_defines_dest(i)) {
+                if (i->dest >= f->next_vreg)
+                    goto cleanup;
+                definition_add(gen + (size_t)id * words, i->dest);
+            }
+            if (inst_is_terminator(i))
+                term = i;
+        }
+    }
+    do {
+        changed = false;
+        for (uint32_t q = 0; q < tail; q++) {
+            uint32_t id = queue[q];
+            definition_in(in, id, entry, params, out, words, blocks, edges);
+            for (size_t w = 0; w < words; w++) {
+                uint64_t value = in[w] | gen[(size_t)id * words + w];
+                if (out[(size_t)id * words + w] != value) {
+                    out[(size_t)id * words + w] = value;
+                    changed = true;
+                }
+            }
+        }
+    } while (changed);
+    for (uint32_t q = 0; q < tail; q++) {
+        uint32_t id = queue[q];
+        const lr_block_t *block = blocks[id].block;
+        failure_block = id;
+        definition_in(in, id, entry, params, out, words, blocks, edges);
+        for (const lr_inst_t *i = block->first; i; i = i->next) {
+            if (i->op != LR_OP_PHI)
+                continue;
+            failure_value = i->dest;
+            failure = "invalid PHI incoming edges";
+            if (!i->num_operands || i->num_operands % 2u ||
+                !inst_defines_dest(i) ||
+                (id == entry && !definition_has(params, i->dest)))
+                goto cleanup;
+            for (uint32_t e = blocks[id].pred; e != UINT32_MAX; e = edges[e].next) {
+                uint32_t matches = 0;
+                for (uint32_t n = 1; n < i->num_operands; n += 2u) {
+                    if (i->operands[n].kind == LR_VAL_BLOCK &&
+                        i->operands[n].block_id == edges[e].from)
+                        matches++;
+                }
+                if (matches != 1u)
+                    goto cleanup;
+            }
+            for (uint32_t n = 0; n < i->num_operands; n += 2u) {
+                const lr_operand_t *value = &i->operands[n];
+                const lr_operand_t *label = &i->operands[n + 1u];
+                bool found = false;
+                if (label->kind != LR_VAL_BLOCK || label->block_id >= count ||
+                    !blocks[label->block_id].block || value->kind == LR_VAL_BLOCK)
+                    goto cleanup;
+                if (!blocks[label->block_id].reachable)
+                    continue;
+                for (uint32_t e = blocks[id].pred; e != UINT32_MAX; e = edges[e].next)
+                    found |= edges[e].from == label->block_id;
+                if (!found)
+                    goto cleanup;
+                if (value->kind == LR_VAL_VREG &&
+                    (value->vreg >= f->next_vreg ||
+                     !definition_has(out + (size_t)label->block_id * words, value->vreg))) {
+                    failure_value = value->vreg;
+                    failure = "PHI value not defined on its predecessor path";
+                    goto cleanup;
+                }
+            }
+            definition_add(in, i->dest);
+        }
+        for (const lr_inst_t *i = block->first; i; i = i->next) {
+            if (i->op == LR_OP_PHI)
+                continue;
+            for (uint32_t n = 0; n < i->num_operands; n++) {
+                const lr_operand_t *op = &i->operands[n];
+                if (op->kind == LR_VAL_VREG &&
+                    (op->vreg >= f->next_vreg || !definition_has(in, op->vreg))) {
+                    failure_value = op->vreg;
+                    failure = "value not defined on every predecessor path";
+                    goto cleanup;
+                }
+            }
+            if (inst_defines_dest(i))
+                definition_add(in, i->dest);
+        }
+    }
+    result = 0;
+cleanup:
+    if (result)
+        definition_error(f, failure_block, failure_value, failure, err, errcap);
+    free(params);
+    free(in);
+    free(out);
+    free(gen);
+    free(queue);
+    free(edges);
+    free(blocks);
+    return result;
+}
+
+int lr_module_validate_definitions(const lr_module_t *m, bool serialized_cfg,
+                                   char *err, size_t errcap) {
+    if (!m)
+        return -1;
+    for (const lr_func_t *f = m->first_func; f; f = f->next) {
+        if (validate_func_definitions(f, serialized_cfg, err, errcap) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 static bool inst_dead_def_eliminable(const lr_inst_t *inst) {
     if (!inst_defines_dest(inst))
         return false;

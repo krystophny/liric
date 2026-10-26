@@ -4,13 +4,14 @@
 #include "ir.h"
 #include "ll_parser.h"
 #include "llvm_backend.h"
+#include "platform/platform_os.h"
 #include "runtime_archive.h"
 #include "target.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -3093,7 +3094,448 @@ cleanup:
     return result;
 }
 
+/* Issue #523: a test-only dominance oracle, independent of legalization and
+   native codegen. Removing the defining block must make the print use
+   unreachable. The scope is the producer's i64 load/print CFG. */
+static bool print_load_dominates_use(const lr_module_t *m) {
+    const lr_func_t *f = lr_module_lookup_function(m, "dominance_print");
+    const lr_block_t *blocks[64] = {0};
+    const lr_block_t *def_block = NULL, *use_block = NULL;
+    const lr_inst_t *definition = NULL, *use = NULL;
+    uint32_t value = UINT32_MAX;
+    uint64_t pending, seen = 0;
+    if (!f || !f->first_block || f->num_blocks > 64)
+        return false;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        bool terminated = false;
+        if (b->id >= 64)
+            return false;
+        blocks[b->id] = b;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (i->op == LR_OP_CALL && i->num_operands == 2 &&
+                i->operands[0].kind == LR_VAL_GLOBAL &&
+                strcmp(lr_module_symbol_name(m, i->operands[0].global_id),
+                       "dominance_print_i64") == 0) {
+                if (terminated || use || i->operands[1].kind != LR_VAL_VREG ||
+                    i->operands[1].type->kind != LR_TYPE_I64)
+                    return false;
+                use = i;
+                use_block = b;
+                value = i->operands[1].vreg;
+            }
+            if (i->op == LR_OP_BR || i->op == LR_OP_CONDBR ||
+                i->op == LR_OP_RET || i->op == LR_OP_UNREACHABLE)
+                terminated = true;
+        }
+    }
+    if (!use)
+        return false;
+    for (const lr_block_t *b = f->first_block; b; b = b->next) {
+        bool terminated = false;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (i->op == LR_OP_LOAD && i->dest == value) {
+                if (terminated || definition || i->type->kind != LR_TYPE_I64)
+                    return false;
+                definition = i;
+                def_block = b;
+            }
+            if (i->op == LR_OP_BR || i->op == LR_OP_CONDBR ||
+                i->op == LR_OP_RET || i->op == LR_OP_UNREACHABLE)
+                terminated = true;
+        }
+    }
+    if (!definition)
+        return false;
+    if (def_block == use_block) {
+        for (const lr_inst_t *i = def_block->first; i; i = i->next) {
+            if (i == definition)
+                return true;
+            if (i == use)
+                return false;
+        }
+    }
+    pending = UINT64_C(1) << f->first_block->id;
+    while (pending) {
+        uint32_t id = 0;
+        const lr_block_t *b;
+        while (!(pending & (UINT64_C(1) << id)))
+            id++;
+        pending &= ~(UINT64_C(1) << id);
+        if ((seen & (UINT64_C(1) << id)) || !(b = blocks[id]) || b == def_block)
+            continue;
+        if (b == use_block)
+            return false;
+        seen |= UINT64_C(1) << id;
+        for (const lr_inst_t *i = b->first; i; i = i->next) {
+            if (i->op != LR_OP_BR && i->op != LR_OP_CONDBR)
+                continue;
+            for (uint32_t n = 0; n < i->num_operands; n++) {
+                if (i->operands[n].kind == LR_VAL_BLOCK &&
+                    i->operands[n].block_id < 64)
+                    pending |= UINT64_C(1) << i->operands[n].block_id;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
+static lr_module_t *build_print_dominance_fixture(lr_arena_t *arena, bool valid) {
+    static const char format[] =
+        "declare void @dominance_print_i64(i64)\n"
+        "define i32 @dominance_print(i32 %%selector) {\n"
+        "entry:\n"
+        "  %%slot = alloca i64\n"
+        "  store i64 -4294967338, ptr %%slot\n"
+        "%s"
+        "  %%take_left = icmp ne i32 %%selector, 0\n"
+        "  br i1 %%take_left, label %%left, label %%right\n"
+        "left:\n"
+        "%s"
+        "  br label %%join\n"
+        "right:\n"
+        "  br label %%join\n"
+        "join:\n"
+        "  call void @dominance_print_i64(i64 %%value)\n"
+        "  ret i32 0\n"
+        "}\n";
+    const char *load = "  %value = load i64, ptr %slot\n";
+    char text[1024], err[256];
+    snprintf(text, sizeof(text), format, valid ? load : "", valid ? "" : load);
+    return lr_parse_ll_text(text, strlen(text), arena, err, sizeof(err));
+}
+
+static int64_t dominance_print_value;
+static unsigned dominance_print_count;
+
+static void dominance_print_i64(int64_t value) {
+    dominance_print_value = value;
+    dominance_print_count++;
+}
+
+int test_ir_print_dominance_survives_emission(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    char *before;
+    typedef int (*fn_t)(int);
+    fn_t fn;
+    void (*printer)(int64_t) = dominance_print_i64;
+    void *printer_addr = NULL, *addr;
+    TEST_ASSERT(arena != NULL, "fixture arena");
+    m = build_print_dominance_fixture(arena, true);
+    TEST_ASSERT(m != NULL, "valid i64 print fixture");
+    TEST_ASSERT(print_load_dominates_use(m), "load dominates print before emission");
+    before = snapshot_module_structure(m);
+    TEST_ASSERT(before != NULL, "source snapshot");
+    cfg.mode = LR_MODE_IR;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+    TEST_ASSERT_EQ(lr_session_set_module(s, m, &err), 0, "set fixture module");
+    for (unsigned n = 0; n < 2; n++) {
+        lr_arena_t *roundtrip_arena = lr_arena_create(0);
+        char parse_err[256];
+        char *text = dump_module_text(m), *after;
+        lr_module_t *roundtrip;
+        FILE *object = lr_platform_tmpfile();
+        TEST_ASSERT(roundtrip_arena != NULL && text != NULL && object != NULL,
+                    "emission outputs");
+        roundtrip = lr_parse_ll_text(text, strlen(text), roundtrip_arena,
+                                    parse_err, sizeof(parse_err));
+        TEST_ASSERT(roundtrip != NULL, "serialized CFG parses");
+        TEST_ASSERT(print_load_dominates_use(roundtrip), "serialized load dominates print");
+        TEST_ASSERT_EQ(lr_session_emit_object_stream(s, object, &err), 0,
+                       "native object emission");
+        TEST_ASSERT(ftell(object) > 0, "native object contains bytes");
+        fclose(object);
+        TEST_ASSERT(print_load_dominates_use(m), "emission preserves source dominance");
+        after = dump_module_text(m);
+        TEST_ASSERT(after != NULL && strcmp(text, after) == 0,
+                    "object emission preserves serialized CFG");
+        free(after);
+        after = snapshot_module_structure(m);
+        TEST_ASSERT(after != NULL && strcmp(before, after) == 0,
+                    "emission preserves source IR");
+        free(after);
+        free(text);
+        lr_arena_destroy(roundtrip_arena);
+    }
+    memcpy(&printer_addr, &printer, sizeof(printer_addr));
+    lr_session_add_symbol(s, "dominance_print_i64", printer_addr);
+    addr = lr_session_lookup(s, "dominance_print");
+    TEST_ASSERT(addr != NULL, "compiled print function");
+    fn_ptr_cast(&fn, addr);
+    dominance_print_count = 0;
+    TEST_ASSERT_EQ(fn(0), 0, "right branch runs");
+    TEST_ASSERT_EQ(dominance_print_value, INT64_C(-4294967338), "right prints full i64");
+    TEST_ASSERT_EQ(fn(1), 0, "left branch runs");
+    TEST_ASSERT_EQ(dominance_print_value, INT64_C(-4294967338), "left prints full i64");
+    TEST_ASSERT_EQ(dominance_print_count, 2, "both branches print exactly once");
+    free(before);
+    lr_session_destroy(s);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_ir_print_dominance_oracle_rejects_bad_cfg(void) {
+    lr_arena_t *arena = lr_arena_create(0);
+    lr_module_t *m;
+    TEST_ASSERT(arena != NULL, "fixture arena");
+    m = build_print_dominance_fixture(arena, false);
+    TEST_ASSERT(m != NULL, "nondominating control parses");
+    TEST_ASSERT(!print_load_dominates_use(m), "oracle rejects bypassed load definition");
+    for (unsigned n = 0; n < 2; n++) {
+        lr_arena_t *roundtrip_arena = lr_arena_create(0);
+        char err[256], *text = dump_module_text(m);
+        lr_module_t *roundtrip;
+        TEST_ASSERT(roundtrip_arena != NULL && text != NULL, "bad CFG dump");
+        TEST_ASSERT(!print_load_dominates_use(m), "dump preserves invalid source CFG");
+        roundtrip = lr_parse_ll_text(text, strlen(text), roundtrip_arena, err, sizeof(err));
+        TEST_ASSERT(roundtrip != NULL, "bad CFG remains parseable");
+        TEST_ASSERT(!print_load_dominates_use(roundtrip), "dump does not repair invalid SSA");
+        free(text);
+        lr_arena_destroy(roundtrip_arena);
+    }
+    lr_arena_destroy(arena);
+    return 0;
+}
+
 /* --- Issue #526: typed pointer metadata through the session API ---------- */
+
+int test_session_rejects_nondominating_ir(void) {
+    lr_session_backend_t backends[] = {
+        LR_SESSION_BACKEND_ISEL, LR_SESSION_BACKEND_COPY_PATCH
+    };
+    for (size_t n = 0; n < sizeof(backends) / sizeof(backends[0]); n++) {
+        lr_arena_t *arena = lr_arena_create(0);
+        lr_module_t *m = build_print_dominance_fixture(arena, false);
+        lr_session_config_t cfg = {0};
+        lr_error_t err;
+        lr_session_t *s;
+        char *before, *after;
+        FILE *object = lr_platform_tmpfile(), *dump = lr_platform_tmpfile();
+        TEST_ASSERT(m != NULL && object != NULL && dump != NULL, "rejection fixture");
+        before = snapshot_module_structure(m);
+        TEST_ASSERT(before != NULL, "source snapshot");
+        cfg.mode = LR_MODE_IR;
+        cfg.backend = backends[n];
+        s = lr_session_create(&cfg, &err);
+        TEST_ASSERT(s != NULL, "session create");
+        TEST_ASSERT_EQ(lr_session_set_module(s, m, &err), 0, "set bad CFG");
+        TEST_ASSERT(lr_session_emit_object_stream(s, object, &err) != 0,
+                    "native object rejects nondominating load");
+        TEST_ASSERT_EQ(err.code, LR_ERR_STATE, "invalid IR error class");
+        TEST_ASSERT(strstr(err.msg, "dominance_print") != NULL &&
+                    strstr(err.msg, "predecessor path") != NULL,
+                    "rejection identifies function and missing predecessor definition");
+        TEST_ASSERT_EQ(ftell(object), 0, "rejected object writes no bytes");
+        TEST_ASSERT(lr_session_dump_ir(s, dump, &err) != 0,
+                    "session dump rejects nondominating load");
+        TEST_ASSERT_EQ(ftell(dump), 0, "rejected dump writes no partial declarations");
+#if defined(__unix__) || defined(__APPLE__)
+        {
+            char *path = NULL, bytes[4];
+            int fd = lr_platform_mkstemp("liric_rejected_output_", &path);
+            FILE *existing;
+            TEST_ASSERT(fd >= 0, "output marker file");
+            close(fd);
+            existing = fopen(path, "wb");
+            TEST_ASSERT(existing != NULL, "open output marker");
+            TEST_ASSERT_EQ(fwrite("keep", 1, 4, existing), 4, "write output marker");
+            fclose(existing);
+            TEST_ASSERT(lr_session_emit_object(s, path, &err) != 0,
+                        "object path rejects invalid CFG");
+            TEST_ASSERT(lr_session_emit_exe(s, path, &err) != 0,
+                        "executable path rejects invalid CFG");
+            existing = fopen(path, "rb");
+            TEST_ASSERT(existing != NULL, "read output marker");
+            TEST_ASSERT_EQ(fread(bytes, 1, 4, existing), 4, "output marker survives");
+            TEST_ASSERT(memcmp(bytes, "keep", 4) == 0 && fgetc(existing) == EOF,
+                        "rejection preserves existing output bytes");
+            fclose(existing);
+            unlink(path);
+            free(path);
+        }
+#endif
+        after = snapshot_module_structure(m);
+        TEST_ASSERT(after != NULL && strcmp(before, after) == 0,
+                    "rejection leaves source IR untouched");
+        free(after);
+        free(before);
+        fclose(dump);
+        fclose(object);
+        lr_session_destroy(s);
+        lr_arena_destroy(arena);
+    }
+    return 0;
+}
+
+static int definition_fixture_rejected(const char *text, const char *diagnostic) {
+    lr_arena_t *arena = lr_arena_create(0);
+    char parse_error[256];
+    lr_module_t *m = lr_parse_ll_text(text, strlen(text), arena,
+                                    parse_error, sizeof(parse_error));
+    lr_session_config_t cfg = {0};
+    lr_error_t err;
+    lr_session_t *s;
+    FILE *out = lr_platform_tmpfile();
+    TEST_ASSERT(m != NULL && out != NULL, "invalid definition fixture parses");
+    cfg.mode = LR_MODE_IR;
+    cfg.backend = LR_SESSION_BACKEND_ISEL;
+    s = lr_session_create(&cfg, &err);
+    TEST_ASSERT(s != NULL, "session create");
+    TEST_ASSERT_EQ(lr_session_set_module(s, m, &err), 0, "set invalid definition fixture");
+    TEST_ASSERT(lr_session_emit_object_stream(s, out, &err) != 0,
+                "invalid definition rejected before native emission");
+    TEST_ASSERT(strstr(err.msg, diagnostic) != NULL, "specific definition diagnostic");
+    TEST_ASSERT_EQ(ftell(out), 0, "rejected native output is empty");
+    TEST_ASSERT(lr_session_dump_ir(s, out, &err) != 0,
+                "invalid definition rejected before serialization");
+    TEST_ASSERT_EQ(ftell(out), 0, "rejected serialized output is empty");
+    fclose(out);
+    lr_session_destroy(s);
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+static int definition_fixture_runs(const char *text, bool repeated_dest,
+                                   int right_result, int left_result) {
+    lr_session_backend_t backends[] = {
+        LR_SESSION_BACKEND_ISEL, LR_SESSION_BACKEND_COPY_PATCH
+    };
+    for (size_t n = 0; n < sizeof(backends) / sizeof(backends[0]); n++) {
+        lr_arena_t *arena = lr_arena_create(0);
+        char parse_error[256];
+        lr_module_t *m = lr_parse_ll_text(text, strlen(text), arena,
+                                        parse_error, sizeof(parse_error));
+        lr_session_config_t cfg = {0};
+        lr_error_t err;
+        lr_session_t *s;
+        FILE *object = lr_platform_tmpfile(), *dump = lr_platform_tmpfile();
+        void *addr;
+        int (*fn)(int);
+        TEST_ASSERT(m != NULL && object != NULL && dump != NULL, "valid definition fixture");
+        if (repeated_dest) {
+            uint32_t destination = UINT32_MAX;
+            for (lr_block_t *b = m->first_func->first_block; b; b = b->next) {
+                for (lr_inst_t *i = b->first; i; i = i->next) {
+                    if (i->op != LR_OP_LOAD)
+                        continue;
+                    if (destination == UINT32_MAX)
+                        destination = i->dest;
+                    else
+                        i->dest = destination;
+                }
+            }
+        }
+        cfg.mode = LR_MODE_IR;
+        cfg.backend = backends[n];
+        s = lr_session_create(&cfg, &err);
+        TEST_ASSERT(s != NULL, "session create");
+        TEST_ASSERT_EQ(lr_session_set_module(s, m, &err), 0, "set valid definitions");
+        TEST_ASSERT_EQ(lr_session_dump_ir(s, dump, &err), 0, "valid definitions serialize");
+        TEST_ASSERT_EQ(lr_session_emit_object_stream(s, object, &err), 0,
+                       "valid definitions emit native object");
+        addr = lr_session_lookup(s, "definition_case");
+        TEST_ASSERT(addr != NULL, "native definition fixture compiles");
+        fn_ptr_cast(&fn, addr);
+        TEST_ASSERT_EQ(fn(0), right_result, "right path preserves defined value");
+        TEST_ASSERT_EQ(fn(1), left_result, "left path preserves defined value");
+        fclose(dump);
+        fclose(object);
+        lr_session_destroy(s);
+        lr_arena_destroy(arena);
+    }
+    return 0;
+}
+
+int test_session_definition_validation_preserves_merges(void) {
+    static const char repeated_definition[] =
+        "define i32 @definition_case(i32 %selector) {\nentry:\n"
+        " %a = alloca i32\n %b = alloca i32\n"
+        " store i32 42, ptr %a\n store i32 7, ptr %b\n"
+        " %condition = icmp ne i32 %selector, 0\n"
+        " br i1 %condition, label %left, label %right\n"
+        "left:\n %left_value = load i32, ptr %a\n br label %join\n"
+        "right:\n %right_value = load i32, ptr %b\n br label %join\n"
+        "join:\n ret i32 %left_value\n}\n";
+    static const char loop[] =
+        "define i32 @definition_case(i32 %unused) {\nentry:\n br label %loop\n"
+        "loop:\n %i = phi i32 [0, %entry], [%next, %body]\n"
+        " %done = icmp eq i32 %i, 3\n br i1 %done, label %exit, label %body\n"
+        "body:\n %next = add i32 %i, 1\n br label %loop\nexit:\n ret i32 %i\n}\n";
+    static const char deferred_alloca[] =
+        "define i32 @definition_case(i32 %unused) {\nentry:\n br label %exit\n"
+        " %slot = alloca i32\nexit:\n store i32 42, ptr %slot\n"
+        " %value = load i32, ptr %slot\n ret i32 %value\n}\n";
+    TEST_ASSERT_EQ(definition_fixture_runs(repeated_definition, true, 7, 42),
+                   0, "same vreg may be defined on both incoming paths");
+    TEST_ASSERT_EQ(definition_fixture_runs(loop, false, 3, 3),
+                   0, "loop PHI inputs preserve predecessor semantics");
+    TEST_ASSERT_EQ(definition_fixture_runs(deferred_alloca, false, 42, 42),
+                   0, "deferred branch preserves same-block alloca semantics");
+    return 0;
+}
+
+int test_session_definition_validation_fallthrough_policy(void) {
+    static const char text[] =
+        "define i32 @fallthrough_policy(i1 %condition) {\nentry:\n"
+        " %slot = alloca i32\n store i32 42, ptr %slot\n"
+        " br i1 %condition, label %left, label %right\n"
+        "left:\n %value = load i32, ptr %slot\n br label %join\n"
+        "right:\n"
+        "join:\n ret i32 %value\n}\n";
+    lr_arena_t *arena = lr_arena_create(0);
+    char error[256];
+    lr_module_t *m = lr_parse_ll_text(text, strlen(text), arena, error, sizeof(error));
+    TEST_ASSERT(m != NULL, "fallthrough fixture parses");
+    TEST_ASSERT_EQ(lr_module_validate_definitions(m, false, error, sizeof(error)), 0,
+                   "native missing terminator does not invent a CFG edge");
+    TEST_ASSERT(lr_module_validate_definitions(m, true, error, sizeof(error)) != 0,
+                "serialized lexical fallthrough exposes undefined incoming path");
+    lr_arena_destroy(arena);
+    return 0;
+}
+
+int test_session_rejects_invalid_definition_edges(void) {
+    static const char before_definition[] =
+        "define i32 @before_definition() {\nentry:\n"
+        " %sum = add i32 %later, 1\n %later = add i32 40, 1\n ret i32 %sum\n}\n";
+    static const char bad_phi[] =
+        "define i32 @bad_phi(i1 %condition) {\nentry:\n"
+        " br i1 %condition, label %left, label %right\n"
+        "left:\n %value = add i32 40, 2\n br label %join\n"
+        "right:\n br label %join\n"
+        "join:\n %result = phi i32 [%value, %left], [%value, %right]\n"
+        " ret i32 %result\n}\n";
+    static const char missing_phi_edge[] =
+        "define i32 @missing_phi_edge(i1 %condition) {\nentry:\n"
+        " br i1 %condition, label %left, label %right\n"
+        "left:\n br label %join\nright:\n br label %join\n"
+        "join:\n %result = phi i32 [42, %left]\n ret i32 %result\n}\n";
+    static const char entry_phi[] =
+        "define i32 @entry_phi() {\nentry:\n"
+        " %value = phi i32 [%next, %entry]\n %next = add i32 %value, 1\n"
+        " %done = icmp eq i32 %next, 3\n"
+        " br i1 %done, label %exit, label %entry\nexit:\n ret i32 %next\n}\n";
+    static const char after_terminator[] =
+        "define i32 @after_terminator() {\nentry:\n br label %exit\n"
+        " %value = add i32 40, 2\nexit:\n ret i32 %value\n}\n";
+    TEST_ASSERT_EQ(definition_fixture_rejected(before_definition, "predecessor path"),
+                   0, "same-block use before definition");
+    TEST_ASSERT_EQ(definition_fixture_rejected(bad_phi, "PHI value"),
+                   0, "PHI input checked at its named predecessor");
+    TEST_ASSERT_EQ(definition_fixture_rejected(missing_phi_edge, "PHI incoming"),
+                   0, "PHI requires every reachable predecessor");
+    TEST_ASSERT_EQ(definition_fixture_rejected(entry_phi, "PHI incoming"),
+                   0, "entry backedge cannot initialize first invocation");
+    TEST_ASSERT_EQ(definition_fixture_rejected(after_terminator, "after terminator"),
+                   0, "serializer cannot repair ordinary instructions after branch");
+    return 0;
+}
 
 static char *session_dump_text(lr_session_t *s) {
     lr_error_t err;

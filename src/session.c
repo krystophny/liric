@@ -3167,6 +3167,22 @@ uint32_t lr_session_emit(struct lr_session *s, const void *inst_ptr,
 
 /* ---- IR-mode only ------------------------------------------------------ */
 
+static int session_validate_ir(struct lr_session *s, bool dumping,
+                               session_error_t *err) {
+    char message[256] = {0};
+    bool serialized_cfg = dumping || (s->jit && s->jit->mode == LR_COMPILE_LLVM);
+    if (s->cur_func) {
+        err_set(err, S_ERR_STATE, "cannot emit during active function");
+        return -1;
+    }
+    if (lr_module_validate_definitions(s->module, serialized_cfg,
+                                       message, sizeof(message)) != 0) {
+        err_set(err, S_ERR_STATE, "%s", message);
+        return -1;
+    }
+    return 0;
+}
+
 int lr_session_dump_ir(struct lr_session *s, FILE *out, session_error_t *err) {
     lr_func_t *f;
     err_clear(err);
@@ -3182,6 +3198,8 @@ int lr_session_dump_ir(struct lr_session *s, FILE *out, session_error_t *err) {
         err_set(err, S_ERR_STATE, "cannot dump during active function");
         return -1;
     }
+    if (session_validate_ir(s, true, err) != 0)
+        return -1;
     for (f = s->module->first_func; f; f = f->next)
         lr_dump_func(f, s->module, out);
     return 0;
@@ -3383,6 +3401,8 @@ int lr_session_emit_object(struct lr_session *s, const char *path,
         return 0;
     }
 
+    if (session_validate_ir(s, false, err) != 0)
+        return -1;
     if (lr_emit_module_object_path_mode(s->module, s->cfg.target,
                                         s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH,
                                         path, s->cfg.opt_level, backend_err,
@@ -3413,6 +3433,8 @@ int lr_session_emit_object_stream(struct lr_session *s, FILE *out,
                                          s->module, target, out);
     }
 
+    if (session_validate_ir(s, false, err) != 0)
+        return -1;
     /* IR mode: compile from IR using session's compile mode */
     lr_compile_mode_t mode = s->jit ? s->jit->mode : LR_COMPILE_COPY_PATCH;
     const lr_target_t *target = session_resolve_target(s);
@@ -3513,6 +3535,8 @@ int lr_session_emit_exe(struct lr_session *s, const char *path,
         return 0;
     }
 
+    if (session_validate_ir(s, false, err) != 0)
+        return -1;
     entry = session_entry_symbol(s->module);
     if (lr_emit_module_executable_path_mode(
             s->module, s->cfg.target,
