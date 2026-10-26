@@ -361,7 +361,8 @@ if(WITH_SLEEF)
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     # SLEEF does not compile cleanly with -Werror; temporarily remove it.
     get_directory_property(_saved_compile_opts COMPILE_OPTIONS)
-    # -g0 here, scoped to this directory only. CMAKE_C_FLAGS_RELEASE deliberately
+    # Default Release dependencies use -g0, scoped to this directory only.
+    # CMAKE_C_FLAGS_RELEASE deliberately
     # carries -g so liric's own objects stay symbolizable, but that variable also
     # reaches the FetchContent sub-build, and libsleef.a then carries 32,686,902
     # bytes of .debug_info (66 MB archive). Every executable that links a member
@@ -370,7 +371,16 @@ if(WITH_SLEEF)
     # lazy-fortran/liric#535. COMPILE_OPTIONS are appended after
     # CMAKE_C_FLAGS_<CONFIG>, so this -g0 is the winning spelling inside the
     # sleef tree while liric's own -g is untouched (see the restore below).
-    set_directory_properties(PROPERTIES COMPILE_OPTIONS "-g0")
+    # Explicit debug profiles and sanitizer builds retain dependency symbols.
+    set(_sleef_compile_options
+        "$<$<NOT:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>>:-g0>")
+    set(_liric_sanitizer_flags "${CMAKE_C_FLAGS}"
+        "${CMAKE_C_FLAGS_RELEASE}" "${CMAKE_C_FLAGS_RELWITHDEBINFO}"
+        "${CMAKE_C_FLAGS_DEBUG}" "${CMAKE_C_FLAGS_MINSIZEREL}")
+    if(_liric_sanitizer_flags MATCHES "-fsanitize=")
+        set(_sleef_compile_options "")
+    endif()
+    set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_sleef_compile_options}")
     FetchContent_MakeAvailable(sleef)
     set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_saved_compile_opts}")
     set(BUILD_SHARED_LIBS "${BUILD_SHARED_LIBS_SAVED}" CACHE BOOL "" FORCE)
