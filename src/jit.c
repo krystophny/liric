@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdarg.h>
+#if defined(__APPLE__)
+struct __emutls_control;
+extern void *__emutls_get_address(struct __emutls_control *);
+#endif
 #if defined(__unix__) || defined(__APPLE__)
 #include <pthread.h>
 #define LR_HAS_PTHREADS 1
@@ -1208,6 +1212,11 @@ void lr_jit_add_symbol(lr_jit_t *j, const char *name, void *addr) {
 }
 
 static void register_builtin_symbols(lr_jit_t *j) {
+#if defined(__APPLE__)
+    /* compiler-rt supplies this statically, outside dlsym's lookup. */
+    lr_jit_add_symbol(j, "__emutls_get_address",
+                      (void *)(uintptr_t)__emutls_get_address);
+#endif
     size_t n = lr_platform_intrinsic_registry_count();
     for (size_t i = 0; i < n; i++) {
         const char *name = lr_platform_intrinsic_registry_name(i);
