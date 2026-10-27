@@ -1383,6 +1383,8 @@ static void *resolve_symbol_from_process(lr_jit_t *j, const char *name) {
         if (lr_jit_load_library(j, "libgcc_s.so.1") == 0)
             return resolve_symbol_from_loaded_libraries(j, lookup);
     }
+#else
+    (void)j;
 #endif
     addr = lr_platform_dlsym_default(lookup);
     if (!addr && lookup[0] == '_')
